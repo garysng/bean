@@ -280,8 +280,8 @@ Global Control Plane（bean-api / scheduler / Postgres,镜像元数据全局 dig
 - **节点归属**：`region` 为一级字段（配置声明,Register 时控制面校验该 region
   已注册,生命周期内不可变）;`labels` 为自由标签（pool/disk/tenant 等）,
   调度请求经 `nodeSelector` 约束——GPU 池、BYOC 专属节点等用标签,不加字段
-- **证书**：云托管私有 CA（CertProvider 抽象,签发/轮换/吊销外包）,
-  BYOC 与自有 region 共享同一信任根
+- **证书**：云托管私有 CA（CertProvider 抽象,签发/轮换/吊销外包）,证书
+  运行时拉取、内存持有不落盘;BYOC 与自有 region 共享同一信任根
 - **故障域**：region 失联 → 该 region sandbox 标 LOST,其他 region 无感;
   全局控制面单点首期接受（控制面故障不影响存量 sandbox 数据面,仅停新建）,
   控制面多活为 P5 储备
@@ -364,7 +364,7 @@ snapshot 对象独立状态机：CREATING → READY → DELETING（RESTORING 引
 - 容器档降权：no-new-privileges、seccomp 默认 profile、caps 最小集、cgroup 硬限制;fc 档宿主侧 jailer + FC seccomp
 - 网络默认拒内网、拒元数据服务
 - 节点不持长期 S3 凭证，全部走 control plane 签发的 presigned URL / STS
-- API 鉴权：API key（首期）→ 租户/RBAC（后期）
+- API 鉴权：API key（调用方识别+配额;不做用户/租户体系——集群内部服务）
 
 ## 7. Repo 结构
 

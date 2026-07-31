@@ -67,8 +67,8 @@ S3 长期凭证：仅 control plane 持有
    ├── 节点产物上传/snapshot：presigned URL（TTL 15min，绑定 key 前缀 + content-length）
    ├── overlaybd 块读取：beand 持 STS 只读角色（限 blob bucket 前缀，1h 轮换）
    └── sandbox 内直传产物：presigned PUT URL 注入（即使泄漏也只能写指定 key）
-控制面 ↔ beand：mTLS（云托管私有 CA 签发,CertProvider 抽象可换自建;短期证书自动轮换;
-   节点注册凭 region bootstrap token——registration-only,凭证分层见 beand-design §7.0）
+控制面 ↔ beand：mTLS（云托管私有 CA;证书运行时拉取、内存持有、不落盘——
+   节点磁盘零凭证残留;注册凭 region bootstrap token,凭证分层见 beand-design §7.0）
 beand ↔ agent：容器档 unix socket（0700，host 侧仅 beand 用户可达;容器内挂载点
    仅 root 可读）;fc 档 vsock（host 侧 FC API socket 仅 beand 可达,guest 内
    /dev/vsock 默认仅 root 可开——非 root 用户进程无法调用 agent API）

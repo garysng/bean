@@ -79,7 +79,7 @@ curl DELETE → 资源清零（netns/挂载/containerd task 无残留）
 
 ## P5+ — 储备项
 
-- 多租户 RBAC 与计费
+- 计量数据产出（cpu·s/mem·s/存储/流量,内部对账;不做租户计费体系）
 - 镜像签名（cosign）
 - allow-list 网络策略、TCP 端口暴露（SNI）
 - dataset 卷（overlaybd 只读块,数据集/权重分发——预留,需求明确后启用）
