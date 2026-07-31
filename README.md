@@ -11,7 +11,7 @@ Container-native sandbox platform for AI evaluation workloads.
 
 - **镜像即环境**：无 e2b 式 template build，Docker 镜像直接启动
 - **秒级冷启动**：overlaybd 块级 lazy-pull from S3 + 节点缓存 + prewarm + 镜像亲和调度
-- **隔离自动分档（内部机制）**：Firecracker microVM 默认档（rootfs 直挂，零嵌套），无 KVM 节点降级 gVisor;GPU 走 runc 容器档（内部预留，不对外）
+- **Firecracker 直启**：overlaybd ublk 直驱块设备 virtio-blk 挂 microVM（rootfs 直挂零嵌套,热路径无 containerd）;容器档（GPU/无 KVM 降级）P5 按需引入
 - **批量原语**：batchCreate、标签批量销毁、eval 批量 SDK helper
 - **Volume 一等资源**：shared-fs 卷（宿主 nfsd 导出，跨 sandbox 持久工作区;dataset 只读块卷预留）
 - **S3 统一存储**：镜像 blob、日志产物、snapshot 全部落 S3，节点无状态

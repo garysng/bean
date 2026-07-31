@@ -53,9 +53,9 @@ AI evaluation / agent rollout 场景（如 SWE-bench 类任务）的特点：
         │ beand    │         │ beand    │         │ beand    │   ← 每节点一个
         │ (裸金属) │         │ (云 VM)  │         │ (裸金属) │      node daemon
         └────┬─────┘         └──────────┘         └──────────┘
-             │ containerd（镜像面）+ beand 自管 FC（VM 面）
+             │ overlaybd(ublk) 直驱 + beand 自管 FC;containerd 仅容器档可选
         ┌────▼─────────────────────────────┐
-        │  ├── snapshotter: overlaybd       │ ← 块级 lazy-pull from S3
+        │  ├── 镜像: overlaybd ublk daemon  │ ← 块级 lazy-pull from S3
         │  └── runtime: fc(默认)│runc│runsc │ ← 内部自动分档（D3）
         └────┬─────────────────────────────┘
              │
@@ -90,9 +90,20 @@ AI evaluation / agent rollout 场景（如 SWE-bench 类任务）的特点：
 组装为块设备（见 D4），既能给容器档做 overlayfs rootfs，也能 virtio-blk 直挂
 microVM（见 D9）——两种形态共享同一条镜像链路，用户无感。
 
-### D2. containerd 之上自研（而非直接驱动 runc）
+### D2. overlaybd 直驱,无 containerd 热路径
 
-containerd 解决 OCI 镜像拉取、snapshotter 插件、runc 生命周期管理这些最重的部分，且是库不是平台（fc 档只用其镜像半边，VM 生命周期 beand 自管）。自研价值集中在调度、网络、API、agent。beand 中 runtime 抽象为接口（完整签名见 beand-design.md §3，含 Pause/Resume/Checkpoint/Restore）。
+fc 主路径**不引入 containerd**（AgentENV 同款,其源码已在本地 /Users/mac/project/agentenv
+可参考）：beand 直接驱动 overlaybd 的 ublk daemon 组装块设备（S3 backing + 本地
+缓存）→ virtio-blk 挂 microVM。containerd 的三项职责在本设计中均有更直接的替代：
+
+| containerd 职责 | 本设计 |
+|---|---|
+| 镜像拉取/content store | blob 在 S3（image-service 离线转换）,元数据控制面下发;registry 不在热路径 |
+| snapshotter | overlaybd ublk daemon 直驱（AgentENV 的 uvm-ublk 实证） |
+| task 生命周期 | fc:beand 自管 FC 进程;容器档:containerd+runc（仅此处保留,可选依赖） |
+
+容器档（GPU/无 KVM 降级）保留 containerd——runc 生命周期与 overlayfs 组装
+不值得自研;纯 fc 节点可完全不装 containerd。runtime 抽象接口见 beand-design §3。
 
 ### D3. 隔离分档 + 节点能力探测
 
@@ -393,6 +404,7 @@ bean/
 
 ## 8. 实施路线
 
-详见 [roadmap.md](roadmap.md)（单一维护处）。概要：P0 单节点骨架（runc）→
-P1 多节点可用 → P2 生产化（fc 主档 + overlaybd + dataset 卷）→ P3 交互/proxy/
-pause/shared-fs 卷 → P4 snapshot 完整形态 → P5+ 储备。
+详见 [roadmap.md](roadmap.md)（单一维护处）。概要：**P0 即 fc 直启**（overlaybd
+直驱 + FC + agent,参考本地 AgentENV 源码）→ P1 多节点可用 → P2 生产化
+（lazy-pull/prewarm/调度亲和）→ P3 交互/proxy/pause/shared-fs 卷 → P4 snapshot
+完整形态 → P5+ 储备（容器档 GPU 路径按需）。

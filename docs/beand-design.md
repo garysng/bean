@@ -35,7 +35,7 @@ controlPlane: grpcs://grpc-bean.internal.gpu-instance.novita.ai:443
                         # 托管网关终结;beand 出向连接,BYOC/跨网天然可达
 s3:
   endpoint: https://s3.ap-east-1.example.com    # 本 region S3 backend
-containerd: /run/bean/containerd.sock    # 独立 containerd 实例，专用 namespace "bean"
+containerd: null        # 可选:仅容器档节点配置（GPU/无 KVM,P5）;纯 fc 节点不装
 cidr: 10.100.0.0/24     # 本节点 sandbox 网段（节点间可复用同段——跨节点 sandbox 互通是非目标）
 cache:
   dir: /var/lib/bean/cache
@@ -81,18 +81,18 @@ type Runtime interface {
 
 | 实现 | 底层 | 职责边界 |
 |---|---|---|
-| `fcRuntime`（主档） | 自研：beand 直接管 firecracker 进程 + jailer | overlaybd 块设备 virtio-blk 直挂;vsock 通 agent;memory snapshot/fork 原生（见 §3.1） |
-| `runcRuntime` | containerd task API + runc shim | GPU 路径 + 可信任务;P0 链路基线;Checkpoint 用 CRIU |
-| `runscRuntime` | containerd + runsc shim (`io.containerd.runsc.v1`) | 无 KVM 节点降级档;Checkpoint 用 gVisor 自带 save/restore |
+| `fcRuntime`（主档,P0 起点） | 自研：beand 直接管 firecracker 进程 + jailer;**无 containerd** | overlaybd ublk 块设备 virtio-blk 直挂;vsock 通 agent;memory snapshot/fork 原生（见 §3.1） |
+| `runcRuntime`（P5 按需,GPU/可信） | containerd task API + runc shim | Checkpoint 用 CRIU;需节点装 containerd |
+| `runscRuntime`（P5,无 KVM 降级） | containerd + runsc shim | Checkpoint 用 gVisor save/restore |
 
 要点：
 
-- containerd 对 fcRuntime 只提供**镜像半边**（overlaybd-snapshotter 组装块设备），
-  VM 生命周期由 beand 自管——不走 kata/firecracker-containerd 的 shim 嵌套
-- `RootfsMount` 由 image 模块产出（见 §4），与 Runtime 解耦：容器档拿到 overlayfs
-  挂载点，fcRuntime 拿到块设备路径——同一条镜像链路
-- OCI spec / VM spec 生成集中在一处（资源限制、mount、seccomp、agent 注入），
-  runtime 实现只做增量修改
+- **fc 热路径零 containerd**：image 模块直驱 overlaybd ublk daemon（AgentENV
+  的 uvm-ublk/uvm-ublk-daemon 同款,本地源码 /Users/mac/project/agentenv 可参考）;
+  containerd 是容器档的可选依赖,纯 fc 节点不装
+- `RootfsMount` 由 image 模块产出（见 §4）,与 Runtime 解耦：fcRuntime 拿块设备
+  路径,容器档拿 overlayfs 挂载点——同一条镜像链路
+- VM spec / OCI spec 生成集中在一处,runtime 实现只做增量修改
 
 ### 3.1 fcRuntime 细节
 
@@ -249,12 +249,17 @@ fc 档两个平台工件,均由 CI 构建、S3 分发、beand 启动时按版本
 
 ## 4. 镜像模块
 
-### 4.1 overlaybd 主路线 + 双格式兜底
+### 4.1 overlaybd 直驱主路线
+
+image 模块直接管理 overlaybd ublk daemon（不经 containerd snapshotter）：
+按镜像元数据（控制面下发的层清单 + S3 blob 引用）生成 overlaybd config →
+ublk 设备就绪 → 交给 runtime。实证细节参考本地 AgentENV 源码
+（`src/overlaybd/`、crates 下 uvm-ublk,以及 registryfs_v2 远端直读模式）。
 
 | 格式 | 消费方式 | 场景 |
 |---|---|---|
-| overlaybd（块级，DADI） | 容器档：overlaybd-snapshotter;fc 档：块设备 virtio-blk 直挂 | 主路径;blob 存 S3，ublk 按需 range-read |
-| 标准 OCI（gzip 层） | overlayfs snapshotter（仅容器档） | 兜底：未转换镜像、overlaybd 故障降级 |
+| overlaybd（块级，DADI） | fc 档：ublk 块设备 virtio-blk 直挂;容器档（P5）：同设备挂载 | 主路径;blob 存 S3，ublk 按需 range-read |
+| 标准 OCI（gzip 层） | containerd overlayfs（仅容器档,P5） | 兜底：未转换镜像 |
 
 - image-service（control plane 逻辑模块，见 4.4）负责把镜像**离线转换**为
   overlaybd 格式（`convertor` 工具，层级转换可增量）;转换在服务端做一次，
@@ -432,8 +437,8 @@ BYOC：客户节点出向连托管接入层即可（443,零证书配置）,身�
 ### 7.2 beand 重启 reconcile
 
 ```
-1. 枚举本地实际状态：containerd namespace "bean" 全量 task（容器档）
-   ∪ 存活 firecracker 进程（jailer 目录 /run/bean/fc/<id>/ + pidfile 规约，fc 档）
+1. 枚举本地实际状态：存活 firecracker 进程（jailer 目录 /run/bean/fc/<id>/ +
+   pidfile 规约,fc 档主路径）∪ containerd task（容器档,如启用）
 2. SyncState 拿控制面期望状态
 3. 三向对账：
    - 双方都有 & 状态一致 → 重挂 agent socket、恢复监控
