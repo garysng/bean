@@ -1,0 +1,160 @@
+syntax = "proto3";
+
+package bean.node.v1;
+
+import "bean/common/v1/exec.proto";
+
+option go_package = "github.com/garysng/bean/internal/gen/bean/node/v1;nodev1";
+
+// NodeService: beand -> control plane (outbound).
+service NodeService {
+  rpc Register(RegisterRequest) returns (RegisterResponse);
+  rpc Heartbeat(stream HeartbeatRequest) returns (stream HeartbeatResponse);
+  rpc SyncState(SyncStateRequest) returns (SyncStateResponse);
+}
+
+// SandboxService: implemented by beand; control plane / gateway call it
+// directly (push). On NAT'd nodes the calls are multiplexed over the
+// node's outbound CommandChannel.
+service SandboxService {
+  rpc CreateSandbox(CreateSandboxRequest) returns (CreateSandboxResponse);
+  rpc DestroySandbox(DestroySandboxRequest) returns (DestroySandboxResponse);
+  rpc PauseSandbox(PauseSandboxRequest) returns (PauseSandboxResponse);
+  rpc ResumeSandbox(ResumeSandboxRequest) returns (ResumeSandboxResponse);
+  rpc GetSandbox(GetSandboxRequest) returns (GetSandboxResponse);
+  rpc StartUserProcess(StartUserProcessNodeRequest) returns (StartUserProcessNodeResponse);
+  // Data plane passthrough to AgentService.
+  rpc Exec(bean.common.v1.ExecRequest) returns (bean.common.v1.ExecResponse);
+  rpc StreamExec(stream bean.common.v1.StreamExecFrame) returns (stream bean.common.v1.StreamExecFrame);
+  rpc ReadFile(bean.common.v1.ReadFileRequest) returns (stream bean.common.v1.FileChunk);
+  rpc WriteFile(stream bean.common.v1.WriteFileFrame) returns (bean.common.v1.WriteFileResponse);
+  rpc DeleteFile(bean.common.v1.DeleteFileRequest) returns (bean.common.v1.DeleteFileResponse);
+  rpc ListDir(bean.common.v1.ListDirRequest) returns (bean.common.v1.ListDirResponse);
+  rpc GetLogs(bean.common.v1.GetLogsRequest) returns (stream bean.common.v1.LogChunk);
+}
+
+message RegisterRequest {
+  string bootstrap_token = 1;
+  string node_id = 2;
+  string region = 3;
+  map<string, string> labels = 4;
+  NodeCapabilities capabilities = 5;
+  NodeResources resources = 6;
+}
+
+message RegisterResponse {
+  string node_token = 1;
+  int64 heartbeat_interval_seconds = 2;
+}
+
+message NodeCapabilities {
+  repeated string runtimes = 1; // e.g. ["fc"], ["fc","runc"]
+}
+
+message NodeResources {
+  double cpu_allocatable = 1;
+  int64 memory_allocatable_mib = 2;
+  int64 disk_sandboxes_mib = 3;
+  int32 gpu_count = 4;
+}
+
+message HeartbeatRequest {
+  string node_id = 1;
+  string node_token = 2;
+  repeated SandboxStatus sandboxes = 3;
+  NodeUsage usage = 4;
+}
+
+message NodeUsage {
+  double cpu_committed = 1;
+  int64 memory_committed_mib = 2;
+  int64 disk_used_mib = 3;
+}
+
+message HeartbeatResponse {
+  bool lease_ok = 1;
+  string renewed_node_token = 2; // empty = keep current
+}
+
+message SyncStateRequest {
+  string node_id = 1;
+  string node_token = 2;
+}
+
+message SyncStateResponse {
+  repeated SandboxSpec expected = 1;
+}
+
+message SandboxSpec {
+  string sandbox_id = 1;
+  string image = 2;
+  double cpu = 3;
+  int64 memory_mib = 4;
+  int64 disk_mib = 5;
+  map<string, string> env = 6;
+  repeated string cmd = 7;          // override image CMD; empty = keep image config
+  bool auto_start_cmd = 8;
+  Lifecycle lifecycle = 9;
+  map<string, string> labels = 10;
+  string network_policy = 11;
+  string runtime = 12;              // internal tier: fc|runc|runsc; empty = node default
+  string request_id = 13;
+}
+
+message Lifecycle {
+  // 0 = unset (never idle out); -0 semantics avoided: use has_idle_timeout.
+  bool has_idle_timeout = 1;
+  int64 idle_timeout_seconds = 2;
+  string on_idle = 3; // pause|kill
+}
+
+message SandboxStatus {
+  string sandbox_id = 1;
+  string state = 2; // PENDING..RUNNING|PAUSED|STOPPED|FAILED
+  string reason = 3;
+  int64 started_at_unix = 4;
+  int64 last_activity_unix = 5;
+}
+
+message CreateSandboxRequest {
+  SandboxSpec spec = 1;
+}
+
+message CreateSandboxResponse {
+  SandboxStatus status = 1;
+}
+
+message DestroySandboxRequest {
+  string sandbox_id = 1;
+  bool force = 2;
+}
+
+message DestroySandboxResponse {}
+
+message PauseSandboxRequest {
+  string sandbox_id = 1;
+}
+
+message PauseSandboxResponse {}
+
+message ResumeSandboxRequest {
+  string sandbox_id = 1;
+}
+
+message ResumeSandboxResponse {}
+
+message GetSandboxRequest {
+  string sandbox_id = 1;
+}
+
+message GetSandboxResponse {
+  SandboxStatus status = 1;
+}
+
+message StartUserProcessNodeRequest {
+  string sandbox_id = 1;
+}
+
+message StartUserProcessNodeResponse {
+  int64 pid = 1;
+}

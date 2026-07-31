@@ -1,0 +1,40 @@
+syntax = "proto3";
+
+package bean.agent.v1;
+
+import "bean/common/v1/exec.proto";
+
+option go_package = "github.com/garysng/bean/internal/gen/bean/agent/v1;agentv1";
+
+// AgentService: beand <-> bean-agent (vsock on fc tier / unix socket on container tier).
+service AgentService {
+  rpc Health(HealthRequest) returns (HealthResponse);
+  rpc Exec(bean.common.v1.ExecRequest) returns (bean.common.v1.ExecResponse);
+  rpc StreamExec(stream bean.common.v1.StreamExecFrame) returns (stream bean.common.v1.StreamExecFrame);
+  rpc ReadFile(bean.common.v1.ReadFileRequest) returns (stream bean.common.v1.FileChunk);
+  rpc WriteFile(stream bean.common.v1.WriteFileFrame) returns (bean.common.v1.WriteFileResponse);
+  rpc DeleteFile(bean.common.v1.DeleteFileRequest) returns (bean.common.v1.DeleteFileResponse);
+  rpc ListDir(bean.common.v1.ListDirRequest) returns (bean.common.v1.ListDirResponse);
+  rpc GetLogs(bean.common.v1.GetLogsRequest) returns (stream bean.common.v1.LogChunk);
+  rpc StartUserProcess(StartUserProcessRequest) returns (StartUserProcessResponse);
+}
+
+message HealthRequest {}
+
+message HealthResponse {
+  string agent_version = 1;
+  int64 uptime_seconds = 2;
+}
+
+message StartUserProcessRequest {
+  // Image config semantics replayed by the agent.
+  repeated string entrypoint = 1;
+  repeated string cmd = 2;
+  map<string, string> env = 3;
+  string user = 4;
+  string workdir = 5;
+}
+
+message StartUserProcessResponse {
+  int64 pid = 1;
+}
