@@ -10,12 +10,11 @@ Container-native sandbox platform for AI evaluation workloads.
 ## 核心特性
 
 - **镜像即环境**：无 e2b 式 template build，Docker 镜像直接启动
-- **秒级冷启动**：Nydus lazy-pull from S3 + 节点 chunk 缓存 + prewarm + 镜像亲和调度
-- **隔离分档**：runc / gVisor（默认）/ Kata，预留 Firecracker microVM 档
+- **秒级冷启动**：overlaybd 块级 lazy-pull from S3 + 节点缓存 + prewarm + 镜像亲和调度
+- **隔离自动分档**：Firecracker microVM 默认档（rootfs 直挂，零嵌套），GPU 任务自动落 runc 容器档，无 KVM 节点降级 gVisor
 - **批量原语**：batchCreate、标签批量销毁、eval 批量 SDK helper
 - **S3 统一存储**：镜像 blob、日志产物、snapshot 全部落 S3，节点无状态
-- **pause/resume/snapshot**：cgroup freezer 轻量暂停;checkpoint + rootfs diff 快照,
-  跨节点 restore,「装环境一次、fan-out N 实验」
+- **pause/resume/snapshot**：FC 原生 memory snapshot + fork（CoW 一母多子）;容器档 freezer/checkpoint 兜底,跨节点 restore,「装环境一次、fan-out N 实验」
 
 ## 文档
 

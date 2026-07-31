@@ -52,7 +52,7 @@ Base: `https://api.<domain>/v1`。错误响应统一：
 POST /sandboxes
 {
   "image": "registry.example.com/swebench/django__django-12345:latest",
-  "isolation": "standard",              // none|standard|strong，默认 standard
+  "isolation": "auto",                  // auto|container|vm，默认 auto（KVM+无GPU→fc）
   "resources": { "cpu": 2, "memoryMiB": 4096, "gpu": 0 },
   "env": { "FOO": "bar" },
   "cmd": null,                          // 覆盖镜像 CMD；null=保留原 entrypoint（由 agent 托管拉起）
@@ -141,7 +141,7 @@ DELETE /sandboxes/{id}/ports/{port}
 POST /images/prewarm   { "refs": ["img:a", "img:b"], "targetNodes": 10, "priority": "high" }
 → { "jobId": "pw_..." }
 GET  /images/prewarm/{jobId}      → 各镜像 × 节点就绪矩阵摘要
-GET  /images/{ref}/status         → { "blobReady": true, "cachedNodes": 7, "sizeBytes": ..., "format": "nydus" }
+GET  /images/{ref}/status         → { "blobReady": true, "cachedNodes": 7, "sizeBytes": ..., "format": "overlaybd" }
 ```
 
 ### 3.6 Snapshots

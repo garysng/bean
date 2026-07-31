@@ -8,7 +8,7 @@
 ```
 beand
 ├── server/          gRPC server（NodeService client 侧 + 数据面 SandboxService 实现）
-├── runtime/         Runtime 接口 + runc/runsc/kata/firecracker 实现
+├── runtime/         Runtime 接口 + fc/runc/runsc 实现
 ├── image/           镜像拉取、snapshotter 管理、本地缓存、prewarm
 ├── network/         netns/veth/bridge/nftables 编排
 ├── agentmgr/        agent 注入、socket 管理、健康探测
@@ -34,8 +34,8 @@ runtimes: auto           # 或显式列表覆盖探测结果
 
 | 探测项 | 方法 | 影响 |
 |---|---|---|
-| KVM | `/dev/kvm` 可打开 | kata/firecracker 档位 |
-| runsc | 二进制存在 + `runsc --version` | standard 档；无 KVM 时自动 `--platform=ptrace` |
+| KVM | `/dev/kvm` 可打开 | fc 档位（默认主档） |
+| runsc | 二进制存在 + `runsc --version` | 无 KVM 降级档；无 KVM 时自动 `--platform=ptrace` |
 | NVMe/磁盘 | 缓存目录所在盘类型 + 可用空间 | 调度缓存盘权重 |
 | GPU | NVML 枚举 | GPU 资源画像 + nvidia 运行时注入 |
 | cgroup v2 | `/sys/fs/cgroup/cgroup.controllers` | 强制要求 v2，v1 直接拒绝启动 |
@@ -59,47 +59,133 @@ type Runtime interface {
 
 | 实现 | 底层 | 职责边界 |
 |---|---|---|
-| `runcRuntime` | containerd task API + runc shim | 基线；Checkpoint 用 CRIU |
-| `runscRuntime` | containerd + runsc shim (`io.containerd.runsc.v1`) | 默认档；Checkpoint 用 gVisor 自带 save/restore |
-| `kataRuntime` | containerd + kata shim | strong 档过渡方案 |
-| `fcRuntime`（Phase 4+） | 自研：直接管 firecracker 进程 + jailer | 容器 rootfs 经 virtio-blk/virtiofs 挂入；vsock 通 agent；memory snapshot 原生 |
+| `fcRuntime`（主档） | 自研：beand 直接管 firecracker 进程 + jailer | overlaybd 块设备 virtio-blk 直挂;vsock 通 agent;memory snapshot/fork 原生（见 §3.1） |
+| `runcRuntime` | containerd task API + runc shim | GPU 路径 + 可信任务;P0 链路基线;Checkpoint 用 CRIU |
+| `runscRuntime` | containerd + runsc shim (`io.containerd.runsc.v1`) | 无 KVM 节点降级档;Checkpoint 用 gVisor 自带 save/restore |
 
 要点：
 
-- 前三个实现共享 containerd 通道，差异只在 runtime handler 与 checkpoint 路径，代码复用率高
-- `RootfsMount` 由 image 模块产出（见 §4），与 Runtime 解耦——这是 fcRuntime 复用镜像链路的关键
-- OCI spec 生成集中在一处（资源限制、mount、seccomp、hostname、agent 注入），runtime 实现只做增量修改
+- containerd 对 fcRuntime 只提供**镜像半边**（overlaybd-snapshotter 组装块设备），
+  VM 生命周期由 beand 自管——不走 kata/firecracker-containerd 的 shim 嵌套
+- `RootfsMount` 由 image 模块产出（见 §4），与 Runtime 解耦：容器档拿到 overlayfs
+  挂载点，fcRuntime 拿到块设备路径——同一条镜像链路
+- OCI spec / VM spec 生成集中在一处（资源限制、mount、seccomp、agent 注入），
+  runtime 实现只做增量修改
+
+### 3.1 fcRuntime 细节
+
+**启动链路**
+
+```
+1. image 模块产出块设备：overlaybd base（只读，lazy-pull S3）+ 可写 overlay 盘
+2. beand 起 jailer→firecracker：guest 内核（平台统一打包，6.x 全功能配置）、
+   virtio-blk×2、vsock、tap 网卡、virtio-balloon
+3. guest 内 bean-agent 作为 init：
+   a. 挂载矩阵：/proc /sys /dev /dev/shm /dev/pts /dev/mqueue /tmp
+      （按 OCI runtime spec 默认 mounts 复刻）
+   b. 切根到镜像 rootfs（base+overlay 已在 host 侧组好，guest 见单一块设备）
+   c. 读启动参数（vsock 首连推送）：image config + sandbox spec
+   d. 应用 ENV/hostname/resolv.conf/hosts;listen vsock
+   e. autoStartCmd → 按 USER/WORKDIR/Entrypoint+Cmd 语义拉起用户进程
+```
+
+**容器兼容性矩阵**
+
+| 项 | 兼容性 | 说明 |
+|---|---|---|
+| ENV/ENTRYPOINT/CMD/USER/WORKDIR | ✅ | agent 按 image config 复刻，与容器档同一份代码 |
+| 文件系统/权限/uid-gid | ✅ | 块设备原样挂载 |
+| /proc /sys /dev | ✅ | 真内核，比 gVisor 模拟更全 |
+| 动态链接/glibc/musl | ✅ | 用户态不变 |
+| 内核版本 | ⚠️ | guest 内核由平台提供，`uname -r` 非宿主;纯用户态负载无感 |
+| VOLUME/EXPOSE/HEALTHCHECK | ➖ | 同容器档：忽略/仅元数据/不执行 |
+| 镜像架构 | ❗ | 必须匹配节点 arch，无模拟（容器档同） |
+| GPU | ❌ | FC 无 passthrough → auto 解析自动落容器档 |
+
+## 3.2 资源模型（cpu / mem 配置）
+
+**API 层**：`resources: {cpu, memoryMiB, gpu}` 创建时声明、**不可变**（FC 不支持热调整,
+容器档为保持语义一致同样不开放热调整）。
+
+| 档 | cpu 执行 | mem 执行 |
+|---|---|---|
+| 容器档 | cgroup v2 `cpu.max`（硬）+ `cpu.weight` | `memory.max` + `memory.swap.max=0` |
+| fc 档 | vCPU 数 = ceil(cpu)，宿主侧 FC 进程再包 cgroup（cpu.max 双保险 + weight 公平） | guest 内存 = memoryMiB;virtio-balloon 空闲回收 |
+
+**超卖策略**
+
+- CPU：vCPU:pCPU 默认 3:1 超卖（eval 负载突发型）;cgroup cpu.weight 按规格比例
+  分配保公平;`dedicated: true`（预留字段）→ vCPU pin，不参与超卖
+- 内存：容器档按 RSS 实际水位记账天然超卖;fc 档靠 balloon——beand 周期驱动
+  气球回收空闲 guest 内存,调度器按「规格承诺量」与「气球后实际占用」双水位记账:
+  新建看承诺量（保证 resume/突发有量），告警看实际占用
+- PAUSED：两档都不释放内存额度（防 resume OOM）;要释放走 snapshot
+- 规格上限：单 sandbox ≤ 32 vCPU / 128 GiB(fc 档 FC 自身约束;容器档同限保持一致)
+
+**存储（disk）**
+
+API 层增加 `resources.diskMiB`（可写层上限，默认 20 GiB）：
+
+| 档 | 可写层实现 | 配额执行 |
+|---|---|---|
+| 容器档 | overlayfs upper dir | XFS project quota（硬限制） |
+| fc 档 | 可写 overlay 盘（sparse 稀疏文件，预建 ext4） | 盘大小即上限，天然硬限;稀疏文件按实际写入占宿主空间 |
+
+- 节点盘分池：`cache/`（镜像 chunk，LRU 可回收）与 `sandboxes/`（可写层，
+  生命周期绑定 sandbox）分开记账——缓存永远可牺牲，可写层不可
+- 可写层用量随心跳上报（调度器盘水位依据）;写满行为：容器档 ENOSPC、
+  fc 档 guest 内 ENOSPC，均不影响宿主
+- tmpfs：`/dev/shm` 默认 64 MiB 计入内存配额，可配
 
 ## 4. 镜像模块
 
-### 4.1 双格式支持
+### 4.1 overlaybd 主路线 + 双格式兜底
 
-| 格式 | snapshotter | 场景 |
+| 格式 | 消费方式 | 场景 |
 |---|---|---|
-| 标准 OCI（gzip 层） | overlayfs | 兜底；小镜像、prewarm 已完成时性能最佳 |
-| Nydus（RAFS） | nydus-snapshotter | 大镜像 lazy-pull 主路径；blob 存 S3 |
+| overlaybd（块级，DADI） | 容器档：overlaybd-snapshotter;fc 档：块设备 virtio-blk 直挂 | 主路径;blob 存 S3，ublk 按需 range-read |
+| 标准 OCI（gzip 层） | overlayfs snapshotter（仅容器档） | 兜底：未转换镜像、overlaybd 故障降级 |
 
-- image-service 负责把高频镜像**离线转换**为 Nydus 格式（转换在服务端做一次，
-  节点侧零转换开销；未转换的镜像自动走 overlayfs 路径）
-- 转换非阻塞：镜像首次使用时若无 Nydus 版本，直接标准拉取，同时后台触发转换
+- image-service（control plane 逻辑模块，见 4.4）负责把镜像**离线转换**为
+  overlaybd 格式（`convertor` 工具，层级转换可增量）;转换在服务端做一次，
+  节点侧零转换开销
+- 转换非阻塞：镜像首次使用时若无 overlaybd 版本，容器档走标准拉取先跑起来
+  （fc 档等待转换完成或直接报错提示 prewarm），同时后台触发转换
+- 可写层：容器档 overlayfs upper（XFS quota）;fc 档独立稀疏 overlay 盘（见 §3.2）
 
 ### 4.2 缓存管理
 
 ```
-/var/lib/bean/cache/
-├── content/        containerd content store（层 blob）
-├── snapshots/      overlayfs/nydus 快照目录
-└── nydus-chunks/   nydus blob chunk 缓存（S3 range-read 结果）
+/var/lib/bean/
+├── cache/               # 可牺牲池（LRU）
+│   ├── content/         #   containerd content store（标准层 blob，兜底路径）
+│   ├── snapshots/       #   overlayfs/overlaybd 快照目录
+│   └── obd-cache/       #   overlaybd 块 chunk 缓存（S3 range-read 结果）
+└── sandboxes/           # 不可牺牲池：可写层/overlay 盘，生命周期绑定 sandbox
 ```
 
-- LRU 以「镜像」为粒度记账（层被多镜像共享时引用计数），chunk 缓存独立 LRU
-- 水位控制：>85% 触发后台 GC，>95% 拒绝新 PULLING 并上报调度器
-- 缓存清单摘要：心跳携带本地镜像 ref 集合的增量 + 布隆过滤器（调度器做镜像亲和用）
+- LRU 以「镜像」为粒度记账（块被多镜像共享时引用计数），chunk 缓存独立 LRU
+- 水位控制：cache 池 >85% 触发后台 GC，>95% 拒绝新 PULLING 并上报调度器;
+  sandboxes 池余量是调度硬约束
+- 缓存清单摘要：心跳携带本地镜像 ref 集合的增量 + 布隆过滤器 + 字节占比（调度器镜像亲和用）
 
 ### 4.3 Prewarm
 
 - 收到 PrewarmImage 指令后按 priority 入队，受专用带宽/并发限制（不与在线 PULLING 抢）
-- Nydus 镜像 prewarm = 拉元数据 + 预取热 chunk（有 access pattern 记录时）或全量 chunk
+- overlaybd prewarm = 拉元数据 + 预取热块（有 access trace 时按 trace,否则全量）
+- overlaybd 原生支持记录启动 IO trace（`record-trace`）,首次运行采集、
+  后续按 trace 精准预取——对固定 eval 镜像集效果显著
+
+### 4.4 image-service 部署形态
+
+image-service 是 **control plane 的逻辑模块**（`internal/control/image`），非独立
+部署服务;P0–P2 内嵌 bean-api 进程。职责需要全局视角所以不能下放节点：
+
+- 格式转换全局去重（一个镜像只转一次，多节点不打架）
+- prewarm 编排需要全节点缓存视图
+- S3 blob GC 需要全局引用计数（镜像 ↔ blob ↔ 运行中 sandbox/snapshot）
+
+转换任务 CPU 重,量大后可拆独立 worker 池水平扩展（接口已按模块边界隔离）。
 
 ## 5. 网络模块
 
@@ -188,7 +274,7 @@ FC microVM 用 tap 设备替代 veth 的 netns 端，同样挂 bean0 桥，nftab
 ### 6.6 传输层抽象
 
 agent 的 gRPC listener 抽象为 `Transport`（unix socket 实现 / vsock 实现），
-fcRuntime 落地时 agent 代码零改动，只换 transport 与注入方式（initrd 或 virtiofs）。
+fc 档 agent 代码零改动，只换 transport（vsock）与注入方式（agent 盘/initrd，见 §3.1）。
 
 ## 7. 心跳、租约与 reconcile
 

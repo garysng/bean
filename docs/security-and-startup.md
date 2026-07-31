@@ -8,7 +8,7 @@ sandbox 内运行的是 **AI 生成的不可信代码**（eval 任务、agent ro
 
 | 威胁 | 后果 | 防线 |
 |---|---|---|
-| 内核逃逸 | 接管节点 | gVisor/Kata 隔离档（A2） |
+| 内核逃逸 | 接管节点 | FC microVM / gVisor 隔离档（A2） |
 | 横向移动 | 访问其他 sandbox / 内网服务 | 网络隔离（A4） |
 | 凭证窃取 | 拿到 S3/控制面凭证 | 零长期凭证（A5） |
 | 资源滥用 | 挖矿、fork 炸弹、磁盘写满 | cgroup 硬限制（A3） |
@@ -18,13 +18,18 @@ sandbox 内运行的是 **AI 生成的不可信代码**（eval 任务、agent ro
 
 ### A2. 隔离档位
 
-| 档 | 运行时 | 逃逸防线 | 适用 |
-|---|---|---|---|
-| `none` | runc | 仅 namespace/seccomp | 内部可信镜像，显式声明才用 |
-| `standard`（默认） | runsc (gVisor) | 用户态内核拦截全部 syscall，宿主内核面≈70 个 syscall | eval / rollout 默认 |
-| `strong` | kata → 未来 firecracker | 硬件虚拟化边界 | 对外多租户、高敏场景 |
+`isolation: auto | container | vm`，auto 解析规则见 architecture.md D3：
 
-gVisor 已知代价：syscall 密集型负载 10–30% 性能损耗、少数 syscall 不兼容（eval 场景实测通过率需在 P2 建立镜像兼容性回归集，不兼容镜像自动降级需**显式人工豁免**，不静默降级）。
+| 实际档 | 运行时 | 逃逸防线 | 何时使用 |
+|---|---|---|---|
+| `fc`（默认主档） | Firecracker microVM | 硬件虚拟化边界，宿主暴露面最小（FC 设备模型极简 + jailer + seccomp） | KVM 节点 & 无 GPU——常规 eval/rollout |
+| `runsc` | gVisor | 用户态内核拦截 syscall，宿主内核面≈70 个 syscall | 无 KVM 节点的降级档 |
+| `runc` | runc | 仅 namespace/seccomp/caps | GPU 任务（FC 无 passthrough）+ 内部可信任务 |
+
+- fc 档 guest 是真内核，无 gVisor 的 syscall 兼容性问题
+- runc 承载 GPU 意味着 **GPU eval 的隔离弱于默认档**——GPU 节点独立节点池 +
+  镜像白名单收紧作为补偿控制;gVisor GPU 支持（nvproxy）作为 P5 演进项
+- runsc 降级档的兼容性回归集仍需建立（P2），不兼容镜像显式豁免，不静默降级
 
 ### A3. 容器加固基线（所有档共用）
 
@@ -50,7 +55,7 @@ gVisor 已知代价：syscall 密集型负载 10–30% 性能损耗、少数 sys
 ```
 S3 长期凭证：仅 control plane 持有
    ├── 节点产物上传/snapshot：presigned URL（TTL 15min，绑定 key 前缀 + content-length）
-   ├── Nydus chunk 读取：beand 持 STS 只读角色（限 blob bucket 前缀，1h 轮换）
+   ├── overlaybd 块读取：beand 持 STS 只读角色（限 blob bucket 前缀，1h 轮换）
    └── sandbox 内直传产物：presigned PUT URL 注入（即使泄漏也只能写指定 key）
 控制面 ↔ noded：mTLS（内部 CA，节点注册时签发，短期证书自动轮换）
 noded ↔ agent：unix socket（0700，host 侧仅 beand 用户可达）；容器内 socket 挂载点
@@ -83,41 +88,44 @@ sandbox token（JWT）：签名密钥控制面持有，绑定 sandbox-id + 过�
 
 ### B1. 冷启动预算
 
-目标：**缓存命中 P50 < 2s；冷镜像（Nydus lazy-pull）P50 < 10s**。分解：
+目标：**缓存命中 P50 < 2s；冷镜像（overlaybd lazy-pull）P50 < 10s**。分解（fc 档为例，容器档少 VM 启动项更快）：
 
 | 阶段 | 缓存命中目标 | 冷路径目标 | 手段 |
 |---|---|---|---|
 | API + 调度 | 50 ms | 50 ms | 内存化调度器状态，无同步外呼 |
 | 指令送达 noded | 100 ms | 100 ms | 心跳流下行推送（非轮询等待） |
-| 镜像就绪 | ~0（已缓存） | 2–6 s | Nydus：仅拉元数据+首批 chunk（见 B2） |
+| 镜像就绪 | ~0（已缓存） | 2–6 s | overlaybd：仅拉元数据+启动热块（见 B2） |
 | rootfs 挂载 | 100 ms | 200 ms | snapshotter 预热、erofs 元数据缓存 |
 | netns/网络 | 50 ms | 50 ms | veth/nftables 批量原子操作;IPAM 内存位图 |
-| 容器创建+启动 | 300–600 ms | 300–600 ms | runsc 启动≈300ms;OCI spec 模板化 |
+| sandbox 启动 | 200–500 ms | 200–500 ms | FC microVM 启动≈125ms+内核引导;容器档 runc≈100ms/runsc≈300ms |
 | agent ready | 100 ms | 100 ms | 静态二进制,无依赖加载 |
 | **合计** | **≈1–1.2 s** | **≈4–8 s** | |
 
 每阶段打点进创建耗时直方图（beand exporter），回归监控。
 
-### B2. Nydus lazy-pull from S3
+### B2. overlaybd lazy-pull from S3
 
 ```
 镜像发布链路（image-service，离线一次）：
-OCI 镜像 → nydusify convert → RAFS bootstrap（元数据）+ chunk blobs → S3
+OCI 镜像 → overlaybd convertor（层级增量转换）→ 块设备层 blobs → S3
                                      │
 节点使用链路：                          ▼
-CreateSandbox → nydus-snapshotter 拉 bootstrap（数 MiB）→ 挂载即返回
-             → 容器启动，文件访问触发 chunk 按需 range-read S3 → 本地 chunk 缓存
+CreateSandbox → overlaybd/ublk 组装块设备（元数据数 MiB）→ 立即可挂
+             → 容器档挂 overlayfs / fc 档 virtio-blk 直挂 guest
+             → IO 访问触发块按需 range-read S3 → 本地 obd-cache
 ```
 
-- 容器「启动」只需 bootstrap + entrypoint 路径上的 chunk，SWE-bench 类镜像实测
-  启动所需数据通常 < 全镜像的 5%
-- chunk 去重：RAFS chunk 级 dedup，2000+ 评测镜像共享基础层（ubuntu/python）时
-  S3 存储与节点缓存都大幅缩减
+- 「启动」只需元数据 + entrypoint 路径热块，SWE-bench 类镜像启动所需数据
+  通常 < 全镜像的 5%;overlaybd `record-trace` 采集启动 IO 序列后可精准预取
+- 块级 dedup：2000+ 评测镜像共享基础层（ubuntu/python）时 S3 存储与节点缓存
+  都大幅缩减
+- 该路线已被 AgentENV 在 FC + 海量 OCI 镜像场景生产验证（本地盘做有界缓存，
+  镜像总量可超磁盘容量）
 - 风险与对策：
-  - S3 首字节延迟波动 → chunk 预取（读到 bootstrap 后并行预取 entrypoint 依赖闭包）
-  - runsc + nydus 兼容性（FUSE 路径）→ 用 nydus 的 erofs+fscache 模式（内核态，
-    绕开 FUSE，需 5.19+ 内核），P2 验证；不满足内核要求的节点退回 overlayfs 全量拉取
-  - 运行中 S3 不可达 → chunk 读失败重试 + sandbox 级 IO 错误上报（区别于任务自身失败）
+  - S3 首字节延迟波动 → 按 trace 预取 + obd-cache 命中兜底
+  - ublk 依赖较新内核（6.0+）→ 节点 OS 统一基线;老内核退回 overlaybd 的
+    tcmu 后端或标准 overlayfs 全量拉取
+  - 运行中 S3 不可达 → 块读失败重试 + sandbox 级 IO 错误上报（区别于任务自身失败）
 
 ### B3. 缓存与预热策略
 
@@ -127,8 +135,8 @@ CreateSandbox → nydus-snapshotter 拉 bootstrap（数 MiB）→ 挂载即返�
 3. **镜像亲和调度**：score = w1·(已缓存层字节占比) + w2·(空闲资源匹配) + w3·(缓存盘类型)
    —— 同一镜像的重复 eval run 天然命中同批节点
 4. **基础层常驻**：统计 top 共享层（ubuntu、conda、python），标记 pin 不参与 LRU
-5. **access pattern 记录**：首次运行记录 chunk 访问序列存 S3 元数据，后续 prewarm/
-   启动按 pattern 预取（Nydus 原生支持 prefetch table）
+5. **IO trace 记录**：首次运行 `record-trace` 采集块访问序列存 S3 元数据，
+   后续 prewarm/启动按 trace 预取（overlaybd 原生能力）
 
 ### B4. 批量拉起（eval 风暴）
 

@@ -53,11 +53,10 @@ AI evaluation / agent rollout 场景（如 SWE-bench 类任务）的特点：
         │ noded    │         │ noded    │         │ noded    │   ← 每节点一个
         │ (裸金属) │         │ (云 VM)  │         │ (裸金属) │      daemon
         └────┬─────┘         └──────────┘         └──────────┘
-             │ containerd client API
+             │ containerd（镜像面）+ beand 自管 FC（VM 面）
         ┌────▼─────────────────────────────┐
-        │ containerd                        │
-        │  ├── snapshotter: nydus/overlayfs │ ← lazy-pull from S3
-        │  └── runtime: runc / runsc / kata │ ← 按节点能力
+        │  ├── snapshotter: overlaybd       │ ← 块级 lazy-pull from S3
+        │  └── runtime: fc │ runc │ runsc   │ ← isolation auto 解析
         └────┬─────────────────────────────┘
              │
         ┌────▼─────────────────┐
@@ -84,9 +83,11 @@ AI evaluation / agent rollout 场景（如 SWE-bench 类任务）的特点：
 
 ## 3. 核心设计决策
 
-### D1. 容器而非 microVM
+### D1. 镜像零转换，容器与 microVM 双形态
 
-直接以 OCI 镜像启动容器，消除 e2b 式 template 转换。隔离通过 runtime handler 分档（见 D3）。未来若需 microVM 档位，在 runtime 抽象层下追加实现（Kata 路线），API 与 control plane 不变。
+任意 OCI 镜像直接作为 sandbox 环境，消除 e2b 式 template 转换。镜像经 overlaybd
+组装为块设备（见 D4），既能给容器档做 overlayfs rootfs，也能 virtio-blk 直挂
+microVM（见 D9）——两种形态共享同一条镜像链路，用户无感。
 
 ### D2. containerd 之上自研（而非直接驱动 runc）
 
@@ -107,44 +108,60 @@ type Runtime interface {
 noded 启动时探测节点能力并上报：
 
 ```
-├── /dev/kvm 可用（裸金属 or 嵌套虚拟化 VM）→ [runc, runsc, kata, firecracker*]
+├── /dev/kvm 可用（裸金属 or 嵌套虚拟化 VM）→ [runc, runsc, fc]
 └── 无 KVM（普通云 VM）                     → [runc, runsc(ptrace)]
-
-* firecracker 档为预留位，Phase 4+ 实装
 ```
 
-sandbox 创建请求携带 `isolation: none | standard | strong`：
+sandbox 创建请求携带 `isolation: auto | container | vm`，默认 `auto`：
 
-- `none` → runc（内部可信任务显式声明）
-- `standard` → runsc（gVisor，默认档，evaluation 跑 AI 生成代码的底线）
-- `strong` → kata（需 KVM 节点）；未来切换为 firecracker 实现（见 D9）
+```
+auto 解析规则：
+  KVM 节点 & 无 GPU 请求 → fc（Firecracker microVM，默认主档，见 D9）
+  GPU 请求               → runc 容器档（FC 无 GPU passthrough，硬限制）
+  无 KVM 节点            → runsc（gVisor 降级档）
+显式 container(runc|runsc) / vm(fc) 仍允许
+```
+
+- **fc**：隔离最强、snapshot/fork 原生、guest 真内核无 syscall 兼容性问题——常规 eval/rollout 默认
+- **runsc**：无 KVM 环境的降级档
+- **runc**：GPU 路径 + 内部可信任务 + P0/P1 链路打通基线
+- ~~kata~~：被 fc 取代，不再引入
 
 scheduler 按能力匹配节点。
 
-### D9. Firecracker microVM 预留位
+### D9. Firecracker 主档：容器 rootfs 直挂 microVM
 
-`strong` 档的长期路线是自研 Firecracker runtime，替代 Kata：
+FC 档**不是**嵌套容器（Kata 式 guest 内再跑 containerd），而是 rootfs 直挂：
 
-- **不走 e2b 的 template 转换路线**。方案是「容器 rootfs 直挂 microVM」：
-  containerd snapshotter 组装好容器 rootfs（overlayfs/erofs），通过
-  virtio-blk / virtiofs 直接挂给 microVM，guest 内 tiny-init 切根后拉起
-  bean-agent。镜像仍是一等公民，零转换
-- 复用 D2 的 `Runtime` 接口新增 `firecrackerRuntime` 实现；agent 通信从
-  unix socket 切到 vsock（agent 协议层已抽象传输）
-- FC 的 memory snapshot / resume 能力天然优于容器档 CRIU，
-  是 snapshot 功能的最终形态（见 docs/snapshot-resume.md）
-- 预留点：proto 中 `isolation` 为枚举可扩展；beand capability 上报含
-  `firecracker`；网络层 veth-tap 桥接与现有节点内 NAT 兼容
+```
+overlaybd 组装镜像块设备（见 D4）
+  → virtio-blk 挂给 microVM（只读 base + 可写 overlay 盘）
+  → guest 内 bean-agent 作为 init：挂载 /proc /sys /dev 等（按 OCI 默认
+    mounts 复刻）、应用 image config（ENV/USER/WORKDIR/Entrypoint+Cmd）
+    拉起用户进程
+```
+
+- guest 内无容器层，"容器"只剩镜像格式；镜像零转换的承诺不变
+- 兼容性：ENV/ENTRYPOINT 等 config 语义由 agent 复刻（与容器档同一份代码）；
+  guest 是完整真实 Linux 内核，兼容性优于 gVisor 模拟层。唯一差异：内核
+  由平台统一打包提供（非宿主内核），对纯用户态 eval 负载无感。
+  详见 beand-design.md fcRuntime 节
+- agent 通信走 vsock（transport 抽象，与容器档 unix socket 同协议）
+- 网络：tap 设备接入节点 bean0 桥，nftables 规则与容器档一致
+- 该路线已被 AgentENV（Kimi K3 训练基础设施）在生产验证；实现参考其
+  overlaybd+ublk 集成与 snapshot 设计
 
 ### D4. S3 为统一存储 backend
 
 | 数据 | 方案 |
 |---|---|
-| 镜像 blob | Nydus/overlaybd blob 直存 S3，节点 lazy-pull 时按需 range-read；registry 仅存元数据 |
-| 节点缓存 | 本地 NVMe 作为 S3 之上的 chunk LRU 缓存；裸金属（大盘）与云 VM（小盘）仅命中率差异，架构统一 |
+| 镜像 blob | **overlaybd 块级镜像**（层 = 块设备 diff）直存 S3，节点经 ublk 按需 range-read；registry 仅存元数据 |
+| 节点缓存 | 本地 NVMe 作为 S3 之上的块 chunk LRU 缓存；裸金属（大盘）与云 VM（小盘）仅命中率差异，架构统一 |
 | eval 产物 | agent/noded 经 presigned URL 直推 S3（control plane 签发，节点不持长期凭证） |
 | 大文件下载 | API 返回 presigned URL 重定向，不过 gateway 转发 |
 | 快照（Phase 2+） | rootfs diff / 内存快照落 S3，支持跨节点 resume |
+
+选 overlaybd（块级，DADI/阿里，AgentENV 已在 FC 场景验证）而非 Nydus（文件级）的关键原因：**块设备链路同时服务容器档（overlaybd-snapshotter → overlayfs）与 microVM 档（virtio-blk 直挂 guest），一条镜像链路通吃全部 runtime 档位**；Nydus 的文件系统语义进不了 microVM，FC 档需另走 virtiofs（FC 支持弱）。Nydus 保留为容器档备选。
 
 热状态（sandbox 元数据、租约、调度状态）用 Postgres，不进 S3。
 
@@ -172,11 +189,43 @@ sandbox netns ←veth→ 节点 bridge → SNAT 出网
 
 ### D7. 调度：镜像亲和优先的 bin-packing
 
-evaluation 调度足够简单，自研反而能做 K8s 做不了的精细优化：
+evaluation 调度足够简单，自研反而能做 K8s 做不了的精细优化。
 
-1. **镜像亲和**：优先选已缓存该镜像层最多的节点（noded 上报本地层清单摘要）
-2. **资源位**：cpu/mem/gpu bin-packing
-3. **缓存盘权重**：镜像大且未预热的任务优先派给有本地 NVMe 的裸金属节点
+**节点资源画像**（心跳上报，调度器内存态维护）：
+
+```
+cpu:   allocatable vCPU（物理核 × 超卖系数 3，预留系统份额）
+       已承诺 = Σ sandbox.cpu;实际负载 = 节点 load（仅告警用）
+mem:   allocatable = 物理内存 − 系统预留
+       已承诺 = Σ sandbox.memoryMiB（fc 档气球回收不减承诺量——保 resume/突发）
+disk:  sandboxes 池余量（可写层）;cache 池水位（只影响打分不做门槛）
+gpu:   空闲卡数（按整卡分配，不切分）
+cap:   [runc, runsc, fc] × 每节点并发创建余量（默认 16）
+```
+
+**调度流程**（单 sandbox;batchCreate 在一次锁内顺序执行同流程）：
+
+```
+1. 过滤（硬约束）：
+   isolation 解析（auto→fc/runsc/runc）→ 节点能力匹配
+   cpu/mem/disk 承诺量 + 请求 ≤ allocatable;GPU 整卡余量
+   节点状态 = READY（SUSPECT/LOST/DRAINING 排除）
+2. 打分（加权和，权重可配）：
+   w1·镜像亲和：该镜像 overlaybd 块在节点缓存的字节占比（心跳带 bloom+字节数）
+   w2·资源平衡：装箱后碎片度（优先填满，留大块空位给大规格）
+   w3·缓存盘类型：冷镜像 → NVMe 大缓存节点加分
+   w4·打散：同 label（同一 eval run）适度反亲和，避免单节点故障吞掉整批
+3. 提交:Postgres 事务扣承诺量 + 写指令 → 心跳下行通知节点
+4. 失败回退:节点报 FAILED（如 ENOSPC 竞态）→ 释放承诺量,重调度(≤3 次,
+   排除失败节点),仍失败 → NO_CAPACITY 返回调用方
+```
+
+**记账一致性**：承诺量以 Postgres 为准（调度器重启可重建内存态）;节点心跳
+实际用量仅用于告警与 balloon 决策，不参与准入——避免「实际水位准入」在
+突发负载下超卖爆炸。
+
+**抢占**：不做。eval 任务同质、短生命周期，排队（NO_CAPACITY + 客户端重试/
+排队池）比抢占简单且足够。
 
 ### D8. 故障模型：租约 + 无状态重建
 
@@ -240,7 +289,7 @@ RUNNING/PAUSED ─snapshot→ SNAPSHOTTING → (回原状态)；snapshot 对象�
 
 目标：P50 < 2s（镜像已缓存）/ P50 < 10s（lazy-pull 冷镜像）。
 
-1. **lazy-pull**：Nydus snapshotter，容器启动只需元数据 + 首批 chunk，运行中按需 range-read S3
+1. **lazy-pull**：overlaybd + ublk 块级按需加载，启动只需元数据 + 热块，运行中按需 range-read S3
 2. **节点缓存**：chunk 级 LRU，S3 为 source of truth，节点盘可随意 GC
 3. **prewarm API**:评测批次开始前预热镜像到目标节点
 4. **镜像亲和调度**：天然提升缓存命中
@@ -284,6 +333,6 @@ bean/
 |---|---|---|
 | **P0 骨架** | proto、noded + containerd(runc) 创建/销毁 sandbox、agent exec、最小 REST API | 单节点端到端：`POST /sandboxes` → exec → destroy |
 | **P1 可用** | scheduler + 多节点、Postgres 状态、Python SDK、CLI、文件 API、网络隔离(nftables) | 多节点跑通一轮小规模 eval |
-| **P2 生产** | runsc 默认隔离、Nydus + S3 lazy-pull、prewarm、镜像亲和调度、产物直推 S3 | 2000 镜像批量评测,冷启动达标 |
-| **P3 扩展** | TS SDK、端口暴露反代、PTY/交互式 rollout、kata 强隔离档 | agent rollout 场景接入 |
+| **P2 生产** | fcRuntime 主档（rootfs 直挂）、overlaybd + S3 lazy-pull、prewarm、镜像亲和调度、产物直推 S3 | 2000 镜像批量评测,冷启动达标 |
+| **P3 扩展** | TS SDK、端口暴露反代、PTY/交互式 rollout、GPU 容器档完善 | agent rollout 场景接入 |
 | **P4+** | 快照/resume、多租户 | — |

@@ -1,26 +1,26 @@
 # Pause / Resume / Snapshot 设计
 
-> 状态机见 architecture.md §4.3。本文覆盖容器档（runc/runsc）实现、S3 布局、
-> 跨节点 resume，以及 Firecracker 档的最终形态。
+> 状态机见 architecture.md §4.3。fc 为默认主档，snapshot 主路径是 FC 原生
+> snapshot;容器档（runc/runsc）的 checkpoint 路径服务降级/GPU 场景。
 
 ## 1. 能力分级
 
 | 能力 | 语义 | 实现 | Phase |
 |---|---|---|---|
-| **pause/resume（本节点）** | 冻结进程，停止计费 CPU，保留内存与状态 | cgroup freezer | P3 |
-| **snapshot** | 完整状态持久化到 S3，sandbox 可销毁 | checkpoint + rootfs diff | P4 |
+| **pause/resume（本节点）** | 冻结执行，保留内存与状态 | fc：pause vCPU;容器档：cgroup freezer | P3 |
+| **snapshot** | 完整状态持久化到 S3，sandbox 可销毁 | fc：memory+disk snapshot（主路径）;容器档：checkpoint + rootfs diff | P3–P4 |
 | **restore（跨节点）** | 从 snapshot 在任意节点重建 | 反向过程 | P4 |
-| **memory snapshot（毫秒级）** | fork 式克隆、agent 分支探索 | Firecracker 原生 | P4+（FC 档） |
+| **fork（毫秒级克隆）** | 一母多子、agent 分支探索 | FC diff snapshot + CoW（仅 fc 档） | P4 |
 
 ## 2. Pause / Resume（轻量，不落盘）
 
 ```
 POST /sandboxes/{id}/pause
-  beand: cgroup.freeze = 1（cgroup v2 freezer，整棵进程树原子冻结）
-       + 网络连接保留（conntrack 不清）、netns 不动
-       + agent 自身也被冻结——控制面把状态置 PAUSED 后拒绝 exec（409）
+  fc 档:   FC API PauseVM（vCPU 停止，内存原样保留），百 ms 内
+  容器档:  cgroup.freeze = 1（cgroup v2 freezer，整棵进程树原子冻结）
+  共同:    网络保留、agent 一并冻结——控制面置 PAUSED 后拒绝 exec（409）
 POST /sandboxes/{id}/resume
-  beand: cgroup.freeze = 0，秒回 RUNNING
+  fc 档:   ResumeVM;容器档: cgroup.freeze = 0——均亚秒回 RUNNING
 ```
 
 - 冻结期间内存不释放——调度器仍按其 memory.max 记账（防止超卖后 resume OOM）；
@@ -28,9 +28,28 @@ POST /sandboxes/{id}/resume
 - 超时销毁计时器在 PAUSED 期间**继续走**（防泄漏），可通过 timeout 接口续期
 - proxy 对 PAUSED 返回 502 + Retry-After
 
-## 3. Snapshot（容器档）
+## 3. Snapshot
 
-### 3.1 组成
+### 3.0 fc 档（主路径）
+
+```
+POST /sandboxes/{id}/snapshot
+1. PauseVM → FC CreateSnapshot：memory file + vmstate（支持 diff snapshot 增量）
+2. 可写 overlay 盘打增量（reflink/块 diff）
+3. memory/vmstate/disk-diff + manifest 流式推 S3（zstd 分片）
+4. keepRunning=true → ResumeVM
+```
+
+- 整机级一致性：TCP 栈、fd、进程树全部在 guest 内一起冻结，无 CRIU 的外部状态问题
+- restore：拉 base 镜像块设备（缓存命中）+ memory file + overlay diff → LoadSnapshot
+  → resume vCPU，目标百 ms 级（本地）/ 秒级（跨节点冷拉）
+- fork：同一 memory snapshot CoW 多次 LoadSnapshot → 一母多子;子实例网络重新分配
+  （MAC/IP 由 agent 在 guest 内重配），「装环境一次 fan-out N 实验」的最优实现
+- 限制：宿主 CPU 代际需兼容（调度按 CPU feature set 分组）;GPU 不适用（GPU 走容器档）
+
+### 3.1–3.5 容器档（降级/GPU 场景）
+
+#### 组成
 
 一个 snapshot = 三部分，原子提交：
 
@@ -43,9 +62,9 @@ s3://bean/snapshots/{snapId}/
 └── rootfs-diff.tar.zst  # 可写层 diff（containerd snapshotter 导出 upper layer）
 ```
 
-base 镜像**不进** snapshot——restore 节点从常规镜像链路（Nydus/S3）取，diff 只含增量。eval 场景 diff 通常很小（几十 MiB 级）。
+base 镜像**不进** snapshot——restore 节点从常规镜像链路（overlaybd/S3）取，diff 只含增量。eval 场景 diff 通常很小（几十 MiB 级）。
 
-### 3.2 runc 档：CRIU
+#### runc 档：CRIU
 
 ```
 流程（beand 执行）：
@@ -66,15 +85,15 @@ CRIU 已知限制（文档明确告知用户）：
 | /dev/shm、大内存 | 内存页全量落盘,10 GiB 内存 ≈ 分钟级;snapshot 是重操作,API 文档标注 |
 | agent 进程 | agent 自身被一并 checkpoint;restore 后 agent 内存态恢复,socket 由 beand 重连（transport 重建逻辑 agent 已支持） |
 
-### 3.3 runsc 档：gVisor save/restore
+#### runsc 档：gVisor save/restore
 
 gVisor 自带整 sandbox 级 save/restore（`runsc checkpoint/restore`），比 CRIU 更可靠（用户态内核状态自包含）：
 
 - checkpoint 产出单一状态文件 → 同样三件套布局
 - 限制类似（外部 TCP、GPU）；跨 gVisor 版本 restore 不保证——manifest 记录 runsc 版本，restore 节点版本不匹配时拒绝并提示
-- **结论：standard 档（默认档）的 snapshot 走 gVisor 原生路径，CRIU 仅服务 runc 档**——这条路径成熟度决定了容器档 snapshot 的整体可用性
+- 容器档内：runsc 走 gVisor 原生路径（更可靠），CRIU 仅服务 runc 档、尽力而为
 
-### 3.4 Restore（跨节点）
+#### Restore（跨节点，容器档）
 
 ```
 POST /sandboxes { "snapshot": "snap_...", ... }
@@ -88,29 +107,26 @@ POST /sandboxes { "snapshot": "snap_...", ... }
 
 目标恢复时延：diff+checkpoint 1 GiB 以内 P50 < 15s（S3 并行分片拉取）。
 
-### 3.5 生命周期
+### 3.6 生命周期（两档共通）
 
 - snapshot 独立对象、独立配额（总字节数 per key）；TTL 可选，S3 lifecycle 兜底
 - 引用计数：有 RESTORING 进行中的 snapshot 不可删
 - 同一 snapshot 可多次 restore → 天然支持「装好环境 snapshot 一次，fan-out N 个实验」——eval 场景的核心价值点
 
-## 4. Firecracker 档（最终形态，Phase 4+）
+## 4. 两档对比与接口统一
 
-FC 原生 snapshot 解决容器档所有痛点，是把 snapshot 做成**高频操作**的路线：
-
-| 维度 | 容器档（CRIU/gVisor save） | FC 档 |
+| 维度 | 容器档（CRIU/gVisor save） | fc 档（主路径） |
 |---|---|---|
-| 一致性 | 进程级，外部状态尽力而为 | 整机级（内存+设备+vCPU），TCP 栈都在 guest 内一起冻结 |
-| 速度 | 分钟级（大内存） | 亚秒级 pause;snapshot 写盘受 IO 限制;diff snapshot 支持增量 |
+| 一致性 | 进程级，外部状态尽力而为 | 整机级（内存+设备+vCPU） |
+| 速度 | 分钟级（大内存） | pause 百 ms;diff snapshot 增量 |
 | resume | 重建进程树 | load snapshot + resume vCPU，百 ms 级 |
-| fork 克隆 | 不支持 | copy-on-write memory + diff snapshot → 一母多子，agent 分支探索/A-B rollout |
+| fork 克隆 | 不支持 | CoW memory → 一母多子（AgentENV 单节点 16 子实证） |
 
-设计预留（现在就固化的接口）：
+接口统一（用户无感）：
 
-- Runtime 接口的 Checkpoint/Restore 签名已兼容（io.Reader/Writer 流式）
-- manifest 的 `runtime` 字段区分 checkpoint 格式，restore 调度按格式匹配节点能力
-- snapshot API 语义不变——用户无感切换底层
-- guest 内 agent 走 vsock（transport 抽象已就位，见 beand-design §6.6）
+- Runtime 接口 Checkpoint/Restore 签名两档通用（io.Reader/Writer 流式）
+- manifest 的 `runtime` 字段区分格式，restore 调度按格式匹配节点能力
+- snapshot API 语义一致，档位差异只体现在速度与 fork 可用性
 
 ## 5. API 汇总（重述）
 

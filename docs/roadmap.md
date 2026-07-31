@@ -37,14 +37,17 @@ curl DELETE → 资源清零（netns/挂载/containerd task 无残留）
 
 **范围**
 
-- runsc 默认隔离档 + 镜像兼容性回归集；容器加固基线全量（seccomp/caps/pids/quota）
-- Nydus + S3 lazy-pull（erofs+fscache 模式验证）、image-service 离线转换、chunk 缓存
-- prewarm API + 编排、镜像亲和 v2（层/chunk 级 bloom）
+- **fcRuntime 主档**：firecracker + jailer 进程管理、overlaybd 块设备 virtio-blk
+  直挂、guest 内核打包、agent vsock transport + init 挂载矩阵（参考 AgentENV 实现）
+- overlaybd + S3 lazy-pull（ublk 路径验证）、image-service 离线转换、块缓存、record-trace 预取
+- isolation auto 解析（fc 默认/GPU→runc/无 KVM→runsc）;runsc 降级档兼容性回归集
+- 容器加固基线全量（seccomp/caps/pids/quota）
+- prewarm API + 编排、镜像亲和 v2（块级 bloom + 字节占比）
 - 产物直推 S3（presigned 链路）、sandbox 日志归档
 - 凭证体系：mTLS 内部 CA、STS/presigned 全覆盖
 - 配额/限流
 
-**验收**：2000 镜像批量评测演练;冷启动 P50 < 10s、缓存命中 P50 < 2s;逃逸回归集通过。
+**验收**：2000 镜像批量评测演练（fc 档）;冷启动 P50 < 10s、缓存命中 P50 < 2s;逃逸回归集通过。
 
 ## P3 — 交互与扩展场景
 
@@ -52,22 +55,21 @@ curl DELETE → 资源清零（netns/挂载/containerd task 无残留）
 
 - WS 流式 exec + PTY（会话重连）、CLI 交互模式（run -it / attach）
 - bean-proxy：通配域名 TLS、端口暴露、sandbox token 鉴权
-- pause/resume（cgroup freezer）
+- pause/resume（fc PauseVM / 容器档 cgroup freezer）
+- fc 档 snapshot 本节点路径（memory+disk → S3）
 - TS SDK、e2b 迁移对照文档
-- kata strong 档接入
 
 **验收**：agent rollout 场景接入（交互式终端 + 端口预览）;pause 后资源计费口径正确。
 
-## P4 — Snapshot 与 FC 档
+## P4 — Snapshot 完整形态
 
 **范围**
 
-- snapshot/restore：gVisor save/restore 主路径 + runc CRIU、S3 三件套布局、跨节点 restore、fan-out 场景
-- `fcRuntime`：firecracker + jailer 进程管理、容器 rootfs virtio 直挂、vsock agent、
-  tap 网络接入 bean0
-- FC memory snapshot / diff snapshot、亚秒级 resume
+- fc 档跨节点 restore、diff snapshot 增量、fork（CoW 一母多子）
+- 容器档 checkpoint 兜底：gVisor save/restore + runc CRIU（GPU/无 KVM 场景）
+- snapshot 生命周期：配额、引用计数、TTL/S3 lifecycle
 
-**验收**：「装环境 → snapshot → fan-out 50 实例」演示;FC 档 resume P50 < 500ms。
+**验收**：「装环境 → snapshot → fan-out 50 实例」演示;fc 档 resume P50 < 500ms。
 
 ## P5+ — 储备项
 
@@ -81,9 +83,11 @@ curl DELETE → 资源清零（netns/挂载/containerd task 无残留）
 
 | 风险 | 影响 | 缓解 |
 |---|---|---|
-| runsc 对 eval 镜像兼容性 | 默认档不可用 → 降级 runc 安全性受损 | P2 建回归集提前扫描全镜像库；不兼容显式豁免清单 |
-| erofs+fscache 内核要求（5.19+） | 旧节点无 lazy-pull | 节点 OS 统一基线；退回 overlayfs 路径保底 |
-| gVisor save/restore 跨版本 | snapshot 长期保存失效 | manifest 记版本 + 节点保留多版本 runsc |
-| CRIU 复杂状态失败率 | runc 档 snapshot 不可靠 | snapshot 主推 runsc 档;CRIU 仅尽力而为 |
-| S3 延迟波动 | 冷启动长尾 | chunk 预取 + prefetch table + 节点缓存池化 |
+| fcRuntime 自研复杂度（VM 生命周期/guest 内核/vsock） | 主档延期 | AgentENV/CubeSandbox 开源实现可深度参考;P0/P1 用 runc 先打通全链路，fc 档并行开发 |
+| ublk 内核要求（6.0+） | 旧节点无 lazy-pull | 节点 OS 统一基线;tcmu 后端或 overlayfs 全量拉取保底 |
+| overlaybd 转换覆盖率 | 未转换镜像 fc 档不可用 | 转换流水线随镜像入库自动触发;容器档标准拉取兜底 |
+| FC snapshot 宿主 CPU 代际兼容 | 跨节点 restore 受限 | 调度按 CPU feature set 分组;manifest 记录代际 |
+| GPU 走 runc 隔离弱 | GPU eval 安全短板 | GPU 独立节点池 + 镜像白名单;nvproxy（gVisor GPU）P5 评估 |
+| runsc 降级档兼容性 | 无 KVM 节点体验差 | 回归集扫描;采购/开通嵌套虚拟化优先 |
+| S3 延迟波动 | 冷启动长尾 | record-trace 预取 + 节点缓存池化 |
 | 自研调度器成熟度 | 资源碎片/饥饿 | eval 负载同质化高,先简单策略 + 指标驱动迭代 |

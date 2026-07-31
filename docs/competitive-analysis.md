@@ -5,6 +5,27 @@
 
 ## 1. 逐家分析
 
+### AgentENV（kvcache-ai / Kimi，2026-07 开源）⭐ 最直接的对标
+
+为 Kimi K3 的 agentic RL 训练而建，与 bean 的目标场景（批量异构镜像 + RL rollout）几乎重合：
+
+- **隔离**：Firecracker microVM per sandbox
+- **环境**：✅ 任意 OCI 镜像零转换——**overlaybd + ublk 块级按需加载**，本地盘做有界缓存，镜像总量可超磁盘容量;snapshot 可落 S3
+- **snapshot/fork**：resume <50ms、pause <100ms、增量快照 <100ms;单节点 fork 16 子实例;virtio-balloon 内存超卖
+- **API**：E2B 兼容 HTTP API（存量 E2B SDK 换 endpoint 即用）+ 反向代理
+- **成熟度**：单机路径经 Kimi 生产验证;**多节点控制面官方标注 prototype**
+- **对 bean 的意义**：验证了「overlaybd 块设备直挂 FC + 任意 OCI 镜像」整条技术路线（bean D4/D9 已采纳同路线）;其弱项（多节点调度、配额、prewarm 编排、运维面）恰是 bean 自研的重点
+
+### CubeSandbox（腾讯云，2026-04 开源，Apache-2.0）
+
+- **隔离**：RustVMM/KVM 自研 hypervisor（改造 Cloud Hypervisor/Kata 组件），Rust 全栈
+- **环境**：❌ image→template 转换路线（e2b 同款），非任意 OCI 直启——不解决批量异构镜像痛点
+- **冷启动**：60ms（资源池化 + 快照克隆;50 并发 P95 90ms）;内存开销 <5MB/sandbox
+- **snapshot**：CubeCoW 引擎——checkpoint/回滚/fork;AutoPause/AutoResume
+- **组件**：CubeAPI（E2B 兼容）/CubeMaster/Cubelet/CubeVS（eBPF 网络隔离）/CubeEgress（L7 出口网关：域名过滤、凭证注入、审计）
+- **成熟度**：腾讯云生产验证,完整多节点集群能力
+- **对 bean 的意义**：template 路线不适配 eval 场景,但 **CubeVS 的 eBPF 网络隔离与 CubeEgress 的 L7 出口治理**（凭证不进 sandbox）是 bean P5 网络演进的参考设计
+
 ### e2b（e2b.dev）
 
 - **隔离**：Firecracker microVM
@@ -68,6 +89,8 @@
 
 | 平台 | 隔离 | 任意 OCI 直启 | 冷启动 | pause/resume/fork | 开源/自托管 | eval 批量适配 |
 |---|---|---|---|---|---|---|
+| **AgentENV** | Firecracker | ✅ overlaybd 零转换 | resume <50ms | ✅✨ fork 16 子 | Apache-2.0 ✅ | ✅ 但多节点 prototype |
+| **CubeSandbox** | RustVMM | ❌ template 路线 | 60ms | ✅ CubeCoW fork | Apache-2.0 ✅ | ❌ template 成本 |
 | e2b | Firecracker | ❌ template build（5–15min/个） | ~200ms | ✅ Beta | Apache-2.0 ✅ | ❌ |
 | Daytona | Docker 容器 | ⚠️ registry 拉取+注册,AMD64 | <90ms | ✅ | AGPL-3.0 ✅ | ⚠️ 无强隔离/无分发优化 |
 | Modal | gVisor | ❌ SDK 重建+依赖 Python | 亚秒 | ⚠️ Alpha | ❌ | ⚠️ 闭源 |
@@ -76,26 +99,29 @@
 | CodeSandbox | Firecracker | ⚠️ devcontainer 套壳 | resume 1–2s | ✅ 成熟 | ❌ | ❌ |
 | Cloudflare | 容器 | ⚠️ 须嵌其运行时 | 快 | ✅ | ❌(SDK 开源) | ❌ 生态绑定 |
 | Vercel | Firecracker | ✅ 但须推其 registry | 秒级 | ✅ FS 快照 | ❌ | ❌ 单区域 |
-| **bean（目标）** | **runc/gVisor/kata→FC 分档** | **✅ 零转换，S3 lazy-pull** | **命中<2s/冷<10s** | **P3 pause、P4 snapshot/fork** | **自研自托管** | **✅ 一等场景** |
+| **bean（目标）** | **FC 默认档 + runc(GPU)/gVisor 降级** | **✅ overlaybd 零转换，S3 lazy-pull** | **命中<2s/冷<10s** | **FC 原生 snapshot/fork（P3–P4）** | **自研自托管** | **✅ 一等场景（多节点调度/prewarm/配额为核心）** |
 
 ## 3. 结论：bean 的差异化定位
 
-1. **「任意 OCI 零转换直启」在商业平台中几乎无人做到**——microVM 阵营全部要求
-   rootfs 转换或 SDK 重建；最接近的 Daytona 也有注册步骤且无强隔离档。
-   批量异构镜像评测是真实空白
-2. **镜像分发是没人做的下半场**：各家优化的是「单模板反复启动」（快照恢复快），
-   而 eval 的痛点是「2000 个不同镜像各启动几次」——bean 的 S3 lazy-pull +
-   chunk 去重 + 镜像亲和调度直接打这个点
-3. **隔离分档**是对「容器派（Daytona，快但弱隔离）vs microVM 派（强但镜像不友好）」
-   二选一困局的回答：同一 API 下按信任度选档
-4. **自主可控**：核心竞品中只有 e2b/Daytona/microsandbox 可自托管，且各有
-   license 或形态限制;bean 全栈自研,S3+裸金属/VM 即可部署,无生态绑定
-5. **fork/分支**（Morph 的王牌）通过 FC 档预留位补齐路线,容器档先用
-   「snapshot 一次 fan-out N」满足 eval 的主要复用需求
+1. **技术路线已被验证，竞争焦点在工程完成度**：AgentENV 证明了「overlaybd 直挂
+   FC + 任意 OCI 零转换」可行且生产可用——bean 采纳同一路线（D4/D9），
+   差异化转向 AgentENV 的空白区：**多节点调度（镜像亲和 bin-packing）、prewarm
+   编排、配额/租约/故障恢复、GPU 路径（容器档）、完整运维面**
+2. **商业平台仍无人做到零转换**：e2b/Morph/CodeSandbox/Modal 全要求 template
+   或 SDK 重建;最接近的 Daytona 无强隔离档。批量异构镜像评测在商业侧仍是空白
+3. **镜像分发是下半场**：各家优化「单模板反复启动」，eval 痛点是「2000 个不同
+   镜像各启动几次」——S3 lazy-pull + 块级去重 + 镜像亲和调度 + record-trace
+   预取直接打这个点
+4. **隔离自动分档**：fc 默认（强隔离+零兼容性问题）、GPU 自动落容器档、无 KVM
+   降级 gVisor——同一 API 按节点能力与任务特征选档，竞品均为单一形态
+5. **自主可控**：全栈自研,S3+裸金属/VM 即可部署,无生态绑定;开源参考
+   （AgentENV/CubeSandbox 均 Apache-2.0）可加速实现而不引入依赖
 
 ## 4. 需要持续跟踪的信号
 
+- **AgentENV 多节点控制面从 prototype 走向成熟的速度**——若其补齐调度/配额/
+  运维面,「基于 AgentENV 二开」将重新成为选项
+- CubeSandbox 是否增加任意 OCI 直启路线
 - Daytona 若补上 gVisor/microVM 档,与 bean 重叠度会显著上升
-- microsandbox 云服务 GA 后的集群化能力
 - e2b Build System 演进是否消除 per-image template 成本
-- Together（CodeSandbox）与 AI eval 生态的整合动作
+- overlaybd/ublk 上游演进（内核 ublk 用户态块设备生态）
