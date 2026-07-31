@@ -210,6 +210,7 @@ cap:   [runc, runsc, fc] × 每节点并发创建余量（默认 16）
 0. Region 选择：显式 region 参数 > 卷/snapshot 数据亲和（强制） >
    镜像 blob 已复制的 region > 容量余量
 1. 过滤（region 内,硬约束）：
+   nodeSelector 标签匹配（如 pool=gpu-a100）
    isolation 解析（auto→fc/runsc/runc）→ 节点能力匹配
    cpu/mem/disk 承诺量 + 请求 ≤ allocatable;GPU 整卡余量
    节点状态 = READY（SUSPECT/LOST/DRAINING 排除）
@@ -274,7 +275,13 @@ Global Control Plane（bean-api / scheduler / Postgres,镜像元数据全局 dig
   （DNS 直达 region proxy,无全局中转）
 - **BYOC**：客户提供节点 + S3（+可选自有域名）,hosted control plane;
   控制面只见元数据,不持客户 S3 长期凭证——presigned/STS 由部署在客户侧的
-  轻量 token 服务签发;beand/proxy 出向 mTLS + region token 注册
+  轻量 token 服务签发;beand/proxy 出向 mTLS + region bootstrap token 注册
+  （registration-only 凭证,BYOC 可配人工 approve;详见 beand-design §7.0）
+- **节点归属**：`region` 为一级字段（配置声明,Register 时控制面校验该 region
+  已注册,生命周期内不可变）;`labels` 为自由标签（pool/disk/tenant 等）,
+  调度请求经 `nodeSelector` 约束——GPU 池、BYOC 专属节点等用标签,不加字段
+- **证书**：云托管私有 CA（CertProvider 抽象,签发/轮换/吊销外包）,
+  BYOC 与自有 region 共享同一信任根
 - **故障域**：region 失联 → 该 region sandbox 标 LOST,其他 region 无感;
   全局控制面单点首期接受（控制面故障不影响存量 sandbox 数据面,仅停新建）,
   控制面多活为 P5 储备

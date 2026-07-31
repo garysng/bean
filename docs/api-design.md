@@ -61,6 +61,7 @@ POST /sandboxes
   "autoStartCmd": false,                // true 则创建后立即拉起原 entrypoint
   "region": "ap-east-1",                // 可选;缺省按 key 默认 region;
                                         // 挂已有卷/从 snapshot 创建时强制数据所在 region
+  "nodeSelector": { "pool": "nvme" },   // 可选;按节点 labels 过滤
   "lifecycle": {                        // 可选;缺省 = 一直运行
     "idleTimeout": "300s",              //   null/缺省=永不;"0s"=活动一结束即触发
     "onIdle": "pause"                   //   pause（默认）| kill

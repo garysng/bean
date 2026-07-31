@@ -23,7 +23,13 @@ beand
 
 ```yaml
 nodeId: auto            # 默认机器指纹生成
-region: ap-east-1       # 节点归属 region（注册时上报）
+region: ap-east-1       # 一级字段（数据域/故障域）,Register 时控制面校验:
+                        #   region 必须已注册（S3/proxy 组已配置）,否则拒绝加入;
+                        #   节点生命周期内不可变（迁 region = 退出重注册）
+labels:                 # 自由标签,调度 nodeSelector 过滤/打分用（可运维更新）
+  pool: gpu-a100
+  disk: nvme
+bootstrapToken: <region bootstrap token>        # 首次注册用,见 §7.0
 controlPlane: grpc://control.example.com:7443   # 出向连接（BYOC 场景跨网）
 s3:
   endpoint: https://s3.ap-east-1.example.com    # 本 region S3 backend
@@ -382,7 +388,30 @@ FC microVM 用 tap 设备替代 veth 的 netns 端，同样挂 bean0 桥，nftab
 agent 的 gRPC listener 抽象为 `Transport`（unix socket 实现 / vsock 实现），
 fc 档 agent 代码零改动，只换 transport（vsock）与注入载体（agent 盘，拍板见 §3.1/§3.4）。
 
-## 7. 心跳、租约与 reconcile
+## 7. 注册、心跳、租约与 reconcile
+
+### 7.0 节点注册与凭证分层
+
+```
+管理员：控制面注册 region（S3 endpoint、proxy 组、BYOC token 服务地址）
+      → 生成 region bootstrap token（短 TTL 24h,可限次数,可撤销）
+节点：beand 配置 token 启动 → Register(token, region, capabilities, labels)
+    → 控制面校验 region 已注册 + token 有效（BYOC region 可配人工 approve）
+    → 经云托管私有 CA 签发节点 mTLS 证书（CertProvider 抽象,默认云托管
+      CA——签发/轮换/吊销外包;完全私有化部署可换自建实现）
+    → 节点进入 region 池,后续心跳/指令走 mTLS
+```
+
+凭证三层,职责不重叠：
+
+| 凭证 | 权限 | 生命周期 |
+|---|---|---|
+| region bootstrap token | **仅 Register**（registration-only,无任何数据读写） | 短 TTL + 限次;泄漏最坏结果=注册假节点,而任务 presigned 只授权自身路径,再加 approve 闭环 |
+| 节点 mTLS 证书 | 心跳/指令/SyncState 身份,绑定 nodeId+region | 云 CA 自动轮换;退出吊销 |
+| S3 访问 | 镜像 blob=STS 只读（限 region bucket 前缀）;写产物/snapshot=per-操作 presigned | STS 1h;presigned 15min |
+
+BYOC 信任链：客户节点与控制面互验同一个云托管 CA 根,客户侧仅需出向可达,
+信任根不随 region/BYOC 分裂。
 
 ### 7.1 心跳
 
