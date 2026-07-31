@@ -259,9 +259,16 @@ func (s *Server) handleGet(w http.ResponseWriter, r *http.Request) {
 	}
 	// Refresh live state from the node for non-terminal sandboxes.
 	if rec.State != "STOPPED" && rec.State != "FAILED" {
-		if st, err := s.node.GetSandbox(r.Context(), &nodev1.GetSandboxRequest{SandboxId: id}); err == nil {
+		st, err := s.node.GetSandbox(r.Context(), &nodev1.GetSandboxRequest{SandboxId: id})
+		switch {
+		case err == nil:
 			rec.State = st.Status.State
 			_ = s.store.PutSandbox(rec)
+		case status.Code(err) == codes.NotFound:
+			// Node no longer has it (e.g. idle sweep onIdle=kill).
+			rec.State = "STOPPED"
+			_ = s.store.PutSandbox(rec)
+			s.emit(id, "sandbox.lifecycle.stopped", map[string]string{"reason": "reconciled: gone on node"})
 		}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"sandbox": rec})

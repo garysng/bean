@@ -19,7 +19,9 @@ test:
 	go test -race -count=1 ./...
 
 cover:
-	go test -race -count=1 -coverprofile=coverage.out ./internal/... ./cli/...
+	go test -race -count=1 -coverprofile=coverage.out \
+		-coverpkg=./internal/agent/...,./internal/node/...,./internal/control/...,./cli/... \
+		./internal/... ./cli/...
 	go tool cover -func=coverage.out | tail -1
 
 test-e2e:
