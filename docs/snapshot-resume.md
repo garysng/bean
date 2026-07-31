@@ -15,17 +15,19 @@
 ## 2. Pause / Resume（轻量，不落盘）
 
 ```
-POST /sandboxes/{id}/pause
+POST /sandboxes/{id}/pause      # 亦可由 lifecycle.onIdle=pause 自动触发
   fc 档:   FC API PauseVM（vCPU 停止，内存原样保留），百 ms 内
   容器档:  cgroup.freeze = 1（cgroup v2 freezer，整棵进程树原子冻结）
-  共同:    网络保留、agent 一并冻结——控制面置 PAUSED 后拒绝 exec（409）
+  共同:    网络保留、agent 一并冻结
+唤醒（平台默认行为）: PAUSED 收到 exec/端口/文件请求 → 自动 resume → 透传
+  （显式 resume API 仍在;调用方通常无感）
 POST /sandboxes/{id}/resume
   fc 档:   ResumeVM;容器档: cgroup.freeze = 0——均亚秒回 RUNNING
 ```
 
 - 冻结期间内存不释放——调度器仍按其 memory.max 记账（防止超卖后 resume OOM）；
   若要释放内存额度，用 snapshot
-- 超时销毁计时器在 PAUSED 期间**继续走**（防泄漏），可通过 timeout 接口续期
+- PAUSED 滞留回收走平台全局策略（默认 7 天,见 api-design §5.2）;idle 计时在 PAUSED 态不再适用
 - proxy 对 PAUSED 返回 502 + Retry-After
 
 ## 3. Snapshot

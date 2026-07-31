@@ -257,12 +257,12 @@ shared-fs 走宿主 NFS 而非 guest 内跑分布式 FS 客户端的原因：gue
 
 ```
 # Sandbox 生命周期
-POST   /v1/sandboxes                 # image, cpu/mem/gpu, env, isolation,
-                                     # timeout, labels → sandbox
+POST   /v1/sandboxes                 # image, resources, env, lifecycle
+                                     # (idleTimeout/onIdle), labels → sandbox
 GET    /v1/sandboxes/{id}
 GET    /v1/sandboxes?label=k=v       # list + filter
 DELETE /v1/sandboxes/{id}
-POST   /v1/sandboxes/{id}/timeout    # 续期
+PATCH  /v1/sandboxes/{id}/lifecycle  # idleTimeout / onIdle 运行时调整
 
 # 进程执行
 POST   /v1/sandboxes/{id}/exec       # 同步：cmd/cwd/env/timeout
@@ -286,6 +286,7 @@ POST   /v1/sandboxes:batchCreate     # 批量创建（eval 高频）
 POST   /v1/sandboxes/{id}/pause|resume|snapshot|fork|start
 CRUD   /v1/volumes                   # dataset / shared-fs 卷
 CRUD   /v1/snapshots
+GET    /v1/sandboxes/{id}/events + WS /v1/events   # 生命周期事件
 GET    /v1/sandboxes/{id}/logs
 ```
 

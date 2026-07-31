@@ -25,7 +25,7 @@ sbx = client.sandboxes.create(
     env={"PYTHONUNBUFFERED": "1"},
     cmd=None, auto_start_cmd=False,   # 原 entrypoint 托管;sbx.start() 手动拉起
     network_policy="egress-only",
-    timeout=1800,
+    idle_timeout="300s", on_idle="pause",   # 缺省=一直运行;eval 用 ("0s","kill")
     labels={"eval-run": "r0731"},
     volumes=[{"volume": vol.id, "mount_path": "/workspace"}],   # 可选
 )                                     # 阻塞至 RUNNING（内部轮询/长轮询），可 wait=False
@@ -33,7 +33,7 @@ sbx = client.sandboxes.create(
 
 sbx = client.sandboxes.get("sbx_...")
 for s in client.sandboxes.list(labels={"eval-run": "r0731"}): ...
-sbx.set_timeout(3600)
+sbx.set_lifecycle(idle_timeout="600s", on_idle="kill")
 sbx.kill()
 
 # —— 执行 ——
@@ -61,9 +61,11 @@ sbx.files.ls("/workspace")
 # —— 端口 ——
 url = sbx.ports.expose(8888, auth="token")                 # → https://...
 
-# —— 进程 / 日志 ——
+# —— 进程 / 日志 / 事件 ——
 sbx.start()                                                # 拉起原 entrypoint
 for line in sbx.logs(follow=True): ...
+for ev in client.events.subscribe(labels={"eval-run": "r0731"}): ...   # WS 实时
+sbx.events()                                               # 历史
 
 # —— volume（独立资源：镜像=环境,卷=数据,跨 sandbox 留存;首期仅 shared-fs）——
 vol = client.volumes.create(name="alice-ws", type="shared-fs", quota_mib=51200)
@@ -96,7 +98,8 @@ results = run_batch(
 )
 ```
 
-封装内容：batchCreate 分批、并发信号量、sandbox 用毕即销毁、LOST 重建、产物直收 S3 URL。这是 SWE-bench 场景的一等入口。
+封装内容：batchCreate 分批（默认注入 lifecycle=("0s","kill") 用完即走）、并发信号量、
+事件驱动回收（WS 订阅替代轮询）、LOST 重建、产物直收 S3 URL。SWE-bench 场景的一等入口。
 
 ### 2.4 行为约定
 

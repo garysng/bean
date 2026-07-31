@@ -20,8 +20,8 @@
 
 ### 2.2 Sandbox 级短时凭证
 
-- 创建 sandbox 时 gateway 签发 **sandbox token**（JWT，绑定 sandbox-id，TTL = sandbox timeout）;
-  timeout 续期响应中返回新 token（旧 token 到原 TTL 自然过期）
+- 创建 sandbox 时 gateway 签发 **sandbox token**（JWT，绑定 sandbox-id，TTL 固定 24h,
+  可经 API 续签;sandbox 销毁即失效）
 - 用途：proxy 访问受保护端口、WebSocket exec 重连，避免长期 API key 下发到浏览器/弱环境
 
 ### 2.3 S3 Presigned URL
@@ -59,7 +59,10 @@ POST /sandboxes
   "env": { "FOO": "bar" },
   "cmd": null,                          // 覆盖镜像 CMD；null=保留原 entrypoint（由 agent 托管拉起）
   "autoStartCmd": false,                // true 则创建后立即拉起原 entrypoint
-  "timeoutSeconds": 1800,               // 到期自动销毁；可续期
+  "lifecycle": {                        // 可选;缺省 = 一直运行
+    "idleTimeout": "300s",              //   null/缺省=永不;"0s"=活动一结束即触发
+    "onIdle": "pause"                   //   pause（默认）| kill
+  },
   "labels": { "eval-run": "swebench-0731", "task": "django-12345" },
   "networkPolicy": "egress-only",       // egress-only|none|allow-list（预留）
   "volumes": [                          // 可选，见 §3.6
@@ -73,7 +76,7 @@ POST /sandboxes
 GET    /sandboxes/{id}                       → sandbox 详情（state、nodeId、createdAt、expiresAt、endpoints）
 GET    /sandboxes?label=eval-run%3Dswebench-0731&state=RUNNING&pageToken=&pageSize=100
 DELETE /sandboxes/{id}                       → 202，异步销毁；?force=true 跳过 graceful
-POST   /sandboxes/{id}/timeout   { "timeoutSeconds": 3600 }   → 续期（从 now 起算）
+PATCH  /sandboxes/{id}/lifecycle { "idleTimeout": "600s", "onIdle": "kill" }   → 运行时调整
 POST   /sandboxes/{id}/pause                 → 202 → PAUSED
 POST   /sandboxes/{id}/resume                → 202 → RUNNING
 POST   /sandboxes/{id}/snapshot  { "name": "after-setup", "keepRunning": true }
@@ -191,13 +194,37 @@ DELETE /snapshots/{id}
 POST   /sandboxes    { "snapshot": "snap_...", ... }     // 从 snapshot 创建（代替 image 字段）
 ```
 
-### 3.8 Logs / 可观测
+### 3.8 Events
+
+```
+事件类型：sandbox.lifecycle.{created,running,paused,resumed,killed,failed,oom}
+事件体：  { "id", "type", "timestamp", "sandboxId", "data": {...}, "version": "v1" }
+          // 命名对齐 e2b（sandbox.lifecycle.* 点分层级）,便于生态兼容
+
+GET /sandboxes/{id}/events?pageToken=      // 历史（Postgres events 表,分页）
+WS  /events?label=eval-run%3Dr0731         // 实时订阅（按 label/id 过滤;
+                                           //  批量 eval 用事件驱动替代轮询）
+```
+
+实现：状态机变更处统一发件 → Postgres（历史）+ 内存 pub/sub（WS）。
+webhook 推送为 P5 储备项。
+
+### 3.9 Logs / 可观测
 
 ```
 GET /sandboxes/{id}/logs?follow=false&tailLines=1000    // agent 环形缓冲 + S3 归档
 GET /nodes                                              // 运维面：节点列表、容量、能力
 GET /metrics                                            // Prometheus 格式（平台自身指标）
 ```
+
+**OTel 采集**：
+
+- 平台组件（gateway/scheduler/beand/agent）trace/metrics/logs 统一 OTLP 导出
+  （Prometheus 兼容端点保留）;request_id 贯穿即 trace id
+- **per-sandbox 资源指标**：beand 按 sandbox 采 cpu/mem/io/net 时序（cgroup/FC
+  stats）,resource attributes 带 sandbox_id/labels——可按 eval-run 聚合消耗
+- **sandbox 内应用 OTLP 透传（可选开启）**：agent 在 sandbox 内 listen
+  localhost:4317,应用 trace 经 vsock/socket 转发出去并打 sandbox 标签
 
 ## 4. 内部 gRPC proto 草案
 
@@ -288,7 +315,27 @@ scheduler 决策（内存态 + Postgres 事务扣承诺量、写指令记录）
 proto 见 §4（NodeService.SyncState 承担重启对账;SandboxService 由 beand 实现、
 control plane 作为 client 直连调用）。
 
-### 5.2 Exec 路由
+### 5.2 Lifecycle 自动化语义
+
+**默认一直运行**——无硬 timeout。回收由 idle 机制驱动：
+
+| idleTimeout | 行为 |
+|---|---|
+| 缺省 / null | 不启用 idle 检测（默认）,sandbox 持续运行 |
+| `"0s"` | 活动一结束立即触发 onIdle（eval 批量：`onIdle: kill` 用完即走） |
+| `"300s"` | 闲置 5 分钟触发 onIdle |
+
+- **idle 判定**（beand 本地,不依赖控制面）：无 exec 会话 + 无端口活跃连接 +
+  无文件 API 操作,持续 idleTimeout;任一活动重置计时
+- **唤醒是平台默认行为（非配置）**：gateway/proxy 对 PAUSED sandbox 收到
+  exec/端口/文件请求 → 触发 resume（fc 亚秒）→ 阻塞至恢复后透传;并发唤醒
+  由控制面按 sandbox-id 去重
+- PAUSED 长期滞留：平台级全局回收策略（管理员配置,默认 7 天 → kill）,
+  非 per-sandbox 字段
+- 业界对齐:CubeSandbox v0.5(on_timeout: pause/kill + 数据面透明唤醒)、
+  e2b auto-pause/auto-resume 同构;我们以 null 表达「永不」,避开 -1/0 魔数重载
+
+### 5.3 Exec 路由
 
 ```
 client → gateway：Bearer key / sandbox token

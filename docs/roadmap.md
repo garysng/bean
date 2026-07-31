@@ -46,6 +46,7 @@ curl DELETE → 资源清零（netns/挂载/containerd task 无残留）
 - prewarm API + 编排、镜像亲和 v2（块级 bloom + 字节占比）
 - guest 内核 + agent 盘构建发布流水线（beand-design §3.4）
 - 产物直推 S3（presigned 链路）、sandbox 日志归档
+- Events（状态机发件 → Postgres + WS 订阅）;OTel 统一导出 + per-sandbox 资源指标
 - 凭证体系：mTLS 内部 CA、STS/presigned 全覆盖
 - 配额/限流
 
@@ -58,6 +59,7 @@ curl DELETE → 资源清零（netns/挂载/containerd task 无残留）
 - WS 流式 exec + PTY（会话重连）、CLI 交互模式（run -it / attach）
 - bean-proxy：通配域名 TLS、端口暴露、sandbox token 鉴权
 - pause/resume（fc PauseVM / 容器档 cgroup freezer）
+- lifecycle 自动化：idle 检测（beand 本地）、onIdle pause/kill、PAUSED 请求透明唤醒
 - fc 档 snapshot 本节点路径（memory+disk → S3）
 - **shared-fs 卷**（宿主挂 JuiceFS + 内核 nfsd 导出、agent NFS 挂载、后端配额）
 - TS SDK、e2b 迁移对照文档
@@ -80,6 +82,8 @@ curl DELETE → 资源清零（netns/挂载/containerd task 无残留）
 - 镜像签名（cosign）
 - allow-list 网络策略、TCP 端口暴露（SNI）
 - dataset 卷（overlaybd 只读块,数据集/权重分发——预留,需求明确后启用）
+- webhook 事件推送（签名 + 重试;先靠 WS/轮询）
+- sandbox 内应用 OTLP 透传
 - GPU sandbox 完整支持（探测已就位，重点是驱动注入与 gVisor GPU 路径评估）
 - 跨 region 部署与就近调度
 

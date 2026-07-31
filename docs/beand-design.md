@@ -407,7 +407,8 @@ netns/veth/nftables 链均带 `bean-<id>` 命名规约，孤儿扫描按前缀�
 
 | 对象 | 策略 |
 |---|---|
-| sandbox 超时 | beand 本地定时器（expiresAt 随指令下发），到期即销毁并上报——不依赖控制面在线 |
+| sandbox idle | beand 本地 idle 检测（lifecycle 随 create 下发）:无 exec/端口/文件活动持续 idleTimeout → 执行 onIdle(pause/kill) 并发 event——不依赖控制面在线 |
+| PAUSED 滞留 | 控制面全局策略（默认 7 天 → kill,管理员可配） |
 | 镜像/chunk 缓存 | §4.2 水位 LRU |
 | exec 会话 | 断连 60s 无重连 |
 | 临时文件（S3 暂存下载） | S3 lifecycle 规则 1 天 |
@@ -415,7 +416,9 @@ netns/veth/nftables 链均带 `bean-<id>` 命名规约，孤儿扫描按前缀�
 
 ## 8. beand 自身可观测
 
-- Prometheus exporter：sandbox 创建各阶段耗时直方图（拉镜像/rootfs/容器启动/agent ready）、
+- OTLP 导出（Prometheus 端点保留）：sandbox 创建各阶段耗时直方图（拉镜像/rootfs/启动/agent ready）、
   缓存命中率、nftables 规则数、IPAM 使用率
+- per-sandbox 资源时序（cgroup/FC stats → OTLP,attributes 带 sandbox_id/labels）;
+  agent 可选透传 sandbox 内应用 OTLP（localhost:4317 → vsock 转发）
 - 结构化日志（zap），request_id 透传
 - pprof 端口（内网）
