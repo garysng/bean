@@ -24,7 +24,7 @@ curl DELETE → 资源清零（netns/挂载/containerd task 无残留）
 
 **范围**
 
-- scheduler：Register/Heartbeat/租约、PullCommands 指令模型、bin-packing + 镜像亲和 v1（按 ref 精确匹配）
+- scheduler：Register/Heartbeat/租约、push 直连指令下发 + SyncState 对账、bin-packing + 镜像亲和 v1（按 ref 精确匹配）
 - Postgres 状态落地、sandbox 超时 GC、beand 重启 reconcile
 - 网络隔离完整版（nftables 规则集、DNS 注入、egress-only/none 策略）
 - Python SDK（sync + async + run_batch）、CLI 核心命令（run/ls/exec/cp/logs/kill）

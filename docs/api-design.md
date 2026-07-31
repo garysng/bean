@@ -188,7 +188,7 @@ service NodeService {
   rpc Register(RegisterRequest) returns (RegisterResponse);        // 能力/资源画像上报
   rpc Heartbeat(stream HeartbeatRequest) returns (stream HeartbeatResponse);
       // 双向流：↑ 心跳+资源水位+sandbox 状态摘要+镜像缓存清单摘要（bloom/hash）
-      // ↓ 租约确认 + 待执行指令通知（推拉结合，详见 5.1）
+      // ↓ 租约确认（指令下发走 push 直连，见 5.1）
 }
 
 service SandboxService {                                           // control → noded
@@ -230,26 +230,34 @@ service AgentService {
 
 ## 5. 控制流细节
 
-### 5.1 指令下发模型
+### 5.1 指令下发模型：push 直连
 
-Heartbeat 双向流做**通知**，SandboxService 做**执行**：
+控制面直接 gRPC 调用 noded 的 `SandboxService`（noded 是 gRPC server，mTLS 内网直连）——与 e2b/AgentENV/CubeSandbox 的业界一致做法相同，调度路径最短：
 
-1. scheduler 决策后把指令写 state store（`commands` 表，状态 PENDING）
-2. 经 Heartbeat 下行帧通知 noded「有新指令」
-3. noded 回调 `SandboxService`（由 control plane 反向暴露？——否）
-
-修正：为避免 noded 需要可入方向连通性（云 VM 常无固定入口），**SandboxService 由 noded 侧实现、control plane 作为 client 调用**仅在 control 可直连 noded 时用；默认路径是 noded 从 Heartbeat 下行帧拿到指令 ID 后，主动 `PullCommands` + 上报结果：
-
-```protobuf
-service NodeService {
-  rpc PullCommands(PullCommandsRequest) returns (PullCommandsResponse);
-  rpc ReportCommandResult(ReportCommandResultRequest) returns (ReportCommandResultResponse);
-}
+```
+scheduler 决策（内存态 + Postgres 事务扣承诺量、写指令记录）
+  → 直连 noded.CreateSandbox（同步返回受理结果）
+  → noded 异步执行,状态变更经 Heartbeat 上报
 ```
 
-- **数据面**（exec/文件/端口）要求 gateway/proxy → noded 直连（内网可达是部署前提）；
-  控制面指令走拉模式，兼容 NAT 后的节点
-- 指令幂等：noded 按 command_id 去重；重启后 PullCommands 全量对账
+- **部署前提**：控制面/gateway/proxy 与节点内网互通（数据面 exec/文件本就要求
+  直连,控制面沿用同一前提,不为不存在的 NAT 场景付复杂度）。跨机房/NAT 节点
+  不支持;真有需求时以节点侧反向隧道作为 P5 储备项
+- **可靠性不靠 pull,靠写库 + 对账**：
+  - 指令先写 Postgres（audit + 状态机 source of truth）,RPC 只是投递方式
+  - RPC 超时/失败 → 有限重试;仍失败 → 释放承诺量重调度（见 architecture D7）
+  - noded 按 command_id 幂等去重（重试安全）
+  - noded 重启 → `SyncState`（拉全量期望状态）对账,补投丢失指令
+- Heartbeat 双向流职责收敛为：↑ 心跳/资源水位/sandbox 状态/缓存摘要,
+  ↓ 租约确认（不再承担指令通知）
+
+```protobuf
+service NodeService {                    // noded → control plane（出向）
+  rpc Register(...) / Heartbeat(stream...)
+  rpc SyncState(SyncStateRequest) returns (SyncStateResponse);   // 重启对账
+}
+// SandboxService 由 noded 实现,control plane 作为 client 直连调用（见 §4）
+```
 
 ### 5.2 Exec 路由
 

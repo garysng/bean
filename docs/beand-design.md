@@ -339,13 +339,13 @@ fc 档 agent 代码零改动，只换 transport（vsock）与注入方式（agen
   镜像缓存增量、正在执行的 command ids
 - 控制面 15s（5 个周期）未收到 → 节点 SUSPECT → 30s → LOST：
   其上 RUNNING sandbox 标 LOST、调度停止派发
-- 网络闪断恢复：流重建后全量状态上报一次
+- 网络闪断恢复：流重建后全量状态上报一次;控制面在此期间的直连指令失败会重试,超过阈值触发重调度
 
 ### 7.2 beand 重启 reconcile
 
 ```
 1. 读 containerd namespace "bean" 全量 task/container 列表
-2. PullCommands 拿控制面期望状态
+2. SyncState 拿控制面期望状态
 3. 三向对账：
    - 双方都有 & 状态一致 → 重挂 agent socket、恢复监控
    - 控制面有、本地无 → 上报 FAILED（由上层决定重建）
