@@ -204,10 +204,12 @@ gpu:   空闲卡数（按整卡分配，不切分）
 cap:   [runc, runsc, fc] × 每节点并发创建余量（默认 16）
 ```
 
-**调度流程**（单 sandbox;batchCreate 在一次锁内顺序执行同流程）：
+**调度流程**（两级：先 region 后节点;batchCreate 在一次锁内顺序执行同流程）：
 
 ```
-1. 过滤（硬约束）：
+0. Region 选择：显式 region 参数 > 卷/snapshot 数据亲和（强制） >
+   镜像 blob 已复制的 region > 容量余量
+1. 过滤（region 内,硬约束）：
    isolation 解析（auto→fc/runsc/runc）→ 节点能力匹配
    cpu/mem/disk 承诺量 + 请求 ≤ allocatable;GPU 整卡余量
    节点状态 = READY（SUSPECT/LOST/DRAINING 排除）
@@ -250,6 +252,32 @@ shared-fs 走宿主 NFS 而非 guest 内跑分布式 FS 客户端的原因：gue
 额外二进制、`none` 网络策略天然兼容（NFS 目标是宿主网关，与出公网正交）、
 宿主客户端缓存全 sandbox 共享（eval 同批读同数据时命中率高）、后端可换。
 详见 beand-design.md §3.3。
+
+### D11. 多区域（Region/Cell）与 BYOC
+
+**控制面全局一份，数据面按 region 自治。** Region = 故障域 + 数据域 + 转发域：
+
+```
+Global Control Plane（bean-api / scheduler / Postgres,镜像元数据全局 digest 索引）
+   │ mTLS,beand/proxy 出向连接
+   ├── Region A：beand 节点池 + regional proxy ×N + region S3 backend
+   └── Region B（BYOC）：客户节点 + 客户 S3,数据不出客户环境
+```
+
+- **数据域**：镜像 blob/产物/snapshot/shared-fs 卷后端全部 region 内闭环;
+  节点只读本 region S3,跨 region 流量仅发生在镜像 blob 复制,不在热路径
+- **镜像复制**：元数据全局唯一（digest）,blob 按 region 存;转换一次写源
+  region,其他 region **按需复制**（首次调度到该 region 时拉取）+
+  **prewarm 显式复制**（`POST /images/prewarm` 带 `region` 参数,eval 批次前用）
+- **卷的数据引力**：卷有 region 归属,挂已有卷的 sandbox 强制落卷所在 region
+- **转发域**：每 region 一组 proxy,域名 `{sbxId}-{port}.{region}.sandbox.<domain>`
+  （DNS 直达 region proxy,无全局中转）
+- **BYOC**：客户提供节点 + S3（+可选自有域名）,hosted control plane;
+  控制面只见元数据,不持客户 S3 长期凭证——presigned/STS 由部署在客户侧的
+  轻量 token 服务签发;beand/proxy 出向 mTLS + region token 注册
+- **故障域**：region 失联 → 该 region sandbox 标 LOST,其他 region 无感;
+  全局控制面单点首期接受（控制面故障不影响存量 sandbox 数据面,仅停新建）,
+  控制面多活为 P5 储备
 
 ## 4. API 设计
 

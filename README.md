@@ -15,6 +15,7 @@ Container-native sandbox platform for AI evaluation workloads.
 - **批量原语**：batchCreate、标签批量销毁、eval 批量 SDK helper
 - **Volume 一等资源**：shared-fs 卷（宿主 nfsd 导出，跨 sandbox 持久工作区;dataset 只读块卷预留）
 - **S3 统一存储**：镜像 blob、日志产物、snapshot 全部落 S3，节点无状态
+- **多区域 / BYOC**：控制面全局一份、数据面按 region 自治（独立 S3 + regional proxy）;BYOC 客户数据不出自有环境
 - **pause/resume/snapshot/fork**：FC 原生 memory snapshot;fork 独立 API（CoW 一母多子,瞬时 fan-out）;容器档 freezer/checkpoint 兜底,跨节点 restore
 
 ## 文档

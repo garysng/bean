@@ -12,6 +12,7 @@ beand
 ├── image/           镜像拉取、snapshotter 管理、本地缓存、prewarm
 ├── network/         netns/veth/bridge/nftables/tc 编排
 ├── volume/          shared-fs 宿主挂载 + NFS 导出、dataset 块设备 attach
+├── sbxproxy/        节点侧端口反代：regional proxy → 直连 sandbox IP:port
 ├── agentmgr/        agent 注入（bind mount / agent 盘）、socket/vsock 管理、健康探测
 ├── reconcile/       期望状态 vs 本地实际状态（containerd ∪ FC 进程）对账
 ├── gc/              超时回收、孤儿资源清理、缓存 LRU
@@ -22,7 +23,10 @@ beand
 
 ```yaml
 nodeId: auto            # 默认机器指纹生成
-controlPlane: grpc://control.internal:7443
+region: ap-east-1       # 节点归属 region（注册时上报）
+controlPlane: grpc://control.example.com:7443   # 出向连接（BYOC 场景跨网）
+s3:
+  endpoint: https://s3.ap-east-1.example.com    # 本 region S3 backend
 containerd: /run/bean/containerd.sock    # 独立 containerd 实例，专用 namespace "bean"
 cidr: 10.100.0.0/24     # 本节点 sandbox 网段（节点间可复用同段——跨节点 sandbox 互通是非目标）
 cache:
@@ -323,8 +327,8 @@ table inet bean {
   连接数上限（防扫描/DDoS 放大）
 - `networkPolicy: none` → netns 无默认路由，纯本地回环（宿主 NFS/网关地址除外,见 §3.3）
 - `allow-list`（预留）→ per-sandbox 链插入目标 CIDR accept
-- 端口暴露不开入站 DNAT——数据面走 agent ForwardPort（见 api-design.md §6），
-  节点防火墙入站只对 control plane/gateway 内网开放
+- 端口暴露不开入站 DNAT——regional proxy → beand sbxproxy → 直连 sandbox IP
+  （见 api-design.md §6.2）;节点防火墙入站仅对 control plane/proxy 开放
 
 ### 5.3 fcRuntime 兼容
 

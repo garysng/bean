@@ -59,6 +59,8 @@ POST /sandboxes
   "env": { "FOO": "bar" },
   "cmd": null,                          // 覆盖镜像 CMD；null=保留原 entrypoint（由 agent 托管拉起）
   "autoStartCmd": false,                // true 则创建后立即拉起原 entrypoint
+  "region": "ap-east-1",                // 可选;缺省按 key 默认 region;
+                                        // 挂已有卷/从 snapshot 创建时强制数据所在 region
   "lifecycle": {                        // 可选;缺省 = 一直运行
     "idleTimeout": "300s",              //   null/缺省=永不;"0s"=活动一结束即触发
     "onIdle": "pause"                   //   pause（默认）| kill
@@ -156,7 +158,10 @@ DELETE /sandboxes/{id}/ports/{port}
 ### 3.5 Images
 
 ```
-POST /images/prewarm   { "refs": ["img:a", "img:b"], "targetNodes": 10, "priority": "high" }
+POST /images/prewarm   { "refs": ["img:a", "img:b"], "region": "ap-east-1",
+                         "targetNodes": 10, "priority": "high" }
+                       // region 缺省 = 镜像源 region;跨 region 首次 prewarm
+                       // 触发 blob 复制到该 region S3
 → { "jobId": "pw_..." }
 GET  /images/prewarm/{jobId}      → 各镜像 × 节点就绪矩阵摘要
 GET  /images/{ref}/status         → { "blobReady": true, "cachedNodes": 7, "sizeBytes": ..., "format": "overlaybd" }
@@ -358,18 +363,23 @@ sandbox 处于 PAUSED/PULLING 等非 RUNNING 态 → 409 SANDBOX_NOT_RUNNING。
 - Host 规则：`{sandboxId}-{port}.sandbox.<domain>`，sandboxId 用短 ID（如 `sbx-` 去前缀后的 base32）
 - HTTP + WebSocket 透传；非 HTTP 协议暂不支持（预留 TCP over TLS SNI 方案）
 
-### 6.2 路由与数据面
+### 6.2 路由与数据面（对齐 e2b：反代直连 sandbox IP）
 
 ```
-浏览器 → proxy（解析 Host → sandboxId+port）
-       → 鉴权（见 6.3）
-       → 路由查询：state store 查 sandbox → nodeId → beand 地址（本地 LRU 缓存 30s + 心跳失效推送）
-       → gRPC ForwardPort 双向流（每连接一路）→ beand 转发 agent → sandbox 内 localhost:port
+浏览器 → {sbxId}-{port}.{region}.sandbox.<domain>（DNS 直达该 region 的 proxy）
+       → regional proxy：解析 Host → 鉴权（6.3）
+       → 路由查询：state store 查 sandbox → nodeId → beand 地址
+         （本地 LRU 缓存 30s + 心跳失效推送;PAUSED → 触发透明唤醒后重路由）
+       → HTTP 反代 → beand 内嵌 sandbox-proxy（节点侧反代）
+       → 直连 sandbox IP:port（fc 档 tap IP / 容器档 veth IP,节点内路由）
 ```
 
-- beand 不为暴露端口维护本地 listener——统一经 `ForwardPort` 流转发，
-  agent 在 sandbox 网络内 dial 目标端口
-- 连接级超时/最大并发 per sandbox 可配；断流自动清理
+- **两跳 HTTP 反代、末端直连 sandbox IP**——e2b/CubeSandbox 同款;不经 agent
+  隧道（省一层用户态拷贝与 vsock 序列化,高流量端口性能关键）
+- agent 的 `ForwardPort` 保留为兜底路径（未来 localhost-only 服务等场景）
+- WebSocket 天然升级透传;连接级超时（>620s,躲上游 LB）、per-sandbox
+  并发/带宽限制;proxy 侧连接活跃度喂 idle 判定（lifecycle）
+- beand 侧 sandbox-proxy 亦做 nftables 之外的第二层校验（仅放行已暴露端口）
 
 ### 6.3 端口鉴权
 
