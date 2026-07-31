@@ -10,9 +10,10 @@ beand
 ├── server/          gRPC server（NodeService client 侧 + 数据面 SandboxService 实现）
 ├── runtime/         Runtime 接口 + fc/runc/runsc 实现
 ├── image/           镜像拉取、snapshotter 管理、本地缓存、prewarm
-├── network/         netns/veth/bridge/nftables 编排
-├── agentmgr/        agent 注入、socket 管理、健康探测
-├── reconcile/       期望状态 vs containerd 实际状态对账
+├── network/         netns/veth/bridge/nftables/tc 编排
+├── volume/          shared-fs 宿主挂载 + NFS 导出、dataset 块设备 attach
+├── agentmgr/        agent 注入（bind mount / agent 盘）、socket/vsock 管理、健康探测
+├── reconcile/       期望状态 vs 本地实际状态（containerd ∪ FC 进程）对账
 ├── gc/              超时回收、孤儿资源清理、缓存 LRU
 └── report/          能力探测、心跳、资源水位、缓存清单摘要
 ```
@@ -23,12 +24,20 @@ beand
 nodeId: auto            # 默认机器指纹生成
 controlPlane: grpc://control.internal:7443
 containerd: /run/bean/containerd.sock    # 独立 containerd 实例，专用 namespace "bean"
-cidr: 10.100.0.0/24     # 本节点 sandbox 网段
+cidr: 10.100.0.0/24     # 本节点 sandbox 网段（节点间可复用同段——跨节点 sandbox 互通是非目标）
 cache:
   dir: /var/lib/bean/cache
   maxBytes: 800Gi        # 裸金属 NVMe 大盘 / 云 VM 小盘只差这个数
 runtimes: auto           # 或显式列表覆盖探测结果
+overcommit:              # 见 §3.2，节点级覆盖调度器全局默认
+  cpu: 3.0
+  memory: 1.0
+network:
+  egressRateMbps: 100    # per-sandbox tc 限速
+  dnsUpstream: []        # 默认节点转发器,上游可配
 ```
+
+（示例为节选,完整 schema 见 deploy/）
 
 ## 2. 能力探测（启动时）
 
@@ -39,6 +48,7 @@ runtimes: auto           # 或显式列表覆盖探测结果
 | NVMe/磁盘 | 缓存目录所在盘类型 + 可用空间 | 调度缓存盘权重 |
 | GPU | NVML 枚举 | GPU 资源画像 + nvidia 运行时注入 |
 | cgroup v2 | `/sys/fs/cgroup/cgroup.controllers` | 强制要求 v2，v1 直接拒绝启动 |
+| ublk/tcmu | /dev/ublk-control、target_core_user | overlaybd 后端选择;两者皆无 → 不上报 fc 能力（fc 依赖块设备） |
 | 内核版本/erofs/overlayfs | `uname` + /proc/filesystems | snapshotter 选择 |
 
 探测结果 → `Register` 上报，之后仅在变化时重报。
@@ -77,15 +87,20 @@ type Runtime interface {
 **启动链路**
 
 ```
-1. image 模块产出块设备：overlaybd base（只读，lazy-pull S3）+ 可写 overlay 盘
-2. beand 起 jailer→firecracker：guest 内核（平台统一打包，6.x 全功能配置）、
-   virtio-blk×2、vsock、tap 网卡、virtio-balloon
+1. image 模块产出 rootfs 块设备：overlaybd base 层（lazy-pull S3）+ overlaybd
+   可写层在宿主合成【单一块设备】（拍板：host 侧组装,e2b/AgentENV 同款;
+   配额=可写层文件大小,snapshot disk-diff 直接取宿主层）
+2. beand 起 jailer→firecracker：
+   virtio-blk: rootfs 盘 + agent 盘(只读 erofs,含 bean-agent 与工具) 
+               + N 个 dataset 卷盘（如有）
+   vsock、tap 网卡、virtio-balloon;guest 内核（平台统一打包,见 §3.4）
+   kernel cmdline: init=/run/bean-agent（agent 盘由内核挂载后执行）
 3. guest 内 bean-agent 作为 init：
    a. 挂载矩阵：/proc /sys /dev /dev/shm /dev/pts /dev/mqueue /tmp
       （按 OCI runtime spec 默认 mounts 复刻）
-   b. 切根到镜像 rootfs（base+overlay 已在 host 侧组好，guest 见单一块设备）
-   c. 读启动参数（vsock 首连推送）：image config + sandbox spec
-   d. 应用 ENV/hostname/resolv.conf/hosts;listen vsock
+   b. 挂载 rootfs 盘并切根（guest 只见一块 rootfs 盘，零 union 逻辑）
+   c. 读启动参数（vsock 首连推送）：image config + sandbox spec + 卷挂载表
+   d. 应用 ENV/hostname/resolv.conf/hosts;挂载卷（dataset 盘 / NFS）;listen vsock
    e. autoStartCmd → 按 USER/WORKDIR/Entrypoint+Cmd 语义拉起用户进程
 ```
 
@@ -169,28 +184,56 @@ POST /sandboxes { ..., "volumes": [
 | `shared-fs` | JuiceFS（on S3+Redis，与 S3 底座一致）或 CephFS，平台配置，用户不感知 | POSIX 读写共享 | 持久工作区、跨 sandbox 共享数据 |
 | `dataset` | overlaybd 只读块（实现上复用镜像的 S3 传输/缓存管道，但资源上是独立对象） | 只读、版本化发布 | 数据集/模型权重海量只读消费 |
 
-**挂载路径按档位分流：**
+**shared-fs 数据面：宿主 NFS 导出（e2b 同款路线,经其源码验证）**
+
+```
+后端（宿主挂载,beand volume 模块管理）：JuiceFS(on S3+Redis) / CephFS / 本地盘
+    ▼
+宿主 NFS 服务导出 per-volume 目录（实现期二选一：go-nfs 用户态库,可做
+    per-volume chroot/quota 拦截 —— e2b 方案;或内核 nfsd,零用户态开销）
+    ▼  NFS 流量仅走 sandbox→宿主网关（virtio-net/veth,不出节点）
+guest/容器内 agent 执行: mount -t nfs -o fg,hard <宿主网关IP>:/<volumeName> <mountPath>
+```
+
+选宿主 NFS 而非 guest 内跑 JuiceFS 客户端的理由：
+
+- **guest 零凭证零额外二进制**——只需内核 NFS client（Linux 标配）;存储凭证只在宿主
+- **`none` 策略天然兼容**——NFS 目标是宿主网关,与「出公网」正交,零外传承诺不破
+- **宿主客户端缓存全 sandbox 共享**——同批 eval 读同数据,宿主拉一次全员命中
+  （guest 内独立客户端则 N 份缓存 N 份回源）
+- 后端可换（JuiceFS/CephFS/本地盘），beand 只见宿主路径
+- 代价：多一跳 NFS 协议;小文件/元数据密集负载偏慢——该类负载引导到可写层,
+  大流量只读引导到 dataset 卷（virtio-blk 直挂,性能最优路径）
+
+**挂载矩阵：**
 
 | 档 | shared-fs | dataset |
 |---|---|---|
-| 容器档 | 宿主挂载（每节点一个挂载点，beand 管理）→ bind mount subPath | 块设备挂载 → bind mount |
-| fc 档 | **guest 内直挂**：agent 跑 JuiceFS/ceph 客户端，走 sandbox 出网连元数据服务与 S3（FC 无 virtiofs，宿主透传不可行） | 多挂一块 virtio-blk，天然支持 |
+| 容器档 | 直接 bind mount 宿主挂载点 subPath（跳过 NFS） | 块设备挂载 → bind mount |
+| fc 档 | guest 内核 NFS client 挂宿主导出 | 附加一块 virtio-blk |
 
-fc 档 shared-fs 要点：
-
-- 客户端二进制随 agent 盘注入（不进用户镜像）;挂载凭证为 volume 级短时 token
-  （控制面签发，只授权该 volume 目录），经 vsock 下发,不落盘
-- 网络策略例外：`egress-only`/`none` 均放行 guest → 文件系统元数据服务/S3 的
-  白名单地址（nftables per-sandbox 链插入）
-- 性能预期明示：guest 内 FUSE + 网络路径吞吐低于容器档 bind mount;
-  只读大数据集优先用 dataset 卷
+- 配额：JuiceFS 目录配额（后端执行）或 NFS proxy 层 QuotaProvider（go-nfs 路线）
 - 挂载失败属 sandbox 创建失败（FAILED,带明确 reason）
+- nftables：sandbox → 宿主网关 NFS 端口的 accept 规则仅对挂了 shared-fs 卷的
+  sandbox 插入（per-sandbox 链）
 
-**不做**：sandbox 间实时协作锁语义——共享写一律经 shared-fs 后端落盘,
-一致性由后端文件系统保证。
+**不做**：sandbox 间实时协作锁语义——共享写一律经后端文件系统落盘保证一致性。
 
-**调度联动**：shared-fs 无节点亲和（网络文件系统全节点可达）;dataset 卷参与
+**调度联动**：shared-fs 无节点亲和（后端全节点可达）;dataset 卷参与
 镜像亲和打分（块缓存命中）。
+
+## 3.4 Guest 内核与 agent 盘的构建发布
+
+fc 档两个平台工件,均由 CI 构建、S3 分发、beand 启动时按版本拉取到本地：
+
+| 工件 | 内容 | 构建 | 版本策略 |
+|---|---|---|---|
+| guest 内核 | 6.x LTS,内嵌 virtio/vsock/nfs/overlayfs 等必需项的精简 config,bzImage | 内核源码 + config 入库,CI 复现构建 | 独立版本号;manifest 记录,snapshot restore 校验一致性 |
+| agent 盘 | erofs 只读镜像:bean-agent 静态二进制 + busybox 级工具 | CI 打包,与 beand 同版本发布 | 随 beand 版本;旧版本保留至无运行中引用 |
+
+- 存放：`s3://bean/artifacts/{kernel,agent-disk}/<version>/` + sha256 校验
+- beand 配置声明版本（默认跟随 beand 发布版），本地缓存 `/var/lib/bean/artifacts/`
+- 容器档的 agent 直接用 agent 盘内同一个二进制 bind mount，两档单一构建产物
 
 ## 4. 镜像模块
 
@@ -251,7 +294,7 @@ image-service 是 **control plane 的逻辑模块**（`internal/control/image`�
 1. ip netns add bean-<id>
 2. veth 对：veth-<id> (host) ↔ eth0 (netns)，母桥 bean0 (10.100.0.1/24)
 3. netns 内配 IP（节点本地 IPAM，位图分配）、默认路由 → 10.100.0.1
-4. resolv.conf 生成挂入（上游 DNS 可配，默认节点 systemd-resolved 或 1.1.1.1）
+4. resolv.conf 指向节点 DNS 转发器（可审计;上游可配,默认 1.1.1.1）
 5. /etc/hosts 注入 sandbox hostname
 ```
 
@@ -274,7 +317,11 @@ table inet bean {
 }
 ```
 
-- `networkPolicy: none` → netns 无默认路由，纯本地回环
+- 前提：启用 `br_netfilter`（桥接流量过 forward 链,否则同桥 sandbox↔sandbox
+  二层直通绕过规则）;节点 bootstrap 脚本固化该 sysctl
+- 带宽/连接数：per-sandbox tc 出口限速（配置项,默认 100 Mbps）+ conntrack
+  连接数上限（防扫描/DDoS 放大）
+- `networkPolicy: none` → netns 无默认路由，纯本地回环（宿主 NFS/网关地址除外,见 §3.3）
 - `allow-list`（预留）→ per-sandbox 链插入目标 CIDR accept
 - 端口暴露不开入站 DNAT——数据面走 agent ForwardPort（见 api-design.md §6），
   节点防火墙入站只对 control plane/gateway 内网开放
@@ -329,7 +376,7 @@ FC microVM 用 tap 设备替代 veth 的 netns 端，同样挂 bean0 桥，nftab
 ### 6.6 传输层抽象
 
 agent 的 gRPC listener 抽象为 `Transport`（unix socket 实现 / vsock 实现），
-fc 档 agent 代码零改动，只换 transport（vsock）与注入方式（agent 盘/initrd，见 §3.1）。
+fc 档 agent 代码零改动，只换 transport（vsock）与注入载体（agent 盘，拍板见 §3.1/§3.4）。
 
 ## 7. 心跳、租约与 reconcile
 
@@ -344,7 +391,8 @@ fc 档 agent 代码零改动，只换 transport（vsock）与注入方式（agen
 ### 7.2 beand 重启 reconcile
 
 ```
-1. 读 containerd namespace "bean" 全量 task/container 列表
+1. 枚举本地实际状态：containerd namespace "bean" 全量 task（容器档）
+   ∪ 存活 firecracker 进程（jailer 目录 /run/bean/fc/<id>/ + pidfile 规约，fc 档）
 2. SyncState 拿控制面期望状态
 3. 三向对账：
    - 双方都有 & 状态一致 → 重挂 agent socket、恢复监控

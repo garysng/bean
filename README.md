@@ -11,8 +11,9 @@ Container-native sandbox platform for AI evaluation workloads.
 
 - **镜像即环境**：无 e2b 式 template build，Docker 镜像直接启动
 - **秒级冷启动**：overlaybd 块级 lazy-pull from S3 + 节点缓存 + prewarm + 镜像亲和调度
-- **隔离自动分档**：Firecracker microVM 默认档（rootfs 直挂，零嵌套），GPU 任务自动落 runc 容器档，无 KVM 节点降级 gVisor
+- **隔离自动分档（内部机制）**：Firecracker microVM 默认档（rootfs 直挂，零嵌套），无 KVM 节点降级 gVisor;GPU 走 runc 容器档（内部预留，不对外）
 - **批量原语**：batchCreate、标签批量销毁、eval 批量 SDK helper
+- **Volume 一等资源**：dataset 卷（overlaybd 只读块，数据集/权重分发）+ shared-fs 卷（宿主 NFS，跨 sandbox 持久工作区）
 - **S3 统一存储**：镜像 blob、日志产物、snapshot 全部落 S3，节点无状态
 - **pause/resume/snapshot**：FC 原生 memory snapshot + fork（CoW 一母多子）;容器档 freezer/checkpoint 兜底,跨节点 restore,「装环境一次、fan-out N 实验」
 
@@ -20,13 +21,13 @@ Container-native sandbox platform for AI evaluation workloads.
 
 | 文档 | 内容 |
 |---|---|
-| [docs/architecture.md](docs/architecture.md) | 总体架构、核心设计决策（D1–D9）、API 概览、状态机 |
+| [docs/architecture.md](docs/architecture.md) | 总体架构、核心设计决策（D1–D10）、API 概览、状态机 |
 | [docs/api-design.md](docs/api-design.md) | REST/gRPC 详细定义、鉴权、bean-proxy 端口反代、配额限流 |
 | [docs/beand-design.md](docs/beand-design.md) | node daemon：Runtime 抽象、镜像缓存、网络编排、reconcile;bean-agent：PID1 注入、exec/PTY/文件 |
 | [docs/security-and-startup.md](docs/security-and-startup.md) | 威胁模型、隔离与加固基线、凭证链;冷启动预算与 lazy-pull 细节 |
 | [docs/snapshot-resume.md](docs/snapshot-resume.md) | pause/resume/snapshot/restore 实现,FC 档最终形态 |
 | [docs/sdk-cli-design.md](docs/sdk-cli-design.md) | Python/TS SDK 接口、CLI 命令面、代码生成策略 |
-| [docs/competitive-analysis.md](docs/competitive-analysis.md) | e2b/Daytona/Modal/Morph 等竞品对比与差异化定位 |
+| [docs/competitive-analysis.md](docs/competitive-analysis.md) | AgentENV/CubeSandbox/e2b/Daytona/Modal/Morph 等竞品对比与差异化定位 |
 | [docs/roadmap.md](docs/roadmap.md) | P0–P5 实施路线、验收标准、风险登记簿 |
 
 ## 规划中的 Repo 结构
@@ -34,7 +35,7 @@ Container-native sandbox platform for AI evaluation workloads.
 ```
 bean/
 ├── proto/                  # gRPC 定义（single source of truth）
-├── cmd/                    # bean-api / bean-scheduler / bean-imaged / beand / bean-agent
+├── cmd/                    # bean-api / bean-scheduler / bean-proxy / beand / bean-agent
 ├── internal/               # control / node / agent / store
 ├── sdk/                    # python / typescript
 ├── cli/                    # bean CLI

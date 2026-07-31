@@ -30,6 +30,7 @@ curl DELETE → 资源清零（netns/挂载/containerd task 无残留）
 - Python SDK（sync + async + run_batch）、CLI 核心命令（run/ls/exec/cp/logs/kill）
 - batchCreate、标签批量销毁
 - 基础可观测：创建阶段耗时直方图、平台 metrics
+- isolation 行为：P0/P1 仅 runc（内部自动分档规则先固定返回 runc）
 
 **验收**：3 节点集群跑 100 并发小规模 eval（overlayfs 全量拉镜像），LOST 重试路径验证（kill 一个节点）。
 
@@ -43,6 +44,8 @@ curl DELETE → 资源清零（netns/挂载/containerd task 无残留）
 - isolation auto 解析（fc 默认/GPU→runc/无 KVM→runsc）;runsc 降级档兼容性回归集
 - 容器加固基线全量（seccomp/caps/pids/quota）
 - prewarm API + 编排、镜像亲和 v2（块级 bloom + 字节占比）
+- **dataset 卷**（复用 overlaybd 管道：publish 转换、virtio-blk/bind mount 挂载）
+- guest 内核 + agent 盘构建发布流水线（beand-design §3.4）
 - 产物直推 S3（presigned 链路）、sandbox 日志归档
 - 凭证体系：mTLS 内部 CA、STS/presigned 全覆盖
 - 配额/限流
@@ -57,6 +60,7 @@ curl DELETE → 资源清零（netns/挂载/containerd task 无残留）
 - bean-proxy：通配域名 TLS、端口暴露、sandbox token 鉴权
 - pause/resume（fc PauseVM / 容器档 cgroup freezer）
 - fc 档 snapshot 本节点路径（memory+disk → S3）
+- **shared-fs 卷**（宿主挂 JuiceFS + NFS 导出、agent NFS 挂载、配额）
 - TS SDK、e2b 迁移对照文档
 
 **验收**：agent rollout 场景接入（交互式终端 + 端口预览）;pause 后资源计费口径正确。
@@ -90,4 +94,6 @@ curl DELETE → 资源清零（netns/挂载/containerd task 无残留）
 | GPU 走 runc 隔离弱 | GPU eval 安全短板 | GPU 独立节点池 + 镜像白名单;nvproxy（gVisor GPU）P5 评估 |
 | runsc 降级档兼容性 | 无 KVM 节点体验差 | 回归集扫描;采购/开通嵌套虚拟化优先 |
 | S3 延迟波动 | 冷启动长尾 | record-trace 预取 + 节点缓存池化 |
+| shared-fs 卷链路（JuiceFS 运维 + 宿主 NFS 服务稳定性） | 卷不可用/慢 | 后端可换(CephFS/本地盘);NFS 实现二选一留后路(go-nfs↔内核 nfsd) |
+| guest 内核/agent 盘版本矩阵 | snapshot 跨版本 restore 失败 | manifest 记录版本;节点保留多版本工件 |
 | 自研调度器成熟度 | 资源碎片/饥饿 | eval 负载同质化高,先简单策略 + 指标驱动迭代 |

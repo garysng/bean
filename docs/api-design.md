@@ -5,9 +5,9 @@
 
 ## 1. 设计原则
 
-- **REST 对外，gRPC 对内**：SDK/CLI 走 REST（+WebSocket 流式），control ↔ noded ↔ agent 走 gRPC
+- **REST 对外，gRPC 对内**：SDK/CLI 走 REST（+WebSocket 流式），control ↔ beand ↔ agent 走 gRPC
 - **幂等**：所有创建类接口支持 `Idempotency-Key` 头，state store 唯一约束去重
-- **大对象不进 gateway**：文件上传/下载超过阈值（默认 4 MiB）一律 presigned URL 直连 S3 或 noded 直连
+- **大对象不进 gateway**：文件上传/下载超过阈值（默认 4 MiB）一律 presigned URL 直连 S3 或 beand 直连
 - **proto 是 single source of truth**：REST DTO 由 proto 派生，OpenAPI spec 生成
 
 ## 2. 鉴权
@@ -20,7 +20,8 @@
 
 ### 2.2 Sandbox 级短时凭证
 
-- 创建 sandbox 时 gateway 签发 **sandbox token**（JWT，绑定 sandbox-id，TTL = sandbox timeout）
+- 创建 sandbox 时 gateway 签发 **sandbox token**（JWT，绑定 sandbox-id，TTL = sandbox timeout）;
+  timeout 续期响应中返回新 token（旧 token 到原 TTL 自然过期）
 - 用途：proxy 访问受保护端口、WebSocket exec 重连，避免长期 API key 下发到浏览器/弱环境
 
 ### 2.3 S3 Presigned URL
@@ -52,15 +53,18 @@ Base: `https://api.<domain>/v1`。错误响应统一：
 POST /sandboxes
 {
   "image": "registry.example.com/swebench/django__django-12345:latest",
-  "isolation": "auto",                  // auto|container|vm，默认 auto（KVM+无GPU→fc）
   "resources": { "cpu": 2, "memoryMiB": 4096, "diskMiB": 20480 },
-                                        // gpu 字段内部预留，不对外开放
+                                        // gpu/isolation 为内部字段不对外;runtime
+                                        // 档位由调度自动分配（architecture D3）
   "env": { "FOO": "bar" },
   "cmd": null,                          // 覆盖镜像 CMD；null=保留原 entrypoint（由 agent 托管拉起）
   "autoStartCmd": false,                // true 则创建后立即拉起原 entrypoint
   "timeoutSeconds": 1800,               // 到期自动销毁；可续期
   "labels": { "eval-run": "swebench-0731", "task": "django-12345" },
-  "networkPolicy": "egress-only"        // egress-only|none|allow-list（预留）
+  "networkPolicy": "egress-only",       // egress-only|none|allow-list（预留）
+  "volumes": [                          // 可选，见 §3.6
+    { "volume": "vol_...", "subPath": "run-0731", "mountPath": "/workspace", "readOnly": false }
+  ]
 }
 → 201 { "sandbox": { "id": "sbx_...", "state": "PENDING", ... }, "token": "<sandbox JWT>" }
 ```
@@ -72,8 +76,12 @@ DELETE /sandboxes/{id}                       → 202，异步销毁；?force=tru
 POST   /sandboxes/{id}/timeout   { "timeoutSeconds": 3600 }   → 续期（从 now 起算）
 POST   /sandboxes/{id}/pause                 → 202 → PAUSED
 POST   /sandboxes/{id}/resume                → 202 → RUNNING
-POST   /sandboxes/{id}/snapshot  { "name": "after-setup" }    → 202 { "snapshotId": "snap_..." }
+POST   /sandboxes/{id}/snapshot  { "name": "after-setup", "keepRunning": true }
+                                             → 202 { "snapshotId": "snap_..." }
+POST   /sandboxes/{id}/start                 → 拉起原 entrypoint（autoStartCmd=false 后手动启动）
 ```
+
+sandbox 详情返回 `runtime: fc|runsc|runc`（实际档位，排障用）。
 
 批量（eval 场景高频）：
 
@@ -111,7 +119,7 @@ S→C: {"type":"stdout"|"stderr","data":"<base64>"}
 S→C: {"type":"exit","exitCode":0}
 ```
 
-链路：client → gateway（升级）→ noded gRPC stream → agent。gateway 只做帧透传与鉴权。
+链路：client → gateway（升级）→ beand gRPC stream → agent。gateway 只做帧透传与鉴权。
 
 ### 3.3 Files
 
@@ -121,9 +129,11 @@ PUT  /sandboxes/{id}/files?path=/workspace/patch.diff     // body ≤4MiB 直传
 GET  /sandboxes/{id}/files?path=/workspace/report.json    // ≤4MiB 直回
 GET  /sandboxes/{id}/files/ls?path=/workspace             → [{name,size,mode,mtime,isDir}]
 POST /sandboxes/{id}/files:uploadUrl   {"path": "...", "sizeBytes": 123456789}
-     → { "url": "<presigned PUT>", "commit": "/files:commitUpload?token=..." }   // 大文件两段式
+     → { "url": "<presigned PUT>", "commit": "/files:commitUpload?token=..." }
+     // 两段式：client PUT S3 → 调 commit → gateway 指令 agent FetchToSandbox
+     //（agent 经 presigned GET 拉入 sandbox 内目标路径）
 POST /sandboxes/{id}/files:downloadUrl {"path": "..."}
-     → { "url": "<presigned GET>" }    // noded 把文件推 S3 暂存后签 URL
+     → { "url": "<presigned GET>" }    // beand 把文件推 S3 暂存后签 URL
 DELETE /sandboxes/{id}/files?path=...
 ```
 
@@ -147,21 +157,32 @@ GET  /images/{ref}/status         → { "blobReady": true, "cachedNodes": 7, "si
 
 ### 3.6 Volumes
 
-镜像与卷为两种正交资源（镜像=环境，卷=数据，独立生命周期）。详见 beand-design.md §3.3。
+镜像与卷为两种正交资源（镜像=环境，卷=数据，独立生命周期）。数据面见 beand-design.md §3.3。
 
 ```
 POST   /volumes    { "name": "swebench-data", "type": "shared-fs"|"dataset",
-                     "quotaMiB": 102400, "readOnly": true, "labels": {} }
-GET    /volumes?label=...
+                     "quotaMiB": 102400, "labels": {} }
+GET    /volumes?label=...          → 含 usage（空间/inode 用量）
 GET    /volumes/{id}
-DELETE /volumes/{id}               // 有活跃挂载时 409
-POST   /volumes/{id}:publish       // dataset 卷：从 S3 源发布新版本
+DELETE /volumes/{id}               // 有活跃挂载时 409 VOLUME_IN_USE
 
-# sandbox 挂载（创建时声明）：
+# dataset 卷版本化发布（shared-fs 卷无此操作）：
+POST   /volumes/{id}:publish   { "source": "s3://bucket/datasets/swebench-v2/",
+                                 "version": "v2" }        → 202 转换任务
+# 挂载时选版本（缺省最新 READY 版本）：
 POST /sandboxes { ..., "volumes": [
-  { "volume": "vol_...", "subPath": "run-0731", "mountPath": "/workspace", "readOnly": false }
+  { "volume": "vol_...", "version": "v2", "mountPath": "/data" },              // dataset
+  { "volume": "vol_...", "subPath": "run-0731", "mountPath": "/workspace",
+    "readOnly": false }                                                        // shared-fs
 ] }
 ```
+
+- readOnly 语义：dataset 卷天然只读（无卷级字段）;shared-fs 卷挂载级
+  `readOnly` 可收紧（默认 false）
+- volume 状态机：`CREATING → READY → DELETING`;dataset 版本各自带状态
+  （publish 转换中 = CONVERTING）
+- 配额：shared-fs 空间/inode 由后端（JuiceFS 目录配额）或 NFS 层执行;
+  per-key 卷总容量配额见 §7
 
 ### 3.7 Snapshots
 
@@ -183,36 +204,50 @@ GET /metrics                                            // Prometheus 格式（�
 ## 4. 内部 gRPC proto 草案
 
 ```protobuf
-// proto/bean/node/v1/node.proto —— control plane ↔ noded
-service NodeService {
+// proto/bean/node/v1/node.proto —— control plane ↔ beand
+service NodeService {                                              // beand → control（出向）
   rpc Register(RegisterRequest) returns (RegisterResponse);        // 能力/资源画像上报
   rpc Heartbeat(stream HeartbeatRequest) returns (stream HeartbeatResponse);
       // 双向流：↑ 心跳+资源水位+sandbox 状态摘要+镜像缓存清单摘要（bloom/hash）
       // ↓ 租约确认（指令下发走 push 直连，见 5.1）
+  rpc SyncState(SyncStateRequest) returns (SyncStateResponse);     // beand 重启对账：拉全量期望状态
 }
 
-service SandboxService {                                           // control → noded
+service SandboxService {                       // beand 实现,control/gateway 作为 client 直连
   rpc CreateSandbox(CreateSandboxRequest) returns (CreateSandboxResponse);
+      // spec 含 volumes: repeated VolumeMount（dataset 盘 ref / shared-fs 导出名）
+  rpc RestoreSandbox(RestoreSandboxRequest) returns (RestoreSandboxResponse);  // 从 snapshot
   rpc DestroySandbox(DestroySandboxRequest) returns (DestroySandboxResponse);
   rpc PauseSandbox(PauseSandboxRequest) returns (PauseSandboxResponse);
   rpc ResumeSandbox(ResumeSandboxRequest) returns (ResumeSandboxResponse);
   rpc SnapshotSandbox(SnapshotSandboxRequest) returns (SnapshotSandboxResponse);
+  rpc StartUserProcess(StartUserProcessRequest) returns (StartUserProcessResponse);
   rpc PrewarmImage(PrewarmImageRequest) returns (PrewarmImageResponse);
-  // Exec/File/Port 由 gateway 直连 noded 转发（携带 sandbox-id 路由头）：
+  rpc PrepareVolume(PrepareVolumeRequest) returns (PrepareVolumeResponse);
+      // dataset 卷预热 / shared-fs 后端挂载确认
+  // 数据面：gateway/proxy 直连 beand 转发（携带 sandbox-id 路由头）,纯透传 AgentService：
   rpc Exec(ExecRequest) returns (ExecResponse);
   rpc StreamExec(stream StreamExecFrame) returns (stream StreamExecFrame);
   rpc ReadFile(ReadFileRequest) returns (stream FileChunk);
   rpc WriteFile(stream WriteFileFrame) returns (WriteFileResponse);
+  rpc DeleteFile(DeleteFileRequest) returns (DeleteFileResponse);
   rpc ListDir(ListDirRequest) returns (ListDirResponse);
+  rpc GetLogs(GetLogsRequest) returns (stream LogChunk);
+  rpc ForwardPort(stream PortFrame) returns (stream PortFrame);   // proxy 数据面
 }
 
-// proto/bean/agent/v1/agent.proto —— noded ↔ bean-agent（unix socket / 未来 vsock）
+// proto/bean/agent/v1/agent.proto —— beand ↔ bean-agent（容器档 unix socket / fc 档 vsock）
 service AgentService {
   rpc Exec(ExecRequest) returns (ExecResponse);
   rpc StreamExec(stream StreamExecFrame) returns (stream StreamExecFrame);
   rpc ReadFile(ReadFileRequest) returns (stream FileChunk);
   rpc WriteFile(stream WriteFileFrame) returns (WriteFileResponse);
   rpc ListDir(ListDirRequest) returns (ListDirResponse);
+  rpc DeleteFile(DeleteFileRequest) returns (DeleteFileResponse);
+  rpc FetchToSandbox(FetchToSandboxRequest) returns (FetchToSandboxResponse);
+      // 从 presigned GET URL 拉文件入 sandbox（大文件上传两段式的第二段）
+  rpc MountVolume(MountVolumeRequest) returns (MountVolumeResponse);     // NFS/dataset 盘挂载
+  rpc UnmountVolume(UnmountVolumeRequest) returns (UnmountVolumeResponse);
   rpc StartUserProcess(StartUserProcessRequest) returns (StartUserProcessResponse);
   rpc ForwardPort(stream PortFrame) returns (stream PortFrame);    // proxy 数据面
   rpc GetLogs(GetLogsRequest) returns (stream LogChunk);
@@ -226,18 +261,18 @@ service AgentService {
 - `CreateSandboxRequest` 含完整 `SandboxSpec`（image ref、resources、isolation、
   network、agent 注入参数、S3 产物 presigned URL 束）
 - `ExecRequest/StreamExecFrame` 在 SandboxService 与 AgentService 中共享 message
-  定义（`proto/bean/common/v1/exec.proto`），noded 纯透传
+  定义（`proto/bean/common/v1/exec.proto`），beand 纯透传
 
 ## 5. 控制流细节
 
 ### 5.1 指令下发模型：push 直连
 
-控制面直接 gRPC 调用 noded 的 `SandboxService`（noded 是 gRPC server，mTLS 内网直连）——与 e2b/AgentENV/CubeSandbox 的业界一致做法相同，调度路径最短：
+控制面直接 gRPC 调用 beand 的 `SandboxService`（beand 是 gRPC server，mTLS 内网直连）——与 e2b/AgentENV/CubeSandbox 的业界一致做法相同，调度路径最短：
 
 ```
 scheduler 决策（内存态 + Postgres 事务扣承诺量、写指令记录）
-  → 直连 noded.CreateSandbox（同步返回受理结果）
-  → noded 异步执行,状态变更经 Heartbeat 上报
+  → 直连 beand.CreateSandbox（同步返回受理结果）
+  → beand 异步执行,状态变更经 Heartbeat 上报
 ```
 
 - **部署前提**：控制面/gateway/proxy 与节点内网互通（数据面 exec/文件本就要求
@@ -246,26 +281,21 @@ scheduler 决策（内存态 + Postgres 事务扣承诺量、写指令记录）
 - **可靠性不靠 pull,靠写库 + 对账**：
   - 指令先写 Postgres（audit + 状态机 source of truth）,RPC 只是投递方式
   - RPC 超时/失败 → 有限重试;仍失败 → 释放承诺量重调度（见 architecture D7）
-  - noded 按 command_id 幂等去重（重试安全）
-  - noded 重启 → `SyncState`（拉全量期望状态）对账,补投丢失指令
+  - beand 按 command_id 幂等去重（重试安全）
+  - beand 重启 → `SyncState`（拉全量期望状态）对账,补投丢失指令
 - Heartbeat 双向流职责收敛为：↑ 心跳/资源水位/sandbox 状态/缓存摘要,
   ↓ 租约确认（不再承担指令通知）
 
-```protobuf
-service NodeService {                    // noded → control plane（出向）
-  rpc Register(...) / Heartbeat(stream...)
-  rpc SyncState(SyncStateRequest) returns (SyncStateResponse);   // 重启对账
-}
-// SandboxService 由 noded 实现,control plane 作为 client 直连调用（见 §4）
-```
+proto 见 §4（NodeService.SyncState 承担重启对账;SandboxService 由 beand 实现、
+control plane 作为 client 直连调用）。
 
 ### 5.2 Exec 路由
 
 ```
 client → gateway：Bearer key / sandbox token
-gateway：state store 查 sandbox → nodeId → noded 地址（缓存 + 失效订阅）
-gateway → noded：gRPC（mTLS，内网）
-noded → agent：unix socket
+gateway：state store 查 sandbox → nodeId → beand 地址（缓存 + 失效订阅）
+gateway → beand：gRPC（mTLS，内网）
+beand → agent：容器档 unix socket / fc 档 vsock
 ```
 
 sandbox 处于 PAUSED/PULLING 等非 RUNNING 态 → 409 SANDBOX_NOT_RUNNING。
@@ -285,12 +315,12 @@ sandbox 处于 PAUSED/PULLING 等非 RUNNING 态 → 409 SANDBOX_NOT_RUNNING。
 ```
 浏览器 → proxy（解析 Host → sandboxId+port）
        → 鉴权（见 6.3）
-       → 路由查询：state store 查 sandbox → nodeId → noded 地址（本地 LRU 缓存 30s + 心跳失效推送）
-       → noded HTTP/1.1|h2c 反代 → noded 内部 dial agent ForwardPort 流 → sandbox 内 localhost:port
+       → 路由查询：state store 查 sandbox → nodeId → beand 地址（本地 LRU 缓存 30s + 心跳失效推送）
+       → gRPC ForwardPort 双向流（每连接一路）→ beand 转发 agent → sandbox 内 localhost:port
 ```
 
-- noded 为每个已暴露端口维护一个本地 listener 是**不必要的**：proxy → noded 用一条
-  gRPC `ForwardPort` 双向流每连接一路，noded 转发到 agent，agent 在 netns 内 dial
+- beand 不为暴露端口维护本地 listener——统一经 `ForwardPort` 流转发，
+  agent 在 sandbox 网络内 dial 目标端口
 - 连接级超时/最大并发 per sandbox 可配；断流自动清理
 
 ### 6.3 端口鉴权
@@ -309,7 +339,7 @@ sandbox 处于 PAUSED/PULLING 等非 RUNNING 态 → 409 SANDBOX_NOT_RUNNING。
 
 | 层 | 机制 |
 |---|---|
-| API key | 并发 sandbox 数、总 CPU/mem、prewarm 次数/天 —— Postgres 计数 + 创建时事务校验 |
+| API key | 并发 sandbox 数、总 CPU/mem、卷总容量/个数、prewarm 次数/天 —— Postgres 计数 + 创建时事务校验 |
 | 请求限流 | gateway 令牌桶：全局 QPS + per-key QPS（exec 与 create 分池） |
 | Exec 输出 | maxOutputBytes 截断；WS 流带宽 per-connection 限速 |
 | proxy | per-sandbox 并发连接数、带宽限速（防滥用做穿透代理） |
@@ -321,4 +351,4 @@ sandbox 处于 PAUSED/PULLING 等非 RUNNING 态 → 409 SANDBOX_NOT_RUNNING。
 - **审计日志**：所有写操作（create/destroy/exec 摘要）落 Postgres + 定期归档 S3
 - **sandbox 日志**：agent 环形缓冲（默认 8 MiB）实时查询；销毁时终态日志 +
   stdout/stderr 全量经 presigned URL 归档 S3（路径：`s3://<bucket>/logs/{sandboxId}/`）
-- **trace**：request_id 全链路透传，OTel 埋点（gateway、noded、agent）
+- **trace**：request_id 全链路透传，OTel 埋点（gateway、beand、agent）

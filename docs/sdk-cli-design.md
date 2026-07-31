@@ -21,12 +21,15 @@ client = BeanClient(api_key="bk_...", base_url="https://api.example.com")
 # —— 生命周期 ——
 sbx = client.sandboxes.create(
     image="registry.example.com/swebench/django-12345:latest",
-    cpu=2, memory_mib=4096,
-    isolation="standard",            # none|standard|strong
+    cpu=2, memory_mib=4096, disk_mib=20480,
     env={"PYTHONUNBUFFERED": "1"},
+    cmd=None, auto_start_cmd=False,   # 原 entrypoint 托管;sbx.start() 手动拉起
+    network_policy="egress-only",
     timeout=1800,
     labels={"eval-run": "r0731"},
+    volumes=[{"volume": vol.id, "mount_path": "/workspace"}],   # 可选
 )                                     # 阻塞至 RUNNING（内部轮询/长轮询），可 wait=False
+# 注：无 isolation 参数——runtime 档位由平台自动分配（fc 默认）
 
 sbx = client.sandboxes.get("sbx_...")
 for s in client.sandboxes.list(labels={"eval-run": "r0731"}): ...
@@ -34,6 +37,7 @@ sbx.set_timeout(3600)
 sbx.kill()
 
 # —— 执行 ——
+# str → ["/bin/sh","-c",...]（镜像无 sh 时报错）;list 原样执行
 r = sbx.exec("python -m pytest tests/ -x", cwd="/workspace", timeout=600)
 r.exit_code, r.stdout, r.stderr, r.truncated, r.duration_ms
 
@@ -57,9 +61,20 @@ sbx.files.ls("/workspace")
 # —— 端口 ——
 url = sbx.ports.expose(8888, auth="token")                 # → https://...
 
+# —— 进程 / 日志 ——
+sbx.start()                                                # 拉起原 entrypoint
+for line in sbx.logs(follow=True): ...
+
+# —— volume（独立资源：镜像=环境,卷=数据,跨 sandbox 留存）——
+vol = client.volumes.create(name="alice-ws", type="shared-fs", quota_mib=51200)
+ds  = client.volumes.create(name="swebench-data", type="dataset")
+ds.publish(source="s3://bucket/datasets/swebench-v2/", version="v2")
+client.volumes.list(labels={...}); vol.delete()
+
 # —— snapshot ——
 sbx.pause(); sbx.resume()
-snap = sbx.snapshot(name="after-setup")
+snap = sbx.snapshot(name="after-setup", keep_running=True)
+client.snapshots.list(); snap.delete()
 sbx2 = client.sandboxes.create(snapshot=snap.id)           # fan-out
 ```
 
@@ -121,14 +136,19 @@ await sbx.kill();
 ### 4.1 命令面
 
 ```
-bean run IMAGE [--cpu 2 --mem 4Gi --isolation standard --env K=V ...]
-         [-- CMD...]        # 创建并可选执行；-i/-t 进入交互 PTY（类 docker run）
+bean run IMAGE [--cpu 2 --mem 4Gi --disk 20Gi --env K=V ...]
+         [--volume vol_xxx:/workspace] [-- CMD...]
+                            # 创建并可选执行；-i/-t 进入交互 PTY（类 docker run）
 bean ls  [--label k=v] [--state RUNNING] [-o json|table|wide]
 bean exec SBX [-i -t] -- CMD...
 bean cp   ./local sbx:SBX:/path    |    sbx:SBX:/path ./local     # 目录自动 tar
 bean logs SBX [-f --tail 100]
 bean kill SBX...            # 支持 --label 批量
+bean attach SBX             # 重连 detach 的 PTY 会话
+bean start SBX              # 拉起原 entrypoint
 bean pause SBX / bean resume SBX
+bean volume create NAME --type shared-fs|dataset [--quota 100Gi]
+bean volume ls / rm VOL / publish VOL --source s3://... --version v2
 bean snapshot create SBX --name after-setup
 bean snapshot ls / rm SNAP
 bean port expose SBX 8888 [--public]
