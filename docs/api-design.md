@@ -204,7 +204,10 @@ POST   /sandboxes    { "snapshot": "snap_...", ... }     // 从 snapshot 创建�
 ### 3.8 Events
 
 ```
-事件类型：sandbox.lifecycle.{created,running,paused,resumed,killed,failed,oom}
+事件类型：sandbox.lifecycle.{created,running,paused,resumed,stopped,failed,lost,oom}
+          + sandbox.snapshot.{ready,failed}
+          // stopped 对应状态机 STOPPED（含显式 DELETE 与 onIdle=kill）,
+          // lost 对应节点租约丢失
 事件体：  { "id", "type", "timestamp", "sandboxId", "data": {...}, "version": "v1" }
           // 命名对齐 e2b（sandbox.lifecycle.* 点分层级）,便于生态兼容
 

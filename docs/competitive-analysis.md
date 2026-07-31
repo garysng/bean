@@ -99,14 +99,14 @@
 | CodeSandbox | Firecracker | ⚠️ devcontainer 套壳 | resume 1–2s | ✅ 成熟 | ❌ | ❌ |
 | Cloudflare | 容器 | ⚠️ 须嵌其运行时 | 快 | ✅ | ❌(SDK 开源) | ❌ 生态绑定 |
 | Vercel | Firecracker | ✅ 但须推其 registry | 秒级 | ✅ FS 快照 | ❌ | ❌ 单区域 |
-| **bean（目标）** | **FC 默认档 + runc(GPU)/gVisor 降级** | **✅ overlaybd 零转换，S3 lazy-pull** | **命中<2s/冷<10s** | **FC 原生 snapshot/fork（P3–P4）** | **自研自托管** | **✅ 一等场景（多节点调度/prewarm/配额为核心）** |
+| **bean（目标）** | **FC 默认档（runc GPU/gVisor 降级为 P5 内部预留）** | **✅ overlaybd 零转换，S3 lazy-pull** | **命中<2s/冷<10s** | **FC 原生 snapshot/fork（P3–P4）** | **自研自托管** | **✅ 一等场景（多节点调度/prewarm/配额为核心）** |
 
 ## 3. 结论：bean 的差异化定位
 
 1. **技术路线已被验证，竞争焦点在工程完成度**：AgentENV 证明了「overlaybd 直挂
    FC + 任意 OCI 零转换」可行且生产可用——bean 采纳同一路线（D4/D9），
    差异化转向 AgentENV 的空白区：**多节点调度（镜像亲和 bin-packing）、prewarm
-   编排、配额/租约/故障恢复、GPU 路径（容器档）、完整运维面**
+   编排、配额/租约/故障恢复、GPU 路径（容器档,P5 内部预留）、完整运维面**
 2. **商业平台仍无人做到零转换**：e2b/Morph/CodeSandbox/Modal 全要求 template
    或 SDK 重建;最接近的 Daytona 无强隔离档。批量异构镜像评测在商业侧仍是空白
 3. **镜像分发是下半场**：各家优化「单模板反复启动」，eval 痛点是「2000 个不同

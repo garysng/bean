@@ -358,6 +358,9 @@ RUNNING/PAUSED ─snapshot→ SNAPSHOTTING → (回原状态)
 snapshot 对象独立状态机：CREATING → READY → DELETING（RESTORING 引用计数期间不可删）
 ```
 
+`DELETE /sandboxes/{id}` 返回 202 后异步走 STOPPING → STOPPED（终态记录保留
+30 天后归档,见 beand-design GC）;`?force=true` 跳过 graceful 直接 kill。
+
 详见 [snapshot-resume.md](snapshot-resume.md)。
 
 ## 5. 冷启动路径优化
