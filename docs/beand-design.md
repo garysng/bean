@@ -30,7 +30,9 @@ labels:                 # 自由标签,调度 nodeSelector 过滤/打分用（�
   pool: gpu-a100
   disk: nvme
 bootstrapToken: <region bootstrap token>        # 首次注册用,见 §7.0
-controlPlane: grpc://control.example.com:7443   # 出向连接（BYOC 场景跨网）
+controlPlane: grpcs://grpc-bean.internal.gpu-instance.novita.ai:443
+                        # 云上托管 gRPC 接入层（nexus 同款模式）,:443 TLS 由
+                        # 托管网关终结;beand 出向连接,BYOC/跨网天然可达
 s3:
   endpoint: https://s3.ap-east-1.example.com    # 本 region S3 backend
 containerd: /run/bean/containerd.sock    # 独立 containerd 实例，专用 namespace "bean"
@@ -397,24 +399,27 @@ fc 档 agent 代码零改动，只换 transport（vsock）与注入载体（agen
       → 生成 region bootstrap token（短 TTL 24h,可限次数,可撤销）
 节点：beand 配置 token 启动 → Register(token, region, capabilities, labels)
     → 控制面校验 region 已注册 + token 有效（BYOC region 可配人工 approve）
-    → beand 从云托管证书服务拉取节点 mTLS 证书（CertProvider 抽象）
-    → 节点进入 region 池,后续心跳/指令走 mTLS
+    → 控制面签发 node token（短期,绑定 nodeId+region）
+    → 后续所有 RPC 携带 node token metadata,心跳自动续期
 ```
 
-**证书不落盘**：证书由云托管服务管理（签发/轮换/吊销全外包）,beand 运行时
-拉取、仅内存持有;节点重启重新走拉取流程。本地磁盘零凭证残留——节点被
-回收/镜像被复制都不泄漏身份。
+**传输与身份分层（顺应云上托管接入层,不引入 mTLS）**：
+
+- 传输层：TLS 单向——控制面经托管 gRPC 接入层暴露（网关终结 TLS）,
+  节点用系统 CA 验证服务端,**零证书配置**（与现有 nexus 边缘节点模式一致）
+- 节点身份：应用层 node token（内存持有不落盘,重启重新 Register）;
+  控制面按 token↔nodeId 绑定校验——节点只能上报/操作调度到自己的 sandbox
+- token 泄漏面：短期 + 绑定 nodeId,冒用需同时伪造心跳流;可即时吊销
 
 凭证三层,职责不重叠：
 
 | 凭证 | 权限 | 生命周期 |
 |---|---|---|
 | region bootstrap token | **仅 Register**（registration-only,无任何数据读写） | 短 TTL + 限次;泄漏最坏结果=注册假节点,而任务 presigned 只授权自身路径,再加 approve 闭环 |
-| 节点 mTLS 证书 | 心跳/指令/SyncState 身份,绑定 nodeId+region | 云 CA 自动轮换;退出吊销 |
+| node token | 心跳/指令/SyncState 身份,绑定 nodeId+region | 短期,心跳续期;内存持有;退出/异常即吊销 |
 | S3 访问 | 镜像 blob=STS 只读（限 region bucket 前缀）;写产物/snapshot=per-操作 presigned | STS 1h;presigned 15min |
 
-BYOC 信任链：客户节点与控制面互验同一个云托管 CA 根,客户侧仅需出向可达,
-信任根不随 region/BYOC 分裂。
+BYOC：客户节点出向连托管接入层即可（443,零证书配置）,身份全在应用层 token。
 
 ### 7.1 心跳
 

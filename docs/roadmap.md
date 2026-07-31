@@ -47,7 +47,7 @@ curl DELETE → 资源清零（netns/挂载/containerd task 无残留）
 - guest 内核 + agent 盘构建发布流水线（beand-design §3.4）
 - 产物直推 S3（presigned 链路）、sandbox 日志归档
 - Events（状态机发件 → Postgres + WS 订阅）;OTel 统一导出 + per-sandbox 资源指标
-- 凭证体系：mTLS 内部 CA、STS/presigned 全覆盖
+- 凭证体系：node token（托管接入层 TLS + 应用层身份）、STS/presigned 全覆盖
 - 配额/限流
 
 **验收**：2000 镜像批量评测演练（fc 档）;冷启动 P50 < 10s、缓存命中 P50 < 2s;逃逸回归集通过。

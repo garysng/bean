@@ -17,7 +17,7 @@
 - `Authorization: Bearer bk_<keyid>_<secret>`
 - key 哈希存 Postgres；附带配额（并发 sandbox 数、CPU/mem 总量、卷容量、prewarm 权限）
 - **不做用户/租户体系**——bean 是集群内部服务,key 仅用于调用方识别、配额与
-  审计归属;安全重心在集群内可靠性（组件 mTLS、凭证分层、隔离档）而非多租户
+  审计归属;安全重心在集群内可靠性（托管 TLS + node token、凭证分层、隔离档）而非多租户
 
 ### 2.2 Sandbox 级短时凭证
 
@@ -300,7 +300,7 @@ service AgentService {
 
 ### 5.1 指令下发模型：push 直连
 
-控制面直接 gRPC 调用 beand 的 `SandboxService`（beand 是 gRPC server，mTLS 内网直连）——与 e2b/AgentENV/CubeSandbox 的业界一致做法相同，调度路径最短：
+控制面直接 gRPC 调用 beand 的 `SandboxService`（beand 是 gRPC server,同 region 内网直连,node token 校验）——与 e2b/AgentENV/CubeSandbox 的业界一致做法相同，调度路径最短：
 
 ```
 scheduler 决策（内存态 + Postgres 事务扣承诺量、写指令记录）
@@ -308,9 +308,8 @@ scheduler 决策（内存态 + Postgres 事务扣承诺量、写指令记录）
   → beand 异步执行,状态变更经 Heartbeat 上报
 ```
 
-- **部署前提**：控制面/gateway/proxy 与节点内网互通（数据面 exec/文件本就要求
-  直连,控制面沿用同一前提,不为不存在的 NAT 场景付复杂度）。跨机房/NAT 节点
-  不支持;真有需求时以节点侧反向隧道作为 P5 储备项
+- **部署前提**：数据面（gateway/proxy → beand 的 exec/文件/端口）要求同 region 内
+  网可达;控制面指令经云上托管 gRPC 接入层（BYOC/跨网天然可达）
 - **可靠性不靠 pull,靠写库 + 对账**：
   - 指令先写 Postgres（audit + 状态机 source of truth）,RPC 只是投递方式
   - RPC 超时/失败 → 有限重试;仍失败 → 释放承诺量重调度（见 architecture D7）
@@ -349,7 +348,7 @@ control plane 作为 client 直连调用）。
 ```
 client → gateway：Bearer key / sandbox token
 gateway：state store 查 sandbox → nodeId → beand 地址（缓存 + 失效订阅）
-gateway → beand：gRPC（mTLS，内网）
+gateway → beand：gRPC（同 region 内网,node token 校验）
 beand → agent：容器档 unix socket / fc 档 vsock
 ```
 

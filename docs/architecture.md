@@ -260,7 +260,7 @@ shared-fs 走宿主 NFS 而非 guest 内跑分布式 FS 客户端的原因：gue
 
 ```
 Global Control Plane（bean-api / scheduler / Postgres,镜像元数据全局 digest 索引）
-   │ mTLS,beand/proxy 出向连接
+   │ 托管 gRPC 接入层(TLS)+node token,beand/proxy 出向连接
    ├── Region A：beand 节点池 + regional proxy ×N + region S3 backend
    └── Region B（BYOC）：客户节点 + 客户 S3,数据不出客户环境
 ```
@@ -275,13 +275,14 @@ Global Control Plane（bean-api / scheduler / Postgres,镜像元数据全局 dig
   （DNS 直达 region proxy,无全局中转）
 - **BYOC**：客户提供节点 + S3（+可选自有域名）,hosted control plane;
   控制面只见元数据,不持客户 S3 长期凭证——presigned/STS 由部署在客户侧的
-  轻量 token 服务签发;beand/proxy 出向 mTLS + region bootstrap token 注册
-  （registration-only 凭证,BYOC 可配人工 approve;详见 beand-design §7.0）
+  轻量 token 服务签发;beand/proxy 出向 443 连托管接入层 + bootstrap token
+  注册（registration-only,可配人工 approve;详见 beand-design §7.0）
 - **节点归属**：`region` 为一级字段（配置声明,Register 时控制面校验该 region
   已注册,生命周期内不可变）;`labels` 为自由标签（pool/disk/tenant 等）,
   调度请求经 `nodeSelector` 约束——GPU 池、BYOC 专属节点等用标签,不加字段
-- **证书**：云托管私有 CA（CertProvider 抽象,签发/轮换/吊销外包）,证书
-  运行时拉取、内存持有不落盘;BYOC 与自有 region 共享同一信任根
+- **接入与身份**：控制面经云上托管 gRPC 接入层暴露（网关终结 TLS,节点
+  零证书配置）;节点身份用应用层 node token（短期、内存持有、绑定 nodeId）,
+  不引入 mTLS——顺应现有基建,BYOC 出向 443 即通
 - **故障域**：region 失联 → 该 region sandbox 标 LOST,其他 region 无感;
   全局控制面单点首期接受（控制面故障不影响存量 sandbox 数据面,仅停新建）,
   控制面多活为 P5 储备
