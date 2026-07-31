@@ -18,9 +18,9 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/garysng/bean/internal/control/store"
 	commonv1 "github.com/garysng/bean/internal/gen/bean/common/v1"
 	nodev1 "github.com/garysng/bean/internal/gen/bean/node/v1"
-	"github.com/garysng/bean/internal/control/store"
 )
 
 const maxInlineFileBytes = 4 << 20 // 4 MiB
@@ -119,7 +119,7 @@ func grpcToHTTP(w http.ResponseWriter, err error) {
 // ---- sandbox lifecycle ----
 
 type createRequest struct {
-	Image     string            `json:"image"`
+	Image     string `json:"image"`
 	Resources *struct {
 		CPU       float64 `json:"cpu"`
 		MemoryMiB int64   `json:"memoryMiB"`
