@@ -158,7 +158,7 @@ disk-diff 直接取宿主 overlaybd 可写层、guest 内零 union 复杂度。
 | eval 产物 | agent/beand 经 presigned URL 直推 S3（control plane 签发，节点不持长期凭证） |
 | 大文件下载 | API 返回 presigned URL 重定向，不过 gateway 转发 |
 | 快照（P3–P4） | FC memory snapshot / rootfs diff 落 S3，支持跨节点 resume |
-| 卷 | dataset 卷复用 overlaybd 管道;shared-fs 卷后端（JuiceFS on S3）宿主挂载（见 D10） |
+| 卷 | shared-fs 卷后端（JuiceFS on S3）宿主挂载 + nfsd 导出（见 D10）;dataset 卷预留 |
 
 选 overlaybd（块级，DADI/阿里，AgentENV 已在 FC 场景验证）而非 Nydus（文件级）的关键原因：**块设备链路同时服务容器档（overlaybd-snapshotter → overlayfs）与 microVM 档（virtio-blk 直挂 guest），一条镜像链路通吃全部 runtime 档位**；Nydus 的文件系统语义进不了 microVM，FC 档需另走 virtiofs（FC 支持弱）。Nydus 保留为容器档备选。
 
@@ -216,7 +216,7 @@ cap:   [runc, runsc, fc] × 每节点并发创建余量（默认 16）
    w2·资源平衡：装箱后碎片度（优先填满，留大块空位给大规格）
    w3·缓存盘类型：冷镜像 → NVMe 大缓存节点加分
    w4·打散：同 label（同一 eval run）适度反亲和，避免单节点故障吞掉整批
-   （dataset 卷的块缓存命中并入 w1 亲和项）
+
 3. 提交:Postgres 事务扣承诺量 + 写指令记录 → push 直连 beand.CreateSandbox（见 api-design §5.1）
 4. 失败回退:节点报 FAILED（如 ENOSPC 竞态）→ 释放承诺量,重调度(≤3 次,
    排除失败节点),仍失败 → NO_CAPACITY 返回调用方
@@ -243,8 +243,8 @@ cap:   [runc, runsc, fc] × 每节点并发创建余量（默认 16）
 
 | 类型 | 后端 | 数据面 | 场景 |
 |---|---|---|---|
-| `dataset` | overlaybd 只读块（复用镜像 S3/缓存管道） | 容器档 bind mount;fc 档附加 virtio-blk | 数据集/权重海量只读消费，性能最优 |
-| `shared-fs` | 宿主挂载 JuiceFS（on S3）/CephFS/本地盘 | **宿主 NFS 导出**（e2b 同款路线）：guest 用内核 NFS client 挂宿主内部地址，流量不出节点 | 持久工作区、跨 sandbox 共享读写 |
+| `shared-fs`（首期） | 宿主挂载 JuiceFS（on S3）/CephFS/本地盘 | **宿主内核 nfsd 导出**（e2b 同款路线）：guest 用内核 NFS client 挂宿主内部地址，流量不出节点 | 持久工作区、跨 sandbox 共享读写 |
+| `dataset`（预留，暂不排期） | overlaybd 只读块（复用镜像管道） | 容器档 bind mount;fc 档附加 virtio-blk | 数据集/权重海量只读消费 |
 
 shared-fs 走宿主 NFS 而非 guest 内跑分布式 FS 客户端的原因：guest 零凭证零
 额外二进制、`none` 网络策略天然兼容（NFS 目标是宿主网关，与出公网正交）、
@@ -283,7 +283,7 @@ GET    /v1/images/{ref}/status       # 缓存分布、blob 就绪度
 
 # 生命周期扩展 / 批量 / 卷 / 快照 / 日志（完整定义见 api-design.md）
 POST   /v1/sandboxes:batchCreate     # 批量创建（eval 高频）
-POST   /v1/sandboxes/{id}/pause|resume|snapshot|start
+POST   /v1/sandboxes/{id}/pause|resume|snapshot|fork|start
 CRUD   /v1/volumes                   # dataset / shared-fs 卷
 CRUD   /v1/snapshots
 GET    /v1/sandboxes/{id}/logs

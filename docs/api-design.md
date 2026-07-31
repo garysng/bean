@@ -79,6 +79,10 @@ POST   /sandboxes/{id}/resume                → 202 → RUNNING
 POST   /sandboxes/{id}/snapshot  { "name": "after-setup", "keepRunning": true }
                                              → 202 { "snapshotId": "snap_..." }
 POST   /sandboxes/{id}/start                 → 拉起原 entrypoint（autoStartCmd=false 后手动启动）
+POST   /sandboxes/{id}/fork     { "count": 3, "labels": {...} }    // 独立 API（fc 档,P4）
+       → 202 { "sandboxes": [ ...N 个新 sandbox... ] }
+       // 语义：对运行中 sandbox 做瞬时 CoW 快照并克隆 N 个独立实例（不产生
+       // 持久 snapshot 对象;要留存用 /snapshot）。容器档返回 501
 ```
 
 sandbox 详情返回 `runtime: fc|runsc|runc`（实际档位，排障用）。
@@ -159,30 +163,24 @@ GET  /images/{ref}/status         → { "blobReady": true, "cachedNodes": 7, "si
 
 镜像与卷为两种正交资源（镜像=环境，卷=数据，独立生命周期）。数据面见 beand-design.md §3.3。
 
+首期仅 `shared-fs` 类型（`dataset` 预留，暂不排期）：
+
 ```
-POST   /volumes    { "name": "swebench-data", "type": "shared-fs"|"dataset",
+POST   /volumes    { "name": "alice-ws", "type": "shared-fs",
                      "quotaMiB": 102400, "labels": {} }
 GET    /volumes?label=...          → 含 usage（空间/inode 用量）
 GET    /volumes/{id}
 DELETE /volumes/{id}               // 有活跃挂载时 409 VOLUME_IN_USE
 
-# dataset 卷版本化发布（shared-fs 卷无此操作）：
-POST   /volumes/{id}:publish   { "source": "s3://bucket/datasets/swebench-v2/",
-                                 "version": "v2" }        → 202 转换任务
-# 挂载时选版本（缺省最新 READY 版本）：
 POST /sandboxes { ..., "volumes": [
-  { "volume": "vol_...", "version": "v2", "mountPath": "/data" },              // dataset
   { "volume": "vol_...", "subPath": "run-0731", "mountPath": "/workspace",
-    "readOnly": false }                                                        // shared-fs
+    "readOnly": false }
 ] }
 ```
 
-- readOnly 语义：dataset 卷天然只读（无卷级字段）;shared-fs 卷挂载级
-  `readOnly` 可收紧（默认 false）
-- volume 状态机：`CREATING → READY → DELETING`;dataset 版本各自带状态
-  （publish 转换中 = CONVERTING）
-- 配额：shared-fs 空间/inode 由后端（JuiceFS 目录配额）或 NFS 层执行;
-  per-key 卷总容量配额见 §7
+- 挂载级 `readOnly` 可收紧（默认 false）
+- volume 状态机：`CREATING → READY → DELETING`
+- 配额：空间/inode 由后端执行（JuiceFS 目录配额）;per-key 卷总容量配额见 §7
 
 ### 3.7 Snapshots
 
@@ -221,10 +219,11 @@ service SandboxService {                       // beand 实现,control/gateway �
   rpc PauseSandbox(PauseSandboxRequest) returns (PauseSandboxResponse);
   rpc ResumeSandbox(ResumeSandboxRequest) returns (ResumeSandboxResponse);
   rpc SnapshotSandbox(SnapshotSandboxRequest) returns (SnapshotSandboxResponse);
+  rpc ForkSandbox(ForkSandboxRequest) returns (ForkSandboxResponse);      // fc 档 CoW 克隆
   rpc StartUserProcess(StartUserProcessRequest) returns (StartUserProcessResponse);
   rpc PrewarmImage(PrewarmImageRequest) returns (PrewarmImageResponse);
   rpc PrepareVolume(PrepareVolumeRequest) returns (PrepareVolumeResponse);
-      // dataset 卷预热 / shared-fs 后端挂载确认
+      // shared-fs 后端挂载确认（dataset 预留）
   // 数据面：gateway/proxy 直连 beand 转发（携带 sandbox-id 路由头）,纯透传 AgentService：
   rpc Exec(ExecRequest) returns (ExecResponse);
   rpc StreamExec(stream StreamExecFrame) returns (stream StreamExecFrame);

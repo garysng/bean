@@ -177,20 +177,21 @@ POST /sandboxes { ..., "volumes": [
 ] }
 ```
 
-**两种类型：**
+**类型：首期仅 `shared-fs`**;`dataset`（overlaybd 只读块，复用镜像管道）为预留
+类型暂不排期——大数据集只读场景先用 shared-fs 或打进镜像，需求明确后再启用。
 
 | 类型 | 后端 | 语义 | 场景 |
 |---|---|---|---|
 | `shared-fs` | JuiceFS（on S3+Redis，与 S3 底座一致）或 CephFS，平台配置，用户不感知 | POSIX 读写共享 | 持久工作区、跨 sandbox 共享数据 |
-| `dataset` | overlaybd 只读块（实现上复用镜像的 S3 传输/缓存管道，但资源上是独立对象） | 只读、版本化发布 | 数据集/模型权重海量只读消费 |
+| `dataset`（预留） | overlaybd 只读块 | 只读、版本化发布 | 数据集/权重海量只读消费 |
 
 **shared-fs 数据面：宿主 NFS 导出（e2b 同款路线,经其源码验证）**
 
 ```
 后端（宿主挂载,beand volume 模块管理）：JuiceFS(on S3+Redis) / CephFS / 本地盘
     ▼
-宿主 NFS 服务导出 per-volume 目录（实现期二选一：go-nfs 用户态库,可做
-    per-volume chroot/quota 拦截 —— e2b 方案;或内核 nfsd,零用户态开销）
+宿主内核 nfsd 导出 per-volume 目录（拍板：内核 nfsd,零用户态开销、成熟度最高;
+    配额由后端执行——JuiceFS 目录配额/CephFS quota）
     ▼  NFS 流量仅走 sandbox→宿主网关（virtio-net/veth,不出节点）
 guest/容器内 agent 执行: mount -t nfs -o fg,hard <宿主网关IP>:/<volumeName> <mountPath>
 ```
@@ -202,25 +203,24 @@ guest/容器内 agent 执行: mount -t nfs -o fg,hard <宿主网关IP>:/<volumeN
 - **宿主客户端缓存全 sandbox 共享**——同批 eval 读同数据,宿主拉一次全员命中
   （guest 内独立客户端则 N 份缓存 N 份回源）
 - 后端可换（JuiceFS/CephFS/本地盘），beand 只见宿主路径
-- 代价：多一跳 NFS 协议;小文件/元数据密集负载偏慢——该类负载引导到可写层,
-  大流量只读引导到 dataset 卷（virtio-blk 直挂,性能最优路径）
+- 代价：多一跳 NFS 协议;小文件/元数据密集负载偏慢——该类负载引导到可写层
+  （dataset 卷启用后,大流量只读再迁过去）
 
 **挂载矩阵：**
 
-| 档 | shared-fs | dataset |
+| 档 | shared-fs | dataset（预留） |
 |---|---|---|
 | 容器档 | 直接 bind mount 宿主挂载点 subPath（跳过 NFS） | 块设备挂载 → bind mount |
 | fc 档 | guest 内核 NFS client 挂宿主导出 | 附加一块 virtio-blk |
 
-- 配额：JuiceFS 目录配额（后端执行）或 NFS proxy 层 QuotaProvider（go-nfs 路线）
+- 配额：后端执行（JuiceFS 目录配额 / CephFS quota）,nfsd 层不做拦截
 - 挂载失败属 sandbox 创建失败（FAILED,带明确 reason）
 - nftables：sandbox → 宿主网关 NFS 端口的 accept 规则仅对挂了 shared-fs 卷的
   sandbox 插入（per-sandbox 链）
 
 **不做**：sandbox 间实时协作锁语义——共享写一律经后端文件系统落盘保证一致性。
 
-**调度联动**：shared-fs 无节点亲和（后端全节点可达）;dataset 卷参与
-镜像亲和打分（块缓存命中）。
+**调度联动**：shared-fs 无节点亲和（后端全节点可达）。
 
 ## 3.4 Guest 内核与 agent 盘的构建发布
 

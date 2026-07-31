@@ -43,9 +43,11 @@ POST /sandboxes/{id}/snapshot
 - 整机级一致性：TCP 栈、fd、进程树全部在 guest 内一起冻结，无 CRIU 的外部状态问题
 - restore：拉 base 镜像块设备（缓存命中）+ memory file + overlay diff → LoadSnapshot
   → resume vCPU，目标百 ms 级（本地）/ 秒级（跨节点冷拉）
-- fork：同一 memory snapshot CoW 多次 LoadSnapshot → 一母多子。子实例宿主侧
-  资源全部新分配：tap 设备、vsock CID、可写层 CoW 克隆、新 sandbox-id/token;
-  guest 内 MAC/IP 由 agent 重配。「装环境一次 fan-out N 实验」的最优实现
+- fork（独立 API：`POST /sandboxes/{id}/fork {count}`）：瞬时 CoW 快照 + N 次
+  LoadSnapshot → 一母多子,不产生持久 snapshot 对象（要留存用 /snapshot）。
+  子实例宿主侧资源全部新分配：tap 设备、vsock CID、可写层 CoW 克隆、新
+  sandbox-id/token;guest 内 MAC/IP 由 agent 重配。「装环境一次 fan-out N
+  实验」的最优实现;首期本节点 fork,跨节点走 snapshot+restore
 - balloon 交互：snapshot 前先收缩气球（减小 memory file）,restore 后气球状态
   随 vmstate 恢复
 - 限制：宿主 CPU 代际需兼容（调度按 CPU feature set 分组）;GPU 不适用（GPU 走容器档）
@@ -116,9 +118,7 @@ POST /sandboxes { "snapshot": "snap_...", ... }
   后跨节点 restore 该连接必死。流程：snapshot 前 agent 收指令 unmount（lazy）
   所有 NFS 挂载点 → snapshot → restore 后 agent 重新 mount（新宿主的网关地址）。
   卸载失败（fd 占用）→ snapshot 失败并报明确错误
-- **dataset 卷**：restore 节点按 manifest 中的卷版本重新 attach virtio-blk
-  （块设备无连接状态,天然安全）;设备顺序按 manifest 复原
-- snapshot manifest 记录完整卷挂载表
+- snapshot manifest 记录完整卷挂载表（dataset 卷启用后:按 manifest 重 attach 块设备）
 
 ### 3.6 生命周期（两档共通）
 

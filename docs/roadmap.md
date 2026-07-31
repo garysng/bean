@@ -44,7 +44,6 @@ curl DELETE → 资源清零（netns/挂载/containerd task 无残留）
 - isolation auto 解析（fc 默认/GPU→runc/无 KVM→runsc）;runsc 降级档兼容性回归集
 - 容器加固基线全量（seccomp/caps/pids/quota）
 - prewarm API + 编排、镜像亲和 v2（块级 bloom + 字节占比）
-- **dataset 卷**（复用 overlaybd 管道：publish 转换、virtio-blk/bind mount 挂载）
 - guest 内核 + agent 盘构建发布流水线（beand-design §3.4）
 - 产物直推 S3（presigned 链路）、sandbox 日志归档
 - 凭证体系：mTLS 内部 CA、STS/presigned 全覆盖
@@ -60,7 +59,7 @@ curl DELETE → 资源清零（netns/挂载/containerd task 无残留）
 - bean-proxy：通配域名 TLS、端口暴露、sandbox token 鉴权
 - pause/resume（fc PauseVM / 容器档 cgroup freezer）
 - fc 档 snapshot 本节点路径（memory+disk → S3）
-- **shared-fs 卷**（宿主挂 JuiceFS + NFS 导出、agent NFS 挂载、配额）
+- **shared-fs 卷**（宿主挂 JuiceFS + 内核 nfsd 导出、agent NFS 挂载、后端配额）
 - TS SDK、e2b 迁移对照文档
 
 **验收**：agent rollout 场景接入（交互式终端 + 端口预览）;pause 后资源计费口径正确。
@@ -69,7 +68,7 @@ curl DELETE → 资源清零（netns/挂载/containerd task 无残留）
 
 **范围**
 
-- fc 档跨节点 restore、diff snapshot 增量、fork（CoW 一母多子）
+- fc 档跨节点 restore、diff snapshot 增量、fork 独立 API（CoW 一母多子,本节点）
 - 容器档 checkpoint 兜底：gVisor save/restore + runc CRIU（GPU/无 KVM 场景）
 - snapshot 生命周期：配额、引用计数、TTL/S3 lifecycle
 
@@ -80,6 +79,7 @@ curl DELETE → 资源清零（netns/挂载/containerd task 无残留）
 - 多租户 RBAC 与计费
 - 镜像签名（cosign）
 - allow-list 网络策略、TCP 端口暴露（SNI）
+- dataset 卷（overlaybd 只读块,数据集/权重分发——预留,需求明确后启用）
 - GPU sandbox 完整支持（探测已就位，重点是驱动注入与 gVisor GPU 路径评估）
 - 跨 region 部署与就近调度
 
@@ -94,6 +94,6 @@ curl DELETE → 资源清零（netns/挂载/containerd task 无残留）
 | GPU 走 runc 隔离弱 | GPU eval 安全短板 | GPU 独立节点池 + 镜像白名单;nvproxy（gVisor GPU）P5 评估 |
 | runsc 降级档兼容性 | 无 KVM 节点体验差 | 回归集扫描;采购/开通嵌套虚拟化优先 |
 | S3 延迟波动 | 冷启动长尾 | record-trace 预取 + 节点缓存池化 |
-| shared-fs 卷链路（JuiceFS 运维 + 宿主 NFS 服务稳定性） | 卷不可用/慢 | 后端可换(CephFS/本地盘);NFS 实现二选一留后路(go-nfs↔内核 nfsd) |
+| shared-fs 卷链路（JuiceFS 运维 + 宿主 nfsd 稳定性） | 卷不可用/慢 | 后端可换(CephFS/本地盘);极端时可切 go-nfs 用户态实现 |
 | guest 内核/agent 盘版本矩阵 | snapshot 跨版本 restore 失败 | manifest 记录版本;节点保留多版本工件 |
 | 自研调度器成熟度 | 资源碎片/饥饿 | eval 负载同质化高,先简单策略 + 指标驱动迭代 |

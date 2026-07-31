@@ -65,17 +65,16 @@ url = sbx.ports.expose(8888, auth="token")                 # → https://...
 sbx.start()                                                # 拉起原 entrypoint
 for line in sbx.logs(follow=True): ...
 
-# —— volume（独立资源：镜像=环境,卷=数据,跨 sandbox 留存）——
+# —— volume（独立资源：镜像=环境,卷=数据,跨 sandbox 留存;首期仅 shared-fs）——
 vol = client.volumes.create(name="alice-ws", type="shared-fs", quota_mib=51200)
-ds  = client.volumes.create(name="swebench-data", type="dataset")
-ds.publish(source="s3://bucket/datasets/swebench-v2/", version="v2")
 client.volumes.list(labels={...}); vol.delete()
 
 # —— snapshot ——
 sbx.pause(); sbx.resume()
 snap = sbx.snapshot(name="after-setup", keep_running=True)
 client.snapshots.list(); snap.delete()
-sbx2 = client.sandboxes.create(snapshot=snap.id)           # fan-out
+sbx2 = client.sandboxes.create(snapshot=snap.id)           # 从持久快照重建
+children = sbx.fork(count=8)                               # 独立 API：瞬时 CoW 克隆 fan-out
 ```
 
 ### 2.2 async 双形态
@@ -147,8 +146,9 @@ bean kill SBX...            # 支持 --label 批量
 bean attach SBX             # 重连 detach 的 PTY 会话
 bean start SBX              # 拉起原 entrypoint
 bean pause SBX / bean resume SBX
-bean volume create NAME --type shared-fs|dataset [--quota 100Gi]
-bean volume ls / rm VOL / publish VOL --source s3://... --version v2
+bean volume create NAME [--quota 100Gi]     # 首期仅 shared-fs
+bean volume ls / rm VOL
+bean fork SBX --count 8
 bean snapshot create SBX --name after-setup
 bean snapshot ls / rm SNAP
 bean port expose SBX 8888 [--public]
