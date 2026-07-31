@@ -330,8 +330,10 @@ control plane 作为 client 直连调用）。
 - **唤醒是平台默认行为（非配置）**：gateway/proxy 对 PAUSED sandbox 收到
   exec/端口/文件请求 → 触发 resume（fc 亚秒）→ 阻塞至恢复后透传;并发唤醒
   由控制面按 sandbox-id 去重
-- PAUSED 长期滞留：平台级全局回收策略（管理员配置,默认 7 天 → kill）,
-  非 per-sandbox 字段
+- PAUSED 滞留：**默认无限期保留**（不擅自回收用户暂停的 sandbox）;注意 PAUSED
+  仍占宿主 RAM 与调度承诺量,容量代价由容量规划承担。管理员可选开启全局回收
+  （默认关）;长期正解是 P4 的 snapshot 归档:PAUSED 超阈值 → 状态落 S3 释放
+  RAM → 再访问自动 restore
 - 业界对齐:CubeSandbox v0.5(on_timeout: pause/kill + 数据面透明唤醒)、
   e2b auto-pause/auto-resume 同构;我们以 null 表达「永不」,避开 -1/0 魔数重载
 

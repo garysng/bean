@@ -27,7 +27,7 @@ POST /sandboxes/{id}/resume
 
 - 冻结期间内存不释放——调度器仍按其 memory.max 记账（防止超卖后 resume OOM）；
   若要释放内存额度，用 snapshot
-- PAUSED 滞留回收走平台全局策略（默认 7 天,见 api-design §5.2）;idle 计时在 PAUSED 态不再适用
+- PAUSED 默认无限期保留（全局回收策略默认关,见 api-design §5.2）;P4 引入 snapshot 归档释放 RAM
 - proxy 对 PAUSED 返回 502 + Retry-After
 
 ## 3. Snapshot

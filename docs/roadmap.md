@@ -71,6 +71,7 @@ curl DELETE → 资源清零（netns/挂载/containerd task 无残留）
 **范围**
 
 - fc 档跨节点 restore、diff snapshot 增量、fork 独立 API（CoW 一母多子,本节点）
+- PAUSED 归档：超阈值自动 snapshot 落 S3 释放 RAM,再访问透明 restore
 - 容器档 checkpoint 兜底：gVisor save/restore + runc CRIU（GPU/无 KVM 场景）
 - snapshot 生命周期：配额、引用计数、TTL/S3 lifecycle
 

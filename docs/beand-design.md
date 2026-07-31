@@ -408,7 +408,7 @@ netns/veth/nftables 链均带 `bean-<id>` 命名规约，孤儿扫描按前缀�
 | 对象 | 策略 |
 |---|---|
 | sandbox idle | beand 本地 idle 检测（lifecycle 随 create 下发）:无 exec/端口/文件活动持续 idleTimeout → 执行 onIdle(pause/kill) 并发 event——不依赖控制面在线 |
-| PAUSED 滞留 | 控制面全局策略（默认 7 天 → kill,管理员可配） |
+| PAUSED 滞留 | 默认不回收;管理员可选开启全局策略（P4 后由 snapshot 归档替代） |
 | 镜像/chunk 缓存 | §4.2 水位 LRU |
 | exec 会话 | 断连 60s 无重连 |
 | 临时文件（S3 暂存下载） | S3 lifecycle 规则 1 天 |
