@@ -397,10 +397,13 @@ fc 档 agent 代码零改动，只换 transport（vsock）与注入载体（agen
       → 生成 region bootstrap token（短 TTL 24h,可限次数,可撤销）
 节点：beand 配置 token 启动 → Register(token, region, capabilities, labels)
     → 控制面校验 region 已注册 + token 有效（BYOC region 可配人工 approve）
-    → 经云托管私有 CA 签发节点 mTLS 证书（CertProvider 抽象,默认云托管
-      CA——签发/轮换/吊销外包;完全私有化部署可换自建实现）
+    → beand 从云托管证书服务拉取节点 mTLS 证书（CertProvider 抽象）
     → 节点进入 region 池,后续心跳/指令走 mTLS
 ```
+
+**证书不落盘**：证书由云托管服务管理（签发/轮换/吊销全外包）,beand 运行时
+拉取、仅内存持有;节点重启重新走拉取流程。本地磁盘零凭证残留——节点被
+回收/镜像被复制都不泄漏身份。
 
 凭证三层,职责不重叠：
 

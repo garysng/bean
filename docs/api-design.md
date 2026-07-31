@@ -15,8 +15,9 @@
 ### 2.1 API Key
 
 - `Authorization: Bearer bk_<keyid>_<secret>`
-- key 哈希存 Postgres；附带配额（并发 sandbox 数、CPU/mem 总量、镜像 prewarm 权限）
-- 首期单租户多 key；租户/RBAC 字段预留（key 表带 `tenant_id`）
+- key 哈希存 Postgres；附带配额（并发 sandbox 数、CPU/mem 总量、卷容量、prewarm 权限）
+- **不做用户/租户体系**——bean 是集群内部服务,key 仅用于调用方识别、配额与
+  审计归属;安全重心在集群内可靠性（组件 mTLS、凭证分层、隔离档）而非多租户
 
 ### 2.2 Sandbox 级短时凭证
 
