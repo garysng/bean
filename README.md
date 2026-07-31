@@ -9,7 +9,7 @@ Container-native sandbox platform for AI evaluation workloads.
 
 ## 核心特性
 
-- **镜像即环境**：无 e2b 式 template build，Docker 镜像直接启动
+- **镜像即环境**：无 e2b 式 template build,用户零操作——平台侧自动离线转换（overlaybd）,Docker 镜像直接启动
 - **秒级冷启动**：overlaybd 块级 lazy-pull from S3 + 节点缓存 + prewarm + 镜像亲和调度
 - **Firecracker 直启**：overlaybd ublk 直驱块设备 virtio-blk 挂 microVM（rootfs 直挂零嵌套,热路径无 containerd）;容器档（GPU/无 KVM 降级）P5 按需引入
 - **批量原语**：batchCreate、标签批量销毁、eval 批量 SDK helper

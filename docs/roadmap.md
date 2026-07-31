@@ -31,7 +31,7 @@ curl DELETE → 资源清零（FC 进程/tap/ublk 设备/挂载无残留）
 **范围**
 
 - scheduler：Register/Heartbeat/租约、push 直连指令下发 + SyncState 对账、bin-packing + 镜像亲和 v1（按 ref 精确匹配）;region 字段进模型（单 region 运行）
-- Postgres 状态落地、sandbox 超时 GC、beand 重启 reconcile
+- Postgres 状态落地、终态/孤儿 GC（P1 仅显式 kill + LOST 清理;idle 回收随 P3 lifecycle）、beand 重启 reconcile
 - 网络隔离完整版（nftables 规则集、DNS 注入、egress-only/none 策略）
 - Python SDK（sync + async + run_batch）、CLI 核心命令（run/ls/exec/cp/logs/kill）
 - batchCreate、标签批量销毁
@@ -62,7 +62,7 @@ curl DELETE → 资源清零（FC 进程/tap/ublk 设备/挂载无残留）
 
 - WS 流式 exec + PTY（会话重连）、CLI 交互模式（run -it / attach）
 - bean-proxy（regional）：通配域名 TLS、端口暴露（反代直连 sandbox IP）、sandbox token 鉴权、PAUSED 透明唤醒
-- pause/resume（fc PauseVM / 容器档 cgroup freezer）
+- pause/resume（fc PauseVM）+ PAUSED 透明唤醒
 - lifecycle 自动化：idle 检测（beand 本地）、onIdle pause/kill、PAUSED 请求透明唤醒
 - fc 档 snapshot 本节点路径（memory+disk → S3）
 - **shared-fs 卷**（宿主挂 JuiceFS + 内核 nfsd 导出、agent NFS 挂载、后端配额）
@@ -90,7 +90,7 @@ curl DELETE → 资源清零（FC 进程/tap/ublk 设备/挂载无残留）
 - sandbox 内应用 OTLP 透传
 - 容器档引入（GPU:containerd+runc+nvidia;无 KVM 降级:runsc）+ 容器加固基线
   + 容器档 checkpoint（gVisor save / CRIU）+ GPU sandbox 完整支持
-- 多区域完整形态：region 级调度已在 P2 就位（单 region 起步）,P5 扩展
+- 多区域完整形态：region 字段 P1 进模型（单 region 起步）,P5 扩展
   多 region blob 复制编排、BYOC region 接入流程（客户侧 token 服务、
   出向注册）、控制面多活
 

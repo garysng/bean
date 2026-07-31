@@ -77,7 +77,7 @@ POST /sandboxes
 ```
 
 ```
-GET    /sandboxes/{id}                       → sandbox 详情（state、nodeId、createdAt、expiresAt、endpoints）
+GET    /sandboxes/{id}                       → sandbox 详情（state、runtime、nodeId、createdAt、lifecycle、lastActivityAt、endpoints）
 GET    /sandboxes?label=eval-run%3Dswebench-0731&state=RUNNING&pageToken=&pageSize=100
 DELETE /sandboxes/{id}                       → 202，异步销毁；?force=true 跳过 graceful
 PATCH  /sandboxes/{id}/lifecycle { "idleTimeout": "600s", "onIdle": "kill" }   → 运行时调整
@@ -152,7 +152,7 @@ DELETE /sandboxes/{id}/files?path=...
 
 ```
 POST /sandboxes/{id}/ports    { "port": 8888, "auth": "token" }   // token|public
-→ { "url": "https://sbx-abc123-8888.sandbox.<domain>", "expiresAt": "..." }
+→ { "url": "https://sbx-abc123-8888.<region>.sandbox.<domain>" }
 GET    /sandboxes/{id}/ports
 DELETE /sandboxes/{id}/ports/{port}
 ```
@@ -269,7 +269,7 @@ service SandboxService {                       // beand 实现,control/gateway �
   rpc ForwardPort(stream PortFrame) returns (stream PortFrame);   // proxy 数据面
 }
 
-// proto/bean/agent/v1/agent.proto —— beand ↔ bean-agent（容器档 unix socket / fc 档 vsock）
+// proto/bean/agent/v1/agent.proto —— beand ↔ bean-agent（fc 档 vsock 主路径 / 容器档 unix socket,P5）
 service AgentService {
   rpc Exec(ExecRequest) returns (ExecResponse);
   rpc StreamExec(stream StreamExecFrame) returns (stream StreamExecFrame);
@@ -308,8 +308,13 @@ scheduler 决策（内存态 + Postgres 事务扣承诺量、写指令记录）
   → beand 异步执行,状态变更经 Heartbeat 上报
 ```
 
-- **部署前提**：数据面（gateway/proxy → beand 的 exec/文件/端口）要求同 region 内
-  网可达;控制面指令经云上托管 gRPC 接入层（BYOC/跨网天然可达）
+- **连接方向闭合**：数据面（gateway/proxy → beand 的 exec/文件/端口）要求同
+  region 内网可达（regional proxy 与节点同域部署）。控制面 → beand 的指令在
+  节点「出向-only、入站零暴露」前提下这样闭合：beand 启动即向托管接入层建立
+  **长连 gRPC 双向流（CommandChannel）**,控制面把 SandboxService 调用多路复用
+  到该流上下发（请求/响应帧带 command_id 关联）——语义仍是 push 直连（控制面
+  发起、同步等响应）,只是传输承载在节点出向连接上;node token 在流建立时校验,
+  流存续期即身份有效期
 - **可靠性不靠 pull,靠写库 + 对账**：
   - 指令先写 Postgres（audit + 状态机 source of truth）,RPC 只是投递方式
   - RPC 超时/失败 → 有限重试;仍失败 → 释放承诺量重调度（见 architecture D7）
@@ -349,10 +354,11 @@ control plane 作为 client 直连调用）。
 client → gateway：Bearer key / sandbox token
 gateway：state store 查 sandbox → nodeId → beand 地址（缓存 + 失效订阅）
 gateway → beand：gRPC（同 region 内网,node token 校验）
-beand → agent：容器档 unix socket / fc 档 vsock
+beand → agent：vsock（fc 主路径;容器档 unix socket,P5）
 ```
 
-sandbox 处于 PAUSED/PULLING 等非 RUNNING 态 → 409 SANDBOX_NOT_RUNNING。
+状态语义：PAUSED → 触发透明唤醒,请求阻塞至 resume（超过唤醒时限,默认 10s,
+才回 502 + Retry-After）;PULLING/STOPPING 等不可唤醒态 → 409 SANDBOX_NOT_RUNNING。
 
 ## 6. bean-proxy（端口反代服务）
 
@@ -360,8 +366,8 @@ sandbox 处于 PAUSED/PULLING 等非 RUNNING 态 → 409 SANDBOX_NOT_RUNNING。
 
 ### 6.1 域名与 TLS
 
-- 通配证书 `*.sandbox.<domain>`（ACME DNS-01 自动续期）
-- Host 规则：`{sandboxId}-{port}.sandbox.<domain>`，sandboxId 用短 ID（如 `sbx-` 去前缀后的 base32）
+- 每 region 通配证书 `*.{region}.sandbox.<domain>`（ACME DNS-01 自动续期）
+- Host 规则：`{sandboxId}-{port}.{region}.sandbox.<domain>`，sandboxId 用短 ID（如 `sbx-` 去前缀后的 base32）
 - HTTP + WebSocket 透传；非 HTTP 协议暂不支持（预留 TCP over TLS SNI 方案）
 
 ### 6.2 路由与数据面（对齐 e2b：反代直连 sandbox IP）
@@ -391,8 +397,8 @@ sandbox 处于 PAUSED/PULLING 等非 RUNNING 态 → 409 SANDBOX_NOT_RUNNING。
 
 ### 6.4 生命周期联动
 
-- sandbox 销毁/超时 → gateway 撤销端口记录 → proxy 缓存失效推送 → 后续请求 404
-- PAUSED 状态 → 502 + Retry-After（resume 后自动恢复）
+- sandbox 销毁（含 onIdle=kill）→ gateway 撤销端口记录 → proxy 缓存失效推送 → 后续请求 404
+- PAUSED → 触发透明唤醒并阻塞透传;唤醒超时（默认 10s）才回 502 + Retry-After
 
 ## 7. 配额与限流
 

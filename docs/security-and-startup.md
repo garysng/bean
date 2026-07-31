@@ -27,11 +27,14 @@ sandbox 内运行的是 **AI 生成的不可信代码**（eval 任务、agent ro
 - fc 档 guest 是真内核，无 gVisor 的 syscall 兼容性问题
 - runc 承载 GPU 意味着 **GPU eval 的隔离弱于默认档**——GPU 节点独立节点池 +
   镜像白名单收紧作为补偿控制;gVisor GPU 支持（nvproxy）作为 P5 演进项
-- runsc 降级档的兼容性回归集仍需建立（P2），不兼容镜像显式豁免，不静默降级
+- runsc 降级档兼容性回归集随容器档 P5 引入，不兼容镜像显式豁免，不静默降级
 
 ### A3. 加固基线
 
-**容器档**（runc/runsc）：
+**fc 档（主档,P2 交付）**：jailer（chroot+独立 uid/gid+设备白名单）、FC 内置
+seccomp、宿主 cgroup 包裹、可写层盘大小硬限、guest 资源自限。详见下方 fc 段。
+
+**容器档**（runc/runsc,随 P5 引入）：
 
 - cgroup v2 硬限制：cpu.max、memory.max（+ memory.swap.max=0）、pids.max（默认 4096，防 fork 炸弹）、io 权重
 - 磁盘写入上限：rootfs 可写层 XFS project quota（默认 20 GiB，可配）
@@ -92,8 +95,8 @@ sandbox token（JWT）：签名密钥控制面持有，绑定 sandbox-id + 过�
 ### A8. 平台面
 
 - API 全写操作审计（who/what/when，Postgres + S3 归档）
-- 节点最小化：专用 OS 镜像、无多余服务、beand/containerd 非 root 化评估（P3）
-- 每周期跑 sandbox 逃逸回归测试集（gVisor exploit suite 子集）
+- 节点最小化：专用 OS 镜像、无多余服务、beand 非 root 化评估（P3;containerd 如启用,P5）
+- 每周期跑 sandbox 逃逸回归测试集（FC/KVM 攻击面为主;容器档引入后加 gVisor exploit suite 子集）
 
 ---
 
@@ -108,7 +111,7 @@ sandbox token（JWT）：签名密钥控制面持有，绑定 sandbox-id + 过�
 | API + 调度 | 50 ms | 50 ms | 内存化调度器状态，无同步外呼 |
 | 指令送达 beand | 50 ms | 50 ms | push 直连 gRPC（控制面→beand） |
 | 镜像就绪 | ~0（已缓存） | 2–6 s | overlaybd：仅拉元数据+启动热块（见 B2） |
-| rootfs 挂载 | 100 ms | 200 ms | snapshotter 预热、erofs 元数据缓存 |
+| rootfs 设备就绪 | 100 ms | 200 ms | ublk 设备组装、overlaybd 元数据缓存 |
 | netns/网络 | 50 ms | 50 ms | veth/nftables 批量原子操作;IPAM 内存位图 |
 | sandbox 启动 | 200–500 ms | 200–500 ms | FC microVM 启动≈125ms+内核引导;容器档 runc≈100ms/runsc≈300ms |
 | agent ready | 100 ms | 100 ms | 静态二进制,无依赖加载 |

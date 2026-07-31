@@ -12,6 +12,8 @@
 | **restore（跨节点）** | 从 snapshot 在任意节点重建 | 反向过程 | P4 |
 | **fork（毫秒级克隆）** | 一母多子、agent 分支探索 | FC diff snapshot + CoW（仅 fc 档） | P4 |
 
+> Phase 均指 fc 主路径;表中容器档实现（freezer/CRIU/gVisor save）随 P5 容器档引入。
+
 ## 2. Pause / Resume（轻量，不落盘）
 
 ```
@@ -28,6 +30,7 @@ POST /sandboxes/{id}/resume
 - 冻结期间内存不释放——调度器仍按其 memory.max 记账（防止超卖后 resume OOM）；
   若要释放内存额度，用 snapshot
 - PAUSED 默认无限期保留（全局回收策略默认关,见 api-design §5.2）;P4 引入 snapshot 归档释放 RAM
+- 对 PAUSED 的请求触发透明唤醒（阻塞至 resume,超时才 502——与 api-design §5.2 一致）
 - proxy 对 PAUSED 返回 502 + Retry-After
 
 ## 3. Snapshot

@@ -9,7 +9,7 @@
 beand
 ├── server/          gRPC server（NodeService client 侧 + 数据面 SandboxService 实现）
 ├── runtime/         Runtime 接口 + fc/runc/runsc 实现
-├── image/           镜像拉取、snapshotter 管理、本地缓存、prewarm
+├── image/           ublk 设备/overlaybd 配置管理、S3 blob 缓存、prewarm
 ├── network/         netns/veth/bridge/nftables/tc 编排
 ├── volume/          shared-fs 宿主挂载 + NFS 导出、dataset 块设备 attach
 ├── sbxproxy/        节点侧端口反代：regional proxy → 直连 sandbox IP:port
@@ -30,9 +30,10 @@ labels:                 # 自由标签,调度 nodeSelector 过滤/打分用（�
   pool: gpu-a100
   disk: nvme
 bootstrapToken: <region bootstrap token>        # 首次注册用,见 §7.0
-controlPlane: grpcs://grpc-bean.internal.gpu-instance.novita.ai:443
-                        # 云上托管 gRPC 接入层（nexus 同款模式）,:443 TLS 由
-                        # 托管网关终结;beand 出向连接,BYOC/跨网天然可达
+controlPlane: grpcs://<hosted-gateway>:443
+                        # 云上托管 gRPC 接入层（nexus 同款模式,示例:
+                        # grpc-bean.internal....:443）,TLS 由托管网关终结;
+                        # beand 出向长连,指令经 CommandChannel 多路复用下发
 s3:
   endpoint: https://s3.ap-east-1.example.com    # 本 region S3 backend
 containerd: null        # 可选:仅容器档节点配置（GPU/无 KVM,P5）;纯 fc 节点不装
@@ -61,7 +62,7 @@ network:
 | GPU | NVML 枚举 | GPU 资源画像 + nvidia 运行时注入 |
 | cgroup v2 | `/sys/fs/cgroup/cgroup.controllers` | 强制要求 v2，v1 直接拒绝启动 |
 | ublk/tcmu | /dev/ublk-control、target_core_user | overlaybd 后端选择;两者皆无 → 不上报 fc 能力（fc 依赖块设备） |
-| 内核版本/erofs/overlayfs | `uname` + /proc/filesystems | snapshotter 选择 |
+| 内核版本/erofs | `uname` + /proc/filesystems | agent 盘（erofs）;overlayfs 仅容器档 P5 |
 
 探测结果 → `Register` 上报，之后仅在变化时重报。
 
@@ -264,8 +265,8 @@ ublk 设备就绪 → 交给 runtime。实证细节参考本地 AgentENV 源码
 - image-service（control plane 逻辑模块，见 4.4）负责把镜像**离线转换**为
   overlaybd 格式（`convertor` 工具，层级转换可增量）;转换在服务端做一次，
   节点侧零转换开销
-- 转换非阻塞：镜像首次使用时若无 overlaybd 版本，容器档走标准拉取先跑起来
-  （fc 档等待转换完成或直接报错提示 prewarm），同时后台触发转换
+- 转换非阻塞：镜像首次使用时若无 overlaybd 版本,fc 档（主）等待转换或明确报错
+  提示先 prewarm,同时后台触发转换（容器档标准拉取兜底,P5）
 - 可写层：容器档 overlayfs upper（XFS quota）;fc 档独立稀疏 overlay 盘（见 §3.2）
 
 ### 4.2 缓存管理
@@ -350,6 +351,9 @@ FC microVM 用 tap 设备替代 veth 的 netns 端，同样挂 bean0 桥，nftab
 ## 6. bean-agent
 
 ### 6.1 注入与启动
+
+> 本节描述**容器档注入**（bind mount + entrypoint override,随 P5 引入）;
+> fc 主路径的 agent 盘注入见 §3.1/§3.4。
 
 1. beand 发布目录 `/var/lib/bean/agent/<version>/bean-agent`（静态编译，musl，≈8 MiB）
 2. OCI spec 增加只读 bind mount：`/var/lib/bean/agent/<ver>/bean-agent → /.bean/agent`

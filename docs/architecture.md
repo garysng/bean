@@ -72,7 +72,7 @@ AI evaluation / agent rollout 场景（如 SWE-bench 类任务）的特点：
 
 | 组件 | 语言 | 职责 |
 |---|---|---|
-| `api-gateway` | Go | REST + gRPC API、鉴权、配额、sandbox 端口反向代理 |
+| `api-gateway` | Go | REST + gRPC API、鉴权、配额（端口反代由 bean-proxy 承担,可合部） |
 | `scheduler` | Go | 节点选择（镜像亲和 + 资源 bin-packing）、租约管理 |
 | `image-service` | Go | 镜像元数据索引、格式转换编排、prewarm、S3 blob GC（control plane 逻辑模块，P0–P2 内嵌 bean-api） |
 | `bean-proxy` | Go | 端口暴露反向代理：通配域名 TLS、路由到 beand → agent |
@@ -126,8 +126,8 @@ beand 启动时探测节点能力并上报：
 ```
 
 - **fc**：隔离最强、snapshot/fork 原生、guest 真内核无 syscall 兼容性问题
-- **runsc**：无 KVM 环境的降级档
-- **runc**：GPU 路径 + 内部可信任务 + P0/P1 链路打通基线
+- **runsc**：无 KVM 环境的降级档（P5 生效;P0–P4 无 KVM 节点不可入池）
+- **runc**：GPU 路径 + 内部可信任务（P5 按需引入）
 - ~~kata~~：被 fc 取代，不再引入
 
 API 请求不含 isolation 字段（内部 proto 保留枚举，便于运维强制指定）;
@@ -196,7 +196,7 @@ sandbox netns ←veth→ 节点 bridge → SNAT 出网
 
 - 每 sandbox 独立 netns，节点本地私有网段（如 10.100.x.0/24 per node）
 - 默认策略：允许出网（拉依赖），禁止访问节点内网/元数据服务（169.254.169.254 等），sandbox 间互相隔离（nftables）
-- 端口暴露：`{sandbox-id}-{port}.sandbox.<domain>` → api-gateway 反代 → beand → agent 端口转发，绕开云厂商 MAC/IP 白名单限制
+- 端口暴露：`{sbxId}-{port}.{region}.sandbox.<domain>` → regional proxy → beand sbxproxy → 直连 sandbox IP（agent ForwardPort 仅兜底）,绕开云厂商 MAC/IP 白名单限制
 - 不依赖 underlay/BGP，两种节点行为完全一致
 
 ### D7. 调度：镜像亲和优先的 bin-packing
@@ -247,8 +247,8 @@ cap:   [runc, runsc, fc] × 每节点并发创建余量（默认 16）
 
 - beand 定期心跳续约；租约超时 → 节点标记失联 → 其上 sandbox 标记 `lost`
 - eval 任务无状态，上层（SDK/调用方）收到 `lost` 后重建即可
-- beand 重启后 reconcile：对账本地实际状态（containerd task ∪ 存活 FC 进程）vs control plane 期望状态（SyncState）
-- GC：sandbox 超时回收、镜像层 LRU 淘汰、孤儿 netns/挂载点清理
+- beand 重启后 reconcile：对账本地实际状态（存活 FC 进程 ∪ containerd task,如启用）vs control plane 期望状态（SyncState）
+- GC：idle 回收（lifecycle.onIdle 驱动）、镜像块 LRU 淘汰、孤儿 tap/netns/挂载清理
 
 ### D10. Volume：独立于镜像的一等数据资源
 
@@ -331,7 +331,7 @@ GET    /v1/images/{ref}/status       # 缓存分布、blob 就绪度
 # 生命周期扩展 / 批量 / 卷 / 快照 / 日志（完整定义见 api-design.md）
 POST   /v1/sandboxes:batchCreate     # 批量创建（eval 高频）
 POST   /v1/sandboxes/{id}/pause|resume|snapshot|fork|start
-CRUD   /v1/volumes                   # dataset / shared-fs 卷
+CRUD   /v1/volumes                   # shared-fs 卷（dataset 预留）
 CRUD   /v1/snapshots
 GET    /v1/sandboxes/{id}/events + WS /v1/events   # 生命周期事件
 GET    /v1/sandboxes/{id}/logs
