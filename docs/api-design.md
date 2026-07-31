@@ -53,7 +53,8 @@ POST /sandboxes
 {
   "image": "registry.example.com/swebench/django__django-12345:latest",
   "isolation": "auto",                  // auto|container|vm，默认 auto（KVM+无GPU→fc）
-  "resources": { "cpu": 2, "memoryMiB": 4096, "gpu": 0 },
+  "resources": { "cpu": 2, "memoryMiB": 4096, "diskMiB": 20480 },
+                                        // gpu 字段内部预留，不对外开放
   "env": { "FOO": "bar" },
   "cmd": null,                          // 覆盖镜像 CMD；null=保留原 entrypoint（由 agent 托管拉起）
   "autoStartCmd": false,                // true 则创建后立即拉起原 entrypoint
@@ -144,7 +145,25 @@ GET  /images/prewarm/{jobId}      → 各镜像 × 节点就绪矩阵摘要
 GET  /images/{ref}/status         → { "blobReady": true, "cachedNodes": 7, "sizeBytes": ..., "format": "overlaybd" }
 ```
 
-### 3.6 Snapshots
+### 3.6 Volumes
+
+镜像与卷为两种正交资源（镜像=环境，卷=数据，独立生命周期）。详见 beand-design.md §3.3。
+
+```
+POST   /volumes    { "name": "swebench-data", "type": "shared-fs"|"dataset",
+                     "quotaMiB": 102400, "readOnly": true, "labels": {} }
+GET    /volumes?label=...
+GET    /volumes/{id}
+DELETE /volumes/{id}               // 有活跃挂载时 409
+POST   /volumes/{id}:publish       // dataset 卷：从 S3 源发布新版本
+
+# sandbox 挂载（创建时声明）：
+POST /sandboxes { ..., "volumes": [
+  { "volume": "vol_...", "subPath": "run-0731", "mountPath": "/workspace", "readOnly": false }
+] }
+```
+
+### 3.7 Snapshots
 
 ```
 GET    /snapshots?label=...            → 列表（id、srcSandboxId、sizeBytes、state）
@@ -153,7 +172,7 @@ DELETE /snapshots/{id}
 POST   /sandboxes    { "snapshot": "snap_...", ... }     // 从 snapshot 创建（代替 image 字段）
 ```
 
-### 3.7 Logs / 可观测
+### 3.8 Logs / 可观测
 
 ```
 GET /sandboxes/{id}/logs?follow=false&tailLines=1000    // agent 环形缓冲 + S3 归档

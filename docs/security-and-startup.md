@@ -24,7 +24,7 @@ sandbox 内运行的是 **AI 生成的不可信代码**（eval 任务、agent ro
 |---|---|---|---|
 | `fc`（默认主档） | Firecracker microVM | 硬件虚拟化边界，宿主暴露面最小（FC 设备模型极简 + jailer + seccomp） | KVM 节点 & 无 GPU——常规 eval/rollout |
 | `runsc` | gVisor | 用户态内核拦截 syscall，宿主内核面≈70 个 syscall | 无 KVM 节点的降级档 |
-| `runc` | runc | 仅 namespace/seccomp/caps | GPU 任务（FC 无 passthrough）+ 内部可信任务 |
+| `runc` | runc | 仅 namespace/seccomp/caps | 内部可信任务 + GPU（内部预留，不对外开放） |
 
 - fc 档 guest 是真内核，无 gVisor 的 syscall 兼容性问题
 - runc 承载 GPU 意味着 **GPU eval 的隔离弱于默认档**——GPU 节点独立节点池 +

@@ -112,13 +112,22 @@ type Runtime interface {
 | 容器档 | cgroup v2 `cpu.max`（硬）+ `cpu.weight` | `memory.max` + `memory.swap.max=0` |
 | fc 档 | vCPU 数 = ceil(cpu)，宿主侧 FC 进程再包 cgroup（cpu.max 双保险 + weight 公平） | guest 内存 = memoryMiB;virtio-balloon 空闲回收 |
 
-**超卖策略**
+**超卖策略（全部为配置项，非硬编码）**
 
-- CPU：vCPU:pCPU 默认 3:1 超卖（eval 负载突发型）;cgroup cpu.weight 按规格比例
-  分配保公平;`dedicated: true`（预留字段）→ vCPU pin，不参与超卖
-- 内存：容器档按 RSS 实际水位记账天然超卖;fc 档靠 balloon——beand 周期驱动
+```yaml
+# beand.yaml（节点级覆盖）/ 调度器全局默认
+overcommit:
+  cpu: 3.0        # allocatable = 物理核 × 该系数;1.0 = 不超卖
+  memory: 1.0     # 内存默认不超卖（fc 档 balloon 回收不改承诺量记账）
+```
+
+- CPU：eval 突发型负载默认 3.0;CPU 密集型节点池可配 1.0;cgroup cpu.weight 按
+  规格比例分配保公平;`dedicated: true`（预留字段）→ vCPU pin，不参与超卖
+- 内存：容器档按 RSS 实际水位天然复用;fc 档靠 balloon——beand 周期驱动
   气球回收空闲 guest 内存,调度器按「规格承诺量」与「气球后实际占用」双水位记账:
   新建看承诺量（保证 resume/突发有量），告警看实际占用
+- 系数变更仅影响后续调度决策，存量 sandbox 不受影响;调低导致承诺量超出新
+  allocatable 时节点标记「不再接单」自然排空
 - PAUSED：两档都不释放内存额度（防 resume OOM）;要释放走 snapshot
 - 规格上限：单 sandbox ≤ 32 vCPU / 128 GiB(fc 档 FC 自身约束;容器档同限保持一致)
 
@@ -136,6 +145,52 @@ API 层增加 `resources.diskMiB`（可写层上限，默认 20 GiB）：
 - 可写层用量随心跳上报（调度器盘水位依据）;写满行为：容器档 ENOSPC、
   fc 档 guest 内 ENOSPC，均不影响宿主
 - tmpfs：`/dev/shm` 默认 64 MiB 计入内存配额，可配
+
+## 3.3 Volume（独立的一等资源）
+
+**资源模型**：镜像与卷是两种正交资源——镜像定义环境（rootfs，不可变，随 sandbox
+销毁），卷承载数据（独立生命周期，先于 sandbox 存在、后于 sandbox 留存，可被
+多个 sandbox 同时挂载）。卷有独立的 CRUD API 与配额：
+
+```
+POST   /volumes        { "name": "swebench-data", "type": "shared-fs"|"dataset",
+                         "quotaMiB": ..., "readOnly": ... }
+GET    /volumes / DELETE /volumes/{id}
+
+POST /sandboxes { ..., "volumes": [
+  { "volume": "vol_...", "subPath": "run-0731", "mountPath": "/workspace", "readOnly": false }
+] }
+```
+
+**两种类型：**
+
+| 类型 | 后端 | 语义 | 场景 |
+|---|---|---|---|
+| `shared-fs` | JuiceFS（on S3+Redis，与 S3 底座一致）或 CephFS，平台配置，用户不感知 | POSIX 读写共享 | 持久工作区、跨 sandbox 共享数据 |
+| `dataset` | overlaybd 只读块（实现上复用镜像的 S3 传输/缓存管道，但资源上是独立对象） | 只读、版本化发布 | 数据集/模型权重海量只读消费 |
+
+**挂载路径按档位分流：**
+
+| 档 | shared-fs | dataset |
+|---|---|---|
+| 容器档 | 宿主挂载（每节点一个挂载点，beand 管理）→ bind mount subPath | 块设备挂载 → bind mount |
+| fc 档 | **guest 内直挂**：agent 跑 JuiceFS/ceph 客户端，走 sandbox 出网连元数据服务与 S3（FC 无 virtiofs，宿主透传不可行） | 多挂一块 virtio-blk，天然支持 |
+
+fc 档 shared-fs 要点：
+
+- 客户端二进制随 agent 盘注入（不进用户镜像）;挂载凭证为 volume 级短时 token
+  （控制面签发，只授权该 volume 目录），经 vsock 下发,不落盘
+- 网络策略例外：`egress-only`/`none` 均放行 guest → 文件系统元数据服务/S3 的
+  白名单地址（nftables per-sandbox 链插入）
+- 性能预期明示：guest 内 FUSE + 网络路径吞吐低于容器档 bind mount;
+  只读大数据集优先用 dataset 卷
+- 挂载失败属 sandbox 创建失败（FAILED,带明确 reason）
+
+**不做**：sandbox 间实时协作锁语义——共享写一律经 shared-fs 后端落盘,
+一致性由后端文件系统保证。
+
+**调度联动**：shared-fs 无节点亲和（网络文件系统全节点可达）;dataset 卷参与
+镜像亲和打分（块缓存命中）。
 
 ## 4. 镜像模块
 

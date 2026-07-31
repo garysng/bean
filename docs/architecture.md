@@ -116,9 +116,9 @@ sandbox 创建请求携带 `isolation: auto | container | vm`，默认 `auto`：
 
 ```
 auto 解析规则：
-  KVM 节点 & 无 GPU 请求 → fc（Firecracker microVM，默认主档，见 D9）
-  GPU 请求               → runc 容器档（FC 无 GPU passthrough，硬限制）
+  KVM 节点 → fc（Firecracker microVM，默认主档，见 D9）
   无 KVM 节点            → runsc（gVisor 降级档）
+  GPU（内部预留，不对外）→ runc 容器档（FC 无 GPU passthrough）
 显式 container(runc|runsc) / vm(fc) 仍允许
 ```
 
@@ -194,7 +194,7 @@ evaluation 调度足够简单，自研反而能做 K8s 做不了的精细优化�
 **节点资源画像**（心跳上报，调度器内存态维护）：
 
 ```
-cpu:   allocatable vCPU（物理核 × 超卖系数 3，预留系统份额）
+cpu:   allocatable vCPU（物理核 × 超卖系数,配置项默认 3.0,预留系统份额）
        已承诺 = Σ sandbox.cpu;实际负载 = 节点 load（仅告警用）
 mem:   allocatable = 物理内存 − 系统预留
        已承诺 = Σ sandbox.memoryMiB（fc 档气球回收不减承诺量——保 resume/突发）
