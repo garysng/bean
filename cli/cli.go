@@ -23,8 +23,16 @@ type Client struct {
 }
 
 func NewClient(baseURL, apiKey string) *Client {
+	timeout := 15 * time.Minute
+	// BEAN_TIMEOUT accepts a Go duration (e.g. "30s"); mainly for tests and
+	// scripted use where a hung endpoint should fail fast.
+	if v := os.Getenv("BEAN_TIMEOUT"); v != "" {
+		if d, err := time.ParseDuration(v); err == nil && d > 0 {
+			timeout = d
+		}
+	}
 	return &Client{BaseURL: strings.TrimRight(baseURL, "/"), APIKey: apiKey,
-		HTTP: &http.Client{Timeout: 15 * time.Minute}}
+		HTTP: &http.Client{Timeout: timeout}}
 }
 
 func (c *Client) do(method, path string, body any) (*http.Response, error) {

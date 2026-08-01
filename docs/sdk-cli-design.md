@@ -167,6 +167,7 @@ bean version / bean config [get|set|use-profile]
 - 长操作（run 等待 RUNNING、snapshot）显示 spinner + 阶段（SCHEDULED→PULLING→…），
   `--no-wait` 立即返回 id
 - 退出码：0 成功;`bean exec` 透传远端 exit code;平台错误 ≥ 125
+- 环境变量：`BEAN_BASE_URL`、`BEAN_API_KEY`、`BEAN_TIMEOUT`（Go duration,默认 15m）
 
 ### 4.3 交互模式
 
