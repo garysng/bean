@@ -43,6 +43,13 @@ func TestMain(m *testing.M) {
 
 // startStack runs noded (localRuntime) + bean-api in-process.
 func startStack(t *testing.T) *httptest.Server {
+	ts, _ := startStackWithServer(t)
+	return ts
+}
+
+// startStackWithServer also returns the Server for tests that need to
+// reach into it (metrics registry, etc).
+func startStackWithServer(t *testing.T) (*httptest.Server, *Server) {
 	t.Helper()
 	mgr := node.NewManager(runtime.NewLocalRuntime(agentBin, t.TempDir()))
 	t.Cleanup(mgr.Close)
@@ -71,7 +78,7 @@ func startStack(t *testing.T) *httptest.Server {
 	srv := NewServer(st, nodev1.NewSandboxServiceClient(conn), "node-test", testKey)
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
-	return ts
+	return ts, srv
 }
 
 func doReq(t *testing.T, ts *httptest.Server, method, path string, body any) (*http.Response, map[string]any) {

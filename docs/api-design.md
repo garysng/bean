@@ -227,7 +227,12 @@ webhook 推送为 P5 储备项。
 ```
 GET /sandboxes/{id}/logs?follow=false&tailLines=1000    // agent 环形缓冲 + S3 归档
 GET /nodes                                              // 运维面：节点列表、容量、能力
-GET /metrics                                            // Prometheus 格式（平台自身指标）
+GET /metrics                                            // Prometheus 格式（免鉴权:本地采集,不含 sandbox 内容）
+    // bean_sandbox_creates_total{outcome}         创建结果计数
+    // bean_sandbox_create_duration_seconds{outcome}  端到端创建延迟直方图
+    // bean_exec_duration_seconds{outcome}         exec 往返延迟
+    // bean_sandboxes{state}                       各状态 sandbox 数（scrape 时按库重算）
+    // bean_events_total{type}  bean_event_subscribers
 ```
 
 **OTel 采集**：

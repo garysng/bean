@@ -22,6 +22,7 @@ import (
 	"github.com/garysng/bean/internal/control/store"
 	commonv1 "github.com/garysng/bean/internal/gen/bean/common/v1"
 	nodev1 "github.com/garysng/bean/internal/gen/bean/node/v1"
+	"github.com/garysng/bean/internal/obs"
 )
 
 const (
@@ -50,6 +51,7 @@ type Server struct {
 	runtimeTier string
 	apiKey      string
 	bus         *eventBus
+	metrics     *obs.Registry
 	mux         *http.ServeMux
 }
 
@@ -86,7 +88,7 @@ func NewServerWithOptions(st *store.Store, router Router, placer Placer, opts Op
 	s := &Server{store: st, router: router, placer: placer,
 		defaultNodeID: opts.DefaultNodeID, region: opts.Region,
 		runtimeTier: tier, apiKey: opts.APIKey,
-		bus: newEventBus(), mux: http.NewServeMux()}
+		bus: newEventBus(), metrics: obs.NewRegistry(), mux: http.NewServeMux()}
 	s.routes()
 	return s
 }
@@ -118,13 +120,15 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
+	s.mux.HandleFunc("GET /metrics", s.handleMetrics)
 }
 
 // ---- auth / errors ----
 
 func (s *Server) authMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		if r.URL.Path == "/healthz" {
+		// Health and metrics are scraped locally and carry no sandbox data.
+		if r.URL.Path == "/healthz" || r.URL.Path == "/metrics" {
 			next.ServeHTTP(w, r)
 			return
 		}
@@ -195,6 +199,17 @@ type createRequest struct {
 }
 
 func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
+	start := time.Now()
+	outcome := "error"
+	defer func() {
+		s.metrics.IncCounter("bean_sandbox_creates_total",
+			"Sandbox create attempts by outcome.",
+			map[string]string{"outcome": outcome}, 1)
+		s.metrics.ObserveDuration("bean_sandbox_create_duration_seconds",
+			"End-to-end sandbox create latency.",
+			map[string]string{"outcome": outcome}, time.Since(start))
+	}()
+
 	var req createRequest
 	if err := json.NewDecoder(io.LimitReader(r.Body, 1<<20)).Decode(&req); err != nil {
 		writeErr(w, http.StatusBadRequest, "INVALID_ARGUMENT", "invalid JSON: "+err.Error())
@@ -264,6 +279,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		}
 		nodeID, err := s.placer.Schedule(placement)
 		if err != nil {
+			outcome = "no_capacity"
 			writeErr(w, http.StatusServiceUnavailable, "NO_CAPACITY", err.Error())
 			return
 		}
@@ -302,6 +318,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	_ = s.store.PutSandbox(rec)
 	s.emit(id, "sandbox.lifecycle.running", nil)
 
+	outcome = "success"
 	writeJSON(w, http.StatusCreated, map[string]any{"sandbox": rec})
 }
 
@@ -359,6 +376,42 @@ func (s *Server) loadSandbox(w http.ResponseWriter, id string) *store.SandboxRec
 		return nil
 	}
 	return rec
+}
+
+// Metrics exposes the registry so binaries can add their own series.
+func (s *Server) Metrics() *obs.Registry { return s.metrics }
+
+func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
+	s.refreshStateGauges()
+	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+	if err := s.metrics.WritePrometheus(w); err != nil {
+		log.Printf("write metrics: %v", err)
+	}
+}
+
+// refreshStateGauges recomputes sandbox counts per state at scrape time,
+// which keeps the counters authoritative even after a restart.
+func (s *Server) refreshStateGauges() {
+	recs, err := s.store.ListSandboxes("", "", "")
+	if err != nil {
+		log.Printf("metrics: list sandboxes: %v", err)
+		return
+	}
+	counts := map[string]float64{}
+	for _, rec := range recs {
+		counts[rec.State]++
+	}
+	// Zero out states we know about so a drained state does not keep its
+	// last value forever.
+	for _, st := range []string{"PENDING", "RUNNING", "PAUSED", "STOPPED", "FAILED", "LOST"} {
+		if _, ok := counts[st]; !ok {
+			counts[st] = 0
+		}
+	}
+	for st, n := range counts {
+		s.metrics.SetGauge("bean_sandboxes", "Sandboxes by state.",
+			map[string]string{"state": st}, n)
+	}
 }
 
 // resolveNode loads the sandbox and returns the client for its node,
@@ -501,6 +554,7 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), timeout+10*time.Second)
 	defer cancel()
+	execStart := time.Now()
 	resp, err := nodeClient.Exec(ctx, &commonv1.ExecRequest{
 		SandboxId:      id,
 		Cmd:            req.Cmd,
@@ -510,6 +564,9 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 		Stdin:          req.Stdin,
 		MaxOutputBytes: req.MaxOutputBytes,
 	})
+	s.metrics.ObserveDuration("bean_exec_duration_seconds",
+		"Exec round-trip latency through the gateway.",
+		map[string]string{"outcome": execOutcome(err)}, time.Since(execStart))
 	if err != nil {
 		grpcToHTTP(w, err)
 		return
@@ -729,6 +786,17 @@ func (s *Server) emit(sandboxID, typ string, data map[string]string) {
 		labels = rec.Labels
 	}
 	s.bus.publish(ev, labels)
+	s.metrics.IncCounter("bean_events_total", "Lifecycle events emitted by type.",
+		map[string]string{"type": typ}, 1)
+	s.metrics.SetGauge("bean_event_subscribers", "Live event stream subscribers.",
+		nil, float64(s.bus.subscriberCount()))
+}
+
+func execOutcome(err error) string {
+	if err == nil {
+		return "success"
+	}
+	return "error"
 }
 
 // handleEventStream streams lifecycle events as SSE until the client
