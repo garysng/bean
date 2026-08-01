@@ -18,7 +18,18 @@ var version = "dev"
 func main() {
 	listenAddr := flag.String("listen", "/run/bean/agent.sock", "unix socket path (or vsock:PORT on fc tier)")
 	rootDir := flag.String("root", "", "confine file ops under this dir (dev mode); empty = host root")
+	pivot := flag.String("pivot", "",
+		"block device holding the user image; mounted as / before serving (fc tier)")
 	flag.Parse()
+
+	// As PID 1 in a microVM the agent owns early boot: the user image is not
+	// the root filesystem until this runs, so it happens before the listener is
+	// bound and before any user process can observe a half-built root.
+	if *pivot != "" {
+		if err := beand.PivotToRootfs(*pivot); err != nil {
+			log.Fatalf("pivot to %s: %v", *pivot, err)
+		}
+	}
 
 	lis, err := beand.Listen(*listenAddr)
 	if err != nil {

@@ -42,6 +42,15 @@ func main() {
 	diskAlloc := flag.Int64("disk-mib", 102400, "allocatable sandbox disk (MiB)")
 	labelsFlag := flag.String("labels", "", "comma-separated node labels, e.g. pool=nvme,zone=a")
 	metricsAddr := flag.String("metrics", "", "HTTP address for /metrics (empty = disabled)")
+	fcBin := flag.String("firecracker-bin", "firecracker", "Firecracker binary (fc runtime)")
+	fcKernel := flag.String("kernel", "/var/lib/bean/assets/vmlinux",
+		"guest kernel image (fc runtime)")
+	fcAgentDisk := flag.String("agent-disk", "",
+		"read-only image holding beand, attached to every microVM (fc runtime)")
+	imageDir := flag.String("image-dir", "/var/lib/bean/images",
+		"prepared base images (fc runtime)")
+	defaultDiskMiB := flag.Int64("default-disk-mib", 2048,
+		"sandbox rootfs size when the spec does not bound it (fc runtime)")
 	flag.Parse()
 
 	if *nodeToken == "" && !isLoopback(*listen) {
@@ -52,8 +61,21 @@ func main() {
 	switch *rtName {
 	case "local":
 		rt = runtime.NewLocalRuntime(*agentBin, *baseDir)
+	case "fc":
+		fcRT, err := runtime.NewFCTier(runtime.FCTierConfig{
+			FirecrackerBin: *fcBin,
+			KernelPath:     *fcKernel,
+			AgentDiskPath:  *fcAgentDisk,
+			BaseDir:        *baseDir,
+			ImageDir:       *imageDir,
+			DefaultDiskMiB: *defaultDiskMiB,
+		})
+		if err != nil {
+			log.Fatalf("fc runtime: %v", err)
+		}
+		rt = fcRT
 	default:
-		log.Fatalf("runtime %q not supported on this build (fc requires linux+KVM)", *rtName)
+		log.Fatalf("runtime %q not supported (want local or fc)", *rtName)
 	}
 
 	mgr := node.NewManager(rt)
