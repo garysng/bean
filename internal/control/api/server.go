@@ -19,6 +19,7 @@ import (
 	"github.com/garysng/bean/internal/control/image"
 	"github.com/garysng/bean/internal/control/scheduler"
 	"github.com/garysng/bean/internal/control/secret"
+	"github.com/garysng/bean/internal/control/snapshot"
 	"github.com/garysng/bean/internal/control/store"
 	commonv1 "github.com/garysng/bean/internal/gen/bean/common/v1"
 	nodev1 "github.com/garysng/bean/internal/gen/bean/node/v1"
@@ -51,6 +52,7 @@ type Server struct {
 	runtimeTier string
 	apiKey      string
 	images      *image.Service
+	snapshots   snapshot.Blobs
 	secrets     *secret.Box
 	bus         *eventBus
 	metrics     *obs.Registry
@@ -84,6 +86,8 @@ type Options struct {
 	// Secrets encrypts persisted credentials; nil disables the registry
 	// credential endpoints rather than storing secrets in the clear.
 	Secrets *secret.Box
+	// Snapshots stores checkpoint blobs; nil disables snapshot endpoints.
+	Snapshots snapshot.Blobs
 }
 
 // NewServerWithOptions is the full constructor.
@@ -94,7 +98,7 @@ func NewServerWithOptions(st *store.Store, router Router, placer Placer, opts Op
 	}
 	s := &Server{store: st, router: router, placer: placer,
 		defaultNodeID: opts.DefaultNodeID, region: opts.Region,
-		runtimeTier: tier, apiKey: opts.APIKey, images: opts.Images, secrets: opts.Secrets,
+		runtimeTier: tier, apiKey: opts.APIKey, images: opts.Images, secrets: opts.Secrets, snapshots: opts.Snapshots,
 		bus: newEventBus(), metrics: obs.NewRegistry(), mux: http.NewServeMux()}
 	s.routes()
 	return s
@@ -133,6 +137,10 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("PUT /v1/registries", s.handlePutRegistry)
 	s.mux.HandleFunc("GET /v1/registries", s.handleListRegistries)
 	s.mux.HandleFunc("DELETE /v1/registries/{host}", s.handleDeleteRegistry)
+	s.mux.HandleFunc("POST /v1/sandboxes/{id}/snapshot", s.handleCreateSnapshot)
+	s.mux.HandleFunc("GET /v1/snapshots", s.handleListSnapshots)
+	s.mux.HandleFunc("GET /v1/snapshots/{id}", s.handleGetSnapshot)
+	s.mux.HandleFunc("DELETE /v1/snapshots/{id}", s.handleDeleteSnapshot)
 	s.mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
@@ -198,7 +206,12 @@ func grpcToHTTP(w http.ResponseWriter, err error) {
 // ---- sandbox lifecycle ----
 
 type createRequest struct {
-	Image     string `json:"image"`
+	// Image is the native OCI reference to run. Mutually exclusive with
+	// Snapshot.
+	Image string `json:"image"`
+	// Snapshot restores a previously captured sandbox instead of starting
+	// from an image.
+	Snapshot  string `json:"snapshot"`
 	Resources *struct {
 		CPU       float64 `json:"cpu"`
 		MemoryMiB int64   `json:"memoryMiB"`
@@ -231,14 +244,19 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "INVALID_ARGUMENT", "invalid JSON: "+err.Error())
 		return
 	}
-	if req.Image == "" {
-		writeErr(w, http.StatusBadRequest, "IMAGE_REF_INVALID", "image is required")
+	switch {
+	case req.Image == "" && req.Snapshot == "":
+		writeErr(w, http.StatusBadRequest, "INVALID_ARGUMENT", "image or snapshot is required")
+		return
+	case req.Image != "" && req.Snapshot != "":
+		writeErr(w, http.StatusBadRequest, "INVALID_ARGUMENT",
+			"image and snapshot are mutually exclusive")
 		return
 	}
 
 	// Register the image so its metadata (and later, digest and conversion
 	// state) exists for anything the platform has been asked to run.
-	if s.images != nil {
+	if s.images != nil && req.Image != "" {
 		if _, err := s.images.Resolve(req.Image); err != nil {
 			outcome = "error"
 			writeErr(w, http.StatusBadRequest, "IMAGE_REF_INVALID", err.Error())
@@ -292,6 +310,12 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		spec.Lifecycle = &nodev1.Lifecycle{HasIdleTimeout: true, IdleTimeoutSeconds: secs, OnIdle: onIdle}
 		rec.IdleTimeout = &secs
 		rec.OnIdle = onIdle
+	}
+
+	if req.Snapshot != "" {
+		outcome = "restore"
+		s.createFromSnapshot(w, r, &req, spec, rec)
+		return
 	}
 
 	// Placement: pick a node before persisting, so a capacity failure never

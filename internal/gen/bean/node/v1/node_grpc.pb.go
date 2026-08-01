@@ -202,6 +202,8 @@ const (
 	SandboxService_PauseSandbox_FullMethodName     = "/bean.node.v1.SandboxService/PauseSandbox"
 	SandboxService_ResumeSandbox_FullMethodName    = "/bean.node.v1.SandboxService/ResumeSandbox"
 	SandboxService_GetSandbox_FullMethodName       = "/bean.node.v1.SandboxService/GetSandbox"
+	SandboxService_SnapshotSandbox_FullMethodName  = "/bean.node.v1.SandboxService/SnapshotSandbox"
+	SandboxService_RestoreSandbox_FullMethodName   = "/bean.node.v1.SandboxService/RestoreSandbox"
 	SandboxService_StartUserProcess_FullMethodName = "/bean.node.v1.SandboxService/StartUserProcess"
 	SandboxService_Exec_FullMethodName             = "/bean.node.v1.SandboxService/Exec"
 	SandboxService_StreamExec_FullMethodName       = "/bean.node.v1.SandboxService/StreamExec"
@@ -225,6 +227,12 @@ type SandboxServiceClient interface {
 	PauseSandbox(ctx context.Context, in *PauseSandboxRequest, opts ...grpc.CallOption) (*PauseSandboxResponse, error)
 	ResumeSandbox(ctx context.Context, in *ResumeSandboxRequest, opts ...grpc.CallOption) (*ResumeSandboxResponse, error)
 	GetSandbox(ctx context.Context, in *GetSandboxRequest, opts ...grpc.CallOption) (*GetSandboxResponse, error)
+	// SnapshotSandbox streams a checkpoint out of the node. The sandbox is
+	// frozen for the duration and returned to its prior state afterwards.
+	SnapshotSandbox(ctx context.Context, in *SnapshotSandboxRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[SnapshotChunk], error)
+	// RestoreSandbox creates a sandbox from a checkpoint stream. The first
+	// frame carries the spec; the rest is checkpoint data.
+	RestoreSandbox(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[RestoreSandboxFrame, RestoreSandboxResponse], error)
 	StartUserProcess(ctx context.Context, in *StartUserProcessNodeRequest, opts ...grpc.CallOption) (*StartUserProcessNodeResponse, error)
 	// Data plane passthrough to AgentService.
 	Exec(ctx context.Context, in *v1.ExecRequest, opts ...grpc.CallOption) (*v1.ExecResponse, error)
@@ -294,6 +302,38 @@ func (c *sandboxServiceClient) GetSandbox(ctx context.Context, in *GetSandboxReq
 	return out, nil
 }
 
+func (c *sandboxServiceClient) SnapshotSandbox(ctx context.Context, in *SnapshotSandboxRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[SnapshotChunk], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &SandboxService_ServiceDesc.Streams[0], SandboxService_SnapshotSandbox_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[SnapshotSandboxRequest, SnapshotChunk]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type SandboxService_SnapshotSandboxClient = grpc.ServerStreamingClient[SnapshotChunk]
+
+func (c *sandboxServiceClient) RestoreSandbox(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[RestoreSandboxFrame, RestoreSandboxResponse], error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	stream, err := c.cc.NewStream(ctx, &SandboxService_ServiceDesc.Streams[1], SandboxService_RestoreSandbox_FullMethodName, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	x := &grpc.GenericClientStream[RestoreSandboxFrame, RestoreSandboxResponse]{ClientStream: stream}
+	return x, nil
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type SandboxService_RestoreSandboxClient = grpc.ClientStreamingClient[RestoreSandboxFrame, RestoreSandboxResponse]
+
 func (c *sandboxServiceClient) StartUserProcess(ctx context.Context, in *StartUserProcessNodeRequest, opts ...grpc.CallOption) (*StartUserProcessNodeResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(StartUserProcessNodeResponse)
@@ -316,7 +356,7 @@ func (c *sandboxServiceClient) Exec(ctx context.Context, in *v1.ExecRequest, opt
 
 func (c *sandboxServiceClient) StreamExec(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[v1.StreamExecFrame, v1.StreamExecFrame], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &SandboxService_ServiceDesc.Streams[0], SandboxService_StreamExec_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &SandboxService_ServiceDesc.Streams[2], SandboxService_StreamExec_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -329,7 +369,7 @@ type SandboxService_StreamExecClient = grpc.BidiStreamingClient[v1.StreamExecFra
 
 func (c *sandboxServiceClient) ReadFile(ctx context.Context, in *v1.ReadFileRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[v1.FileChunk], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &SandboxService_ServiceDesc.Streams[1], SandboxService_ReadFile_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &SandboxService_ServiceDesc.Streams[3], SandboxService_ReadFile_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -348,7 +388,7 @@ type SandboxService_ReadFileClient = grpc.ServerStreamingClient[v1.FileChunk]
 
 func (c *sandboxServiceClient) WriteFile(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[v1.WriteFileFrame, v1.WriteFileResponse], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &SandboxService_ServiceDesc.Streams[2], SandboxService_WriteFile_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &SandboxService_ServiceDesc.Streams[4], SandboxService_WriteFile_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -381,7 +421,7 @@ func (c *sandboxServiceClient) ListDir(ctx context.Context, in *v1.ListDirReques
 
 func (c *sandboxServiceClient) GetLogs(ctx context.Context, in *v1.GetLogsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[v1.LogChunk], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &SandboxService_ServiceDesc.Streams[3], SandboxService_GetLogs_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &SandboxService_ServiceDesc.Streams[5], SandboxService_GetLogs_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -411,6 +451,12 @@ type SandboxServiceServer interface {
 	PauseSandbox(context.Context, *PauseSandboxRequest) (*PauseSandboxResponse, error)
 	ResumeSandbox(context.Context, *ResumeSandboxRequest) (*ResumeSandboxResponse, error)
 	GetSandbox(context.Context, *GetSandboxRequest) (*GetSandboxResponse, error)
+	// SnapshotSandbox streams a checkpoint out of the node. The sandbox is
+	// frozen for the duration and returned to its prior state afterwards.
+	SnapshotSandbox(*SnapshotSandboxRequest, grpc.ServerStreamingServer[SnapshotChunk]) error
+	// RestoreSandbox creates a sandbox from a checkpoint stream. The first
+	// frame carries the spec; the rest is checkpoint data.
+	RestoreSandbox(grpc.ClientStreamingServer[RestoreSandboxFrame, RestoreSandboxResponse]) error
 	StartUserProcess(context.Context, *StartUserProcessNodeRequest) (*StartUserProcessNodeResponse, error)
 	// Data plane passthrough to AgentService.
 	Exec(context.Context, *v1.ExecRequest) (*v1.ExecResponse, error)
@@ -444,6 +490,12 @@ func (UnimplementedSandboxServiceServer) ResumeSandbox(context.Context, *ResumeS
 }
 func (UnimplementedSandboxServiceServer) GetSandbox(context.Context, *GetSandboxRequest) (*GetSandboxResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method GetSandbox not implemented")
+}
+func (UnimplementedSandboxServiceServer) SnapshotSandbox(*SnapshotSandboxRequest, grpc.ServerStreamingServer[SnapshotChunk]) error {
+	return status.Error(codes.Unimplemented, "method SnapshotSandbox not implemented")
+}
+func (UnimplementedSandboxServiceServer) RestoreSandbox(grpc.ClientStreamingServer[RestoreSandboxFrame, RestoreSandboxResponse]) error {
+	return status.Error(codes.Unimplemented, "method RestoreSandbox not implemented")
 }
 func (UnimplementedSandboxServiceServer) StartUserProcess(context.Context, *StartUserProcessNodeRequest) (*StartUserProcessNodeResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method StartUserProcess not implemented")
@@ -579,6 +631,24 @@ func _SandboxService_GetSandbox_Handler(srv interface{}, ctx context.Context, de
 	}
 	return interceptor(ctx, in, info, handler)
 }
+
+func _SandboxService_SnapshotSandbox_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(SnapshotSandboxRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
+	}
+	return srv.(SandboxServiceServer).SnapshotSandbox(m, &grpc.GenericServerStream[SnapshotSandboxRequest, SnapshotChunk]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type SandboxService_SnapshotSandboxServer = grpc.ServerStreamingServer[SnapshotChunk]
+
+func _SandboxService_RestoreSandbox_Handler(srv interface{}, stream grpc.ServerStream) error {
+	return srv.(SandboxServiceServer).RestoreSandbox(&grpc.GenericServerStream[RestoreSandboxFrame, RestoreSandboxResponse]{ServerStream: stream})
+}
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type SandboxService_RestoreSandboxServer = grpc.ClientStreamingServer[RestoreSandboxFrame, RestoreSandboxResponse]
 
 func _SandboxService_StartUserProcess_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(StartUserProcessNodeRequest)
@@ -733,6 +803,16 @@ var SandboxService_ServiceDesc = grpc.ServiceDesc{
 		},
 	},
 	Streams: []grpc.StreamDesc{
+		{
+			StreamName:    "SnapshotSandbox",
+			Handler:       _SandboxService_SnapshotSandbox_Handler,
+			ServerStreams: true,
+		},
+		{
+			StreamName:    "RestoreSandbox",
+			Handler:       _SandboxService_RestoreSandbox_Handler,
+			ClientStreams: true,
+		},
 		{
 			StreamName:    "StreamExec",
 			Handler:       _SandboxService_StreamExec_Handler,

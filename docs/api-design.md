@@ -159,15 +159,43 @@ DELETE /sandboxes/{id}/ports/{port}
 
 ### 3.5 Images
 
+**术语（必须区分清楚）**：
+
+| 概念 | 归属 | 说明 |
+|---|---|---|
+| `ref` | **用户输入** | 原生 OCI 引用（`python:3.12`）。用户只提供也只看到这个 |
+| `digest` | 平台解析 | tag 解析一次后固定;调度/缓存/复现全部按 digest,避免移动 tag 改变批次内容 |
+| overlaybd 产物 | **平台内部** | 转换后的块设备形态,用户不可见、不可指定 |
+| `state` | 平台内部 | `PENDING → CONVERTING → READY \| FAILED` |
+
+`format` 字段告诉调用方当前哪个档能跑该镜像：`oci`（未转换,走标准拉取）
+或 `overlaybd`（已转换,fc 档可用）。
+
 ```
-POST /images/prewarm   { "refs": ["img:a", "img:b"], "region": "ap-east-1",
+GET  /images                      列表
+GET  /images/status?ref=<ref>     单镜像状态（ref 走 query:含 / 与 :）
+     → { ref, digest, state, format, cachedNodes, sizeBytes }
+POST /images/prewarm   { "refs": ["img:a"], "region": "ap-east-1",
                          "targetNodes": 10, "priority": "high" }
-                       // region 缺省 = 镜像源 region;跨 region 首次 prewarm
-                       // 触发 blob 复制到该 region S3
-→ { "jobId": "pw_..." }
-GET  /images/prewarm/{jobId}      → 各镜像 × 节点就绪矩阵摘要
-GET  /images/{ref}/status         → { "blobReady": true, "cachedNodes": 7, "sizeBytes": ..., "format": "overlaybd" }
+     → { jobId, refs, ready: {ref: nodeCount}, done }
+GET  /images/prewarm/{jobId}      各镜像 × 节点就绪矩阵
 ```
+
+**Registry 认证**（私有镜像）：按 registry host 登记一次凭证,之后私有镜像与
+公开镜像用法完全相同——只给 ref。
+
+```
+PUT    /registries   { "host": "registry.example.com", "username": "robot",
+                       "secret": "..." }     // secret 只写:响应/日志/sandbox 均不含
+GET    /registries                            → host/username/时间戳（无 secret）
+DELETE /registries/{host}
+```
+
+- 凭证 AES-256-GCM 加密后落库（`--secret-key` / `BEAN_SECRET_KEY`）,
+  数据库副本本身不足以拉取私有镜像;**无 master key 时端点拒绝而非明文存储**
+- 无凭证的 registry 按匿名拉取,公开镜像照常工作
+- host 归一化:`https://r.io/` 与 `r.io` 视为同一个;无 host 的 ref 默认
+  Docker Hub（与容器运行时同规则）
 
 ### 3.6 Volumes
 
@@ -195,11 +223,25 @@ POST /sandboxes { ..., "volumes": [
 ### 3.7 Snapshots
 
 ```
-GET    /snapshots?label=...            → 列表（id、srcSandboxId、sizeBytes、state）
+POST   /sandboxes/{id}/snapshot  { "name": "after-setup", "labels": {},
+                                   "keepRunning": true }
+       → 202 { snapshotId, snapshot: {state, sizeBytes, ...} }
+GET    /snapshots?label=k%3Dv&state=READY   → 列表
 GET    /snapshots/{id}
-DELETE /snapshots/{id}
-POST   /sandboxes    { "snapshot": "snap_...", ... }     // 从 snapshot 创建（代替 image 字段）
+DELETE /snapshots/{id}                       // RefCount>0 → 409 SNAPSHOT_IN_USE
+POST   /sandboxes    { "snapshot": "snap_..." }   // 从 snapshot 创建
+                                                  // image 与 snapshot 互斥
 ```
+
+- `keepRunning` 默认 **true**：snapshot 不应打扰正在工作的 sandbox;
+  为一致性会短暂冻结,完成后恢复原状态（RUNNING 或 PAUSED 均保持）
+- snapshot 状态机 `CREATING → READY | FAILED`;失败会记录 reason,
+  不会卡在 CREATING
+- **引用计数**：restore 期间持有引用,期间删除返回 409;restore 结束自动释放
+- restore 继承 snapshot 的 image（rootfs 基底必须与 checkpoint 匹配）
+- checkpoint 格式**按 runtime 档区分**,不可互换,故 snapshot 记录产出它的 runtime
+- blob 存储走 `snapshot.Blobs` 接口：当前本地目录（原子写:临时文件 + rename,
+  失败不留可读的半成品）,S3 后续替换实现即可
 
 ### 3.8 Events
 

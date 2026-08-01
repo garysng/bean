@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -23,7 +24,11 @@ func stubAPI(t *testing.T) (*httptest.Server, *[]string) {
 		seen = append(seen, "create")
 		var body map[string]any
 		json.NewDecoder(r.Body).Decode(&body)
-		if img, _ := body["image"].(string); img == "" || img == "reject-me" {
+		img, _ := body["image"].(string)
+		snap, _ := body["snapshot"].(string)
+		// A create must name exactly one source; "reject-me" simulates a
+		// server-side rejection.
+		if (img == "" && snap == "") || img == "reject-me" {
 			w.WriteHeader(400)
 			json.NewEncoder(w).Encode(map[string]any{
 				"error": map[string]string{"code": "IMAGE_REF_INVALID", "message": "image rejected"}})
@@ -101,6 +106,52 @@ func stubAPI(t *testing.T) (*httptest.Server, *[]string) {
 		w.Write([]byte("remote-data"))
 	})
 
+	mux.HandleFunc("POST /v1/sandboxes/{id}/snapshot", func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		json.NewDecoder(r.Body).Decode(&body)
+		seen = append(seen, fmt.Sprintf("snapshot:name=%v,keepRunning=%v",
+			body["name"], body["keepRunning"]))
+		w.WriteHeader(202)
+		json.NewEncoder(w).Encode(map[string]any{
+			"snapshotId": "snap_cli1",
+			"snapshot":   map[string]any{"state": "READY", "sizeBytes": 4096},
+		})
+	})
+	mux.HandleFunc("GET /v1/snapshots", func(w http.ResponseWriter, r *http.Request) {
+		seen = append(seen, "snapshots:label="+r.URL.Query().Get("label"))
+		json.NewEncoder(w).Encode(map[string]any{"snapshots": []map[string]any{{
+			"id": "snap_cli1", "name": "after-setup", "state": "READY",
+			"sandboxId": "sbx_cli1", "image": "busybox", "sizeBytes": 4096,
+			"createdAt": "2026-08-01T00:00:00Z",
+		}}})
+	})
+	mux.HandleFunc("DELETE /v1/snapshots/{id}", func(w http.ResponseWriter, r *http.Request) {
+		seen = append(seen, "snapshot-rm")
+		w.WriteHeader(204)
+	})
+	mux.HandleFunc("GET /v1/images", func(w http.ResponseWriter, r *http.Request) {
+		seen = append(seen, "images")
+		json.NewEncoder(w).Encode(map[string]any{"images": []map[string]any{{
+			"ref": "busybox:1.36", "state": "PENDING", "cachedNodes": 0, "sizeBytes": 0,
+		}}})
+	})
+	mux.HandleFunc("GET /v1/images/status", func(w http.ResponseWriter, r *http.Request) {
+		seen = append(seen, "image-status:"+r.URL.Query().Get("ref"))
+		json.NewEncoder(w).Encode(map[string]any{
+			"ref": r.URL.Query().Get("ref"), "state": "PENDING", "format": "oci",
+			"cachedNodes": 0, "sizeBytes": 0,
+		})
+	})
+	mux.HandleFunc("POST /v1/images/prewarm", func(w http.ResponseWriter, r *http.Request) {
+		var body map[string]any
+		json.NewDecoder(r.Body).Decode(&body)
+		seen = append(seen, fmt.Sprintf("prewarm:nodes=%v", body["targetNodes"]))
+		w.WriteHeader(202)
+		json.NewEncoder(w).Encode(map[string]any{
+			"jobId": "pw_cli1", "ready": map[string]int{"busybox:1.36": 2},
+		})
+	})
+
 	ts := httptest.NewServer(mux)
 	t.Cleanup(ts.Close)
 	return ts, &seen
@@ -148,7 +199,7 @@ func TestCmdRunRequiresImageLocally(t *testing.T) {
 	ts, seen := stubAPI(t)
 	// Missing --image is caught client-side; no request should be sent.
 	_, errStr, code := runCLI(t, ts, "run")
-	if code != 125 || !strings.Contains(errStr, "--image required") {
+	if code != 125 || !strings.Contains(errStr, "--image or --snapshot") {
 		t.Errorf("code=%d stderr=%q", code, errStr)
 	}
 	if len(*seen) != 0 {
@@ -369,5 +420,127 @@ func TestCmdEventsRequiresIDWithoutFollow(t *testing.T) {
 	_, errStr, code := runCLI(t, ts, "events")
 	if code != 125 || !strings.Contains(errStr, "usage") {
 		t.Errorf("code=%d stderr=%q", code, errStr)
+	}
+}
+
+func TestCmdRunFromSnapshot(t *testing.T) {
+	ts, seen := stubAPI(t)
+	out, errStr, code := runCLI(t, ts, "run", "--snapshot", "snap_cli1")
+	if code != 0 {
+		t.Fatalf("code=%d err=%q", code, errStr)
+	}
+	if !strings.Contains(out, "sbx_cli1") {
+		t.Errorf("out = %q", out)
+	}
+	if (*seen)[0] != "create" {
+		t.Errorf("calls = %v", *seen)
+	}
+}
+
+func TestCmdRunRejectsBothSources(t *testing.T) {
+	ts, seen := stubAPI(t)
+	_, errStr, code := runCLI(t, ts, "run", "--image", "x", "--snapshot", "s")
+	if code != 125 || !strings.Contains(errStr, "exactly one") {
+		t.Errorf("code=%d stderr=%q", code, errStr)
+	}
+	if len(*seen) != 0 {
+		t.Errorf("request sent despite invalid args: %v", *seen)
+	}
+}
+
+func TestCmdSnapshotCreate(t *testing.T) {
+	ts, seen := stubAPI(t)
+	out, errStr, code := runCLI(t, ts, "snapshot", "create", "sbx_cli1", "--name", "after-setup")
+	if code != 0 {
+		t.Fatalf("code=%d err=%q", code, errStr)
+	}
+	for _, want := range []string{"snap_cli1", "READY", "4096"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("out missing %q: %q", want, out)
+		}
+	}
+	// keepRunning is left to the server default unless asked otherwise.
+	if got := (*seen)[0]; got != "snapshot:name=after-setup,keepRunning=<nil>" {
+		t.Errorf("request = %q", got)
+	}
+
+	if _, _, code := runCLI(t, ts, "snapshot", "create", "sbx_cli1", "--no-keep-running"); code != 0 {
+		t.Fatal("no-keep-running failed")
+	}
+	if got := (*seen)[1]; !strings.Contains(got, "keepRunning=false") {
+		t.Errorf("request = %q", got)
+	}
+}
+
+func TestCmdSnapshotListAndRemove(t *testing.T) {
+	ts, seen := stubAPI(t)
+	out, _, code := runCLI(t, ts, "snapshot", "ls", "--label", "kind=test")
+	if code != 0 {
+		t.Fatalf("code = %d", code)
+	}
+	for _, want := range []string{"ID", "snap_cli1", "after-setup", "READY", "busybox"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("out missing %q: %q", want, out)
+		}
+	}
+	if (*seen)[0] != "snapshots:label=kind=test" {
+		t.Errorf("call = %q", (*seen)[0])
+	}
+
+	out, _, code = runCLI(t, ts, "snapshot", "rm", "snap_cli1")
+	if code != 0 || !strings.Contains(out, "deleted") {
+		t.Errorf("code=%d out=%q", code, out)
+	}
+}
+
+func TestCmdSnapshotUsage(t *testing.T) {
+	ts, _ := stubAPI(t)
+	for _, args := range [][]string{
+		{"snapshot"},
+		{"snapshot", "create"},
+		{"snapshot", "rm"},
+		{"snapshot", "bogus"},
+	} {
+		if _, errStr, code := runCLI(t, ts, args...); code == 0 {
+			t.Errorf("args %v: expected failure, stderr=%q", args, errStr)
+		}
+	}
+}
+
+func TestCmdImage(t *testing.T) {
+	ts, seen := stubAPI(t)
+
+	out, _, code := runCLI(t, ts, "image", "ls")
+	if code != 0 || !strings.Contains(out, "busybox:1.36") {
+		t.Errorf("ls: code=%d out=%q", code, out)
+	}
+
+	out, _, code = runCLI(t, ts, "image", "status", "busybox:1.36")
+	if code != 0 {
+		t.Fatalf("status code = %d", code)
+	}
+	// format tells the user which tier can run it today.
+	if !strings.Contains(out, "oci") || !strings.Contains(out, "PENDING") {
+		t.Errorf("status out = %q", out)
+	}
+
+	out, _, code = runCLI(t, ts, "image", "prewarm", "busybox:1.36", "--nodes", "2")
+	if code != 0 {
+		t.Fatalf("prewarm code = %d", code)
+	}
+	if !strings.Contains(out, "pw_cli1") || !strings.Contains(out, "2 node") {
+		t.Errorf("prewarm out = %q", out)
+	}
+	if got := (*seen)[2]; got != "prewarm:nodes=2" {
+		t.Errorf("prewarm request = %q", got)
+	}
+}
+
+func TestCmdImageUsage(t *testing.T) {
+	ts, _ := stubAPI(t)
+	for _, args := range [][]string{{"image"}, {"image", "status"}, {"image", "prewarm"}, {"image", "bogus"}} {
+		if _, errStr, code := runCLI(t, ts, args...); code == 0 {
+			t.Errorf("args %v: expected failure, stderr=%q", args, errStr)
+		}
 	}
 }

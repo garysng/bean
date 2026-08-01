@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	"syscall"
 	"time"
 
@@ -22,6 +23,7 @@ import (
 	"github.com/garysng/bean/internal/control/nodesvc"
 	"github.com/garysng/bean/internal/control/scheduler"
 	"github.com/garysng/bean/internal/control/secret"
+	"github.com/garysng/bean/internal/control/snapshot"
 	"github.com/garysng/bean/internal/control/store"
 	nodev1 "github.com/garysng/bean/internal/gen/bean/node/v1"
 	"github.com/garysng/bean/internal/node"
@@ -43,6 +45,8 @@ func main() {
 		"node capability required for placement (fc|local|runc|runsc)")
 	secretKey := flag.String("secret-key", os.Getenv("BEAN_SECRET_KEY"),
 		"master key encrypting persisted credentials (empty disables registry credentials)")
+	snapshotDir := flag.String("snapshot-dir", "",
+		"directory holding snapshot blobs (default: <db dir>/snapshots; S3 later)")
 	flag.Parse()
 
 	if *apiKey == "" {
@@ -70,15 +74,27 @@ func main() {
 		log.Print("no --secret-key: registry credentials disabled (public images only)")
 	}
 
+	// Snapshot blobs live next to the database by default. The Blobs
+	// interface is what lets this become S3 without touching the handlers.
+	blobDir := *snapshotDir
+	if blobDir == "" {
+		blobDir = filepath.Join(filepath.Dir(*dbPath), "snapshots")
+	}
+	blobs, err := snapshot.NewDirBlobs(blobDir)
+	if err != nil {
+		log.Fatalf("snapshot storage: %v", err)
+	}
+	log.Printf("snapshot blobs in %s", blobDir)
+
 	var srv *api.Server
 	if *nodeGRPC != "" {
 		srv = setupMultiNode(ctx, st, multiNodeConfig{
 			nodeGRPCAddr: *nodeGRPC, region: *region, apiKey: *apiKey,
 			nodeToken: *nodeToken, bootstrapToken: *bootstrapToken,
-			runtimeTier: *runtimeTier, secrets: secrets,
+			runtimeTier: *runtimeTier, secrets: secrets, blobs: blobs,
 		})
 	} else {
-		srv = setupSingleNode(st, *nodedAddr, *apiKey, *nodeToken, secrets)
+		srv = setupSingleNode(st, *nodedAddr, *apiKey, *nodeToken, secrets, blobs)
 		log.Printf("single-node mode (noded=%s)", *nodedAddr)
 	}
 
@@ -107,7 +123,7 @@ func main() {
 
 // setupSingleNode keeps the P0 path: one gateway, one noded.
 func setupSingleNode(st *store.Store, nodedAddr, apiKey, nodeToken string,
-	secrets *secret.Box) *api.Server {
+	secrets *secret.Box, blobs snapshot.Blobs) *api.Server {
 	unaryTok, streamTok := node.TokenClientInterceptors(nodeToken)
 	conn, err := grpc.NewClient(nodedAddr,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
@@ -120,6 +136,7 @@ func setupSingleNode(st *store.Store, nodedAddr, apiKey, nodeToken string,
 		nil, api.Options{
 			DefaultNodeID: "node-0", Region: "local", APIKey: apiKey,
 			RuntimeTier: "local", Images: image.New(st, nil), Secrets: secrets,
+			Snapshots: blobs,
 		})
 }
 
@@ -132,6 +149,7 @@ type multiNodeConfig struct {
 	bootstrapToken string
 	runtimeTier    string
 	secrets        *secret.Box
+	blobs          snapshot.Blobs
 }
 
 // setupMultiNode serves NodeService and places sandboxes via the scheduler.
@@ -171,7 +189,7 @@ func setupMultiNode(ctx context.Context, st *store.Store, cfg multiNodeConfig) *
 		cfg.nodeGRPCAddr, cfg.region, cfg.runtimeTier)
 	return api.NewServerWithOptions(st, router, sched, api.Options{
 		Region: cfg.region, APIKey: cfg.apiKey, RuntimeTier: cfg.runtimeTier,
-		Images: image.New(st, nil), Secrets: cfg.secrets,
+		Images: image.New(st, nil), Secrets: cfg.secrets, Snapshots: cfg.blobs,
 	})
 }
 

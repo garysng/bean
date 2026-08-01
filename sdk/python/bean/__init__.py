@@ -11,7 +11,7 @@ from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
 __all__ = [
-    "BeanClient", "Sandbox", "ExecResult", "Event",
+    "BeanClient", "Sandbox", "Snapshot", "ExecResult", "Event",
     "BeanAPIError", "BeanConnectionError",
 ]
 
@@ -38,6 +38,32 @@ class ExecResult:
     stderr: str
     truncated: bool
     duration_ms: int
+
+
+@dataclass
+class Snapshot:
+    """A captured sandbox that can be restored later."""
+
+    id: str
+    state: str
+    sandbox_id: str
+    image: str = ""
+    name: str = ""
+    size_bytes: int = 0
+    labels: Dict[str, str] = field(default_factory=dict)
+    _client: "BeanClient" = field(default=None, repr=False, compare=False)
+
+    @classmethod
+    def _from_json(cls, obj: Dict[str, Any], client: "BeanClient" = None) -> "Snapshot":
+        return cls(
+            id=obj.get("id", ""), state=obj.get("state", ""),
+            sandbox_id=obj.get("sandboxId", ""), image=obj.get("image", ""),
+            name=obj.get("name", ""), size_bytes=obj.get("sizeBytes", 0),
+            labels=obj.get("labels") or {}, _client=client,
+        )
+
+    def delete(self) -> None:
+        self._client._request("DELETE", f"/v1/snapshots/{self.id}")
 
 
 @dataclass
@@ -111,6 +137,22 @@ class Sandbox:
         self._client._request("POST", f"/v1/sandboxes/{self.id}/resume")
         self.state = "RUNNING"
 
+    def snapshot(
+        self,
+        name: str = "",
+        labels: Optional[Dict[str, str]] = None,
+        keep_running: bool = True,
+    ) -> Snapshot:
+        """Capture this sandbox so it can be restored later.
+
+        The sandbox keeps running unless keep_running is False.
+        """
+        body = {"name": name, "labels": labels or {}, "keepRunning": keep_running}
+        data = self._client._request("POST", f"/v1/sandboxes/{self.id}/snapshot", body)
+        if not keep_running:
+            self.state = "STOPPED"
+        return Snapshot._from_json(data["snapshot"], self._client)
+
     def events(self) -> List[Dict[str, Any]]:
         return self._client._request("GET", f"/v1/sandboxes/{self.id}/events")["events"]
 
@@ -142,7 +184,7 @@ class _Sandboxes:
 
     def create(
         self,
-        image: str,
+        image: str = "",
         cpu: float = 1,
         memory_mib: int = 512,
         disk_mib: int = 20480,
@@ -152,14 +194,24 @@ class _Sandboxes:
         labels: Optional[Dict[str, str]] = None,
         idle_timeout: Optional[str] = None,
         on_idle: str = "pause",
+        snapshot: str = "",
     ) -> Sandbox:
+        """Create a sandbox from an image, or restore one from a snapshot.
+
+        Exactly one of image or snapshot must be given.
+        """
+        if bool(image) == bool(snapshot):
+            raise ValueError("provide exactly one of image or snapshot")
         body: Dict[str, Any] = {
-            "image": image,
             "resources": {"cpu": cpu, "memoryMiB": memory_mib, "diskMiB": disk_mib},
             "env": env or {},
             "labels": labels or {},
             "autoStartCmd": auto_start_cmd,
         }
+        if image:
+            body["image"] = image
+        else:
+            body["snapshot"] = snapshot
         if cmd:
             body["cmd"] = cmd
         if idle_timeout is not None:
@@ -188,6 +240,53 @@ class _Sandboxes:
                     labels=d.get("labels") or {}, _client=self._client)
             for d in data
         ]
+
+
+class _Snapshots:
+    def __init__(self, client: "BeanClient"):
+        self._client = client
+
+    def list(self, labels: Optional[Dict[str, str]] = None) -> List[Snapshot]:
+        path = "/v1/snapshots"
+        if labels:
+            k, v = next(iter(labels.items()))
+            path += "?label=" + urllib.parse.quote(f"{k}={v}")
+        data = self._client._request("GET", path)["snapshots"]
+        return [Snapshot._from_json(d, self._client) for d in data]
+
+    def get(self, snapshot_id: str) -> Snapshot:
+        data = self._client._request("GET", f"/v1/snapshots/{snapshot_id}")["snapshot"]
+        return Snapshot._from_json(data, self._client)
+
+    def delete(self, snapshot_id: str) -> None:
+        self._client._request("DELETE", f"/v1/snapshots/{snapshot_id}")
+
+
+class _Images:
+    def __init__(self, client: "BeanClient"):
+        self._client = client
+
+    def list(self) -> List[Dict[str, Any]]:
+        return self._client._request("GET", "/v1/images")["images"] or []
+
+    def status(self, ref: str) -> Dict[str, Any]:
+        q = urllib.parse.urlencode({"ref": ref})
+        return self._client._request("GET", f"/v1/images/status?{q}")
+
+    def prewarm(
+        self,
+        refs: List[str],
+        target_nodes: int = 0,
+        region: str = "",
+        priority: str = "",
+    ) -> Dict[str, Any]:
+        """Pull images onto nodes ahead of a batch."""
+        body = {"refs": refs, "targetNodes": target_nodes,
+                "region": region, "priority": priority}
+        return self._client._request("POST", "/v1/images/prewarm", body)
+
+    def prewarm_status(self, job_id: str) -> Dict[str, Any]:
+        return self._client._request("GET", f"/v1/images/prewarm/{job_id}")
 
 
 class _Events:
@@ -260,6 +359,8 @@ class BeanClient:
         self.base_url = (base_url or os.environ.get("BEAN_BASE_URL", "http://127.0.0.1:8080")).rstrip("/")
         self.timeout = timeout
         self.sandboxes = _Sandboxes(self)
+        self.snapshots = _Snapshots(self)
+        self.images = _Images(self)
         self.events = _Events(self)
 
     def _request_raw(self, method: str, path: str, body: Optional[bytes] = None) -> bytes:

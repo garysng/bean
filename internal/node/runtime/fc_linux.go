@@ -5,6 +5,7 @@ package runtime
 import (
 	"context"
 	"fmt"
+	"io"
 )
 
 // FCRuntime is the Firecracker microVM runtime (P0 main tier on Linux/KVM).
@@ -45,4 +46,14 @@ func (r *FCRuntime) Pause(ctx context.Context, id string) error {
 
 func (r *FCRuntime) Resume(ctx context.Context, id string) error {
 	return fmt.Errorf("fc runtime: not yet implemented")
+}
+
+// Checkpoint will use Firecracker's native snapshot (memory file + vmstate)
+// plus the overlaybd writable layer; see docs/snapshot-resume.md §3.0.
+func (r *FCRuntime) Checkpoint(ctx context.Context, id string, w io.Writer) error {
+	return fmt.Errorf("fc runtime: not yet implemented")
+}
+
+func (r *FCRuntime) Restore(ctx context.Context, spec *Spec, src io.Reader) (*Handle, error) {
+	return nil, fmt.Errorf("fc runtime: not yet implemented")
 }

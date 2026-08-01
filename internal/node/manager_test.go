@@ -1,8 +1,10 @@
 package node
 
 import (
+	"bytes"
 	"context"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -12,6 +14,8 @@ import (
 	"testing"
 	"time"
 
+	agentv1 "github.com/garysng/bean/internal/gen/bean/agent/v1"
+	commonv1 "github.com/garysng/bean/internal/gen/bean/common/v1"
 	nodev1 "github.com/garysng/bean/internal/gen/bean/node/v1"
 	"github.com/garysng/bean/internal/node/runtime"
 )
@@ -274,9 +278,15 @@ func (f *failingRuntime) Create(context.Context, *runtime.Spec) (*runtime.Handle
 	return nil, errors.New("synthetic create failure")
 }
 func (f *failingRuntime) Destroy(context.Context, string, bool) error { return nil }
-func (f *failingRuntime) Pause(context.Context, string) error         { return nil }
-func (f *failingRuntime) Resume(context.Context, string) error        { return nil }
-func (f *failingRuntime) List(context.Context) ([]string, error)      { return nil, nil }
+func (f *failingRuntime) Checkpoint(context.Context, string, io.Writer) error {
+	return errors.New("synthetic checkpoint failure")
+}
+func (f *failingRuntime) Restore(context.Context, *runtime.Spec, io.Reader) (*runtime.Handle, error) {
+	return nil, errors.New("synthetic restore failure")
+}
+func (f *failingRuntime) Pause(context.Context, string) error    { return nil }
+func (f *failingRuntime) Resume(context.Context, string) error   { return nil }
+func (f *failingRuntime) List(context.Context) ([]string, error) { return nil, nil }
 
 func TestManagerMetricsRecordPhases(t *testing.T) {
 	m := newTestManager(t)
@@ -367,4 +377,156 @@ func TestManagerMetricsCountDestroyAndIdleActions(t *testing.T) {
 	if !strings.Contains(out, `bean_node_destroys_total{outcome="success",runtime="local"} 1`) {
 		t.Errorf("destroy not counted:\n%s", out)
 	}
+}
+
+func TestSnapshotAndRestoreRoundTrip(t *testing.T) {
+	m := newTestManager(t)
+	ctx := context.Background()
+	if _, err := m.Create(ctx, spec("src")); err != nil {
+		t.Fatal(err)
+	}
+
+	// Write a file through the agent so the checkpoint has something the
+	// restored sandbox must be able to read back.
+	conn, release, err := m.AgentConn(ctx, "src")
+	if err != nil {
+		t.Fatal(err)
+	}
+	ac := agentv1.NewAgentServiceClient(conn)
+	ws, err := ac.WriteFile(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ws.Send(&commonv1.WriteFileFrame{Frame: &commonv1.WriteFileFrame_Meta{
+		Meta: &commonv1.WriteFileMeta{Path: "/state/data.txt", Mkdirs: true},
+	}})
+	ws.Send(&commonv1.WriteFileFrame{Frame: &commonv1.WriteFileFrame_Data{Data: []byte("persisted-state")}})
+	if _, err := ws.CloseAndRecv(); err != nil {
+		t.Fatal(err)
+	}
+	release()
+
+	var buf bytes.Buffer
+	if err := m.Snapshot(ctx, "src", &buf); err != nil {
+		t.Fatal(err)
+	}
+	if buf.Len() == 0 {
+		t.Fatal("empty checkpoint")
+	}
+	// The source sandbox keeps running: a snapshot must not disturb it.
+	if got := m.StateOf("src"); got != runtime.StateRunning {
+		t.Errorf("source state = %s, want RUNNING", got)
+	}
+	if _, rel, err := m.AgentConn(ctx, "src"); err != nil {
+		t.Errorf("source unusable after snapshot: %v", err)
+	} else {
+		rel()
+	}
+
+	// Restore into a new sandbox and verify the file came along.
+	restored, err := m.RestoreSandbox(ctx, spec("dst"), &buf)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if restored.State != runtime.StateRunning {
+		t.Errorf("restored state = %s", restored.State)
+	}
+	conn2, release2, err := m.AgentConn(ctx, "dst")
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer release2()
+	rs, err := agentv1.NewAgentServiceClient(conn2).ReadFile(ctx,
+		&commonv1.ReadFileRequest{Path: "/state/data.txt"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var data []byte
+	for {
+		chunk, rerr := rs.Recv()
+		if rerr != nil {
+			break
+		}
+		data = append(data, chunk.Data...)
+	}
+	if string(data) != "persisted-state" {
+		t.Errorf("restored content = %q, want persisted-state", data)
+	}
+}
+
+func TestSnapshotOfPausedSandboxStaysPaused(t *testing.T) {
+	m := newTestManager(t)
+	ctx := context.Background()
+	if _, err := m.Create(ctx, spec("p")); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Pause(ctx, "p"); err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	if err := m.Snapshot(ctx, "p", &buf); err != nil {
+		t.Fatal(err)
+	}
+	if got := m.StateOf("p"); got != runtime.StatePaused {
+		t.Errorf("state = %s, want PAUSED preserved", got)
+	}
+}
+
+func TestSnapshotRejectsBadStates(t *testing.T) {
+	m := newTestManager(t)
+	var buf bytes.Buffer
+	if err := m.Snapshot(context.Background(), "ghost", &buf); !errors.Is(err, ErrSandboxNotFound) {
+		t.Errorf("err = %v, want ErrSandboxNotFound", err)
+	}
+}
+
+func TestSnapshotFailureLeavesSandboxRunning(t *testing.T) {
+	// A runtime whose Checkpoint fails must not leave the sandbox stuck in
+	// SNAPSHOTTING.
+	m := NewManager(&failingCheckpointRuntime{LocalRuntime: runtime.NewLocalRuntime(agentBin, t.TempDir())})
+	t.Cleanup(m.Close)
+	ctx := context.Background()
+	if _, err := m.Create(ctx, spec("s")); err != nil {
+		t.Fatal(err)
+	}
+	var buf bytes.Buffer
+	if err := m.Snapshot(ctx, "s", &buf); err == nil {
+		t.Fatal("expected checkpoint failure")
+	}
+	if got := m.StateOf("s"); got != runtime.StateRunning {
+		t.Errorf("state = %s, want RUNNING restored after failure", got)
+	}
+}
+
+func TestRestoreDuplicateRejected(t *testing.T) {
+	m := newTestManager(t)
+	ctx := context.Background()
+	if _, err := m.Create(ctx, spec("dup")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := m.RestoreSandbox(ctx, spec("dup"), bytes.NewReader(nil)); err == nil {
+		t.Error("expected duplicate rejection")
+	}
+}
+
+func TestRestoreCorruptCheckpointFails(t *testing.T) {
+	m := newTestManager(t)
+	_, err := m.RestoreSandbox(context.Background(), spec("bad"),
+		bytes.NewReader([]byte("not a checkpoint")))
+	if err == nil {
+		t.Fatal("expected restore failure")
+	}
+	// The failed sandbox must not linger in the manager.
+	if m.Get("bad") != nil {
+		t.Error("failed restore left an entry behind")
+	}
+}
+
+// failingCheckpointRuntime behaves like LocalRuntime except Checkpoint.
+type failingCheckpointRuntime struct {
+	*runtime.LocalRuntime
+}
+
+func (f *failingCheckpointRuntime) Checkpoint(context.Context, string, io.Writer) error {
+	return errors.New("synthetic checkpoint failure")
 }

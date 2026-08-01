@@ -1247,6 +1247,228 @@ func (x *GetSandboxResponse) GetStatus() *SandboxStatus {
 	return nil
 }
 
+type SnapshotSandboxRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	SandboxId     string                 `protobuf:"bytes,1,opt,name=sandbox_id,json=sandboxId,proto3" json:"sandbox_id,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SnapshotSandboxRequest) Reset() {
+	*x = SnapshotSandboxRequest{}
+	mi := &file_bean_node_v1_node_proto_msgTypes[22]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SnapshotSandboxRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SnapshotSandboxRequest) ProtoMessage() {}
+
+func (x *SnapshotSandboxRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_bean_node_v1_node_proto_msgTypes[22]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SnapshotSandboxRequest.ProtoReflect.Descriptor instead.
+func (*SnapshotSandboxRequest) Descriptor() ([]byte, []int) {
+	return file_bean_node_v1_node_proto_rawDescGZIP(), []int{22}
+}
+
+func (x *SnapshotSandboxRequest) GetSandboxId() string {
+	if x != nil {
+		return x.SandboxId
+	}
+	return ""
+}
+
+type SnapshotChunk struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Data          []byte                 `protobuf:"bytes,1,opt,name=data,proto3" json:"data,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *SnapshotChunk) Reset() {
+	*x = SnapshotChunk{}
+	mi := &file_bean_node_v1_node_proto_msgTypes[23]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *SnapshotChunk) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*SnapshotChunk) ProtoMessage() {}
+
+func (x *SnapshotChunk) ProtoReflect() protoreflect.Message {
+	mi := &file_bean_node_v1_node_proto_msgTypes[23]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use SnapshotChunk.ProtoReflect.Descriptor instead.
+func (*SnapshotChunk) Descriptor() ([]byte, []int) {
+	return file_bean_node_v1_node_proto_rawDescGZIP(), []int{23}
+}
+
+func (x *SnapshotChunk) GetData() []byte {
+	if x != nil {
+		return x.Data
+	}
+	return nil
+}
+
+type RestoreSandboxFrame struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// Types that are valid to be assigned to Frame:
+	//
+	//	*RestoreSandboxFrame_Spec
+	//	*RestoreSandboxFrame_Data
+	Frame         isRestoreSandboxFrame_Frame `protobuf_oneof:"frame"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RestoreSandboxFrame) Reset() {
+	*x = RestoreSandboxFrame{}
+	mi := &file_bean_node_v1_node_proto_msgTypes[24]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RestoreSandboxFrame) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RestoreSandboxFrame) ProtoMessage() {}
+
+func (x *RestoreSandboxFrame) ProtoReflect() protoreflect.Message {
+	mi := &file_bean_node_v1_node_proto_msgTypes[24]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RestoreSandboxFrame.ProtoReflect.Descriptor instead.
+func (*RestoreSandboxFrame) Descriptor() ([]byte, []int) {
+	return file_bean_node_v1_node_proto_rawDescGZIP(), []int{24}
+}
+
+func (x *RestoreSandboxFrame) GetFrame() isRestoreSandboxFrame_Frame {
+	if x != nil {
+		return x.Frame
+	}
+	return nil
+}
+
+func (x *RestoreSandboxFrame) GetSpec() *SandboxSpec {
+	if x != nil {
+		if x, ok := x.Frame.(*RestoreSandboxFrame_Spec); ok {
+			return x.Spec
+		}
+	}
+	return nil
+}
+
+func (x *RestoreSandboxFrame) GetData() []byte {
+	if x != nil {
+		if x, ok := x.Frame.(*RestoreSandboxFrame_Data); ok {
+			return x.Data
+		}
+	}
+	return nil
+}
+
+type isRestoreSandboxFrame_Frame interface {
+	isRestoreSandboxFrame_Frame()
+}
+
+type RestoreSandboxFrame_Spec struct {
+	Spec *SandboxSpec `protobuf:"bytes,1,opt,name=spec,proto3,oneof"`
+}
+
+type RestoreSandboxFrame_Data struct {
+	Data []byte `protobuf:"bytes,2,opt,name=data,proto3,oneof"`
+}
+
+func (*RestoreSandboxFrame_Spec) isRestoreSandboxFrame_Frame() {}
+
+func (*RestoreSandboxFrame_Data) isRestoreSandboxFrame_Frame() {}
+
+type RestoreSandboxResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Status        *SandboxStatus         `protobuf:"bytes,1,opt,name=status,proto3" json:"status,omitempty"`
+	BytesRestored int64                  `protobuf:"varint,2,opt,name=bytes_restored,json=bytesRestored,proto3" json:"bytes_restored,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *RestoreSandboxResponse) Reset() {
+	*x = RestoreSandboxResponse{}
+	mi := &file_bean_node_v1_node_proto_msgTypes[25]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *RestoreSandboxResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*RestoreSandboxResponse) ProtoMessage() {}
+
+func (x *RestoreSandboxResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_bean_node_v1_node_proto_msgTypes[25]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use RestoreSandboxResponse.ProtoReflect.Descriptor instead.
+func (*RestoreSandboxResponse) Descriptor() ([]byte, []int) {
+	return file_bean_node_v1_node_proto_rawDescGZIP(), []int{25}
+}
+
+func (x *RestoreSandboxResponse) GetStatus() *SandboxStatus {
+	if x != nil {
+		return x.Status
+	}
+	return nil
+}
+
+func (x *RestoreSandboxResponse) GetBytesRestored() int64 {
+	if x != nil {
+		return x.BytesRestored
+	}
+	return 0
+}
+
 type StartUserProcessNodeRequest struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
 	SandboxId     string                 `protobuf:"bytes,1,opt,name=sandbox_id,json=sandboxId,proto3" json:"sandbox_id,omitempty"`
@@ -1256,7 +1478,7 @@ type StartUserProcessNodeRequest struct {
 
 func (x *StartUserProcessNodeRequest) Reset() {
 	*x = StartUserProcessNodeRequest{}
-	mi := &file_bean_node_v1_node_proto_msgTypes[22]
+	mi := &file_bean_node_v1_node_proto_msgTypes[26]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1268,7 +1490,7 @@ func (x *StartUserProcessNodeRequest) String() string {
 func (*StartUserProcessNodeRequest) ProtoMessage() {}
 
 func (x *StartUserProcessNodeRequest) ProtoReflect() protoreflect.Message {
-	mi := &file_bean_node_v1_node_proto_msgTypes[22]
+	mi := &file_bean_node_v1_node_proto_msgTypes[26]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1281,7 +1503,7 @@ func (x *StartUserProcessNodeRequest) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StartUserProcessNodeRequest.ProtoReflect.Descriptor instead.
 func (*StartUserProcessNodeRequest) Descriptor() ([]byte, []int) {
-	return file_bean_node_v1_node_proto_rawDescGZIP(), []int{22}
+	return file_bean_node_v1_node_proto_rawDescGZIP(), []int{26}
 }
 
 func (x *StartUserProcessNodeRequest) GetSandboxId() string {
@@ -1300,7 +1522,7 @@ type StartUserProcessNodeResponse struct {
 
 func (x *StartUserProcessNodeResponse) Reset() {
 	*x = StartUserProcessNodeResponse{}
-	mi := &file_bean_node_v1_node_proto_msgTypes[23]
+	mi := &file_bean_node_v1_node_proto_msgTypes[27]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
@@ -1312,7 +1534,7 @@ func (x *StartUserProcessNodeResponse) String() string {
 func (*StartUserProcessNodeResponse) ProtoMessage() {}
 
 func (x *StartUserProcessNodeResponse) ProtoReflect() protoreflect.Message {
-	mi := &file_bean_node_v1_node_proto_msgTypes[23]
+	mi := &file_bean_node_v1_node_proto_msgTypes[27]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 		if ms.LoadMessageInfo() == nil {
@@ -1325,7 +1547,7 @@ func (x *StartUserProcessNodeResponse) ProtoReflect() protoreflect.Message {
 
 // Deprecated: Use StartUserProcessNodeResponse.ProtoReflect.Descriptor instead.
 func (*StartUserProcessNodeResponse) Descriptor() ([]byte, []int) {
-	return file_bean_node_v1_node_proto_rawDescGZIP(), []int{23}
+	return file_bean_node_v1_node_proto_rawDescGZIP(), []int{27}
 }
 
 func (x *StartUserProcessNodeResponse) GetPid() int64 {
@@ -1436,7 +1658,19 @@ const file_bean_node_v1_node_proto_rawDesc = "" +
 	"\n" +
 	"sandbox_id\x18\x01 \x01(\tR\tsandboxId\"I\n" +
 	"\x12GetSandboxResponse\x123\n" +
-	"\x06status\x18\x01 \x01(\v2\x1b.bean.node.v1.SandboxStatusR\x06status\"<\n" +
+	"\x06status\x18\x01 \x01(\v2\x1b.bean.node.v1.SandboxStatusR\x06status\"7\n" +
+	"\x16SnapshotSandboxRequest\x12\x1d\n" +
+	"\n" +
+	"sandbox_id\x18\x01 \x01(\tR\tsandboxId\"#\n" +
+	"\rSnapshotChunk\x12\x12\n" +
+	"\x04data\x18\x01 \x01(\fR\x04data\"e\n" +
+	"\x13RestoreSandboxFrame\x12/\n" +
+	"\x04spec\x18\x01 \x01(\v2\x19.bean.node.v1.SandboxSpecH\x00R\x04spec\x12\x14\n" +
+	"\x04data\x18\x02 \x01(\fH\x00R\x04dataB\a\n" +
+	"\x05frame\"t\n" +
+	"\x16RestoreSandboxResponse\x123\n" +
+	"\x06status\x18\x01 \x01(\v2\x1b.bean.node.v1.SandboxStatusR\x06status\x12%\n" +
+	"\x0ebytes_restored\x18\x02 \x01(\x03R\rbytesRestored\"<\n" +
 	"\x1bStartUserProcessNodeRequest\x12\x1d\n" +
 	"\n" +
 	"sandbox_id\x18\x01 \x01(\tR\tsandboxId\"0\n" +
@@ -1445,14 +1679,17 @@ const file_bean_node_v1_node_proto_rawDesc = "" +
 	"\vNodeService\x12I\n" +
 	"\bRegister\x12\x1d.bean.node.v1.RegisterRequest\x1a\x1e.bean.node.v1.RegisterResponse\x12P\n" +
 	"\tHeartbeat\x12\x1e.bean.node.v1.HeartbeatRequest\x1a\x1f.bean.node.v1.HeartbeatResponse(\x010\x01\x12L\n" +
-	"\tSyncState\x12\x1e.bean.node.v1.SyncStateRequest\x1a\x1f.bean.node.v1.SyncStateResponse2\xcf\b\n" +
+	"\tSyncState\x12\x1e.bean.node.v1.SyncStateRequest\x1a\x1f.bean.node.v1.SyncStateResponse2\x84\n" +
+	"\n" +
 	"\x0eSandboxService\x12X\n" +
 	"\rCreateSandbox\x12\".bean.node.v1.CreateSandboxRequest\x1a#.bean.node.v1.CreateSandboxResponse\x12[\n" +
 	"\x0eDestroySandbox\x12#.bean.node.v1.DestroySandboxRequest\x1a$.bean.node.v1.DestroySandboxResponse\x12U\n" +
 	"\fPauseSandbox\x12!.bean.node.v1.PauseSandboxRequest\x1a\".bean.node.v1.PauseSandboxResponse\x12X\n" +
 	"\rResumeSandbox\x12\".bean.node.v1.ResumeSandboxRequest\x1a#.bean.node.v1.ResumeSandboxResponse\x12O\n" +
 	"\n" +
-	"GetSandbox\x12\x1f.bean.node.v1.GetSandboxRequest\x1a .bean.node.v1.GetSandboxResponse\x12i\n" +
+	"GetSandbox\x12\x1f.bean.node.v1.GetSandboxRequest\x1a .bean.node.v1.GetSandboxResponse\x12V\n" +
+	"\x0fSnapshotSandbox\x12$.bean.node.v1.SnapshotSandboxRequest\x1a\x1b.bean.node.v1.SnapshotChunk0\x01\x12[\n" +
+	"\x0eRestoreSandbox\x12!.bean.node.v1.RestoreSandboxFrame\x1a$.bean.node.v1.RestoreSandboxResponse(\x01\x12i\n" +
 	"\x10StartUserProcess\x12).bean.node.v1.StartUserProcessNodeRequest\x1a*.bean.node.v1.StartUserProcessNodeResponse\x12A\n" +
 	"\x04Exec\x12\x1b.bean.common.v1.ExecRequest\x1a\x1c.bean.common.v1.ExecResponse\x12R\n" +
 	"\n" +
@@ -1476,7 +1713,7 @@ func file_bean_node_v1_node_proto_rawDescGZIP() []byte {
 	return file_bean_node_v1_node_proto_rawDescData
 }
 
-var file_bean_node_v1_node_proto_msgTypes = make([]protoimpl.MessageInfo, 27)
+var file_bean_node_v1_node_proto_msgTypes = make([]protoimpl.MessageInfo, 31)
 var file_bean_node_v1_node_proto_goTypes = []any{
 	(*RegisterRequest)(nil),              // 0: bean.node.v1.RegisterRequest
 	(*RegisterResponse)(nil),             // 1: bean.node.v1.RegisterResponse
@@ -1500,75 +1737,85 @@ var file_bean_node_v1_node_proto_goTypes = []any{
 	(*ResumeSandboxResponse)(nil),        // 19: bean.node.v1.ResumeSandboxResponse
 	(*GetSandboxRequest)(nil),            // 20: bean.node.v1.GetSandboxRequest
 	(*GetSandboxResponse)(nil),           // 21: bean.node.v1.GetSandboxResponse
-	(*StartUserProcessNodeRequest)(nil),  // 22: bean.node.v1.StartUserProcessNodeRequest
-	(*StartUserProcessNodeResponse)(nil), // 23: bean.node.v1.StartUserProcessNodeResponse
-	nil,                                  // 24: bean.node.v1.RegisterRequest.LabelsEntry
-	nil,                                  // 25: bean.node.v1.SandboxSpec.EnvEntry
-	nil,                                  // 26: bean.node.v1.SandboxSpec.LabelsEntry
-	(*v1.ExecRequest)(nil),               // 27: bean.common.v1.ExecRequest
-	(*v1.StreamExecFrame)(nil),           // 28: bean.common.v1.StreamExecFrame
-	(*v1.ReadFileRequest)(nil),           // 29: bean.common.v1.ReadFileRequest
-	(*v1.WriteFileFrame)(nil),            // 30: bean.common.v1.WriteFileFrame
-	(*v1.DeleteFileRequest)(nil),         // 31: bean.common.v1.DeleteFileRequest
-	(*v1.ListDirRequest)(nil),            // 32: bean.common.v1.ListDirRequest
-	(*v1.GetLogsRequest)(nil),            // 33: bean.common.v1.GetLogsRequest
-	(*v1.ExecResponse)(nil),              // 34: bean.common.v1.ExecResponse
-	(*v1.FileChunk)(nil),                 // 35: bean.common.v1.FileChunk
-	(*v1.WriteFileResponse)(nil),         // 36: bean.common.v1.WriteFileResponse
-	(*v1.DeleteFileResponse)(nil),        // 37: bean.common.v1.DeleteFileResponse
-	(*v1.ListDirResponse)(nil),           // 38: bean.common.v1.ListDirResponse
-	(*v1.LogChunk)(nil),                  // 39: bean.common.v1.LogChunk
+	(*SnapshotSandboxRequest)(nil),       // 22: bean.node.v1.SnapshotSandboxRequest
+	(*SnapshotChunk)(nil),                // 23: bean.node.v1.SnapshotChunk
+	(*RestoreSandboxFrame)(nil),          // 24: bean.node.v1.RestoreSandboxFrame
+	(*RestoreSandboxResponse)(nil),       // 25: bean.node.v1.RestoreSandboxResponse
+	(*StartUserProcessNodeRequest)(nil),  // 26: bean.node.v1.StartUserProcessNodeRequest
+	(*StartUserProcessNodeResponse)(nil), // 27: bean.node.v1.StartUserProcessNodeResponse
+	nil,                                  // 28: bean.node.v1.RegisterRequest.LabelsEntry
+	nil,                                  // 29: bean.node.v1.SandboxSpec.EnvEntry
+	nil,                                  // 30: bean.node.v1.SandboxSpec.LabelsEntry
+	(*v1.ExecRequest)(nil),               // 31: bean.common.v1.ExecRequest
+	(*v1.StreamExecFrame)(nil),           // 32: bean.common.v1.StreamExecFrame
+	(*v1.ReadFileRequest)(nil),           // 33: bean.common.v1.ReadFileRequest
+	(*v1.WriteFileFrame)(nil),            // 34: bean.common.v1.WriteFileFrame
+	(*v1.DeleteFileRequest)(nil),         // 35: bean.common.v1.DeleteFileRequest
+	(*v1.ListDirRequest)(nil),            // 36: bean.common.v1.ListDirRequest
+	(*v1.GetLogsRequest)(nil),            // 37: bean.common.v1.GetLogsRequest
+	(*v1.ExecResponse)(nil),              // 38: bean.common.v1.ExecResponse
+	(*v1.FileChunk)(nil),                 // 39: bean.common.v1.FileChunk
+	(*v1.WriteFileResponse)(nil),         // 40: bean.common.v1.WriteFileResponse
+	(*v1.DeleteFileResponse)(nil),        // 41: bean.common.v1.DeleteFileResponse
+	(*v1.ListDirResponse)(nil),           // 42: bean.common.v1.ListDirResponse
+	(*v1.LogChunk)(nil),                  // 43: bean.common.v1.LogChunk
 }
 var file_bean_node_v1_node_proto_depIdxs = []int32{
-	24, // 0: bean.node.v1.RegisterRequest.labels:type_name -> bean.node.v1.RegisterRequest.LabelsEntry
+	28, // 0: bean.node.v1.RegisterRequest.labels:type_name -> bean.node.v1.RegisterRequest.LabelsEntry
 	2,  // 1: bean.node.v1.RegisterRequest.capabilities:type_name -> bean.node.v1.NodeCapabilities
 	3,  // 2: bean.node.v1.RegisterRequest.resources:type_name -> bean.node.v1.NodeResources
 	11, // 3: bean.node.v1.HeartbeatRequest.sandboxes:type_name -> bean.node.v1.SandboxStatus
 	5,  // 4: bean.node.v1.HeartbeatRequest.usage:type_name -> bean.node.v1.NodeUsage
 	9,  // 5: bean.node.v1.SyncStateResponse.expected:type_name -> bean.node.v1.SandboxSpec
-	25, // 6: bean.node.v1.SandboxSpec.env:type_name -> bean.node.v1.SandboxSpec.EnvEntry
+	29, // 6: bean.node.v1.SandboxSpec.env:type_name -> bean.node.v1.SandboxSpec.EnvEntry
 	10, // 7: bean.node.v1.SandboxSpec.lifecycle:type_name -> bean.node.v1.Lifecycle
-	26, // 8: bean.node.v1.SandboxSpec.labels:type_name -> bean.node.v1.SandboxSpec.LabelsEntry
+	30, // 8: bean.node.v1.SandboxSpec.labels:type_name -> bean.node.v1.SandboxSpec.LabelsEntry
 	9,  // 9: bean.node.v1.CreateSandboxRequest.spec:type_name -> bean.node.v1.SandboxSpec
 	11, // 10: bean.node.v1.CreateSandboxResponse.status:type_name -> bean.node.v1.SandboxStatus
 	11, // 11: bean.node.v1.GetSandboxResponse.status:type_name -> bean.node.v1.SandboxStatus
-	0,  // 12: bean.node.v1.NodeService.Register:input_type -> bean.node.v1.RegisterRequest
-	4,  // 13: bean.node.v1.NodeService.Heartbeat:input_type -> bean.node.v1.HeartbeatRequest
-	7,  // 14: bean.node.v1.NodeService.SyncState:input_type -> bean.node.v1.SyncStateRequest
-	12, // 15: bean.node.v1.SandboxService.CreateSandbox:input_type -> bean.node.v1.CreateSandboxRequest
-	14, // 16: bean.node.v1.SandboxService.DestroySandbox:input_type -> bean.node.v1.DestroySandboxRequest
-	16, // 17: bean.node.v1.SandboxService.PauseSandbox:input_type -> bean.node.v1.PauseSandboxRequest
-	18, // 18: bean.node.v1.SandboxService.ResumeSandbox:input_type -> bean.node.v1.ResumeSandboxRequest
-	20, // 19: bean.node.v1.SandboxService.GetSandbox:input_type -> bean.node.v1.GetSandboxRequest
-	22, // 20: bean.node.v1.SandboxService.StartUserProcess:input_type -> bean.node.v1.StartUserProcessNodeRequest
-	27, // 21: bean.node.v1.SandboxService.Exec:input_type -> bean.common.v1.ExecRequest
-	28, // 22: bean.node.v1.SandboxService.StreamExec:input_type -> bean.common.v1.StreamExecFrame
-	29, // 23: bean.node.v1.SandboxService.ReadFile:input_type -> bean.common.v1.ReadFileRequest
-	30, // 24: bean.node.v1.SandboxService.WriteFile:input_type -> bean.common.v1.WriteFileFrame
-	31, // 25: bean.node.v1.SandboxService.DeleteFile:input_type -> bean.common.v1.DeleteFileRequest
-	32, // 26: bean.node.v1.SandboxService.ListDir:input_type -> bean.common.v1.ListDirRequest
-	33, // 27: bean.node.v1.SandboxService.GetLogs:input_type -> bean.common.v1.GetLogsRequest
-	1,  // 28: bean.node.v1.NodeService.Register:output_type -> bean.node.v1.RegisterResponse
-	6,  // 29: bean.node.v1.NodeService.Heartbeat:output_type -> bean.node.v1.HeartbeatResponse
-	8,  // 30: bean.node.v1.NodeService.SyncState:output_type -> bean.node.v1.SyncStateResponse
-	13, // 31: bean.node.v1.SandboxService.CreateSandbox:output_type -> bean.node.v1.CreateSandboxResponse
-	15, // 32: bean.node.v1.SandboxService.DestroySandbox:output_type -> bean.node.v1.DestroySandboxResponse
-	17, // 33: bean.node.v1.SandboxService.PauseSandbox:output_type -> bean.node.v1.PauseSandboxResponse
-	19, // 34: bean.node.v1.SandboxService.ResumeSandbox:output_type -> bean.node.v1.ResumeSandboxResponse
-	21, // 35: bean.node.v1.SandboxService.GetSandbox:output_type -> bean.node.v1.GetSandboxResponse
-	23, // 36: bean.node.v1.SandboxService.StartUserProcess:output_type -> bean.node.v1.StartUserProcessNodeResponse
-	34, // 37: bean.node.v1.SandboxService.Exec:output_type -> bean.common.v1.ExecResponse
-	28, // 38: bean.node.v1.SandboxService.StreamExec:output_type -> bean.common.v1.StreamExecFrame
-	35, // 39: bean.node.v1.SandboxService.ReadFile:output_type -> bean.common.v1.FileChunk
-	36, // 40: bean.node.v1.SandboxService.WriteFile:output_type -> bean.common.v1.WriteFileResponse
-	37, // 41: bean.node.v1.SandboxService.DeleteFile:output_type -> bean.common.v1.DeleteFileResponse
-	38, // 42: bean.node.v1.SandboxService.ListDir:output_type -> bean.common.v1.ListDirResponse
-	39, // 43: bean.node.v1.SandboxService.GetLogs:output_type -> bean.common.v1.LogChunk
-	28, // [28:44] is the sub-list for method output_type
-	12, // [12:28] is the sub-list for method input_type
-	12, // [12:12] is the sub-list for extension type_name
-	12, // [12:12] is the sub-list for extension extendee
-	0,  // [0:12] is the sub-list for field type_name
+	9,  // 12: bean.node.v1.RestoreSandboxFrame.spec:type_name -> bean.node.v1.SandboxSpec
+	11, // 13: bean.node.v1.RestoreSandboxResponse.status:type_name -> bean.node.v1.SandboxStatus
+	0,  // 14: bean.node.v1.NodeService.Register:input_type -> bean.node.v1.RegisterRequest
+	4,  // 15: bean.node.v1.NodeService.Heartbeat:input_type -> bean.node.v1.HeartbeatRequest
+	7,  // 16: bean.node.v1.NodeService.SyncState:input_type -> bean.node.v1.SyncStateRequest
+	12, // 17: bean.node.v1.SandboxService.CreateSandbox:input_type -> bean.node.v1.CreateSandboxRequest
+	14, // 18: bean.node.v1.SandboxService.DestroySandbox:input_type -> bean.node.v1.DestroySandboxRequest
+	16, // 19: bean.node.v1.SandboxService.PauseSandbox:input_type -> bean.node.v1.PauseSandboxRequest
+	18, // 20: bean.node.v1.SandboxService.ResumeSandbox:input_type -> bean.node.v1.ResumeSandboxRequest
+	20, // 21: bean.node.v1.SandboxService.GetSandbox:input_type -> bean.node.v1.GetSandboxRequest
+	22, // 22: bean.node.v1.SandboxService.SnapshotSandbox:input_type -> bean.node.v1.SnapshotSandboxRequest
+	24, // 23: bean.node.v1.SandboxService.RestoreSandbox:input_type -> bean.node.v1.RestoreSandboxFrame
+	26, // 24: bean.node.v1.SandboxService.StartUserProcess:input_type -> bean.node.v1.StartUserProcessNodeRequest
+	31, // 25: bean.node.v1.SandboxService.Exec:input_type -> bean.common.v1.ExecRequest
+	32, // 26: bean.node.v1.SandboxService.StreamExec:input_type -> bean.common.v1.StreamExecFrame
+	33, // 27: bean.node.v1.SandboxService.ReadFile:input_type -> bean.common.v1.ReadFileRequest
+	34, // 28: bean.node.v1.SandboxService.WriteFile:input_type -> bean.common.v1.WriteFileFrame
+	35, // 29: bean.node.v1.SandboxService.DeleteFile:input_type -> bean.common.v1.DeleteFileRequest
+	36, // 30: bean.node.v1.SandboxService.ListDir:input_type -> bean.common.v1.ListDirRequest
+	37, // 31: bean.node.v1.SandboxService.GetLogs:input_type -> bean.common.v1.GetLogsRequest
+	1,  // 32: bean.node.v1.NodeService.Register:output_type -> bean.node.v1.RegisterResponse
+	6,  // 33: bean.node.v1.NodeService.Heartbeat:output_type -> bean.node.v1.HeartbeatResponse
+	8,  // 34: bean.node.v1.NodeService.SyncState:output_type -> bean.node.v1.SyncStateResponse
+	13, // 35: bean.node.v1.SandboxService.CreateSandbox:output_type -> bean.node.v1.CreateSandboxResponse
+	15, // 36: bean.node.v1.SandboxService.DestroySandbox:output_type -> bean.node.v1.DestroySandboxResponse
+	17, // 37: bean.node.v1.SandboxService.PauseSandbox:output_type -> bean.node.v1.PauseSandboxResponse
+	19, // 38: bean.node.v1.SandboxService.ResumeSandbox:output_type -> bean.node.v1.ResumeSandboxResponse
+	21, // 39: bean.node.v1.SandboxService.GetSandbox:output_type -> bean.node.v1.GetSandboxResponse
+	23, // 40: bean.node.v1.SandboxService.SnapshotSandbox:output_type -> bean.node.v1.SnapshotChunk
+	25, // 41: bean.node.v1.SandboxService.RestoreSandbox:output_type -> bean.node.v1.RestoreSandboxResponse
+	27, // 42: bean.node.v1.SandboxService.StartUserProcess:output_type -> bean.node.v1.StartUserProcessNodeResponse
+	38, // 43: bean.node.v1.SandboxService.Exec:output_type -> bean.common.v1.ExecResponse
+	32, // 44: bean.node.v1.SandboxService.StreamExec:output_type -> bean.common.v1.StreamExecFrame
+	39, // 45: bean.node.v1.SandboxService.ReadFile:output_type -> bean.common.v1.FileChunk
+	40, // 46: bean.node.v1.SandboxService.WriteFile:output_type -> bean.common.v1.WriteFileResponse
+	41, // 47: bean.node.v1.SandboxService.DeleteFile:output_type -> bean.common.v1.DeleteFileResponse
+	42, // 48: bean.node.v1.SandboxService.ListDir:output_type -> bean.common.v1.ListDirResponse
+	43, // 49: bean.node.v1.SandboxService.GetLogs:output_type -> bean.common.v1.LogChunk
+	32, // [32:50] is the sub-list for method output_type
+	14, // [14:32] is the sub-list for method input_type
+	14, // [14:14] is the sub-list for extension type_name
+	14, // [14:14] is the sub-list for extension extendee
+	0,  // [0:14] is the sub-list for field type_name
 }
 
 func init() { file_bean_node_v1_node_proto_init() }
@@ -1576,13 +1823,17 @@ func file_bean_node_v1_node_proto_init() {
 	if File_bean_node_v1_node_proto != nil {
 		return
 	}
+	file_bean_node_v1_node_proto_msgTypes[24].OneofWrappers = []any{
+		(*RestoreSandboxFrame_Spec)(nil),
+		(*RestoreSandboxFrame_Data)(nil),
+	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_bean_node_v1_node_proto_rawDesc), len(file_bean_node_v1_node_proto_rawDesc)),
 			NumEnums:      0,
-			NumMessages:   27,
+			NumMessages:   31,
 			NumExtensions: 0,
 			NumServices:   2,
 		},

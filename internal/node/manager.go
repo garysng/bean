@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"log"
 	"sync"
 	"time"
@@ -91,16 +92,7 @@ func (m *Manager) Create(ctx context.Context, spec *nodev1.SandboxSpec) (*Sandbo
 	m.sandboxes[spec.SandboxId] = sb
 	m.mu.Unlock()
 
-	rspec := &runtime.Spec{
-		SandboxID:    spec.SandboxId,
-		Image:        spec.Image,
-		CPU:          spec.Cpu,
-		MemoryMiB:    spec.MemoryMib,
-		DiskMiB:      spec.DiskMib,
-		Env:          spec.Env,
-		Cmd:          spec.Cmd,
-		AutoStartCmd: spec.AutoStartCmd,
-	}
+	rspec := specToRuntime(spec)
 
 	createStart := time.Now()
 	outcome := "error"
@@ -119,21 +111,9 @@ func (m *Manager) Create(ctx context.Context, spec *nodev1.SandboxSpec) (*Sandbo
 		return nil, err
 	}
 
-	conn, err := grpc.NewClient(handle.AgentAddr,
-		grpc.WithTransportCredentials(insecure.NewCredentials()))
+	conn, err := m.dialAgent(ctx, spec.SandboxId, handle)
 	if err != nil {
-		_ = m.rt.Destroy(context.Background(), spec.SandboxId, true)
-		m.dropFailed(spec.SandboxId)
-		return nil, fmt.Errorf("agent dial: %w", err)
-	}
-	healthStart := time.Now()
-	err = waitHealthy(ctx, conn, 5*time.Second)
-	m.observePhase("agent_ready", time.Since(healthStart))
-	if err != nil {
-		conn.Close()
-		_ = m.rt.Destroy(context.Background(), spec.SandboxId, true)
-		m.dropFailed(spec.SandboxId)
-		return nil, fmt.Errorf("agent health: %w", err)
+		return nil, err
 	}
 
 	m.mu.Lock()
@@ -339,6 +319,145 @@ func (m *Manager) Pause(ctx context.Context, id string) error {
 	}
 	m.mu.Unlock()
 	return nil
+}
+
+// Snapshot writes a checkpoint of the sandbox to w. The sandbox is frozen
+// for the duration so the checkpoint is internally consistent, then
+// returned to its previous state — a snapshot is not supposed to disturb a
+// running workload.
+func (m *Manager) Snapshot(ctx context.Context, id string, w io.Writer) error {
+	// Claim the transition under lock, remembering where to go back to.
+	m.mu.Lock()
+	sb, ok := m.sandboxes[id]
+	if !ok {
+		m.mu.Unlock()
+		return fmt.Errorf("%w: %s", ErrSandboxNotFound, id)
+	}
+	prev := sb.State
+	if prev != runtime.StateRunning && prev != runtime.StatePaused {
+		m.mu.Unlock()
+		return fmt.Errorf("sandbox %s is %s; snapshot needs RUNNING or PAUSED", id, prev)
+	}
+	sb.State = runtime.StateSnapshotting
+	m.mu.Unlock()
+
+	restore := func() {
+		m.mu.Lock()
+		if cur, ok := m.sandboxes[id]; ok && cur.State == runtime.StateSnapshotting {
+			cur.State = prev
+		}
+		m.mu.Unlock()
+	}
+
+	// Freeze a running sandbox so the filesystem is not moving underneath
+	// the checkpoint; an already-paused one needs no extra work.
+	if prev == runtime.StateRunning {
+		if err := m.rt.Pause(ctx, id); err != nil {
+			restore()
+			return fmt.Errorf("freeze for snapshot: %w", err)
+		}
+	}
+
+	start := time.Now()
+	err := m.rt.Checkpoint(ctx, id, w)
+	m.observePhase("checkpoint", time.Since(start))
+	m.metrics.IncCounter("bean_node_snapshots_total",
+		"Snapshots taken on this node.",
+		map[string]string{"outcome": boolOutcome(err == nil), "runtime": m.rt.Name()}, 1)
+
+	// Unfreeze before reporting, so a checkpoint error still leaves the
+	// sandbox running rather than silently stuck.
+	if prev == runtime.StateRunning {
+		if rerr := m.rt.Resume(ctx, id); rerr != nil {
+			log.Printf("sandbox %s: resume after snapshot failed: %v", id, rerr)
+		}
+	}
+	restore()
+	if err != nil {
+		return fmt.Errorf("checkpoint: %w", err)
+	}
+	return nil
+}
+
+// RestoreSandbox creates a sandbox from a checkpoint. It mirrors Create,
+// including agent health-checking, so a restored sandbox is immediately
+// usable through the same data-plane paths.
+func (m *Manager) RestoreSandbox(ctx context.Context, spec *nodev1.SandboxSpec,
+	src io.Reader) (*Sandbox, error) {
+	if spec.GetSandboxId() == "" {
+		return nil, fmt.Errorf("sandbox_id required")
+	}
+	m.mu.Lock()
+	if _, exists := m.sandboxes[spec.SandboxId]; exists {
+		m.mu.Unlock()
+		return nil, fmt.Errorf("sandbox %s already exists", spec.SandboxId)
+	}
+	sb := &Sandbox{Spec: spec, State: runtime.StateRestoring, lastActivity: time.Now()}
+	m.sandboxes[spec.SandboxId] = sb
+	m.mu.Unlock()
+
+	start := time.Now()
+	outcome := "error"
+	defer func() {
+		m.metrics.IncCounter("bean_node_restores_total",
+			"Sandbox restores handled by this node.",
+			map[string]string{"outcome": outcome, "runtime": m.rt.Name()}, 1)
+		m.observePhase("restore", time.Since(start))
+	}()
+
+	handle, err := m.rt.Restore(ctx, specToRuntime(spec), src)
+	if err != nil {
+		m.dropFailed(spec.SandboxId)
+		return nil, err
+	}
+	conn, err := m.dialAgent(ctx, spec.SandboxId, handle)
+	if err != nil {
+		return nil, err
+	}
+
+	m.mu.Lock()
+	sb.Handle = handle
+	sb.conn = conn
+	sb.State = runtime.StateRunning
+	m.mu.Unlock()
+	outcome = "success"
+	return sb, nil
+}
+
+// dialAgent connects to a sandbox's agent and waits for it to be healthy,
+// cleaning up the sandbox if it never comes up.
+func (m *Manager) dialAgent(ctx context.Context, id string, handle *runtime.Handle) (*grpc.ClientConn, error) {
+	conn, err := grpc.NewClient(handle.AgentAddr,
+		grpc.WithTransportCredentials(insecure.NewCredentials()))
+	if err != nil {
+		_ = m.rt.Destroy(context.Background(), id, true)
+		m.dropFailed(id)
+		return nil, fmt.Errorf("agent dial: %w", err)
+	}
+	healthStart := time.Now()
+	err = waitHealthy(ctx, conn, 5*time.Second)
+	m.observePhase("agent_ready", time.Since(healthStart))
+	if err != nil {
+		conn.Close()
+		_ = m.rt.Destroy(context.Background(), id, true)
+		m.dropFailed(id)
+		return nil, fmt.Errorf("agent health: %w", err)
+	}
+	return conn, nil
+}
+
+// specToRuntime projects the proto spec onto the runtime's view.
+func specToRuntime(spec *nodev1.SandboxSpec) *runtime.Spec {
+	return &runtime.Spec{
+		SandboxID:    spec.SandboxId,
+		Image:        spec.Image,
+		CPU:          spec.Cpu,
+		MemoryMiB:    spec.MemoryMib,
+		DiskMiB:      spec.DiskMib,
+		Env:          spec.Env,
+		Cmd:          spec.Cmd,
+		AutoStartCmd: spec.AutoStartCmd,
+	}
 }
 
 func (m *Manager) Resume(ctx context.Context, id string) error {

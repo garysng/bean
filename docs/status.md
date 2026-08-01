@@ -1,7 +1,7 @@
 # 实现状态与 fcRuntime 实装计划
 
-> 快照日期：2026-08-01。代码 ~9.8k 行（不含生成代码），155 个 Go 测试 +
-> 12 个 Python 测试，覆盖率 82.5%，CI 全绿（lint/race 单测/e2e/SDK/proto drift）。
+> 快照日期：2026-08-01。覆盖率 81.5%，CI 全绿（lint/race 单测/e2e/SDK/proto drift）。
+> 已在 Linux x86_64 上验证（12 包 race 单测 + e2e + SDK 全通过），无 darwin 平台假设。
 
 ## 1. 已完成
 
@@ -14,6 +14,8 @@
 | `nodesvc` | ✅ | Register（bootstrap token 校验 + 签发 node token）、Heartbeat 双向流续租、SyncState、租约过期回调 |
 | `store` | ✅ | SQLite（Postgres 接口已抽象）:sandbox 记录、事件历史 |
 | 事件 | ✅ | 状态机统一发件 → 持久化 + SSE 实时订阅（按 sandbox/label 过滤,慢订阅者丢弃计数） |
+| image API | ✅ | ref/digest/overlaybd 产物三层语义、状态机、prewarm job;registry 凭证 AES-256-GCM 加密存储 |
+| snapshot | ✅ 控制面 | 创建/列表/删除/引用计数、从 snapshot 创建 sandbox;blob 存储接口化（本地目录,S3 待接） |
 | 路由 | ✅ | `NodeRouter` per-node 连接池,数据面按记录里的 nodeID 解析 |
 
 ### 节点面
@@ -28,8 +30,9 @@
 
 ### 客户端
 
-Python SDK（create/exec/files/pause/resume/kill/events 订阅、context manager、
-错误分层）、Go CLI（run/ls/exec/cp/logs/kill/pause/resume/events -f）。
+Python SDK（create/exec/files/pause/resume/kill、snapshot、images、events 订阅、
+context manager、错误分层）、Go CLI（run [--image|--snapshot]/ls/exec/cp/logs/kill/
+pause/resume/events -f/snapshot/image）。
 
 ### 可观测
 
@@ -43,28 +46,35 @@ Python SDK（create/exec/files/pause/resume/kill/events 订阅、context manager
 - 多节点 e2e：1 gateway + 2 自注册 noded，放置分散、exec 路由正确、容量耗尽 503、释放后可再创建
 - 安全回归：symlink 逃逸阻断、setuid 位剥离、host env 不泄漏、超时后孤儿孙进程不挂起
 - 并发回归：并发放置恰好 N 个成功、并发 pause 只一个胜出、连接池无竞态
+- snapshot e2e：写文件 → snapshot → 从 snapshot 创建 → exec 读回内容一致;
+  克隆间互相独立、fan-out 多份、引用计数拒删、blob 随记录删除
 
 ## 2. 与设计的差距
 
 | 项 | 状态 |
 |---|---|
 | fcRuntime（真 microVM） | ⛔ 未实装,**唯一实质缺口** |
-| overlaybd 镜像链路 | ⛔ 未实装（依赖 fc 档） |
-| prewarm API | ⛔ 未做（无真镜像分发时价值有限） |
-| shared-fs 卷 / snapshot / fork / proxy 端口暴露 | ⛔ P3–P4 范围,未开始 |
+| overlaybd 镜像链路 | ⛔ 未实装（依赖 fc 档）;image 状态机与 API 已就位 |
+| prewarm 节点侧执行 | ⚠️ API 与 job 状态已就位,节点侧拉取随 overlaybd 落地 |
+| snapshot 的 fc 档实现 | ⚠️ 控制面全通;LocalRuntime 用 tar 真跑通,fc 档 memory snapshot 待实装 |
+| fork / shared-fs 卷 / proxy 端口暴露 | ⛔ P3–P4 范围,未开始 |
 | OTLP 导出 | ⚠️ registry 已就位,包一层即可 |
 | Postgres | ⚠️ 接口已抽象,当前 SQLite |
 | 创建阶段指标 image_pull/rootfs/network | ⚠️ 埋点位已留,等 fc 档 |
 
 ## 3. fcRuntime 实装计划
 
-### 3.1 前置环境（当前阻塞点）
+### 3.1 前置环境
 
-- **Linux x86_64 裸金属或开启嵌套虚拟化的 VM**，`/dev/kvm` 可读写
-- 内核 6.0+（ublk 用户态块设备;不满足则退 overlaybd tcmu 后端）
-- `firecracker` + `jailer` 二进制、`overlaybd` 组件、S3 或兼容对象存储
-- 参考实现已在本地：`/Users/mac/project/agentenv`（AgentENV,uvm-ublk 直驱
-  overlaybd + FC 的完整实证）
+**已备好**（192.168.75.52，root 可登录）：Linux x86_64、16 核 / 23 GB、
+`/dev/kvm` 可用（AMD svm）、Go 1.24.5、Firecracker + Jailer v1.10.1、TCMU 可用。
+
+**限制**：内核 5.15（< 6.0）→ 无 `/dev/ublk-control`，overlaybd 需走 **tcmu 后端**
+（功能完整，性能不如 ublk）。若要 ublk 需装 HWE 内核（`linux-generic-hwe-22.04`，6.8）
+并重启。
+
+**仍需**：`overlaybd` 组件、S3 或兼容对象存储。参考实现在本地
+`/Users/mac/project/agentenv`（AgentENV，uvm-ublk 直驱 overlaybd + FC 的完整实证）。
 
 ### 3.2 实装顺序
 
@@ -90,7 +100,8 @@ Python SDK（create/exec/files/pause/resume/kill/events 订阅、context manager
 
 ### 3.3 可复用的现有资产
 
-fcRuntime 只需实现 `runtime.Runtime` 接口（6 个方法），**上层完全不用改**：
+fcRuntime 只需实现 `runtime.Runtime` 接口（7 个方法，含 Checkpoint/Restore），
+**上层完全不用改**：
 Manager、gRPC 面、scheduler、gateway、SDK、CLI、e2e 断言都与 runtime 无关。
 `LocalRuntime` 已证明这层抽象成立——同一套 manager/e2e 测试换实现即可复用。
 
@@ -103,10 +114,7 @@ Manager、gRPC 面、scheduler、gateway、SDK、CLI、e2e 断言都与 runtime 
 | ublk 内核要求 | 节点 OS 统一基线;tcmu 后端兜底 |
 | 清理不彻底导致残留 | 沿用 `bean-<id>` 命名规约 + 现有孤儿扫描 |
 
-## 4. 建议
+## 4. 下一步
 
-本地（darwin，无 KVM）能做的部分已基本做完。继续在无 KVM 环境下推进的候选只剩
-prewarm 骨架和 OTLP 包装，两者在没有真镜像分发/采集后端时价值都有限。
-
-**建议下一步是准备 §3.1 的 Linux+KVM 环境**，然后按 §3.2 顺序实装 fcRuntime——
-这是把项目从「链路正确」推到「产品可用」的唯一路径。
+环境已就绪，控制面（含 image/snapshot/registry 认证）已完整且在 Linux 上验证过。
+按 §3.2 顺序实装 fcRuntime 即可，第一步是 guest 内核 + agent 盘。

@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"io"
+	"sync/atomic"
 
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -207,4 +208,97 @@ func (s *GRPCServer) GetLogs(req *commonv1.GetLogsRequest, stream nodev1.Sandbox
 			return serr
 		}
 	}
+}
+
+// snapshotChunkSize bounds gRPC frame size while keeping the stream
+// efficient for multi-hundred-megabyte checkpoints.
+const snapshotChunkSize = 1 << 20
+
+// SnapshotSandbox streams a checkpoint to the caller. The writer adapter
+// turns Manager's io.Writer contract into gRPC frames.
+func (s *GRPCServer) SnapshotSandbox(req *nodev1.SnapshotSandboxRequest,
+	stream nodev1.SandboxService_SnapshotSandboxServer) error {
+	if req.GetSandboxId() == "" {
+		return status.Error(codes.InvalidArgument, "sandbox_id required")
+	}
+	w := &chunkWriter{stream: stream}
+	if err := s.mgr.Snapshot(stream.Context(), req.SandboxId, w); err != nil {
+		if errors.Is(err, ErrSandboxNotFound) {
+			return status.Errorf(codes.NotFound, "%v", err)
+		}
+		return status.Errorf(codes.FailedPrecondition, "%v", err)
+	}
+	return nil
+}
+
+// chunkWriter splits writes into gRPC frames.
+type chunkWriter struct {
+	stream nodev1.SandboxService_SnapshotSandboxServer
+}
+
+func (c *chunkWriter) Write(p []byte) (int, error) {
+	total := 0
+	for len(p) > 0 {
+		n := min(len(p), snapshotChunkSize)
+		if err := c.stream.Send(&nodev1.SnapshotChunk{Data: p[:n]}); err != nil {
+			return total, err
+		}
+		p = p[n:]
+		total += n
+	}
+	return total, nil
+}
+
+// RestoreSandbox consumes a spec frame followed by checkpoint data. The
+// checkpoint is piped straight into the runtime so a large restore does not
+// have to be buffered in memory.
+func (s *GRPCServer) RestoreSandbox(stream nodev1.SandboxService_RestoreSandboxServer) error {
+	first, err := stream.Recv()
+	if err != nil {
+		return status.Errorf(codes.InvalidArgument, "recv spec frame: %v", err)
+	}
+	spec := first.GetSpec()
+	if spec == nil {
+		return status.Error(codes.InvalidArgument, "first frame must carry the spec")
+	}
+
+	pr, pw := io.Pipe()
+	var restored atomic.Int64
+	go func() {
+		for {
+			frame, rerr := stream.Recv()
+			if rerr == io.EOF {
+				pw.Close()
+				return
+			}
+			if rerr != nil {
+				pw.CloseWithError(rerr)
+				return
+			}
+			data := frame.GetData()
+			if len(data) == 0 {
+				continue
+			}
+			if _, werr := pw.Write(data); werr != nil {
+				pw.CloseWithError(werr)
+				return
+			}
+			restored.Add(int64(len(data)))
+		}
+	}()
+
+	sb, err := s.mgr.RestoreSandbox(stream.Context(), spec, pr)
+	// Draining matters: an early runtime failure would otherwise leave the
+	// sender blocked on a full pipe.
+	pr.CloseWithError(err)
+	if err != nil {
+		return status.Errorf(codes.Internal, "restore: %v", err)
+	}
+	return stream.SendAndClose(&nodev1.RestoreSandboxResponse{
+		Status: &nodev1.SandboxStatus{
+			SandboxId: spec.SandboxId,
+			State:     string(sb.State),
+		},
+		BytesRestored: restored.Load(),
+	})
 }

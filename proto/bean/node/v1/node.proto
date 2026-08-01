@@ -22,6 +22,12 @@ service SandboxService {
   rpc PauseSandbox(PauseSandboxRequest) returns (PauseSandboxResponse);
   rpc ResumeSandbox(ResumeSandboxRequest) returns (ResumeSandboxResponse);
   rpc GetSandbox(GetSandboxRequest) returns (GetSandboxResponse);
+  // SnapshotSandbox streams a checkpoint out of the node. The sandbox is
+  // frozen for the duration and returned to its prior state afterwards.
+  rpc SnapshotSandbox(SnapshotSandboxRequest) returns (stream SnapshotChunk);
+  // RestoreSandbox creates a sandbox from a checkpoint stream. The first
+  // frame carries the spec; the rest is checkpoint data.
+  rpc RestoreSandbox(stream RestoreSandboxFrame) returns (RestoreSandboxResponse);
   rpc StartUserProcess(StartUserProcessNodeRequest) returns (StartUserProcessNodeResponse);
   // Data plane passthrough to AgentService.
   rpc Exec(bean.common.v1.ExecRequest) returns (bean.common.v1.ExecResponse);
@@ -149,6 +155,26 @@ message GetSandboxRequest {
 
 message GetSandboxResponse {
   SandboxStatus status = 1;
+}
+
+message SnapshotSandboxRequest {
+  string sandbox_id = 1;
+}
+
+message SnapshotChunk {
+  bytes data = 1;
+}
+
+message RestoreSandboxFrame {
+  oneof frame {
+    SandboxSpec spec = 1;
+    bytes data = 2;
+  }
+}
+
+message RestoreSandboxResponse {
+  SandboxStatus status = 1;
+  int64 bytes_restored = 2;
 }
 
 message StartUserProcessNodeRequest {

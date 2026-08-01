@@ -11,6 +11,7 @@ import (
 	"net/url"
 	"os"
 	"sort"
+	"strconv"
 	"strings"
 	"text/tabwriter"
 	"time"
@@ -115,6 +116,10 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		err = cmdCp(c, rest, stdout)
 	case "events":
 		err = cmdEvents(c, rest, stdout)
+	case "snapshot":
+		err = cmdSnapshot(c, rest, stdout)
+	case "image":
+		err = cmdImage(c, rest, stdout)
 	case "version":
 		fmt.Fprintln(stdout, "bean CLI (dev)")
 	default:
@@ -138,6 +143,10 @@ commands:
   logs SBX [--tail N]
   cp LOCAL sbx:SBX:/path | sbx:SBX:/path LOCAL
   events SBX | events -f [SBX] [--label k=v]    # -f follows the live stream
+  snapshot create SBX [--name N] [--no-keep-running]
+  snapshot ls [--label k=v] | snapshot rm SNAP
+  run --snapshot SNAP                           # restore instead of image
+  image ls | image status REF | image prewarm REF... [--nodes N]
 env: BEAN_BASE_URL (default http://127.0.0.1:8080), BEAN_API_KEY`
 
 func envOr(k, def string) string {
@@ -182,11 +191,16 @@ func parseFlags(args []string) (map[string]string, []string) {
 
 func cmdRun(c *Client, args []string, stdout io.Writer) error {
 	flags, _ := parseFlags(args)
-	image := flags["image"]
-	if image == "" {
-		return fmt.Errorf("--image required")
+	image, snap := flags["image"], flags["snapshot"]
+	if (image == "") == (snap == "") {
+		return fmt.Errorf("provide exactly one of --image or --snapshot")
 	}
-	body := map[string]any{"image": image}
+	body := map[string]any{}
+	if image != "" {
+		body["image"] = image
+	} else {
+		body["snapshot"] = snap
+	}
 	if lbl := flags["label"]; lbl != "" {
 		parts := strings.SplitN(lbl, "=", 2)
 		if len(parts) == 2 {
@@ -314,6 +328,150 @@ func cmdLogs(c *Client, args []string, stdout io.Writer) error {
 	}
 	_, err = io.Copy(stdout, resp.Body)
 	return err
+}
+
+// cmdSnapshot handles snapshot create/ls/rm.
+func cmdSnapshot(c *Client, args []string, stdout io.Writer) error {
+	flags, pos := parseFlags(args)
+	if len(pos) == 0 {
+		return fmt.Errorf("usage: bean snapshot create SBX | ls | rm SNAP")
+	}
+	switch pos[0] {
+	case "create":
+		if len(pos) < 2 {
+			return fmt.Errorf("usage: bean snapshot create SBX [--name N]")
+		}
+		body := map[string]any{"name": flags["name"]}
+		// keepRunning defaults true; --no-keep-running stops the source once
+		// the snapshot is safely stored.
+		if flags["no-keep-running"] == "true" {
+			body["keepRunning"] = false
+		}
+		var out struct {
+			SnapshotID string `json:"snapshotId"`
+			Snapshot   struct {
+				State     string `json:"state"`
+				SizeBytes int64  `json:"sizeBytes"`
+			} `json:"snapshot"`
+		}
+		if err := c.doJSON("POST", "/v1/sandboxes/"+pos[1]+"/snapshot", body, &out); err != nil {
+			return err
+		}
+		fmt.Fprintf(stdout, "%s\t%s\t%d bytes\n",
+			out.SnapshotID, out.Snapshot.State, out.Snapshot.SizeBytes)
+		return nil
+
+	case "ls":
+		path := "/v1/snapshots"
+		if lbl := flags["label"]; lbl != "" {
+			path += "?label=" + url.QueryEscape(lbl)
+		}
+		var out struct {
+			Snapshots []struct {
+				ID        string    `json:"id"`
+				Name      string    `json:"name"`
+				State     string    `json:"state"`
+				SandboxID string    `json:"sandboxId"`
+				Image     string    `json:"image"`
+				SizeBytes int64     `json:"sizeBytes"`
+				CreatedAt time.Time `json:"createdAt"`
+			} `json:"snapshots"`
+		}
+		if err := c.doJSON("GET", path, nil, &out); err != nil {
+			return err
+		}
+		tw := tabwriter.NewWriter(stdout, 2, 4, 2, ' ', 0)
+		fmt.Fprintln(tw, "ID\tNAME\tSTATE\tSANDBOX\tIMAGE\tSIZE\tAGE")
+		for _, s := range out.Snapshots {
+			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%d\t%s\n",
+				s.ID, s.Name, s.State, s.SandboxID, s.Image, s.SizeBytes,
+				time.Since(s.CreatedAt).Truncate(time.Second))
+		}
+		return tw.Flush()
+
+	case "rm":
+		if len(pos) < 2 {
+			return fmt.Errorf("usage: bean snapshot rm SNAP")
+		}
+		if err := c.doJSON("DELETE", "/v1/snapshots/"+pos[1], nil, nil); err != nil {
+			return err
+		}
+		fmt.Fprintln(stdout, pos[1], "deleted")
+		return nil
+
+	default:
+		return fmt.Errorf("unknown snapshot subcommand %q", pos[0])
+	}
+}
+
+// cmdImage handles image ls/status/prewarm.
+func cmdImage(c *Client, args []string, stdout io.Writer) error {
+	flags, pos := parseFlags(args)
+	if len(pos) == 0 {
+		return fmt.Errorf("usage: bean image ls | status REF | prewarm REF...")
+	}
+	switch pos[0] {
+	case "ls":
+		var out struct {
+			Images []struct {
+				Ref         string `json:"ref"`
+				State       string `json:"state"`
+				CachedNodes int    `json:"cachedNodes"`
+				SizeBytes   int64  `json:"sizeBytes"`
+			} `json:"images"`
+		}
+		if err := c.doJSON("GET", "/v1/images", nil, &out); err != nil {
+			return err
+		}
+		tw := tabwriter.NewWriter(stdout, 2, 4, 2, ' ', 0)
+		fmt.Fprintln(tw, "REF\tSTATE\tCACHED NODES\tSIZE")
+		for _, i := range out.Images {
+			fmt.Fprintf(tw, "%s\t%s\t%d\t%d\n", i.Ref, i.State, i.CachedNodes, i.SizeBytes)
+		}
+		return tw.Flush()
+
+	case "status":
+		if len(pos) < 2 {
+			return fmt.Errorf("usage: bean image status REF")
+		}
+		var out map[string]any
+		if err := c.doJSON("GET", "/v1/images/status?ref="+url.QueryEscape(pos[1]), nil, &out); err != nil {
+			return err
+		}
+		tw := tabwriter.NewWriter(stdout, 2, 4, 2, ' ', 0)
+		for _, k := range []string{"ref", "digest", "state", "format", "cachedNodes", "sizeBytes"} {
+			if v, ok := out[k]; ok {
+				fmt.Fprintf(tw, "%s:\t%v\n", k, v)
+			}
+		}
+		return tw.Flush()
+
+	case "prewarm":
+		if len(pos) < 2 {
+			return fmt.Errorf("usage: bean image prewarm REF... [--nodes N]")
+		}
+		body := map[string]any{"refs": pos[1:]}
+		if n := flags["nodes"]; n != "" {
+			if parsed, err := strconv.Atoi(n); err == nil {
+				body["targetNodes"] = parsed
+			}
+		}
+		var out struct {
+			JobID string         `json:"jobId"`
+			Ready map[string]int `json:"ready"`
+		}
+		if err := c.doJSON("POST", "/v1/images/prewarm", body, &out); err != nil {
+			return err
+		}
+		fmt.Fprintf(stdout, "%s\n", out.JobID)
+		for ref, n := range out.Ready {
+			fmt.Fprintf(stdout, "  %s: cached on %d node(s)\n", ref, n)
+		}
+		return nil
+
+	default:
+		return fmt.Errorf("unknown image subcommand %q", pos[0])
+	}
 }
 
 // streamEvents follows the SSE event stream until interrupted.

@@ -3,6 +3,7 @@ package runtime
 
 import (
 	"context"
+	"io"
 	"time"
 )
 
@@ -10,14 +11,16 @@ import (
 type State string
 
 const (
-	StatePulling  State = "PULLING"
-	StateStarting State = "STARTING"
-	StateRunning  State = "RUNNING"
-	StatePausing  State = "PAUSING"
-	StatePaused   State = "PAUSED"
-	StateResuming State = "RESUMING"
-	StateStopped  State = "STOPPED"
-	StateFailed   State = "FAILED"
+	StatePulling      State = "PULLING"
+	StateStarting     State = "STARTING"
+	StateRunning      State = "RUNNING"
+	StatePausing      State = "PAUSING"
+	StatePaused       State = "PAUSED"
+	StateResuming     State = "RESUMING"
+	StateSnapshotting State = "SNAPSHOTTING"
+	StateRestoring    State = "RESTORING"
+	StateStopped      State = "STOPPED"
+	StateFailed       State = "FAILED"
 )
 
 // Spec is the node-side sandbox spec (subset of proto SandboxSpec).
@@ -41,11 +44,24 @@ type Handle struct {
 	RuntimeTag string
 }
 
-// Runtime creates and manages sandbox instances.
+// Runtime creates and manages sandbox instances. Implementations are
+// interchangeable from the Manager's point of view, which is what lets the
+// same control plane drive process-level sandboxes in dev and microVMs in
+// production.
 type Runtime interface {
 	Name() string
 	Create(ctx context.Context, spec *Spec) (*Handle, error)
 	Destroy(ctx context.Context, id string, force bool) error
 	Pause(ctx context.Context, id string) error
 	Resume(ctx context.Context, id string) error
+
+	// Checkpoint writes a restorable representation of the sandbox to w.
+	// The format is runtime-specific and not interchangeable between
+	// tiers, which is why a snapshot records the runtime that produced it.
+	Checkpoint(ctx context.Context, id string, w io.Writer) error
+
+	// Restore creates a sandbox from a checkpoint previously written by the
+	// same runtime. The spec supplies identity and resources; the
+	// checkpoint supplies the filesystem (and, for microVMs, memory).
+	Restore(ctx context.Context, spec *Spec, r io.Reader) (*Handle, error)
 }

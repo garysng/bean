@@ -9,7 +9,9 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from bean import BeanAPIError, BeanClient, BeanConnectionError, Event  # noqa: E402
+from bean import (  # noqa: E402
+    BeanAPIError, BeanClient, BeanConnectionError, Event, Snapshot,
+)
 
 
 class StubHandler(BaseHTTPRequestHandler):
@@ -43,9 +45,16 @@ class StubHandler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", 0))
         body = json.loads(self.rfile.read(length) or b"{}")
         if self.path == "/v1/sandboxes":
-            if not body.get("image"):
-                return self._json(400, {"error": {"code": "IMAGE_REF_INVALID", "message": "image required"}})
-            sb = {"id": "sbx_stub1", "state": "RUNNING", "image": body["image"],
+            image, snap = body.get("image"), body.get("snapshot")
+            if not image and not snap:
+                return self._json(400, {"error": {"code": "INVALID_ARGUMENT",
+                                                  "message": "image or snapshot required"}})
+            if image == "reject-me":
+                return self._json(400, {"error": {"code": "IMAGE_REF_INVALID",
+                                                  "message": "image rejected"}})
+            sb = {"id": "sbx_stub1", "state": "RUNNING",
+                  "image": image or "python:3.12",
+                  "snapshotId": snap or "",
                   "labels": body.get("labels", {})}
             StubHandler.store["sbx_stub1"] = sb
             return self._json(201, {"sandbox": sb})
@@ -53,6 +62,16 @@ class StubHandler(BaseHTTPRequestHandler):
             cmd = body["cmd"]
             return self._json(200, {"exitCode": 0, "stdout": " ".join(cmd), "stderr": "",
                                     "truncated": False, "durationMs": 5})
+        if self.path.endswith("/snapshot"):
+            return self._json(202, {
+                "snapshotId": "snap_stub1",
+                "snapshot": {"id": "snap_stub1", "state": "READY",
+                             "sandboxId": "sbx_stub1", "image": "python:3.12",
+                             "name": body.get("name", ""), "sizeBytes": 2048},
+            })
+        if self.path == "/v1/images/prewarm":
+            return self._json(202, {"jobId": "pw_stub1",
+                                    "ready": {r: 1 for r in body.get("refs", [])}})
         if self.path.endswith("/pause") or self.path.endswith("/resume"):
             self.send_response(202)
             self.end_headers()
@@ -79,6 +98,22 @@ class StubHandler(BaseHTTPRequestHandler):
             return
         if self.path == "/v1/sandboxes":
             return self._json(200, {"sandboxes": list(StubHandler.store.values())})
+        if self.path.startswith("/v1/snapshots/"):
+            return self._json(200, {"snapshot": {
+                "id": "snap_stub1", "state": "READY", "sandboxId": "sbx_stub1",
+                "image": "python:3.12", "sizeBytes": 2048}})
+        if self.path.startswith("/v1/snapshots"):
+            return self._json(200, {"snapshots": [{
+                "id": "snap_stub1", "state": "READY", "sandboxId": "sbx_stub1",
+                "image": "python:3.12", "sizeBytes": 2048}]})
+        if self.path == "/v1/images":
+            return self._json(200, {"images": [
+                {"ref": "python:3.12", "state": "PENDING", "cachedNodes": 0}]})
+        if self.path.startswith("/v1/images/status"):
+            return self._json(200, {"ref": "python:3.12", "state": "PENDING",
+                                    "format": "oci", "cachedNodes": 0})
+        if self.path.startswith("/v1/images/prewarm/"):
+            return self._json(200, {"jobId": "pw_stub1", "done": True})
         if self.path.startswith("/v1/sandboxes/sbx_stub1/files?"):
             self.send_response(200)
             self.end_headers()
@@ -139,8 +174,9 @@ class SDKTest(unittest.TestCase):
         self.assertEqual(cm.exception.http_status, 401)
 
     def test_create_validation_error(self):
+        # A server-side rejection surfaces as BeanAPIError with its code.
         with self.assertRaises(BeanAPIError) as cm:
-            self.client.sandboxes.create(image="")
+            self.client.sandboxes.create(image="reject-me")
         self.assertEqual(cm.exception.code, "IMAGE_REF_INVALID")
 
     def test_context_manager_kills(self):
@@ -184,6 +220,51 @@ class SDKTest(unittest.TestCase):
         c = BeanClient(api_key="k", base_url="http://192.0.2.1:8080")
         with self.assertRaises(BeanConnectionError):
             list(c.events.subscribe(timeout=1))
+
+    def test_sandbox_snapshot(self):
+        sb = self.client.sandboxes.create(image="python:3.12")
+        snap = sb.snapshot(name="after-setup")
+        self.assertIsInstance(snap, Snapshot)
+        self.assertEqual(snap.id, "snap_stub1")
+        self.assertEqual(snap.state, "READY")
+        self.assertEqual(snap.size_bytes, 2048)
+        # Keeping the sandbox running is the default.
+        self.assertEqual(sb.state, "RUNNING")
+
+    def test_snapshot_stops_source_when_asked(self):
+        sb = self.client.sandboxes.create(image="python:3.12")
+        sb.snapshot(keep_running=False)
+        self.assertEqual(sb.state, "STOPPED")
+
+    def test_create_from_snapshot(self):
+        sb = self.client.sandboxes.create(snapshot="snap_stub1")
+        self.assertEqual(sb.id, "sbx_stub1")
+
+    def test_create_requires_exactly_one_source(self):
+        with self.assertRaises(ValueError):
+            self.client.sandboxes.create(image="x", snapshot="y")
+        with self.assertRaises(ValueError):
+            self.client.sandboxes.create()
+
+    def test_snapshots_namespace(self):
+        snaps = self.client.snapshots.list()
+        self.assertEqual(len(snaps), 1)
+        self.assertEqual(snaps[0].id, "snap_stub1")
+        one = self.client.snapshots.get("snap_stub1")
+        self.assertEqual(one.image, "python:3.12")
+        # Deleting through either the namespace or the object works.
+        self.client.snapshots.delete("snap_stub1")
+        one.delete()
+
+    def test_images_namespace(self):
+        imgs = self.client.images.list()
+        self.assertEqual(imgs[0]["ref"], "python:3.12")
+        status = self.client.images.status("python:3.12")
+        self.assertEqual(status["format"], "oci")
+        job = self.client.images.prewarm(["python:3.12"], target_nodes=1)
+        self.assertEqual(job["jobId"], "pw_stub1")
+        self.assertEqual(job["ready"]["python:3.12"], 1)
+        self.assertTrue(self.client.images.prewarm_status("pw_stub1")["done"])
 
     def test_timeout_configurable(self):
         c = BeanClient(api_key="k", base_url=self.client.base_url, timeout=1.5)

@@ -3,6 +3,7 @@ package runtime
 import (
 	"context"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -38,9 +39,37 @@ func NewLocalRuntime(agentBin, baseDir string) *LocalRuntime {
 func (r *LocalRuntime) Name() string { return "local" }
 
 func (r *LocalRuntime) Create(ctx context.Context, spec *Spec) (*Handle, error) {
+	return r.create(ctx, spec, nil)
+}
+
+// Checkpoint archives the sandbox rootfs. Process state is not captured:
+// LocalRuntime exists for development and CI, where filesystem fidelity is
+// what the control-plane paths under test actually depend on.
+func (r *LocalRuntime) Checkpoint(ctx context.Context, id string, w io.Writer) error {
+	sb, err := r.get(id)
+	if err != nil {
+		return err
+	}
+	return tarDirectory(sb.root, w)
+}
+
+// Restore recreates a sandbox and unpacks a checkpoint over its rootfs.
+func (r *LocalRuntime) Restore(ctx context.Context, spec *Spec, src io.Reader) (*Handle, error) {
+	return r.create(ctx, spec, src)
+}
+
+// create starts a sandbox, optionally seeding its rootfs from a checkpoint
+// before the agent comes up so the agent never observes a partial rootfs.
+func (r *LocalRuntime) create(ctx context.Context, spec *Spec, restoreFrom io.Reader) (*Handle, error) {
 	root := filepath.Join(r.baseDir, spec.SandboxID, "rootfs")
 	if err := os.MkdirAll(root, 0o755); err != nil {
 		return nil, fmt.Errorf("mkdir %s: %w", root, err)
+	}
+	if restoreFrom != nil {
+		if err := untarDirectory(restoreFrom, root); err != nil {
+			_ = os.RemoveAll(filepath.Join(r.baseDir, spec.SandboxID))
+			return nil, fmt.Errorf("restore rootfs: %w", err)
+		}
 	}
 	// Unix socket paths are limited to ~104 bytes on darwin; use a short tmp dir.
 	sockDir, err := os.MkdirTemp("", "bn")
