@@ -18,6 +18,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/garysng/bean/internal/control/scheduler"
 	"github.com/garysng/bean/internal/control/store"
 	commonv1 "github.com/garysng/bean/internal/gen/bean/common/v1"
 	nodev1 "github.com/garysng/bean/internal/gen/bean/node/v1"
@@ -28,19 +29,44 @@ const (
 	maxExecTimeoutSeconds = 3600    // clamp: never hold a request for longer
 )
 
-// Server is the REST gateway. P0: single node, direct noded connection.
-type Server struct {
-	store  *store.Store
-	node   nodev1.SandboxServiceClient
-	nodeID string
-	apiKey string
-	mux    *http.ServeMux
+// Placer selects a node for a sandbox. Nil in single-node mode.
+type Placer interface {
+	Schedule(req *scheduler.Request) (string, error)
+	ReleaseCreate(nodeID string)
+	Release(nodeID string, req *scheduler.Request)
 }
 
+// Server is the REST gateway.
+type Server struct {
+	store  *store.Store
+	router Router
+	// placer is set in multi-node mode; when nil every sandbox goes to
+	// defaultNodeID (single-node P0 path).
+	placer        Placer
+	defaultNodeID string
+	region        string
+	apiKey        string
+	mux           *http.ServeMux
+}
+
+// NewServer builds a single-node gateway routing everything to one noded.
 func NewServer(st *store.Store, nodeClient nodev1.SandboxServiceClient, nodeID, apiKey string) *Server {
-	s := &Server{store: st, node: nodeClient, nodeID: nodeID, apiKey: apiKey, mux: http.NewServeMux()}
+	return NewServerWithRouter(st, NewStaticRouter(nodeClient), nil, nodeID, "local", apiKey)
+}
+
+// NewServerWithRouter builds a gateway that can place sandboxes across
+// nodes. Pass a nil placer to keep single-node behaviour.
+func NewServerWithRouter(st *store.Store, router Router, placer Placer,
+	defaultNodeID, region, apiKey string) *Server {
+	s := &Server{store: st, router: router, placer: placer,
+		defaultNodeID: defaultNodeID, region: region, apiKey: apiKey, mux: http.NewServeMux()}
 	s.routes()
 	return s
+}
+
+// nodeClientFor resolves the SandboxService client owning a sandbox.
+func (s *Server) nodeClientFor(rec *store.SandboxRecord) (nodev1.SandboxServiceClient, error) {
+	return s.router.Client(rec.NodeID)
 }
 
 func (s *Server) Handler() http.Handler { return s.authMiddleware(s.mux) }
@@ -173,7 +199,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	rec := &store.SandboxRecord{
-		ID: id, Image: req.Image, State: "PENDING", NodeID: s.nodeID,
+		ID: id, Image: req.Image, State: "PENDING", NodeID: s.defaultNodeID,
 		CPU: spec.Cpu, MemoryMiB: spec.MemoryMib, DiskMiB: spec.DiskMib,
 		Labels: req.Labels, CreatedAt: time.Now(), LastActivity: time.Now(),
 	}
@@ -197,20 +223,48 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		rec.OnIdle = onIdle
 	}
 
+	// Placement: pick a node before persisting, so a capacity failure never
+	// leaves a record pointing at a node that cannot host it.
+	var placement *scheduler.Request
+	if s.placer != nil {
+		placement = &scheduler.Request{
+			SandboxID: id, Region: s.region, Image: req.Image,
+			CPU: spec.Cpu, MemoryMiB: spec.MemoryMib, DiskMiB: spec.DiskMib,
+			Runtime: "local", SpreadKey: req.Labels["eval-run"],
+		}
+		nodeID, err := s.placer.Schedule(placement)
+		if err != nil {
+			writeErr(w, http.StatusServiceUnavailable, "NO_CAPACITY", err.Error())
+			return
+		}
+		rec.NodeID = nodeID
+	}
+
 	if err := s.store.PutSandbox(rec); err != nil {
+		if s.placer != nil {
+			s.placer.ReleaseCreate(rec.NodeID)
+			s.placer.Release(rec.NodeID, placement)
+		}
 		writeErr(w, http.StatusInternalServerError, "INTERNAL", err.Error())
 		return
 	}
 	s.emit(id, "sandbox.lifecycle.created", nil)
 
+	nodeClient, err := s.nodeClientFor(rec)
+	if err != nil {
+		s.failCreate(rec, placement, err)
+		writeErr(w, http.StatusServiceUnavailable, "NODE_UNREACHABLE", err.Error())
+		return
+	}
+
 	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
 	defer cancel()
-	resp, err := s.node.CreateSandbox(ctx, &nodev1.CreateSandboxRequest{Spec: spec})
+	resp, err := nodeClient.CreateSandbox(ctx, &nodev1.CreateSandboxRequest{Spec: spec})
+	if s.placer != nil {
+		s.placer.ReleaseCreate(rec.NodeID)
+	}
 	if err != nil {
-		rec.State = "FAILED"
-		rec.Reason = err.Error()
-		_ = s.store.PutSandbox(rec)
-		s.emit(id, "sandbox.lifecycle.failed", map[string]string{"reason": err.Error()})
+		s.failCreate(rec, placement, err)
 		grpcToHTTP(w, err)
 		return
 	}
@@ -219,6 +273,29 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	s.emit(id, "sandbox.lifecycle.running", nil)
 
 	writeJSON(w, http.StatusCreated, map[string]any{"sandbox": rec})
+}
+
+// failCreate records the failure and returns committed capacity.
+func (s *Server) failCreate(rec *store.SandboxRecord, placement *scheduler.Request, cause error) {
+	rec.State = "FAILED"
+	rec.Reason = cause.Error()
+	_ = s.store.PutSandbox(rec)
+	s.emit(rec.ID, "sandbox.lifecycle.failed", map[string]string{"reason": cause.Error()})
+	if s.placer != nil && placement != nil {
+		s.placer.Release(rec.NodeID, placement)
+	}
+}
+
+// releasePlacement returns capacity for a sandbox that has stopped.
+func (s *Server) releasePlacement(rec *store.SandboxRecord) {
+	if s.placer == nil {
+		return
+	}
+	s.placer.Release(rec.NodeID, &scheduler.Request{
+		SandboxID: rec.ID, Region: s.region, Image: rec.Image,
+		CPU: rec.CPU, MemoryMiB: rec.MemoryMiB, DiskMiB: rec.DiskMiB,
+		SpreadKey: rec.Labels["eval-run"],
+	})
 }
 
 func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
@@ -254,6 +331,21 @@ func (s *Server) loadSandbox(w http.ResponseWriter, id string) *store.SandboxRec
 	return rec
 }
 
+// resolveNode loads the sandbox and returns the client for its node,
+// writing the error response and returning nil on failure.
+func (s *Server) resolveNode(w http.ResponseWriter, id string) nodev1.SandboxServiceClient {
+	rec := s.loadSandbox(w, id)
+	if rec == nil {
+		return nil
+	}
+	c, err := s.nodeClientFor(rec)
+	if err != nil {
+		writeErr(w, http.StatusServiceUnavailable, "NODE_UNREACHABLE", err.Error())
+		return nil
+	}
+	return c
+}
+
 func (s *Server) handleGet(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
 	rec := s.loadSandbox(w, id)
@@ -262,7 +354,12 @@ func (s *Server) handleGet(w http.ResponseWriter, r *http.Request) {
 	}
 	// Refresh live state from the node for non-terminal sandboxes.
 	if rec.State != "STOPPED" && rec.State != "FAILED" {
-		st, err := s.node.GetSandbox(r.Context(), &nodev1.GetSandboxRequest{SandboxId: id})
+		nodeClient, cerr := s.nodeClientFor(rec)
+		if cerr != nil {
+			writeJSON(w, http.StatusOK, map[string]any{"sandbox": rec})
+			return
+		}
+		st, err := nodeClient.GetSandbox(r.Context(), &nodev1.GetSandboxRequest{SandboxId: id})
 		switch {
 		case err == nil:
 			rec.State = st.Status.State
@@ -284,22 +381,29 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	force := r.URL.Query().Get("force") == "true"
-	if _, err := s.node.DestroySandbox(r.Context(), &nodev1.DestroySandboxRequest{SandboxId: id, Force: force}); err != nil {
+	nodeClient, cerr := s.nodeClientFor(rec)
+	if cerr != nil {
+		writeErr(w, http.StatusServiceUnavailable, "NODE_UNREACHABLE", cerr.Error())
+		return
+	}
+	if _, err := nodeClient.DestroySandbox(r.Context(), &nodev1.DestroySandboxRequest{SandboxId: id, Force: force}); err != nil {
 		grpcToHTTP(w, err)
 		return
 	}
 	rec.State = "STOPPED"
 	_ = s.store.PutSandbox(rec)
+	s.releasePlacement(rec)
 	s.emit(id, "sandbox.lifecycle.stopped", nil)
 	w.WriteHeader(http.StatusAccepted)
 }
 
 func (s *Server) handlePause(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if s.loadSandbox(w, id) == nil {
+	nodeClient := s.resolveNode(w, id)
+	if nodeClient == nil {
 		return
 	}
-	if _, err := s.node.PauseSandbox(r.Context(), &nodev1.PauseSandboxRequest{SandboxId: id}); err != nil {
+	if _, err := nodeClient.PauseSandbox(r.Context(), &nodev1.PauseSandboxRequest{SandboxId: id}); err != nil {
 		grpcToHTTP(w, err)
 		return
 	}
@@ -310,10 +414,11 @@ func (s *Server) handlePause(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleResume(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if s.loadSandbox(w, id) == nil {
+	nodeClient := s.resolveNode(w, id)
+	if nodeClient == nil {
 		return
 	}
-	if _, err := s.node.ResumeSandbox(r.Context(), &nodev1.ResumeSandboxRequest{SandboxId: id}); err != nil {
+	if _, err := nodeClient.ResumeSandbox(r.Context(), &nodev1.ResumeSandboxRequest{SandboxId: id}); err != nil {
 		grpcToHTTP(w, err)
 		return
 	}
@@ -342,7 +447,8 @@ type execRequest struct {
 
 func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if s.loadSandbox(w, id) == nil {
+	nodeClient := s.resolveNode(w, id)
+	if nodeClient == nil {
 		return
 	}
 	var req execRequest
@@ -365,7 +471,7 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 	}
 	ctx, cancel := context.WithTimeout(r.Context(), timeout+10*time.Second)
 	defer cancel()
-	resp, err := s.node.Exec(ctx, &commonv1.ExecRequest{
+	resp, err := nodeClient.Exec(ctx, &commonv1.ExecRequest{
 		SandboxId:      id,
 		Cmd:            req.Cmd,
 		Cwd:            req.Cwd,
@@ -391,7 +497,8 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleWriteFile(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if s.loadSandbox(w, id) == nil {
+	nodeClient := s.resolveNode(w, id)
+	if nodeClient == nil {
 		return
 	}
 	path := r.URL.Query().Get("path")
@@ -414,7 +521,7 @@ func (s *Server) handleWriteFile(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusRequestEntityTooLarge, "FILE_TOO_LARGE", "inline upload limited to 4MiB; use presigned flow")
 		return
 	}
-	ws, err := s.node.WriteFile(r.Context())
+	ws, err := nodeClient.WriteFile(r.Context())
 	if err != nil {
 		grpcToHTTP(w, err)
 		return
@@ -442,7 +549,8 @@ func (s *Server) handleWriteFile(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleReadFile(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if s.loadSandbox(w, id) == nil {
+	nodeClient := s.resolveNode(w, id)
+	if nodeClient == nil {
 		return
 	}
 	path := r.URL.Query().Get("path")
@@ -450,7 +558,7 @@ func (s *Server) handleReadFile(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "INVALID_ARGUMENT", "path query param required")
 		return
 	}
-	stream, err := s.node.ReadFile(r.Context(), &commonv1.ReadFileRequest{SandboxId: id, Path: path})
+	stream, err := nodeClient.ReadFile(r.Context(), &commonv1.ReadFileRequest{SandboxId: id, Path: path})
 	if err != nil {
 		grpcToHTTP(w, err)
 		return
@@ -485,7 +593,8 @@ func (s *Server) handleReadFile(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleDeleteFile(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if s.loadSandbox(w, id) == nil {
+	nodeClient := s.resolveNode(w, id)
+	if nodeClient == nil {
 		return
 	}
 	path := r.URL.Query().Get("path")
@@ -493,7 +602,7 @@ func (s *Server) handleDeleteFile(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "INVALID_ARGUMENT", "path query param required")
 		return
 	}
-	if _, err := s.node.DeleteFile(r.Context(), &commonv1.DeleteFileRequest{SandboxId: id, Path: path}); err != nil {
+	if _, err := nodeClient.DeleteFile(r.Context(), &commonv1.DeleteFileRequest{SandboxId: id, Path: path}); err != nil {
 		grpcToHTTP(w, err)
 		return
 	}
@@ -502,14 +611,15 @@ func (s *Server) handleDeleteFile(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleListDir(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if s.loadSandbox(w, id) == nil {
+	nodeClient := s.resolveNode(w, id)
+	if nodeClient == nil {
 		return
 	}
 	path := r.URL.Query().Get("path")
 	if path == "" {
 		path = "/"
 	}
-	resp, err := s.node.ListDir(r.Context(), &commonv1.ListDirRequest{SandboxId: id, Path: path})
+	resp, err := nodeClient.ListDir(r.Context(), &commonv1.ListDirRequest{SandboxId: id, Path: path})
 	if err != nil {
 		grpcToHTTP(w, err)
 		return
@@ -526,14 +636,15 @@ func (s *Server) handleListDir(w http.ResponseWriter, r *http.Request) {
 
 func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 	id := r.PathValue("id")
-	if s.loadSandbox(w, id) == nil {
+	nodeClient := s.resolveNode(w, id)
+	if nodeClient == nil {
 		return
 	}
 	tail := 0
 	if ts := r.URL.Query().Get("tailLines"); ts != "" {
 		tail, _ = strconv.Atoi(ts)
 	}
-	stream, err := s.node.GetLogs(r.Context(), &commonv1.GetLogsRequest{SandboxId: id, TailLines: int32(tail)})
+	stream, err := nodeClient.GetLogs(r.Context(), &commonv1.GetLogsRequest{SandboxId: id, TailLines: int32(tail)})
 	if err != nil {
 		grpcToHTTP(w, err)
 		return
