@@ -4,6 +4,7 @@ package runtime
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"strings"
 
@@ -39,13 +40,29 @@ func NewFCTier(cfg FCTierConfig) (Runtime, error) {
 		}
 	}
 
-	provider := &image.FileProvider{
-		BaseDir:        cfg.BaseDir,
-		ImageDir:       cfg.ImageDir,
-		DefaultSizeMiB: cfg.DefaultDiskMiB,
-	}
 	return NewFCRuntime(cfg.FirecrackerBin, cfg.KernelPath, cfg.AgentDiskPath,
-		cfg.BaseDir, provider), nil
+		cfg.BaseDir, selectProvider(cfg)), nil
+}
+
+// selectProvider picks how a rootfs is assembled.
+//
+// device-mapper is preferred because it shares one read-only base across every
+// sandbox and gives each a copy-on-write store: creating a sandbox copies
+// nothing, and a write costs kilobytes instead of the image's size. Copying the
+// base image works everywhere but makes a fan-out of clones cost the image size
+// each time, so it is the fallback rather than the default.
+func selectProvider(cfg FCTierConfig) image.Provider {
+	dm := image.NewDevMapperProvider(cfg.BaseDir, cfg.ImageDir, cfg.DefaultDiskMiB)
+	if err := dm.Available(); err != nil {
+		log.Printf("fc tier: %v; falling back to copying base images", err)
+		return &image.FileProvider{
+			BaseDir:        cfg.BaseDir,
+			ImageDir:       cfg.ImageDir,
+			DefaultSizeMiB: cfg.DefaultDiskMiB,
+		}
+	}
+	log.Printf("fc tier: rootfs via device-mapper copy-on-write")
+	return dm
 }
 
 // checkSnapshotSupport verifies the host can save a vCPU's state.

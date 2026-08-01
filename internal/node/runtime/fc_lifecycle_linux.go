@@ -4,6 +4,7 @@ package runtime
 
 import (
 	"archive/tar"
+	"bytes"
 	"compress/gzip"
 	"context"
 	"errors"
@@ -178,15 +179,16 @@ const (
 //
 // Tar is used rather than a custom container because the parts have wildly
 // different sizes and a reader must be able to find one without buffering the
-// others. Compression is not optional: a snapshot's uncompressed size is the
-// provisioned rootfs plus guest memory — over a gigabyte for a small sandbox —
-// while the holes and zeroed memory pages that make up most of it compress to
-// almost nothing. Measured on a 1 GiB rootfs with 256 MiB of guest memory, the
-// bundle goes from 1280 MiB to 17 MiB, which is the difference between snapshots
-// being usable and not.
+// others.
+//
+// Two things keep the result small. The writable layer goes in as an extent
+// list, so its cost follows what the sandbox wrote rather than what it was
+// provisioned. Guest memory is compressed, since most of a fresh VM's pages are
+// zero. Together these took a snapshot of a small sandbox from 1280 MiB to
+// around 20 MiB, which is the difference between snapshots being usable and not.
 func writeSnapshotBundle(w io.Writer, statePath, memPath, rootfsPath string) error {
-	// Speed over ratio: the content is mostly runs of zeroes, which even the
-	// fastest setting removes, and a checkpoint blocks the paused sandbox.
+	// Speed over ratio: the remaining bulk is zeroed memory pages, which even
+	// the fastest setting removes, and the sandbox is paused throughout.
 	zw, err := gzip.NewWriterLevel(w, gzip.BestSpeed)
 	if err != nil {
 		return err
@@ -199,20 +201,57 @@ func writeSnapshotBundle(w io.Writer, statePath, memPath, rootfsPath string) err
 
 func writeBundleEntries(w io.Writer, statePath, memPath, rootfsPath string) error {
 	tw := tar.NewWriter(w)
-	members := []struct{ name, path string }{
+
+	// vmstate and the memory file are dense — Firecracker writes every byte —
+	// so they go in whole.
+	for _, m := range []struct{ name, path string }{
 		{snapshotStateFile, statePath},
 		{snapshotMemFile, memPath},
-		{snapshotRootfsFile, rootfsPath},
-	}
-	for _, m := range members {
-		if m.path == "" {
-			continue
-		}
+	} {
 		if err := writeTarFile(tw, m.name, m.path); err != nil {
 			return fmt.Errorf("fc: bundle %s: %w", m.name, err)
 		}
 	}
+
+	// The writable layer is provisioned large and used lightly, so it goes in as
+	// an extent list. Emitting its full length as zeroes for the compressor to
+	// remove measured at 15s of paused-sandbox time on a 20 GiB store.
+	if rootfsPath != "" {
+		if err := writeSparseTarFile(tw, snapshotRootfsFile, rootfsPath); err != nil {
+			return fmt.Errorf("fc: bundle %s: %w", snapshotRootfsFile, err)
+		}
+	}
 	return tw.Close()
+}
+
+// writeSparseTarFile writes a file's allocated extents as one tar member.
+//
+// A tar header needs the size up front, and the extent stream's size is only
+// known after walking the file, so the extents are collected first. That costs
+// memory proportional to the data written — kilobytes to a few megabytes for a
+// sandbox's changes — rather than to the provisioned size.
+func writeSparseTarFile(tw *tar.Writer, name, path string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return err
+	}
+	defer f.Close()
+	info, err := f.Stat()
+	if err != nil {
+		return err
+	}
+
+	var buf bytes.Buffer
+	if _, err := writeSparse(&buf, f, info.Size()); err != nil {
+		return err
+	}
+	if err := tw.WriteHeader(&tar.Header{
+		Name: name, Mode: 0o600, Size: int64(buf.Len()), Typeflag: tar.TypeReg,
+	}); err != nil {
+		return err
+	}
+	_, err = io.Copy(tw, &buf)
+	return err
 }
 
 func writeTarFile(tw *tar.Writer, name, path string) error {
@@ -230,10 +269,7 @@ func writeTarFile(tw *tar.Writer, name, path string) error {
 	}); err != nil {
 		return err
 	}
-	// The rootfs is sparse: a 1 GiB filesystem holding 8 MiB of data would
-	// otherwise be copied as 1 GiB of mostly zeroes, making every snapshot cost
-	// the provisioned size rather than the used size. copySparse skips holes.
-	_, err = copySparse(tw, f, info.Size())
+	_, err = io.Copy(tw, f)
 	return err
 }
 
@@ -388,11 +424,14 @@ func readSnapshotBundle(src io.Reader, dir, rootfsDevice string) (map[string]str
 
 // writeBundleMember writes one member. The rootfs is written in place, since
 // the device already exists at the right size; the others are created.
-func writeBundleMember(src io.Reader, dest string, inPlace bool) error {
+// writeBundleMember extracts one member. sparse selects the extent-list format
+// the writable layer is stored in; the dense members are copied whole.
+func writeBundleMember(src io.Reader, dest string, sparse bool) error {
 	flags := os.O_CREATE | os.O_WRONLY | os.O_TRUNC
-	if inPlace {
-		// Truncating a block device is meaningless and truncating the sparse
-		// file would discard its size, so the contents are overwritten.
+	if sparse {
+		// The destination is the layer the provider already created at the
+		// right size. Truncating it would discard that, so it is written in
+		// place.
 		flags = os.O_WRONLY
 	}
 	f, err := os.OpenFile(dest, flags, 0o600)
@@ -400,55 +439,14 @@ func writeBundleMember(src io.Reader, dest string, inPlace bool) error {
 		return err
 	}
 	defer f.Close()
-	if err := copyPunchingHoles(f, src); err != nil {
+
+	if sparse {
+		return readSparse(src, f)
+	}
+	if _, err := io.Copy(f, src); err != nil {
 		return err
 	}
 	return f.Sync()
-}
-
-// copyPunchingHoles writes src to f, seeking over runs of zeroes instead of
-// writing them. Without this a restored rootfs allocates its full provisioned
-// size even though the snapshot only carried the used blocks, so every restore
-// would cost the disk the original sparse file avoided.
-func copyPunchingHoles(f *os.File, src io.Reader) error {
-	const chunk = 128 << 10
-	buf := make([]byte, chunk)
-	var offset int64
-	for {
-		n, err := io.ReadFull(src, buf)
-		if n > 0 {
-			if isAllZero(buf[:n]) {
-				// Seeking past a hole leaves it unallocated. The file's size
-				// comes from the device or a later write, so nothing is lost.
-				if _, serr := f.Seek(int64(n), io.SeekCurrent); serr != nil {
-					return serr
-				}
-			} else {
-				if _, werr := f.WriteAt(buf[:n], offset); werr != nil {
-					return werr
-				}
-				if _, serr := f.Seek(offset+int64(n), io.SeekStart); serr != nil {
-					return serr
-				}
-			}
-			offset += int64(n)
-		}
-		if err == io.EOF || err == io.ErrUnexpectedEOF {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-	}
-}
-
-func isAllZero(b []byte) bool {
-	for _, c := range b {
-		if c != 0 {
-			return false
-		}
-	}
-	return true
 }
 
 func (r *FCRuntime) get(id string) (*fcVM, error) {
