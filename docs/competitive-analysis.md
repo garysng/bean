@@ -5,6 +5,31 @@
 
 ## 1. 逐家分析
 
+### Tensorlake（tensorlakeai，2026 转型）⭐ 与 bean 同层最接近的商业实现
+
+原文档处理/RAG 项目（indexify）已转型为 *sandbox-native cloud for AI agents*，三块产品：
+Sandboxes（Firecracker microVM）、Cloud Volumes（内容寻址版本化文件系统）、
+Orchestrate（`@application`/`@function` serverless 编排,每 function 独占 sandbox）。
+
+- **隔离**：Firecracker microVM（非容器）;内存+文件系统快照、instant clone、
+  auto suspend/resume、live migration、预热池、egress allow/deny、
+  `https://<port>-<sandbox>.sandbox.tensorlake.ai` ingress——与 bean 的 D9/D11/
+  lifecycle 设计高度重合
+- **技术栈**：Rust（CLI/SDK/FUSE 客户端）+ Python/TS SDK;调度器 Lattice、
+  自研分布式 SQL 元数据库 Orion（Apache-2.0）
+- **开源边界**：主仓 Apache-2.0 但**仅 SDK/CLI/FUSE 客户端**;服务端/控制面闭源,
+  云服务不可自托管
+- **活跃度**：~976 star,日更,商业化已上线
+- **对 bean 的意义**：功能面最接近的对标（含卷、快照、ingress、编排）,
+  但闭源+不可自托管——这正是 bean「自主可控 + BYOC」的立足点。三个可借鉴点：
+  1. **`oci2rootfs`**（Apache-2.0,Rust）:OCI → ext4 rootfs,whiteout/opaque/xattr
+     处理完整,但全量预物化无 lazy load——可作 bean **未转换镜像的 fallback 转换器**
+     （overlaybd 直挂仍是主路径,性能更优）
+  2. **镜像即快照**：任意 sandbox 快照可 `register` 成命名镜像,对「装环境一次、
+     批量复用」场景实用（见 roadmap P4）
+  3. **`harbor`**（同 org）:agent evaluation / RL environment 框架,正是 bean 的
+     目标场景,API 形状值得对照
+
 ### AgentENV（kvcache-ai / Kimi，2026-07 开源）⭐ 最直接的对标
 
 为 Kimi K3 的 agentic RL 训练而建，与 bean 的目标场景（批量异构镜像 + RL rollout）几乎重合：
@@ -89,6 +114,7 @@
 
 | 平台 | 隔离 | 任意 OCI 直启 | 冷启动 | pause/resume/fork | 开源/自托管 | eval 批量适配 |
 |---|---|---|---|---|---|---|
+| **Tensorlake** | Firecracker | ✅ 但 oci2rootfs 全量预物化 | 预热池 | ✅ 快照/clone/迁移 | ❌ 仅客户端开源 | ⚠️ 闭源不可自托管 |
 | **AgentENV** | Firecracker | ✅ overlaybd 零转换 | resume <50ms | ✅✨ fork 16 子 | Apache-2.0 ✅ | ✅ 但多节点 prototype |
 | **CubeSandbox** | RustVMM | ❌ template 路线 | 60ms | ✅ CubeCoW fork | Apache-2.0 ✅ | ❌ template 成本 |
 | e2b | Firecracker | ❌ template build（5–15min/个） | ~200ms | ✅ Beta | Apache-2.0 ✅ | ❌ |
@@ -107,8 +133,10 @@
    FC + 任意 OCI 零转换」可行且生产可用——bean 采纳同一路线（D4/D9），
    差异化转向 AgentENV 的空白区：**多节点调度（镜像亲和 bin-packing）、prewarm
    编排、配额/租约/故障恢复、GPU 路径（容器档,P5 内部预留）、完整运维面**
-2. **商业平台仍无人做到零转换**：e2b/Morph/CodeSandbox/Modal 全要求 template
-   或 SDK 重建;最接近的 Daytona 无强隔离档。批量异构镜像评测在商业侧仍是空白
+2. **商业平台仍无人做到「零转换 + 按需加载」**：Tensorlake 走得最远（oci2rootfs
+   把 OCI 转 ext4,对用户零操作）,但仍是全量预物化、无 lazy load;e2b/Morph/
+   CodeSandbox/Modal 要求 template 或 SDK 重建;最接近的 Daytona 无强隔离档。
+   批量异构镜像评测在商业侧仍是空白
 3. **镜像分发是下半场**：各家优化「单模板反复启动」，eval 痛点是「2000 个不同
    镜像各启动几次」——S3 lazy-pull + 块级去重 + 镜像亲和调度 + record-trace
    预取直接打这个点
@@ -119,6 +147,7 @@
 
 ## 4. 需要持续跟踪的信号
 
+- **Tensorlake 是否开放服务端或推出自托管版**——若开放,功能重合度最高
 - **AgentENV 多节点控制面从 prototype 走向成熟的速度**——若其补齐调度/配额/
   运维面,「基于 AgentENV 二开」将重新成为选项
 - CubeSandbox 是否增加任意 OCI 直启路线
