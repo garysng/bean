@@ -18,8 +18,10 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 
 	"github.com/garysng/bean/internal/control/api"
+	"github.com/garysng/bean/internal/control/image"
 	"github.com/garysng/bean/internal/control/nodesvc"
 	"github.com/garysng/bean/internal/control/scheduler"
+	"github.com/garysng/bean/internal/control/secret"
 	"github.com/garysng/bean/internal/control/store"
 	nodev1 "github.com/garysng/bean/internal/gen/bean/node/v1"
 	"github.com/garysng/bean/internal/node"
@@ -39,6 +41,8 @@ func main() {
 		"token nodes must present to register (multi-node mode)")
 	runtimeTier := flag.String("runtime-tier", "fc",
 		"node capability required for placement (fc|local|runc|runsc)")
+	secretKey := flag.String("secret-key", os.Getenv("BEAN_SECRET_KEY"),
+		"master key encrypting persisted credentials (empty disables registry credentials)")
 	flag.Parse()
 
 	if *apiKey == "" {
@@ -54,11 +58,27 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	// Encryption for persisted credentials. Without a key the registry
+	// endpoints refuse rather than storing secrets in the clear.
+	var secrets *secret.Box
+	if *secretKey != "" {
+		var err error
+		if secrets, err = secret.NewBox(*secretKey); err != nil {
+			log.Fatalf("secret key: %v", err)
+		}
+	} else {
+		log.Print("no --secret-key: registry credentials disabled (public images only)")
+	}
+
 	var srv *api.Server
 	if *nodeGRPC != "" {
-		srv = setupMultiNode(ctx, st, *nodeGRPC, *region, *apiKey, *nodeToken, *bootstrapToken, *runtimeTier)
+		srv = setupMultiNode(ctx, st, multiNodeConfig{
+			nodeGRPCAddr: *nodeGRPC, region: *region, apiKey: *apiKey,
+			nodeToken: *nodeToken, bootstrapToken: *bootstrapToken,
+			runtimeTier: *runtimeTier, secrets: secrets,
+		})
 	} else {
-		srv = setupSingleNode(st, *nodedAddr, *apiKey, *nodeToken)
+		srv = setupSingleNode(st, *nodedAddr, *apiKey, *nodeToken, secrets)
 		log.Printf("single-node mode (noded=%s)", *nodedAddr)
 	}
 
@@ -86,7 +106,8 @@ func main() {
 }
 
 // setupSingleNode keeps the P0 path: one gateway, one noded.
-func setupSingleNode(st *store.Store, nodedAddr, apiKey, nodeToken string) *api.Server {
+func setupSingleNode(st *store.Store, nodedAddr, apiKey, nodeToken string,
+	secrets *secret.Box) *api.Server {
 	unaryTok, streamTok := node.TokenClientInterceptors(nodeToken)
 	conn, err := grpc.NewClient(nodedAddr,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
@@ -95,21 +116,35 @@ func setupSingleNode(st *store.Store, nodedAddr, apiKey, nodeToken string) *api.
 	if err != nil {
 		log.Fatalf("dial noded: %v", err)
 	}
-	return api.NewServer(st, nodev1.NewSandboxServiceClient(conn), "node-0", apiKey)
+	return api.NewServerWithOptions(st, api.NewStaticRouter(nodev1.NewSandboxServiceClient(conn)),
+		nil, api.Options{
+			DefaultNodeID: "node-0", Region: "local", APIKey: apiKey,
+			RuntimeTier: "local", Images: image.New(st, nil), Secrets: secrets,
+		})
+}
+
+// multiNodeConfig groups the multi-node wiring parameters.
+type multiNodeConfig struct {
+	nodeGRPCAddr   string
+	region         string
+	apiKey         string
+	nodeToken      string
+	bootstrapToken string
+	runtimeTier    string
+	secrets        *secret.Box
 }
 
 // setupMultiNode serves NodeService and places sandboxes via the scheduler.
-func setupMultiNode(ctx context.Context, st *store.Store,
-	nodeGRPCAddr, region, apiKey, nodeToken, bootstrapToken, runtimeTier string) *api.Server {
+func setupMultiNode(ctx context.Context, st *store.Store, cfg multiNodeConfig) *api.Server {
 	sched := scheduler.New(scheduler.DefaultWeights())
 
 	svc := nodesvc.New(sched, nodesvc.Options{
-		BootstrapToken: bootstrapToken,
+		BootstrapToken: cfg.bootstrapToken,
 		Lister:         &storeLister{store: st},
 		OnLost:         func(nodeID string) { markNodeSandboxesLost(st, nodeID) },
 	})
 
-	lis, err := net.Listen("tcp", nodeGRPCAddr)
+	lis, err := net.Listen("tcp", cfg.nodeGRPCAddr)
 	if err != nil {
 		log.Fatalf("listen NodeService: %v", err)
 	}
@@ -126,16 +161,17 @@ func setupMultiNode(ctx context.Context, st *store.Store,
 	}()
 	go svc.RunLivenessSweep(ctx, 5*time.Second)
 
-	router := api.NewNodeRouter(svc, nodeToken)
+	router := api.NewNodeRouter(svc, cfg.nodeToken)
 	go func() {
 		<-ctx.Done()
 		router.Close()
 	}()
 
 	log.Printf("multi-node mode: NodeService on %s (region=%s runtime-tier=%s)",
-		nodeGRPCAddr, region, runtimeTier)
+		cfg.nodeGRPCAddr, cfg.region, cfg.runtimeTier)
 	return api.NewServerWithOptions(st, router, sched, api.Options{
-		Region: region, APIKey: apiKey, RuntimeTier: runtimeTier,
+		Region: cfg.region, APIKey: cfg.apiKey, RuntimeTier: cfg.runtimeTier,
+		Images: image.New(st, nil), Secrets: cfg.secrets,
 	})
 }
 
@@ -148,10 +184,10 @@ func markNodeSandboxesLost(st *store.Store, nodeID string) {
 		return
 	}
 	for _, rec := range recs {
-		if rec.NodeID != nodeID || isTerminal(rec.State) {
+		if rec.NodeID != nodeID || store.IsTerminal(rec.State) {
 			continue
 		}
-		rec.State = "LOST"
+		rec.State = store.SandboxLost
 		if err := st.PutSandbox(rec); err != nil {
 			log.Printf("mark %s lost: %v", rec.ID, err)
 			continue
@@ -162,10 +198,6 @@ func markNodeSandboxesLost(st *store.Store, nodeID string) {
 			Data: map[string]string{"nodeId": nodeID},
 		})
 	}
-}
-
-func isTerminal(state string) bool {
-	return state == "STOPPED" || state == "FAILED" || state == "LOST"
 }
 
 // storeLister answers SyncState from the records the control plane believes
@@ -180,7 +212,7 @@ func (l *storeLister) ExpectedForNode(nodeID string) []*nodev1.SandboxSpec {
 	}
 	var out []*nodev1.SandboxSpec
 	for _, rec := range recs {
-		if rec.NodeID != nodeID || isTerminal(rec.State) {
+		if rec.NodeID != nodeID || store.IsTerminal(rec.State) {
 			continue
 		}
 		out = append(out, &nodev1.SandboxSpec{

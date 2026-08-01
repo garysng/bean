@@ -3,9 +3,7 @@ package api
 
 import (
 	"context"
-	"crypto/rand"
 	"crypto/subtle"
-	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -18,7 +16,9 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/garysng/bean/internal/control/image"
 	"github.com/garysng/bean/internal/control/scheduler"
+	"github.com/garysng/bean/internal/control/secret"
 	"github.com/garysng/bean/internal/control/store"
 	commonv1 "github.com/garysng/bean/internal/gen/bean/common/v1"
 	nodev1 "github.com/garysng/bean/internal/gen/bean/node/v1"
@@ -50,6 +50,8 @@ type Server struct {
 	// are internal (docs/architecture.md D3): callers never choose one.
 	runtimeTier string
 	apiKey      string
+	images      *image.Service
+	secrets     *secret.Box
 	bus         *eventBus
 	metrics     *obs.Registry
 	mux         *http.ServeMux
@@ -77,6 +79,11 @@ type Options struct {
 	// RuntimeTier is the node capability required for placement; defaults
 	// to "fc" (the main tier) when empty.
 	RuntimeTier string
+	// Images enables the image endpoints and image registration on create.
+	Images *image.Service
+	// Secrets encrypts persisted credentials; nil disables the registry
+	// credential endpoints rather than storing secrets in the clear.
+	Secrets *secret.Box
 }
 
 // NewServerWithOptions is the full constructor.
@@ -87,14 +94,14 @@ func NewServerWithOptions(st *store.Store, router Router, placer Placer, opts Op
 	}
 	s := &Server{store: st, router: router, placer: placer,
 		defaultNodeID: opts.DefaultNodeID, region: opts.Region,
-		runtimeTier: tier, apiKey: opts.APIKey,
+		runtimeTier: tier, apiKey: opts.APIKey, images: opts.Images, secrets: opts.Secrets,
 		bus: newEventBus(), metrics: obs.NewRegistry(), mux: http.NewServeMux()}
 	s.routes()
 	return s
 }
 
 // nodeClientFor resolves the SandboxService client owning a sandbox.
-func (s *Server) nodeClientFor(rec *store.SandboxRecord) (nodev1.SandboxServiceClient, error) {
+func (s *Server) nodeClientFor(rec *store.Sandbox) (nodev1.SandboxServiceClient, error) {
 	return s.router.Client(rec.NodeID)
 }
 
@@ -117,6 +124,15 @@ func (s *Server) routes() {
 	// Live subscription (Server-Sent Events): no extra dependency, works
 	// through proxies, and the browser/SDK story is simple.
 	s.mux.HandleFunc("GET /v1/events", s.handleEventStream)
+	s.mux.HandleFunc("GET /v1/images", s.handleListImages)
+	// ref goes in a query param: it contains slashes and colons, which
+	// would otherwise collide with sibling routes like prewarm.
+	s.mux.HandleFunc("GET /v1/images/status", s.handleImageStatus)
+	s.mux.HandleFunc("POST /v1/images/prewarm", s.handlePrewarm)
+	s.mux.HandleFunc("GET /v1/images/prewarm/{jobId}", s.handlePrewarmStatus)
+	s.mux.HandleFunc("PUT /v1/registries", s.handlePutRegistry)
+	s.mux.HandleFunc("GET /v1/registries", s.handleListRegistries)
+	s.mux.HandleFunc("DELETE /v1/registries/{host}", s.handleDeleteRegistry)
 	s.mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
@@ -220,7 +236,17 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	id := "sbx_" + randHex(10)
+	// Register the image so its metadata (and later, digest and conversion
+	// state) exists for anything the platform has been asked to run.
+	if s.images != nil {
+		if _, err := s.images.Resolve(req.Image); err != nil {
+			outcome = "error"
+			writeErr(w, http.StatusBadRequest, "IMAGE_REF_INVALID", err.Error())
+			return
+		}
+	}
+
+	id := store.NewID(store.PrefixSandbox)
 	spec := &nodev1.SandboxSpec{
 		SandboxId:    id,
 		Image:        req.Image,
@@ -243,8 +269,8 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 			spec.DiskMib = req.Resources.DiskMiB
 		}
 	}
-	rec := &store.SandboxRecord{
-		ID: id, Image: req.Image, State: "PENDING", NodeID: s.defaultNodeID,
+	rec := &store.Sandbox{
+		ID: id, Image: req.Image, State: store.SandboxPending, NodeID: s.defaultNodeID,
 		CPU: spec.Cpu, MemoryMiB: spec.MemoryMib, DiskMiB: spec.DiskMib,
 		Labels: req.Labels, CreatedAt: time.Now(), LastActivity: time.Now(),
 	}
@@ -314,7 +340,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		grpcToHTTP(w, err)
 		return
 	}
-	rec.State = resp.Status.State
+	rec.State = store.SandboxState(resp.Status.State)
 	_ = s.store.PutSandbox(rec)
 	s.emit(id, "sandbox.lifecycle.running", nil)
 
@@ -323,8 +349,8 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 }
 
 // failCreate records the failure and returns committed capacity.
-func (s *Server) failCreate(rec *store.SandboxRecord, placement *scheduler.Request, cause error) {
-	rec.State = "FAILED"
+func (s *Server) failCreate(rec *store.Sandbox, placement *scheduler.Request, cause error) {
+	rec.State = store.SandboxFailed
 	rec.Reason = cause.Error()
 	_ = s.store.PutSandbox(rec)
 	s.emit(rec.ID, "sandbox.lifecycle.failed", map[string]string{"reason": cause.Error()})
@@ -334,7 +360,7 @@ func (s *Server) failCreate(rec *store.SandboxRecord, placement *scheduler.Reque
 }
 
 // releasePlacement returns capacity for a sandbox that has stopped.
-func (s *Server) releasePlacement(rec *store.SandboxRecord) {
+func (s *Server) releasePlacement(rec *store.Sandbox) {
 	if s.placer == nil {
 		return
 	}
@@ -354,18 +380,18 @@ func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {
 			labelVal = parts[1]
 		}
 	}
-	recs, err := s.store.ListSandboxes(labelKey, labelVal, r.URL.Query().Get("state"))
+	recs, err := s.store.ListSandboxes(labelKey, labelVal, store.SandboxState(r.URL.Query().Get("state")))
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "INTERNAL", err.Error())
 		return
 	}
 	if recs == nil {
-		recs = []*store.SandboxRecord{}
+		recs = []*store.Sandbox{}
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"sandboxes": recs})
 }
 
-func (s *Server) loadSandbox(w http.ResponseWriter, id string) *store.SandboxRecord {
+func (s *Server) loadSandbox(w http.ResponseWriter, id string) *store.Sandbox {
 	rec, err := s.store.GetSandbox(id)
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "INTERNAL", err.Error())
@@ -399,13 +425,13 @@ func (s *Server) refreshStateGauges() {
 	}
 	counts := map[string]float64{}
 	for _, rec := range recs {
-		counts[rec.State]++
+		counts[string(rec.State)]++
 	}
-	// Zero out states we know about so a drained state does not keep its
-	// last value forever.
-	for _, st := range []string{"PENDING", "RUNNING", "PAUSED", "STOPPED", "FAILED", "LOST"} {
-		if _, ok := counts[st]; !ok {
-			counts[st] = 0
+	// Zero out every known state so a drained one reports 0 rather than
+	// keeping its last value forever.
+	for _, st := range store.AllSandboxStates() {
+		if _, ok := counts[string(st)]; !ok {
+			counts[string(st)] = 0
 		}
 	}
 	for st, n := range counts {
@@ -436,7 +462,7 @@ func (s *Server) handleGet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	// Refresh live state from the node for non-terminal sandboxes.
-	if rec.State != "STOPPED" && rec.State != "FAILED" {
+	if !store.IsTerminal(rec.State) {
 		nodeClient, cerr := s.nodeClientFor(rec)
 		if cerr != nil {
 			writeJSON(w, http.StatusOK, map[string]any{"sandbox": rec})
@@ -445,11 +471,11 @@ func (s *Server) handleGet(w http.ResponseWriter, r *http.Request) {
 		st, err := nodeClient.GetSandbox(r.Context(), &nodev1.GetSandboxRequest{SandboxId: id})
 		switch {
 		case err == nil:
-			rec.State = st.Status.State
+			rec.State = store.SandboxState(st.Status.State)
 			_ = s.store.PutSandbox(rec)
 		case status.Code(err) == codes.NotFound:
 			// Node no longer has it (e.g. idle sweep onIdle=kill).
-			rec.State = "STOPPED"
+			rec.State = store.SandboxStopped
 			_ = s.store.PutSandbox(rec)
 			s.emit(id, "sandbox.lifecycle.stopped", map[string]string{"reason": "reconciled: gone on node"})
 		}
@@ -473,7 +499,7 @@ func (s *Server) handleDelete(w http.ResponseWriter, r *http.Request) {
 		grpcToHTTP(w, err)
 		return
 	}
-	rec.State = "STOPPED"
+	rec.State = store.SandboxStopped
 	_ = s.store.PutSandbox(rec)
 	s.releasePlacement(rec)
 	s.emit(id, "sandbox.lifecycle.stopped", nil)
@@ -490,7 +516,7 @@ func (s *Server) handlePause(w http.ResponseWriter, r *http.Request) {
 		grpcToHTTP(w, err)
 		return
 	}
-	s.updateState(id, "PAUSED")
+	s.updateState(id, store.SandboxPaused)
 	s.emit(id, "sandbox.lifecycle.paused", nil)
 	w.WriteHeader(http.StatusAccepted)
 }
@@ -505,12 +531,12 @@ func (s *Server) handleResume(w http.ResponseWriter, r *http.Request) {
 		grpcToHTTP(w, err)
 		return
 	}
-	s.updateState(id, "RUNNING")
+	s.updateState(id, store.SandboxRunning)
 	s.emit(id, "sandbox.lifecycle.resumed", nil)
 	w.WriteHeader(http.StatusAccepted)
 }
 
-func (s *Server) updateState(id, state string) {
+func (s *Server) updateState(id string, state store.SandboxState) {
 	if rec, err := s.store.GetSandbox(id); err == nil && rec != nil {
 		rec.State = state
 		_ = s.store.PutSandbox(rec)
@@ -845,12 +871,4 @@ func (s *Server) handleEventStream(w http.ResponseWriter, r *http.Request) {
 			flusher.Flush()
 		}
 	}
-}
-
-func randHex(n int) string {
-	b := make([]byte, n)
-	if _, err := rand.Read(b); err != nil {
-		panic(err)
-	}
-	return hex.EncodeToString(b)
 }

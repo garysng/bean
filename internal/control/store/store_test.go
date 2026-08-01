@@ -16,8 +16,8 @@ func openTestStore(t *testing.T) *Store {
 	return st
 }
 
-func rec(id, state string, labels map[string]string) *SandboxRecord {
-	return &SandboxRecord{
+func rec(id string, state SandboxState, labels map[string]string) *Sandbox {
+	return &Sandbox{
 		ID: id, Image: "img:1", State: state, NodeID: "node-0",
 		CPU: 1, MemoryMiB: 512, DiskMiB: 20480, Labels: labels,
 		CreatedAt: time.Now(), LastActivity: time.Now(),
@@ -26,7 +26,7 @@ func rec(id, state string, labels map[string]string) *SandboxRecord {
 
 func TestPutGetSandbox(t *testing.T) {
 	st := openTestStore(t)
-	in := rec("sbx_a", "RUNNING", map[string]string{"run": "r1"})
+	in := rec("sbx_a", SandboxRunning, map[string]string{"run": "r1"})
 	idle := int64(300)
 	in.IdleTimeout = &idle
 	in.OnIdle = "pause"
@@ -40,7 +40,7 @@ func TestPutGetSandbox(t *testing.T) {
 	if got == nil {
 		t.Fatal("record not found")
 	}
-	if got.ID != in.ID || got.State != "RUNNING" || got.Labels["run"] != "r1" {
+	if got.ID != in.ID || got.State != SandboxRunning || got.Labels["run"] != "r1" {
 		t.Errorf("got = %+v", got)
 	}
 	if got.IdleTimeout == nil || *got.IdleTimeout != 300 || got.OnIdle != "pause" {
@@ -61,17 +61,17 @@ func TestGetSandboxMissingReturnsNil(t *testing.T) {
 
 func TestPutSandboxUpserts(t *testing.T) {
 	st := openTestStore(t)
-	r := rec("sbx_b", "PENDING", nil)
+	r := rec("sbx_b", SandboxPending, nil)
 	if err := st.PutSandbox(r); err != nil {
 		t.Fatal(err)
 	}
-	r.State = "STOPPED"
+	r.State = SandboxStopped
 	r.Reason = "done"
 	if err := st.PutSandbox(r); err != nil {
 		t.Fatal(err)
 	}
 	got, _ := st.GetSandbox("sbx_b")
-	if got.State != "STOPPED" || got.Reason != "done" {
+	if got.State != SandboxStopped || got.Reason != "done" {
 		t.Errorf("upsert failed: %+v", got)
 	}
 	all, _ := st.ListSandboxes("", "", "")
@@ -82,21 +82,22 @@ func TestPutSandboxUpserts(t *testing.T) {
 
 func TestListSandboxesFilters(t *testing.T) {
 	st := openTestStore(t)
-	st.PutSandbox(rec("s1", "RUNNING", map[string]string{"run": "a"}))
-	st.PutSandbox(rec("s2", "STOPPED", map[string]string{"run": "a"}))
-	st.PutSandbox(rec("s3", "RUNNING", map[string]string{"run": "b"}))
+	st.PutSandbox(rec("s1", SandboxRunning, map[string]string{"run": "a"}))
+	st.PutSandbox(rec("s2", SandboxStopped, map[string]string{"run": "a"}))
+	st.PutSandbox(rec("s3", SandboxRunning, map[string]string{"run": "b"}))
 
 	cases := []struct {
-		name            string
-		key, val, state string
-		want            int
+		name     string
+		key, val string
+		state    SandboxState
+		want     int
 	}{
 		{"no filter", "", "", "", 3},
-		{"by state", "", "", "RUNNING", 2},
+		{"by state", "", "", SandboxRunning, 2},
 		{"by label", "run", "a", "", 2},
-		{"label and state", "run", "a", "RUNNING", 1},
+		{"label and state", "run", "a", SandboxRunning, 1},
 		{"label miss", "run", "zzz", "", 0},
-		{"state miss", "", "", "FAILED", 0},
+		{"state miss", "", "", SandboxFailed, 0},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -113,7 +114,7 @@ func TestListSandboxesFilters(t *testing.T) {
 
 func TestDeleteSandbox(t *testing.T) {
 	st := openTestStore(t)
-	st.PutSandbox(rec("gone", "RUNNING", nil))
+	st.PutSandbox(rec("gone", SandboxRunning, nil))
 	if err := st.DeleteSandbox("gone"); err != nil {
 		t.Fatal(err)
 	}
