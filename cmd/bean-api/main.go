@@ -1,6 +1,10 @@
-// bean-api is the REST gateway. In single-node mode it dials one noded
-// directly; in multi-node mode it serves NodeService so nodes register
-// themselves, and places sandboxes with the scheduler.
+// bean-api is the REST gateway. It serves the user-facing API and
+// NodeService, so nodes register themselves and every sandbox is placed by
+// the scheduler — there is no separate single-node mode, because a cluster
+// with one node is just a cluster with one node.
+//
+// The process holds no placement state: node capacity and reservations live
+// in the store, so replicas are interchangeable and a restart loses nothing.
 package main
 
 import (
@@ -16,7 +20,6 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
 
 	"github.com/garysng/bean/internal/control/api"
 	"github.com/garysng/bean/internal/control/image"
@@ -26,27 +29,26 @@ import (
 	"github.com/garysng/bean/internal/control/snapshot"
 	"github.com/garysng/bean/internal/control/store"
 	nodev1 "github.com/garysng/bean/internal/gen/bean/node/v1"
-	"github.com/garysng/bean/internal/node"
 )
 
 var version = "dev"
 
 func main() {
 	listen := flag.String("listen", "127.0.0.1:8080", "HTTP listen address")
-	nodedAddr := flag.String("noded", "127.0.0.1:7443", "noded gRPC address (single-node mode)")
-	nodeGRPC := flag.String("node-grpc", "", "listen address for NodeService; set to enable multi-node mode")
+	nodeGRPC := flag.String("node-grpc", "127.0.0.1:7440", "NodeService listen address")
 	region := flag.String("region", "local", "region this control plane serves")
 	dbPath := flag.String("db", "bean.db", "SQLite database path")
 	apiKey := flag.String("api-key", os.Getenv("BEAN_API_KEY"), "API key (or BEAN_API_KEY env)")
-	nodeToken := flag.String("node-token", os.Getenv("BEAN_NODE_TOKEN"), "token for noded calls")
+	nodeToken := flag.String("node-token", os.Getenv("BEAN_NODE_TOKEN"),
+		"token presented when calling a node's data plane")
 	bootstrapToken := flag.String("bootstrap-token", os.Getenv("BEAN_BOOTSTRAP_TOKEN"),
-		"token nodes must present to register (multi-node mode)")
+		"token nodes must present to register")
 	runtimeTier := flag.String("runtime-tier", "fc",
 		"node capability required for placement (fc|local|runc|runsc)")
 	secretKey := flag.String("secret-key", os.Getenv("BEAN_SECRET_KEY"),
 		"master key encrypting persisted credentials (empty disables registry credentials)")
 	snapshotDir := flag.String("snapshot-dir", "",
-		"directory holding snapshot blobs (default: <db dir>/snapshots; S3 later)")
+		"directory holding snapshot blobs (default: <db dir>/snapshots)")
 	flag.Parse()
 
 	if *apiKey == "" {
@@ -66,7 +68,6 @@ func main() {
 	// endpoints refuse rather than storing secrets in the clear.
 	var secrets *secret.Box
 	if *secretKey != "" {
-		var err error
 		if secrets, err = secret.NewBox(*secretKey); err != nil {
 			log.Fatalf("secret key: %v", err)
 		}
@@ -74,8 +75,6 @@ func main() {
 		log.Print("no --secret-key: registry credentials disabled (public images only)")
 	}
 
-	// Snapshot blobs live next to the database by default. The Blobs
-	// interface is what lets this become S3 without touching the handlers.
 	blobDir := *snapshotDir
 	if blobDir == "" {
 		blobDir = filepath.Join(filepath.Dir(*dbPath), "snapshots")
@@ -84,29 +83,50 @@ func main() {
 	if err != nil {
 		log.Fatalf("snapshot storage: %v", err)
 	}
-	log.Printf("snapshot blobs in %s", blobDir)
 
-	var srv *api.Server
-	if *nodeGRPC != "" {
-		srv = setupMultiNode(ctx, st, multiNodeConfig{
-			nodeGRPCAddr: *nodeGRPC, region: *region, apiKey: *apiKey,
-			nodeToken: *nodeToken, bootstrapToken: *bootstrapToken,
-			runtimeTier: *runtimeTier, secrets: secrets, blobs: blobs,
-		})
-	} else {
-		srv = setupSingleNode(st, *nodedAddr, *apiKey, *nodeToken, secrets, blobs)
-		log.Printf("single-node mode (noded=%s)", *nodedAddr)
+	sched := scheduler.New(st, scheduler.DefaultWeights())
+	images := image.New(st, nodeCacheSource{store: st})
+
+	nodeSvc := nodesvc.New(st, sched, nodesvc.Options{
+		BootstrapToken: *bootstrapToken,
+		Lister:         &storeLister{store: st},
+		OnLost:         func(nodeID string) { markNodeSandboxesLost(st, sched, nodeID) },
+	})
+
+	grpcSrv := grpc.NewServer()
+	nodev1.RegisterNodeServiceServer(grpcSrv, nodeSvc)
+	nodeLis, err := net.Listen("tcp", *nodeGRPC)
+	if err != nil {
+		log.Fatalf("listen NodeService: %v", err)
 	}
+	go func() {
+		if err := grpcSrv.Serve(nodeLis); err != nil {
+			log.Printf("NodeService stopped: %v", err)
+		}
+	}()
+	go func() {
+		<-ctx.Done()
+		grpcSrv.GracefulStop()
+	}()
+	go nodeSvc.RunLivenessSweep(ctx, 5*time.Second)
+
+	router := api.NewNodeRouter(nodeSvc, *nodeToken)
+	defer router.Close()
+
+	srv := api.New(st, router, sched, api.Options{
+		Region: *region, APIKey: *apiKey, RuntimeTier: *runtimeTier,
+		Images: images, Secrets: secrets, Snapshots: blobs,
+	})
 
 	httpSrv := &http.Server{
 		Addr:              *listen,
 		Handler:           srv.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
-		// Body reads are bounded per-handler via LimitReader; keep a generous
-		// ReadTimeout to stop slow-body attacks without breaking uploads.
+		// Body reads are bounded per-handler via LimitReader; a generous
+		// ReadTimeout stops slow-body attacks without breaking uploads.
 		ReadTimeout: 5 * time.Minute,
 		IdleTimeout: 120 * time.Second,
-		// No WriteTimeout: exec/logs/file reads legitimately stream for long.
+		// No WriteTimeout: exec, logs and file reads legitimately stream.
 	}
 	go func() {
 		<-ctx.Done()
@@ -115,87 +135,17 @@ func main() {
 		_ = httpSrv.Shutdown(shutCtx)
 	}()
 
-	log.Printf("bean-api %s listening on %s", version, *listen)
+	log.Printf("bean-api %s: HTTP %s, NodeService %s (region=%s runtime-tier=%s, snapshots in %s)",
+		version, *listen, *nodeGRPC, *region, *runtimeTier, blobDir)
 	if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatal(err)
 	}
 }
 
-// setupSingleNode keeps the P0 path: one gateway, one noded.
-func setupSingleNode(st *store.Store, nodedAddr, apiKey, nodeToken string,
-	secrets *secret.Box, blobs snapshot.Blobs) *api.Server {
-	unaryTok, streamTok := node.TokenClientInterceptors(nodeToken)
-	conn, err := grpc.NewClient(nodedAddr,
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithUnaryInterceptor(unaryTok),
-		grpc.WithStreamInterceptor(streamTok))
-	if err != nil {
-		log.Fatalf("dial noded: %v", err)
-	}
-	return api.NewServerWithOptions(st, api.NewStaticRouter(nodev1.NewSandboxServiceClient(conn)),
-		nil, api.Options{
-			DefaultNodeID: "node-0", Region: "local", APIKey: apiKey,
-			RuntimeTier: "local", Images: image.New(st, nil), Secrets: secrets,
-			Snapshots: blobs,
-		})
-}
-
-// multiNodeConfig groups the multi-node wiring parameters.
-type multiNodeConfig struct {
-	nodeGRPCAddr   string
-	region         string
-	apiKey         string
-	nodeToken      string
-	bootstrapToken string
-	runtimeTier    string
-	secrets        *secret.Box
-	blobs          snapshot.Blobs
-}
-
-// setupMultiNode serves NodeService and places sandboxes via the scheduler.
-func setupMultiNode(ctx context.Context, st *store.Store, cfg multiNodeConfig) *api.Server {
-	sched := scheduler.New(scheduler.DefaultWeights())
-
-	svc := nodesvc.New(sched, nodesvc.Options{
-		BootstrapToken: cfg.bootstrapToken,
-		Lister:         &storeLister{store: st},
-		OnLost:         func(nodeID string) { markNodeSandboxesLost(st, nodeID) },
-	})
-
-	lis, err := net.Listen("tcp", cfg.nodeGRPCAddr)
-	if err != nil {
-		log.Fatalf("listen NodeService: %v", err)
-	}
-	grpcSrv := grpc.NewServer()
-	nodev1.RegisterNodeServiceServer(grpcSrv, svc)
-	go func() {
-		if err := grpcSrv.Serve(lis); err != nil {
-			log.Printf("NodeService server stopped: %v", err)
-		}
-	}()
-	go func() {
-		<-ctx.Done()
-		grpcSrv.GracefulStop()
-	}()
-	go svc.RunLivenessSweep(ctx, 5*time.Second)
-
-	router := api.NewNodeRouter(svc, cfg.nodeToken)
-	go func() {
-		<-ctx.Done()
-		router.Close()
-	}()
-
-	log.Printf("multi-node mode: NodeService on %s (region=%s runtime-tier=%s)",
-		cfg.nodeGRPCAddr, cfg.region, cfg.runtimeTier)
-	return api.NewServerWithOptions(st, router, sched, api.Options{
-		Region: cfg.region, APIKey: cfg.apiKey, RuntimeTier: cfg.runtimeTier,
-		Images: image.New(st, nil), Secrets: cfg.secrets, Snapshots: cfg.blobs,
-	})
-}
-
-// markNodeSandboxesLost flags a lost node's sandboxes so callers can
-// rebuild them elsewhere.
-func markNodeSandboxesLost(st *store.Store, nodeID string) {
+// markNodeSandboxesLost flags a lost node's sandboxes and returns their
+// capacity, so a node failure strands neither the records nor the
+// reservations.
+func markNodeSandboxesLost(st *store.Store, sched *scheduler.Scheduler, nodeID string) {
 	recs, err := st.ListSandboxes("", "", "")
 	if err != nil {
 		log.Printf("mark lost for %s: %v", nodeID, err)
@@ -209,6 +159,9 @@ func markNodeSandboxesLost(st *store.Store, nodeID string) {
 		if err := st.PutSandbox(rec); err != nil {
 			log.Printf("mark %s lost: %v", rec.ID, err)
 			continue
+		}
+		if err := sched.Release(rec.ID); err != nil {
+			log.Printf("release %s after node loss: %v", rec.ID, err)
 		}
 		_ = st.AppendEvent(&store.Event{
 			Type: "sandbox.lifecycle.lost", Timestamp: time.Now(),
@@ -242,4 +195,22 @@ func (l *storeLister) ExpectedForNode(nodeID string) []*nodev1.SandboxSpec {
 		})
 	}
 	return out
+}
+
+// nodeCacheSource reports how many nodes cache an image, which drives
+// prewarm progress and image-affinity scoring.
+type nodeCacheSource struct{ store *store.Store }
+
+func (n nodeCacheSource) CachedNodeCount(ref string) int {
+	nodes, err := n.store.LoadNodes()
+	if err != nil {
+		return 0
+	}
+	count := 0
+	for _, node := range nodes {
+		if bytes, ok := node.CachedImages[ref]; ok && bytes > 0 {
+			count++
+		}
+	}
+	return count
 }

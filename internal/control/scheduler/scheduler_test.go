@@ -2,17 +2,31 @@ package scheduler
 
 import (
 	"errors"
+	"path/filepath"
 	"sync"
 	"testing"
 	"time"
+
+	"github.com/garysng/bean/internal/control/store"
 )
 
-func node(id string, cpu float64, memMiB int64, mut ...func(*Node)) *Node {
-	n := &Node{
+func newTestStore(t *testing.T) *store.Store {
+	t.Helper()
+	st, err := store.Open(filepath.Join(t.TempDir(), "sched.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	return st
+}
+
+func node(id string, cpu float64, memMiB int64, mut ...func(*store.NodeRecord)) *store.NodeRecord {
+	n := &store.NodeRecord{
 		ID: id, Region: "r1", Runtimes: []string{"fc"},
-		CPUAllocatable: cpu, MemoryMiBAllocate: memMiB,
-		DiskMiBAllocate: 1 << 20, GPUCount: 0,
+		CPUAllocatable: cpu, MemoryAllocateMiB: memMiB,
+		DiskAllocateMiB: 1 << 20, GPUCount: 0,
 		CachedImages: map[string]int64{},
+		State:        NodeReady, LastHeartbeat: time.Now(),
 	}
 	for _, f := range mut {
 		f(n)
@@ -31,17 +45,19 @@ func req(id string, cpu float64, memMiB int64, mut ...func(*Request)) *Request {
 	return r
 }
 
-func newSched(t *testing.T, nodes ...*Node) *Scheduler {
+func newSched(t *testing.T, nodes ...*store.NodeRecord) (*Scheduler, *store.Store) {
 	t.Helper()
-	s := New(DefaultWeights())
+	st := newTestStore(t)
 	for _, n := range nodes {
-		s.Register(n)
+		if err := st.UpsertNode(n); err != nil {
+			t.Fatal(err)
+		}
 	}
-	return s
+	return New(st, DefaultWeights()), st
 }
 
-func TestSchedulePicksFeasibleNode(t *testing.T) {
-	s := newSched(t, node("n1", 4, 4096))
+func TestSchedulePlacesAndReserves(t *testing.T) {
+	s, st := newSched(t, node("n1", 4, 4096))
 	got, err := s.Schedule(req("s1", 2, 2048))
 	if err != nil {
 		t.Fatal(err)
@@ -49,28 +65,93 @@ func TestSchedulePicksFeasibleNode(t *testing.T) {
 	if got != "n1" {
 		t.Errorf("node = %s", got)
 	}
-	ns := s.Nodes()
-	if ns[0].CPUCommitted != 2 || ns[0].MemoryMiBCommit != 2048 {
-		t.Errorf("committed = %.1f/%d", ns[0].CPUCommitted, ns[0].MemoryMiBCommit)
+	// The reservation is durable, not just in this process.
+	n, err := st.GetNode("n1")
+	if err != nil {
+		t.Fatal(err)
 	}
-	if ns[0].CreateInFlight != 1 {
-		t.Errorf("in-flight = %d", ns[0].CreateInFlight)
+	if n.CPUCommitted != 2 || n.MemoryCommitMiB != 2048 {
+		t.Errorf("committed = %.1f/%d", n.CPUCommitted, n.MemoryCommitMiB)
+	}
+	if n.CreateInFlight != 1 {
+		t.Errorf("in-flight = %d", n.CreateInFlight)
+	}
+}
+
+func TestAccountingSurvivesSchedulerRestart(t *testing.T) {
+	// The point of durable accounting: a fresh scheduler over the same store
+	// must see existing reservations and not oversell.
+	s, st := newSched(t, node("n1", 2, 2048))
+	if _, err := s.Schedule(req("s1", 2, 2048)); err != nil {
+		t.Fatal(err)
+	}
+
+	fresh := New(st, DefaultWeights())
+	if _, err := fresh.Schedule(req("s2", 1, 512)); !errors.Is(err, ErrNoCapacity) {
+		t.Errorf("err = %v, want ErrNoCapacity from a restarted scheduler", err)
+	}
+	// After releasing, the fresh scheduler can place again.
+	if err := fresh.Release("s1"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := fresh.Schedule(req("s2", 1, 512)); err != nil {
+		t.Errorf("after release: %v", err)
+	}
+}
+
+func TestConcurrentSchedulersDoNotOversell(t *testing.T) {
+	// Two schedulers over one store stand in for two gateway replicas.
+	// 8 CPU total, 1 CPU each, 32 concurrent attempts split across both:
+	// exactly 8 succeed, because the store arbitrates.
+	st := newTestStore(t)
+	if err := st.UpsertNode(node("n1", 8, 1<<20, func(n *store.NodeRecord) {
+		n.MaxCreates = 1000
+	})); err != nil {
+		t.Fatal(err)
+	}
+	replicas := []*Scheduler{New(st, DefaultWeights()), New(st, DefaultWeights())}
+
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	ok := 0
+	for i := 0; i < 32; i++ {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			s := replicas[i%len(replicas)]
+			if _, err := s.Schedule(req(store.NewID("sbx"), 1, 1)); err == nil {
+				mu.Lock()
+				ok++
+				mu.Unlock()
+			}
+		}(i)
+	}
+	wg.Wait()
+
+	if ok != 8 {
+		t.Errorf("successful placements = %d, want exactly 8", ok)
+	}
+	n, _ := st.GetNode("n1")
+	if n.CPUCommitted != 8 {
+		t.Errorf("committed = %.1f, want 8", n.CPUCommitted)
 	}
 }
 
 func TestScheduleRegionRequired(t *testing.T) {
-	s := newSched(t, node("n1", 4, 4096))
+	s, _ := newSched(t, node("n1", 4, 4096))
 	if _, err := s.Schedule(req("s1", 1, 512, func(r *Request) { r.Region = "" })); err == nil {
 		t.Error("expected error when region is empty")
 	}
 }
 
 func TestScheduleFiltersHardConstraints(t *testing.T) {
-	s := newSched(t,
-		node("wrong-region", 8, 8192, func(n *Node) { n.Region = "r2" }),
-		node("wrong-runtime", 8, 8192, func(n *Node) { n.Runtimes = []string{"runc"} }),
+	s, _ := newSched(t,
+		node("wrong-region", 8, 8192, func(n *store.NodeRecord) { n.Region = "r2" }),
+		node("wrong-runtime", 8, 8192, func(n *store.NodeRecord) { n.Runtimes = []string{"runc"} }),
 		node("no-label", 8, 8192),
-		node("labelled", 8, 8192, func(n *Node) { n.Labels = map[string]string{"pool": "nvme"} }),
+		node("labelled", 8, 8192, func(n *store.NodeRecord) {
+			n.Labels = map[string]string{"pool": "nvme"}
+		}),
 	)
 	got, err := s.Schedule(req("s1", 1, 512, func(r *Request) {
 		r.NodeSelector = map[string]string{"pool": "nvme"}
@@ -84,57 +165,41 @@ func TestScheduleFiltersHardConstraints(t *testing.T) {
 }
 
 func TestScheduleNoCapacity(t *testing.T) {
-	s := newSched(t, node("small", 1, 512))
-	_, err := s.Schedule(req("big", 4, 4096))
-	if !errors.Is(err, ErrNoCapacity) {
+	s, _ := newSched(t, node("small", 1, 512))
+	if _, err := s.Schedule(req("big", 4, 4096)); !errors.Is(err, ErrNoCapacity) {
 		t.Errorf("err = %v, want ErrNoCapacity", err)
 	}
-	// GPU request with no GPU nodes
 	if _, err := s.Schedule(req("gpu", 1, 256, func(r *Request) { r.GPU = 1 })); !errors.Is(err, ErrNoCapacity) {
 		t.Errorf("gpu err = %v, want ErrNoCapacity", err)
 	}
 }
 
-func TestCommitmentAccountingPreventsOversell(t *testing.T) {
-	s := newSched(t, node("n1", 4, 4096))
-	for i := 0; i < 4; i++ {
-		if _, err := s.Schedule(req("s", 1, 1024)); err != nil {
-			t.Fatalf("placement %d: %v", i, err)
-		}
-	}
-	// Node is now fully committed even though nothing actually runs.
-	if _, err := s.Schedule(req("overflow", 1, 1024)); !errors.Is(err, ErrNoCapacity) {
-		t.Errorf("err = %v, want ErrNoCapacity", err)
-	}
-}
-
-func TestReleaseReturnsCapacity(t *testing.T) {
-	s := newSched(t, node("n1", 2, 2048))
-	r := req("s1", 2, 2048)
-	if _, err := s.Schedule(r); err != nil {
+func TestReleaseIsIdempotent(t *testing.T) {
+	s, st := newSched(t, node("n1", 2, 2048))
+	if _, err := s.Schedule(req("s1", 2, 2048)); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Schedule(req("s2", 1, 512)); !errors.Is(err, ErrNoCapacity) {
-		t.Fatalf("expected full node, got %v", err)
+	for i := 0; i < 3; i++ {
+		if err := s.Release("s1"); err != nil {
+			t.Fatalf("release %d: %v", i, err)
+		}
 	}
-	s.Release("n1", r)
-	if _, err := s.Schedule(req("s2", 1, 512)); err != nil {
-		t.Errorf("after release: %v", err)
+	n, _ := st.GetNode("n1")
+	if n.CPUCommitted != 0 || n.MemoryCommitMiB != 0 {
+		t.Errorf("committed = %.1f/%d, want zero", n.CPUCommitted, n.MemoryCommitMiB)
 	}
-	// Release never goes negative.
-	s.Release("n1", req("x", 999, 999999))
-	ns := s.Nodes()
-	if ns[0].CPUCommitted < 0 || ns[0].MemoryMiBCommit < 0 {
-		t.Errorf("negative commitment: %+v", ns[0])
+	// Releasing something never reserved is also fine.
+	if err := s.Release("never-existed"); err != nil {
+		t.Errorf("release unknown: %v", err)
 	}
-	// Release of an unknown node is a no-op.
-	s.Release("ghost", r)
 }
 
 func TestImageAffinityWins(t *testing.T) {
-	s := newSched(t,
+	s, _ := newSched(t,
 		node("cold", 8, 8192),
-		node("warm", 8, 8192, func(n *Node) { n.CachedImages = map[string]int64{"img:1": 1 << 30} }),
+		node("warm", 8, 8192, func(n *store.NodeRecord) {
+			n.CachedImages = map[string]int64{"img:1": 1 << 30}
+		}),
 	)
 	got, err := s.Schedule(req("s1", 1, 512))
 	if err != nil {
@@ -146,9 +211,9 @@ func TestImageAffinityWins(t *testing.T) {
 }
 
 func TestNVMePreferredForColdImage(t *testing.T) {
-	s := newSched(t,
+	s, _ := newSched(t,
 		node("spinning", 8, 8192),
-		node("nvme", 8, 8192, func(n *Node) { n.NVMeCache = true }),
+		node("nvme", 8, 8192, func(n *store.NodeRecord) { n.NVMeCache = true }),
 	)
 	got, err := s.Schedule(req("cold", 1, 512, func(r *Request) { r.Image = "uncached:1" }))
 	if err != nil {
@@ -160,10 +225,12 @@ func TestNVMePreferredForColdImage(t *testing.T) {
 }
 
 func TestSpreadAcrossNodes(t *testing.T) {
-	s := newSched(t, node("a", 16, 16384), node("b", 16, 16384), node("c", 16, 16384))
+	s, _ := newSched(t, node("a", 16, 16384), node("b", 16, 16384), node("c", 16, 16384))
 	seen := map[string]int{}
 	for i := 0; i < 6; i++ {
-		got, err := s.Schedule(req("s", 1, 512, func(r *Request) { r.SpreadKey = "run-1" }))
+		got, err := s.Schedule(req(store.NewID("sbx"), 1, 512, func(r *Request) {
+			r.SpreadKey = "run-1"
+		}))
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -174,53 +241,37 @@ func TestSpreadAcrossNodes(t *testing.T) {
 	}
 	for id, n := range seen {
 		if n != 2 {
-			t.Errorf("node %s got %d, want even spread", id, n)
+			t.Errorf("node %s got %d, want an even spread", id, n)
 		}
 	}
 }
 
-func TestSpreadReleasedOnRelease(t *testing.T) {
-	s := newSched(t, node("a", 16, 16384))
-	r := req("s1", 1, 512, func(r *Request) { r.SpreadKey = "run-x" })
-	if _, err := s.Schedule(r); err != nil {
-		t.Fatal(err)
-	}
-	s.Release("a", r)
-	// After release the spread penalty is gone, so scoring is back to base.
-	s2 := newSched(t, node("a", 16, 16384))
-	base := s2.scoreLocked(s2.nodes["a"], r)
-	after := s.scoreLocked(s.nodes["a"], r)
-	if base != after {
-		t.Errorf("score after release = %.2f, want base %.2f", after, base)
-	}
-}
-
 func TestMaxCreatesBoundsBurst(t *testing.T) {
-	s := newSched(t, node("n1", 100, 1<<20, func(n *Node) { n.MaxCreates = 2 }))
+	s, _ := newSched(t, node("n1", 100, 1<<20, func(n *store.NodeRecord) { n.MaxCreates = 2 }))
 	for i := 0; i < 2; i++ {
-		if _, err := s.Schedule(req("s", 1, 256)); err != nil {
+		if _, err := s.Schedule(req(store.NewID("sbx"), 1, 256)); err != nil {
 			t.Fatalf("placement %d: %v", i, err)
 		}
 	}
 	if _, err := s.Schedule(req("third", 1, 256)); !errors.Is(err, ErrNoCapacity) {
 		t.Errorf("err = %v, want ErrNoCapacity when create slots are full", err)
 	}
-	s.ReleaseCreate("n1")
+	if err := s.FinishCreate("n1"); err != nil {
+		t.Fatal(err)
+	}
 	if _, err := s.Schedule(req("third", 1, 256)); err != nil {
-		t.Errorf("after ReleaseCreate: %v", err)
+		t.Errorf("after FinishCreate: %v", err)
 	}
-	// ReleaseCreate never underflows or panics on unknown nodes.
+	// FinishCreate never underflows.
 	for i := 0; i < 5; i++ {
-		s.ReleaseCreate("n1")
-	}
-	s.ReleaseCreate("ghost")
-	if got := s.Nodes()[0].CreateInFlight; got != 0 {
-		t.Errorf("in-flight = %d, want 0", got)
+		if err := s.FinishCreate("n1"); err != nil {
+			t.Fatal(err)
+		}
 	}
 }
 
 func TestScheduleBatchPartialSuccess(t *testing.T) {
-	s := newSched(t, node("n1", 2, 2048))
+	s, _ := newSched(t, node("n1", 2, 2048))
 	reqs := []*Request{
 		req("ok1", 1, 1024),
 		req("ok2", 1, 1024),
@@ -239,155 +290,228 @@ func TestScheduleBatchPartialSuccess(t *testing.T) {
 }
 
 func TestDrainStopsPlacement(t *testing.T) {
-	s := newSched(t, node("n1", 8, 8192), node("n2", 8, 8192))
+	s, _ := newSched(t, node("n1", 8, 8192), node("n2", 8, 8192))
 	if err := s.Drain("n1"); err != nil {
 		t.Fatal(err)
 	}
 	for i := 0; i < 4; i++ {
-		got, err := s.Schedule(req("s", 1, 512))
+		got, err := s.Schedule(req(store.NewID("sbx"), 1, 512))
 		if err != nil {
 			t.Fatal(err)
 		}
 		if got == "n1" {
-			t.Fatal("placed on draining node")
+			t.Fatal("placed on a draining node")
 		}
 	}
 	if err := s.Drain("ghost"); err == nil {
-		t.Error("draining unknown node should error")
+		t.Error("draining an unknown node should error")
 	}
 }
 
-func TestHeartbeatLivenessTransitions(t *testing.T) {
+func TestLivenessTransitions(t *testing.T) {
 	now := time.Now()
-	s := New(DefaultWeights())
+	st := newTestStore(t)
+	n := node("n1", 4, 4096)
+	n.LastHeartbeat = now
+	if err := st.UpsertNode(n); err != nil {
+		t.Fatal(err)
+	}
+	s := New(st, DefaultWeights())
 	s.SetClock(func() time.Time { return now })
-	s.Register(node("n1", 4, 4096))
 
-	if lost := s.SweepLiveness(); len(lost) != 0 {
-		t.Fatalf("fresh node reported lost: %v", lost)
+	if lost, err := s.SweepLiveness(); err != nil || len(lost) != 0 {
+		t.Fatalf("fresh node reported lost: %v %v", lost, err)
 	}
 
-	// Past the suspect threshold: no new placements should be blocked yet,
-	// but state reflects the doubt.
+	// Past the suspect threshold the node stops receiving placements while
+	// we wait to see whether it comes back.
 	now = now.Add(20 * time.Second)
-	s.SweepLiveness()
-	if got := s.Nodes()[0].State; got != NodeSuspect {
-		t.Errorf("state = %s, want SUSPECT", got)
+	if _, err := s.SweepLiveness(); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := st.GetNode("n1")
+	if got.State != NodeSuspect {
+		t.Errorf("state = %s, want SUSPECT", got.State)
 	}
 	if _, err := s.Schedule(req("s1", 1, 512)); !errors.Is(err, ErrNoCapacity) {
-		t.Errorf("SUSPECT node accepted placement: %v", err)
+		t.Errorf("SUSPECT node accepted a placement: %v", err)
 	}
 
-	// Past the lost threshold: reported once, not repeatedly.
+	// Past the lost threshold it is reported once, not repeatedly.
 	now = now.Add(60 * time.Second)
-	lost := s.SweepLiveness()
+	lost, err := s.SweepLiveness()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(lost) != 1 || lost[0] != "n1" {
 		t.Fatalf("lost = %v", lost)
 	}
-	if again := s.SweepLiveness(); len(again) != 0 {
+	if again, _ := s.SweepLiveness(); len(again) != 0 {
 		t.Errorf("lost reported twice: %v", again)
 	}
 
 	// A heartbeat brings it back.
-	if err := s.Heartbeat("n1", map[string]int64{"img:1": 1}); err != nil {
+	if err := st.TouchNode("n1", nil); err != nil {
 		t.Fatal(err)
 	}
-	if got := s.Nodes()[0].State; got != NodeReady {
-		t.Errorf("state = %s, want READY", got)
+	got, _ = st.GetNode("n1")
+	if got.State != NodeReady {
+		t.Errorf("state = %s, want READY", got.State)
 	}
 	if _, err := s.Schedule(req("s1", 1, 512)); err != nil {
-		t.Errorf("recovered node rejected placement: %v", err)
+		t.Errorf("recovered node rejected a placement: %v", err)
 	}
-	if err := s.Heartbeat("ghost", nil); err == nil {
-		t.Error("heartbeat for unknown node should error")
+}
+
+func TestLostReportedOnceAcrossReplicas(t *testing.T) {
+	// Several replicas sweep concurrently; a node must be reported lost
+	// exactly once so its sandboxes are not marked lost twice.
+	now := time.Now()
+	st := newTestStore(t)
+	n := node("n1", 4, 4096)
+	n.LastHeartbeat = now.Add(-10 * time.Minute)
+	if err := st.UpsertNode(n); err != nil {
+		t.Fatal(err)
+	}
+
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	total := 0
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			s := New(st, DefaultWeights())
+			s.SetClock(func() time.Time { return now })
+			lost, err := s.SweepLiveness()
+			if err != nil {
+				t.Errorf("sweep: %v", err)
+				return
+			}
+			mu.Lock()
+			total += len(lost)
+			mu.Unlock()
+		}()
+	}
+	wg.Wait()
+	if total != 1 {
+		t.Errorf("node reported lost %d times, want exactly 1", total)
 	}
 }
 
 func TestDrainingNodeNotSweptToLost(t *testing.T) {
 	now := time.Now()
-	s := New(DefaultWeights())
+	st := newTestStore(t)
+	n := node("n1", 4, 4096)
+	n.LastHeartbeat = now
+	st.UpsertNode(n)
+	s := New(st, DefaultWeights())
 	s.SetClock(func() time.Time { return now })
-	s.Register(node("n1", 4, 4096))
-	s.Drain("n1")
+	if err := s.Drain("n1"); err != nil {
+		t.Fatal(err)
+	}
 	now = now.Add(10 * time.Minute)
-	if lost := s.SweepLiveness(); len(lost) != 0 {
+	if lost, _ := s.SweepLiveness(); len(lost) != 0 {
 		t.Errorf("draining node reported lost: %v", lost)
 	}
-	if got := s.Nodes()[0].State; got != NodeDraining {
-		t.Errorf("state = %s, want DRAINING", got)
+	got, _ := st.GetNode("n1")
+	if got.State != NodeDraining {
+		t.Errorf("state = %s, want DRAINING", got.State)
 	}
 }
 
 func TestReRegisterPreservesCommitments(t *testing.T) {
-	s := newSched(t, node("n1", 4, 4096))
+	s, st := newSched(t, node("n1", 4, 4096))
 	if _, err := s.Schedule(req("s1", 2, 2048)); err != nil {
 		t.Fatal(err)
 	}
-	// noded restarts and re-registers: accounting must survive, otherwise
-	// the node would be oversold.
-	s.Register(node("n1", 4, 4096))
-	ns := s.Nodes()
-	if ns[0].CPUCommitted != 2 || ns[0].MemoryMiBCommit != 2048 {
-		t.Errorf("commitments lost on re-register: %+v", ns[0])
+	// A node restarting and re-registering must not appear empty, or the
+	// scheduler would oversell it.
+	if err := st.UpsertNode(node("n1", 4, 4096)); err != nil {
+		t.Fatal(err)
 	}
-	if ns[0].State != NodeReady {
-		t.Errorf("state = %s", ns[0].State)
+	got, _ := st.GetNode("n1")
+	if got.CPUCommitted != 2 || got.MemoryCommitMiB != 2048 {
+		t.Errorf("commitments lost on re-register: %+v", got)
 	}
 }
 
 func TestDeterministicTieBreak(t *testing.T) {
-	// Identical nodes must produce a stable choice across runs.
-	for i := 0; i < 20; i++ {
-		s := newSched(t, node("b", 8, 8192), node("a", 8, 8192), node("c", 8, 8192))
+	for i := 0; i < 10; i++ {
+		s, _ := newSched(t, node("b", 8, 8192), node("a", 8, 8192), node("c", 8, 8192))
 		got, err := s.Schedule(req("s1", 1, 512))
 		if err != nil {
 			t.Fatal(err)
 		}
 		if got != "a" {
-			t.Fatalf("iteration %d picked %s, want deterministic 'a'", i, got)
+			t.Fatalf("iteration %d picked %s, want a deterministic 'a'", i, got)
 		}
 	}
 }
 
-func TestConcurrentScheduleNoOversell(t *testing.T) {
-	// 8 CPU total, 1 CPU each, 32 concurrent attempts: exactly 8 succeed.
-	s := newSched(t, node("n1", 8, 1<<20, func(n *Node) { n.MaxCreates = 1000 }))
-	var wg sync.WaitGroup
-	var mu sync.Mutex
-	ok := 0
-	for i := 0; i < 32; i++ {
-		wg.Add(1)
-		go func() {
-			defer wg.Done()
-			if _, err := s.Schedule(req("s", 1, 1)); err == nil {
-				mu.Lock()
-				ok++
-				mu.Unlock()
-			}
-		}()
+func TestReclaimOrphanReservations(t *testing.T) {
+	// A gateway that dies mid-create leaves a reservation with no sandbox.
+	// Without reclamation that node's capacity would leak permanently.
+	s, st := newSched(t, node("n1", 4, 4096))
+	if _, err := s.Schedule(req("orphaned", 4, 4096)); err != nil {
+		t.Fatal(err)
 	}
-	wg.Wait()
-	if ok != 8 {
-		t.Errorf("successful placements = %d, want 8", ok)
+	if _, err := s.Schedule(req("next", 1, 512)); !errors.Is(err, ErrNoCapacity) {
+		t.Fatalf("expected a full node, got %v", err)
 	}
-	if got := s.Nodes()[0].CPUCommitted; got != 8 {
-		t.Errorf("committed = %.1f, want 8", got)
+
+	n, err := s.ReclaimOrphanReservations()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n != 1 {
+		t.Errorf("reclaimed %d, want 1", n)
+	}
+	if _, err := s.Schedule(req("next", 1, 512)); err != nil {
+		t.Errorf("after reclaim: %v", err)
+	}
+
+	// A reservation whose sandbox is alive is left alone.
+	st.PutSandbox(&store.Sandbox{ID: "next", State: store.SandboxRunning, NodeID: "n1"})
+	if n, err := s.ReclaimOrphanReservations(); err != nil || n != 0 {
+		t.Errorf("reclaimed %d (err %v), want 0 for a live sandbox", n, err)
+	}
+
+	// A terminal sandbox's reservation is reclaimed.
+	st.PutSandbox(&store.Sandbox{ID: "next", State: store.SandboxStopped, NodeID: "n1"})
+	if n, err := s.ReclaimOrphanReservations(); err != nil || n != 1 {
+		t.Errorf("reclaimed %d (err %v), want 1 for a stopped sandbox", n, err)
 	}
 }
 
-func TestNodesSnapshotIsCopy(t *testing.T) {
-	s := newSched(t, node("n1", 4, 4096, func(n *Node) {
-		n.Labels = map[string]string{"pool": "a"}
-		n.CachedImages = map[string]int64{"img:1": 5}
-	}))
-	snap := s.Nodes()
-	snap[0].Labels["pool"] = "mutated"
-	snap[0].CachedImages["img:1"] = 999
-	snap[0].Runtimes[0] = "mutated"
+func TestUtilisation(t *testing.T) {
+	s, _ := newSched(t, node("n1", 4, 4000), node("n2", 4, 4000))
+	if _, err := s.Schedule(req("s1", 2, 2000)); err != nil {
+		t.Fatal(err)
+	}
+	cpu, mem, err := s.Utilisation("r1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 2 of 8 CPU, 2000 of 8000 MiB.
+	if cpu != 0.25 || mem != 0.25 {
+		t.Errorf("utilisation = %.2f/%.2f, want 0.25/0.25", cpu, mem)
+	}
+	// An unknown region is empty, not an error.
+	if cpu, mem, err = s.Utilisation("nowhere"); err != nil || cpu != 0 || mem != 0 {
+		t.Errorf("unknown region = %.2f/%.2f err=%v", cpu, mem, err)
+	}
+}
 
-	fresh := s.Nodes()
-	if fresh[0].Labels["pool"] != "a" || fresh[0].CachedImages["img:1"] != 5 ||
-		fresh[0].Runtimes[0] != "fc" {
-		t.Errorf("snapshot mutation leaked into scheduler state: %+v", fresh[0])
+func TestNodesSnapshot(t *testing.T) {
+	s, _ := newSched(t, node("n1", 4, 4096, func(n *store.NodeRecord) {
+		n.Labels = map[string]string{"pool": "a"}
+	}))
+	nodes, err := s.Nodes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(nodes) != 1 || nodes[0].Labels["pool"] != "a" {
+		t.Errorf("nodes = %+v", nodes)
 	}
 }

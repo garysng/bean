@@ -99,9 +99,9 @@ func drain(ch chan *store.Event) []*store.Event {
 }
 
 func TestEventStreamDeliversLifecycleEvents(t *testing.T) {
-	ts := startStack(t)
+	env := startEnv(t, envOpts{})
 
-	req, err := http.NewRequest("GET", ts.URL+"/v1/events", nil)
+	req, err := http.NewRequest("GET", env.Server.URL+"/v1/events", nil)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -127,7 +127,7 @@ func TestEventStreamDeliversLifecycleEvents(t *testing.T) {
 	// Creating a sandbox must produce events on the stream.
 	go func() {
 		time.Sleep(100 * time.Millisecond)
-		doReq(t, ts, "POST", "/v1/sandboxes", map[string]any{"image": "img:1"})
+		env.do("POST", "/v1/sandboxes", map[string]any{"image": "img:1"})
 	}()
 
 	seen := map[string]bool{}
@@ -160,8 +160,8 @@ func TestEventStreamDeliversLifecycleEvents(t *testing.T) {
 }
 
 func TestEventStreamRequiresAuth(t *testing.T) {
-	ts := startStack(t)
-	resp, err := http.Get(ts.URL + "/v1/events")
+	env := startEnv(t, envOpts{})
+	resp, err := http.Get(env.Server.URL + "/v1/events")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -172,8 +172,8 @@ func TestEventStreamRequiresAuth(t *testing.T) {
 }
 
 func TestEventStreamUnsubscribesOnDisconnect(t *testing.T) {
-	ts := startStack(t)
-	req, _ := http.NewRequest("GET", ts.URL+"/v1/events", nil)
+	env := startEnv(t, envOpts{})
+	req, _ := http.NewRequest("GET", env.Server.URL+"/v1/events", nil)
 	req.Header.Set("Authorization", "Bearer "+testKey)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -189,7 +189,7 @@ func TestEventStreamUnsubscribesOnDisconnect(t *testing.T) {
 	// outside, so ensure subsequent requests still work (no leaked lock).
 	deadline := time.Now().Add(5 * time.Second)
 	for {
-		if code, _ := doReq(t, ts, "GET", "/v1/sandboxes", nil); code.StatusCode == http.StatusOK {
+		if code, _ := env.do("GET", "/v1/sandboxes", nil); code.StatusCode == http.StatusOK {
 			return
 		}
 		if time.Now().After(deadline) {

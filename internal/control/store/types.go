@@ -68,12 +68,145 @@ type ImageState string
 const (
 	// ImagePending: the ref is registered but nothing has been prepared.
 	ImagePending ImageState = "PENDING"
-	// ImageConverting: an overlaybd build is in progress.
+	// ImageBuilding: a platform-side build is producing this image.
+	ImageBuilding ImageState = "BUILDING"
+	// ImageConverting: an overlaybd conversion is in progress.
 	ImageConverting ImageState = "CONVERTING"
 	// ImageReady: an overlaybd artifact exists and the fc tier can use it.
 	ImageReady  ImageState = "READY"
 	ImageFailed ImageState = "FAILED"
 )
+
+// ImageSource records how an image came to exist, which determines its
+// conversion cost (see docs/image-build.md §2).
+type ImageSource string
+
+const (
+	// ImageImported is a native OCI reference the caller supplied. Its
+	// layers are tar.gz and must be converted before the fc tier can use it.
+	ImageImported ImageSource = "imported"
+	// ImageBuilt was produced by the platform. A commit-built image needs no
+	// conversion because an overlaybd writable layer is already LSMT; a
+	// BuildKit-built one still does, because BuildKit emits standard OCI.
+	ImageBuilt ImageSource = "built"
+)
+
+// BuildState tracks a build's progress.
+type BuildState string
+
+const (
+	BuildPending    BuildState = "PENDING"
+	BuildRunning    BuildState = "RUNNING"
+	BuildConverting BuildState = "CONVERTING"
+	BuildReady      BuildState = "READY"
+	BuildFailed     BuildState = "FAILED"
+	BuildCancelled  BuildState = "CANCELLED"
+)
+
+// IsBuildTerminal reports whether a build will make no further progress.
+func IsBuildTerminal(s BuildState) bool {
+	switch s {
+	case BuildReady, BuildFailed, BuildCancelled:
+		return true
+	default:
+		return false
+	}
+}
+
+// BuildKind is how the build was described. All kinds compile to the same
+// plan, so the executor does not branch on this; it exists for reporting.
+type BuildKind string
+
+const (
+	// BuildKindDockerfile uses BuildKit for full Dockerfile semantics.
+	BuildKindDockerfile BuildKind = "dockerfile"
+	// BuildKindSteps is the declarative form; the SDK compiles chained
+	// calls into ordered steps.
+	BuildKindSteps BuildKind = "steps"
+	// BuildKindCommit captures a running sandbox's filesystem.
+	BuildKindCommit BuildKind = "commit"
+)
+
+// BuildStepKind enumerates the operations a plan step can perform.
+type BuildStepKind string
+
+const (
+	StepRun     BuildStepKind = "run"
+	StepCopy    BuildStepKind = "copy"
+	StepEnv     BuildStepKind = "env"
+	StepWorkdir BuildStepKind = "workdir"
+	StepUser    BuildStepKind = "user"
+)
+
+// BuildStep is one operation in a plan.
+type BuildStep struct {
+	Kind BuildStepKind `json:"kind"`
+	// CacheKey hashes the preceding step chain together with this step's
+	// content, so an unchanged prefix reuses cached layers. This is what
+	// makes per-step caching work regardless of which front end produced
+	// the plan.
+	CacheKey string `json:"cacheKey,omitempty"`
+
+	// Run is the shell command for StepRun.
+	Run string `json:"run,omitempty"`
+	// Source and Dest apply to StepCopy; Source is relative to the build
+	// context.
+	Source string `json:"source,omitempty"`
+	Dest   string `json:"dest,omitempty"`
+	// Env applies to StepEnv.
+	Env map[string]string `json:"env,omitempty"`
+	// Value carries the argument for StepWorkdir and StepUser.
+	Value string `json:"value,omitempty"`
+}
+
+// BuildPlan is the single intermediate representation every build form
+// compiles to (docs/image-build.md §5). Adding a front end does not touch
+// the executor, and changing executors does not touch the API.
+type BuildPlan struct {
+	// From is the base image ref; either source kind is acceptable.
+	From string `json:"from"`
+	// Tag is the ref the finished image will be known by.
+	Tag   string      `json:"tag"`
+	Kind  BuildKind   `json:"kind"`
+	Steps []BuildStep `json:"steps,omitempty"`
+
+	// Dockerfile holds the file's contents for BuildKindDockerfile; the
+	// context is uploaded separately and referenced by digest.
+	Dockerfile    string `json:"dockerfile,omitempty"`
+	ContextDigest string `json:"contextDigest,omitempty"`
+
+	Env     map[string]string `json:"env,omitempty"`
+	Workdir string            `json:"workdir,omitempty"`
+	// SandboxID is the source sandbox for BuildKindCommit.
+	SandboxID string `json:"sandboxId,omitempty"`
+}
+
+// ImageBuild is a build request and its progress.
+type ImageBuild struct {
+	ID    string     `json:"buildId"`
+	State BuildState `json:"state"`
+	// Reason explains a FAILED or CANCELLED build.
+	Reason string `json:"reason,omitempty"`
+
+	Plan *BuildPlan `json:"plan"`
+
+	// NodeID is where the build ran; builds execute on nodes so they share
+	// the local block cache with sandboxes.
+	NodeID string `json:"nodeId,omitempty"`
+	// ImageDigest is the finished artifact, set once READY.
+	ImageDigest string `json:"imageDigest,omitempty"`
+	SizeBytes   int64  `json:"sizeBytes,omitempty"`
+	// CachedSteps counts steps satisfied from cache, which is the number
+	// users care about when a rebuild is unexpectedly slow.
+	CachedSteps int `json:"cachedSteps"`
+
+	Labels    map[string]string `json:"labels,omitempty"`
+	CreatedAt time.Time         `json:"createdAt"`
+	UpdatedAt time.Time         `json:"updatedAt"`
+	// StartedAt and FinishedAt bound the build for duration reporting.
+	StartedAt  *time.Time `json:"startedAt,omitempty"`
+	FinishedAt *time.Time `json:"finishedAt,omitempty"`
+}
 
 // ID prefixes. Every user-visible identifier is prefixed so it is obvious
 // what an ID refers to in logs, errors and support requests.
@@ -83,6 +216,7 @@ const (
 	PrefixImage      = "img"
 	PrefixVolume     = "vol"
 	PrefixPrewarmJob = "pw"
+	PrefixBuild      = "bld"
 )
 
 // NewID returns a prefixed random identifier, e.g. "sbx_9f8745cbb1".
@@ -167,6 +301,17 @@ type Image struct {
 
 	State  ImageState `json:"state"`
 	Reason string     `json:"reason,omitempty"`
+
+	// Source distinguishes an imported OCI reference from a platform build.
+	Source ImageSource `json:"source"`
+	// BaseRef is the image this one was built on top of; layer reuse and
+	// garbage collection both need it.
+	BaseRef string `json:"baseRef,omitempty"`
+	// BuildID traces a built image back to the build that produced it.
+	BuildID string `json:"buildId,omitempty"`
+	// LayerDigests is the layer manifest, which drives layer-level dedup
+	// and cache accounting.
+	LayerDigests []string `json:"layerDigests,omitempty"`
 
 	SizeBytes int64 `json:"sizeBytes,omitempty"`
 	// CachedNodes counts nodes reporting local blocks for this image,

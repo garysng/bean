@@ -2,112 +2,15 @@ package api
 
 import (
 	"bytes"
-	"encoding/json"
 	"fmt"
-	"net"
 	"net/http"
-	"net/http/httptest"
-	"os"
-	"os/exec"
-	"path/filepath"
 	"strings"
 	"testing"
-
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
-
-	"github.com/garysng/bean/internal/control/store"
-	nodev1 "github.com/garysng/bean/internal/gen/bean/node/v1"
-	"github.com/garysng/bean/internal/node"
-	"github.com/garysng/bean/internal/node/runtime"
 )
 
-const testKey = "bk_test_secret"
-
-var agentBin string
-
-func TestMain(m *testing.M) {
-	dir, err := os.MkdirTemp("", "beand-bin")
-	if err != nil {
-		panic(err)
-	}
-	agentBin = filepath.Join(dir, "beand")
-	cmd := exec.Command("go", "build", "-o", agentBin, "github.com/garysng/bean/cmd/beand")
-	if out, err := cmd.CombinedOutput(); err != nil {
-		panic("build agent: " + string(out))
-	}
-	code := m.Run()
-	os.RemoveAll(dir)
-	os.Exit(code)
-}
-
-// startStack runs noded (localRuntime) + bean-api in-process.
-func startStack(t *testing.T) *httptest.Server {
-	ts, _ := startStackWithServer(t)
-	return ts
-}
-
-// startStackWithServer also returns the Server for tests that need to
-// reach into it (metrics registry, etc).
-func startStackWithServer(t *testing.T) (*httptest.Server, *Server) {
-	t.Helper()
-	mgr := node.NewManager(runtime.NewLocalRuntime(agentBin, t.TempDir()))
-	t.Cleanup(mgr.Close)
-
-	lis, err := net.Listen("tcp", "127.0.0.1:0")
-	if err != nil {
-		t.Fatal(err)
-	}
-	gsrv := grpc.NewServer()
-	nodev1.RegisterSandboxServiceServer(gsrv, node.NewGRPCServer(mgr))
-	go gsrv.Serve(lis)
-	t.Cleanup(gsrv.Stop)
-
-	conn, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { conn.Close() })
-
-	st, err := store.Open(filepath.Join(t.TempDir(), "test.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { st.Close() })
-
-	srv := NewServer(st, nodev1.NewSandboxServiceClient(conn), "node-test", testKey)
-	ts := httptest.NewServer(srv.Handler())
-	t.Cleanup(ts.Close)
-	return ts, srv
-}
-
-func doReq(t *testing.T, ts *httptest.Server, method, path string, body any) (*http.Response, map[string]any) {
-	t.Helper()
-	var rd *bytes.Reader
-	if body != nil {
-		b, _ := json.Marshal(body)
-		rd = bytes.NewReader(b)
-	} else {
-		rd = bytes.NewReader(nil)
-	}
-	req, err := http.NewRequest(method, ts.URL+path, rd)
-	if err != nil {
-		t.Fatal(err)
-	}
-	req.Header.Set("Authorization", "Bearer "+testKey)
-	resp, err := http.DefaultClient.Do(req)
-	if err != nil {
-		t.Fatal(err)
-	}
-	defer resp.Body.Close()
-	var out map[string]any
-	_ = json.NewDecoder(resp.Body).Decode(&out)
-	return resp, out
-}
-
 func TestAuthRequired(t *testing.T) {
-	ts := startStack(t)
-	resp, err := http.Get(ts.URL + "/v1/sandboxes")
+	env := startEnv(t, envOpts{})
+	resp, err := http.Get(env.Server.URL + "/v1/sandboxes")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -118,10 +21,10 @@ func TestAuthRequired(t *testing.T) {
 }
 
 func TestSandboxLifecycleViaREST(t *testing.T) {
-	ts := startStack(t)
+	env := startEnv(t, envOpts{})
 
 	// create
-	resp, out := doReq(t, ts, "POST", "/v1/sandboxes", map[string]any{
+	resp, out := env.do("POST", "/v1/sandboxes", map[string]any{
 		"image":  "python:3.12",
 		"labels": map[string]string{"run": "t1"},
 	})
@@ -135,7 +38,7 @@ func TestSandboxLifecycleViaREST(t *testing.T) {
 	}
 
 	// exec
-	resp, out = doReq(t, ts, "POST", "/v1/sandboxes/"+id+"/exec", map[string]any{
+	resp, out = env.do("POST", "/v1/sandboxes/"+id+"/exec", map[string]any{
 		"cmd": []string{"sh", "-c", "echo hi"},
 	})
 	if resp.StatusCode != http.StatusOK {
@@ -149,17 +52,17 @@ func TestSandboxLifecycleViaREST(t *testing.T) {
 	}
 
 	// list with label filter
-	resp, out = doReq(t, ts, "GET", "/v1/sandboxes?label=run%3Dt1", nil)
+	resp, out = env.do("GET", "/v1/sandboxes?label=run%3Dt1", nil)
 	if n := len(out["sandboxes"].([]any)); n != 1 {
 		t.Errorf("list count = %d", n)
 	}
-	resp, out = doReq(t, ts, "GET", "/v1/sandboxes?label=run%3Dother", nil)
+	resp, out = env.do("GET", "/v1/sandboxes?label=run%3Dother", nil)
 	if n := len(out["sandboxes"].([]any)); n != 0 {
 		t.Errorf("filtered list count = %d", n)
 	}
 
 	// events
-	resp, out = doReq(t, ts, "GET", "/v1/sandboxes/"+id+"/events", nil)
+	resp, out = env.do("GET", "/v1/sandboxes/"+id+"/events", nil)
 	events := out["events"].([]any)
 	if len(events) < 2 {
 		t.Errorf("events = %v", events)
@@ -170,23 +73,23 @@ func TestSandboxLifecycleViaREST(t *testing.T) {
 	}
 
 	// delete
-	resp, _ = doReq(t, ts, "DELETE", "/v1/sandboxes/"+id, nil)
+	resp, _ = env.do("DELETE", "/v1/sandboxes/"+id, nil)
 	if resp.StatusCode != http.StatusAccepted {
 		t.Fatalf("delete status = %d", resp.StatusCode)
 	}
-	resp, out = doReq(t, ts, "GET", "/v1/sandboxes/"+id, nil)
+	resp, out = env.do("GET", "/v1/sandboxes/"+id, nil)
 	if out["sandbox"].(map[string]any)["state"] != "STOPPED" {
 		t.Errorf("state after delete = %v", out["sandbox"].(map[string]any)["state"])
 	}
 }
 
 func TestFilesViaREST(t *testing.T) {
-	ts := startStack(t)
-	_, out := doReq(t, ts, "POST", "/v1/sandboxes", map[string]any{"image": "x"})
+	env := startEnv(t, envOpts{})
+	_, out := env.do("POST", "/v1/sandboxes", map[string]any{"image": "x"})
 	id := out["sandbox"].(map[string]any)["id"].(string)
 
 	// write
-	req, _ := http.NewRequest("PUT", ts.URL+"/v1/sandboxes/"+id+"/files?path=/w/a.txt&mkdirs=true", strings.NewReader("hello file"))
+	req, _ := http.NewRequest("PUT", env.Server.URL+"/v1/sandboxes/"+id+"/files?path=/w/a.txt&mkdirs=true", strings.NewReader("hello file"))
 	req.Header.Set("Authorization", "Bearer "+testKey)
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -198,7 +101,7 @@ func TestFilesViaREST(t *testing.T) {
 	}
 
 	// read back
-	req, _ = http.NewRequest("GET", ts.URL+"/v1/sandboxes/"+id+"/files?path=/w/a.txt", nil)
+	req, _ = http.NewRequest("GET", env.Server.URL+"/v1/sandboxes/"+id+"/files?path=/w/a.txt", nil)
 	req.Header.Set("Authorization", "Bearer "+testKey)
 	resp, err = http.DefaultClient.Do(req)
 	if err != nil {
@@ -212,14 +115,14 @@ func TestFilesViaREST(t *testing.T) {
 	}
 
 	// ls
-	_, out = doReq(t, ts, "GET", "/v1/sandboxes/"+id+"/files/ls?path=/w", nil)
+	_, out = env.do("GET", "/v1/sandboxes/"+id+"/files/ls?path=/w", nil)
 	entries := out["entries"].([]any)
 	if len(entries) != 1 || entries[0].(map[string]any)["name"] != "a.txt" {
 		t.Errorf("entries = %v", entries)
 	}
 
 	// delete file
-	req, _ = http.NewRequest("DELETE", ts.URL+"/v1/sandboxes/"+id+"/files?path=/w/a.txt", nil)
+	req, _ = http.NewRequest("DELETE", env.Server.URL+"/v1/sandboxes/"+id+"/files?path=/w/a.txt", nil)
 	req.Header.Set("Authorization", "Bearer "+testKey)
 	resp, _ = http.DefaultClient.Do(req)
 	resp.Body.Close()
@@ -229,46 +132,46 @@ func TestFilesViaREST(t *testing.T) {
 }
 
 func TestPauseResumeAndWakeViaREST(t *testing.T) {
-	ts := startStack(t)
-	_, out := doReq(t, ts, "POST", "/v1/sandboxes", map[string]any{"image": "x"})
+	env := startEnv(t, envOpts{})
+	_, out := env.do("POST", "/v1/sandboxes", map[string]any{"image": "x"})
 	id := out["sandbox"].(map[string]any)["id"].(string)
 
-	resp, _ := doReq(t, ts, "POST", "/v1/sandboxes/"+id+"/pause", nil)
+	resp, _ := env.do("POST", "/v1/sandboxes/"+id+"/pause", nil)
 	if resp.StatusCode != http.StatusAccepted {
 		t.Fatalf("pause status = %d", resp.StatusCode)
 	}
-	_, out = doReq(t, ts, "GET", "/v1/sandboxes/"+id, nil)
+	_, out = env.do("GET", "/v1/sandboxes/"+id, nil)
 	if out["sandbox"].(map[string]any)["state"] != "PAUSED" {
 		t.Fatalf("state = %v", out["sandbox"].(map[string]any)["state"])
 	}
 
 	// exec against PAUSED wakes it transparently
-	resp, out = doReq(t, ts, "POST", "/v1/sandboxes/"+id+"/exec", map[string]any{
+	resp, out = env.do("POST", "/v1/sandboxes/"+id+"/exec", map[string]any{
 		"cmd": []string{"echo", "awake"},
 	})
 	if resp.StatusCode != http.StatusOK {
 		t.Fatalf("exec on paused = %d: %v", resp.StatusCode, out)
 	}
-	_, out = doReq(t, ts, "GET", "/v1/sandboxes/"+id, nil)
+	_, out = env.do("GET", "/v1/sandboxes/"+id, nil)
 	if out["sandbox"].(map[string]any)["state"] != "RUNNING" {
 		t.Errorf("state after wake = %v", out["sandbox"].(map[string]any)["state"])
 	}
 }
 
 func TestCreateValidation(t *testing.T) {
-	ts := startStack(t)
-	resp, out := doReq(t, ts, "POST", "/v1/sandboxes", map[string]any{})
+	env := startEnv(t, envOpts{})
+	resp, out := env.do("POST", "/v1/sandboxes", map[string]any{})
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("status = %d", resp.StatusCode)
 	}
-	resp, out = doReq(t, ts, "POST", "/v1/sandboxes", map[string]any{
+	resp, out = env.do("POST", "/v1/sandboxes", map[string]any{
 		"image":     "x",
 		"lifecycle": map[string]any{"idleTimeout": "nonsense"},
 	})
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("bad idleTimeout status = %d: %v", resp.StatusCode, out)
 	}
-	resp, out = doReq(t, ts, "POST", "/v1/sandboxes", map[string]any{
+	resp, out = env.do("POST", "/v1/sandboxes", map[string]any{
 		"image":     "x",
 		"lifecycle": map[string]any{"idleTimeout": "10s", "onIdle": "explode"},
 	})
@@ -278,8 +181,8 @@ func TestCreateValidation(t *testing.T) {
 }
 
 func TestNotFound(t *testing.T) {
-	ts := startStack(t)
-	resp, out := doReq(t, ts, "GET", "/v1/sandboxes/sbx_missing", nil)
+	env := startEnv(t, envOpts{})
+	resp, out := env.do("GET", "/v1/sandboxes/sbx_missing", nil)
 	if resp.StatusCode != http.StatusNotFound {
 		t.Errorf("status = %d: %v", resp.StatusCode, out)
 	}
@@ -290,10 +193,10 @@ func TestNotFound(t *testing.T) {
 }
 
 func TestExecNonZeroExit(t *testing.T) {
-	ts := startStack(t)
-	_, out := doReq(t, ts, "POST", "/v1/sandboxes", map[string]any{"image": "x"})
+	env := startEnv(t, envOpts{})
+	_, out := env.do("POST", "/v1/sandboxes", map[string]any{"image": "x"})
 	id := out["sandbox"].(map[string]any)["id"].(string)
-	_, out = doReq(t, ts, "POST", fmt.Sprintf("/v1/sandboxes/%s/exec", id), map[string]any{
+	_, out = env.do("POST", fmt.Sprintf("/v1/sandboxes/%s/exec", id), map[string]any{
 		"cmd": []string{"sh", "-c", "exit 42"},
 	})
 	if out["exitCode"].(float64) != 42 {
@@ -302,26 +205,26 @@ func TestExecNonZeroExit(t *testing.T) {
 }
 
 func TestResumeAndLogsHandlers(t *testing.T) {
-	ts := startStack(t)
-	_, out := doReq(t, ts, "POST", "/v1/sandboxes", map[string]any{"image": "x"})
+	env := startEnv(t, envOpts{})
+	_, out := env.do("POST", "/v1/sandboxes", map[string]any{"image": "x"})
 	id := out["sandbox"].(map[string]any)["id"].(string)
 
 	// Explicit pause then explicit resume (the transparent-wake path is
 	// covered separately; this exercises the resume handler directly).
-	if resp, _ := doReq(t, ts, "POST", "/v1/sandboxes/"+id+"/pause", nil); resp.StatusCode != http.StatusAccepted {
+	if resp, _ := env.do("POST", "/v1/sandboxes/"+id+"/pause", nil); resp.StatusCode != http.StatusAccepted {
 		t.Fatalf("pause status = %d", resp.StatusCode)
 	}
-	resp, _ := doReq(t, ts, "POST", "/v1/sandboxes/"+id+"/resume", nil)
+	resp, _ := env.do("POST", "/v1/sandboxes/"+id+"/resume", nil)
 	if resp.StatusCode != http.StatusAccepted {
 		t.Fatalf("resume status = %d", resp.StatusCode)
 	}
-	_, out = doReq(t, ts, "GET", "/v1/sandboxes/"+id, nil)
+	_, out = env.do("GET", "/v1/sandboxes/"+id, nil)
 	if got := out["sandbox"].(map[string]any)["state"]; got != "RUNNING" {
 		t.Errorf("state after resume = %v", got)
 	}
 
 	// Logs endpoint streams the sandbox log buffer.
-	req, _ := http.NewRequest("GET", ts.URL+"/v1/sandboxes/"+id+"/logs?tailLines=10", nil)
+	req, _ := http.NewRequest("GET", env.Server.URL+"/v1/sandboxes/"+id+"/logs?tailLines=10", nil)
 	req.Header.Set("Authorization", "Bearer "+testKey)
 	lresp, err := http.DefaultClient.Do(req)
 	if err != nil {
@@ -336,10 +239,10 @@ func TestResumeAndLogsHandlers(t *testing.T) {
 	}
 
 	// Both endpoints 404 for an unknown sandbox.
-	if resp, _ := doReq(t, ts, "POST", "/v1/sandboxes/sbx_missing/resume", nil); resp.StatusCode != http.StatusNotFound {
+	if resp, _ := env.do("POST", "/v1/sandboxes/sbx_missing/resume", nil); resp.StatusCode != http.StatusNotFound {
 		t.Errorf("resume unknown = %d, want 404", resp.StatusCode)
 	}
-	req2, _ := http.NewRequest("GET", ts.URL+"/v1/sandboxes/sbx_missing/logs", nil)
+	req2, _ := http.NewRequest("GET", env.Server.URL+"/v1/sandboxes/sbx_missing/logs", nil)
 	req2.Header.Set("Authorization", "Bearer "+testKey)
 	r2, _ := http.DefaultClient.Do(req2)
 	r2.Body.Close()

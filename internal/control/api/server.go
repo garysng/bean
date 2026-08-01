@@ -31,22 +31,28 @@ const (
 	maxExecTimeoutSeconds = 3600    // clamp: never hold a request for longer
 )
 
-// Placer selects a node for a sandbox. Nil in single-node mode.
+// Placer selects a node for a sandbox and owns the resource accounting.
+// Reservations are durable, so releasing one needs only the sandbox id —
+// the amounts are recorded with the reservation.
 type Placer interface {
 	Schedule(req *scheduler.Request) (string, error)
-	ReleaseCreate(nodeID string)
-	Release(nodeID string, req *scheduler.Request)
+	// FinishCreate clears the in-flight marker once a create settles.
+	FinishCreate(nodeID string) error
+	// Release returns a stopped sandbox's capacity. Idempotent.
+	Release(sandboxID string) error
+	// Nodes and Drain back the operational surface.
+	Nodes() ([]*store.NodeRecord, error)
+	Drain(nodeID string) error
 }
 
-// Server is the REST gateway.
+// Server is the REST gateway. It holds no placement state of its own: node
+// capacity and reservations live in the store, so replicas are
+// interchangeable and a restart loses nothing.
 type Server struct {
 	store  *store.Store
 	router Router
-	// placer is set in multi-node mode; when nil every sandbox goes to
-	// defaultNodeID (single-node P0 path).
-	placer        Placer
-	defaultNodeID string
-	region        string
+	placer Placer
+	region string
 	// runtimeTier is the node capability sandboxes require. Runtime tiers
 	// are internal (docs/architecture.md D3): callers never choose one.
 	runtimeTier string
@@ -59,25 +65,10 @@ type Server struct {
 	mux         *http.ServeMux
 }
 
-// NewServer builds a single-node gateway routing everything to one noded.
-func NewServer(st *store.Store, nodeClient nodev1.SandboxServiceClient, nodeID, apiKey string) *Server {
-	return NewServerWithRouter(st, NewStaticRouter(nodeClient), nil, nodeID, "local", apiKey)
-}
-
-// NewServerWithRouter builds a gateway that can place sandboxes across
-// nodes. Pass a nil placer to keep single-node behaviour.
-func NewServerWithRouter(st *store.Store, router Router, placer Placer,
-	defaultNodeID, region, apiKey string) *Server {
-	return NewServerWithOptions(st, router, placer, Options{
-		DefaultNodeID: defaultNodeID, Region: region, APIKey: apiKey,
-	})
-}
-
 // Options configures the gateway.
 type Options struct {
-	DefaultNodeID string
-	Region        string
-	APIKey        string
+	Region string
+	APIKey string
 	// RuntimeTier is the node capability required for placement; defaults
 	// to "fc" (the main tier) when empty.
 	RuntimeTier string
@@ -90,15 +81,20 @@ type Options struct {
 	Snapshots snapshot.Blobs
 }
 
-// NewServerWithOptions is the full constructor.
-func NewServerWithOptions(st *store.Store, router Router, placer Placer, opts Options) *Server {
+// New builds a gateway. A placer is required: every sandbox is placed by
+// the scheduler, whether the cluster has one node or many.
+func New(st *store.Store, router Router, placer Placer, opts Options) *Server {
 	tier := opts.RuntimeTier
 	if tier == "" {
 		tier = "fc"
 	}
-	s := &Server{store: st, router: router, placer: placer,
-		defaultNodeID: opts.DefaultNodeID, region: opts.Region,
-		runtimeTier: tier, apiKey: opts.APIKey, images: opts.Images, secrets: opts.Secrets, snapshots: opts.Snapshots,
+	region := opts.Region
+	if region == "" {
+		region = "local"
+	}
+	s := &Server{store: st, router: router, placer: placer, region: region,
+		runtimeTier: tier, apiKey: opts.APIKey, images: opts.Images,
+		secrets: opts.Secrets, snapshots: opts.Snapshots,
 		bus: newEventBus(), metrics: obs.NewRegistry(), mux: http.NewServeMux()}
 	s.routes()
 	return s
@@ -145,6 +141,8 @@ func (s *Server) routes() {
 		w.WriteHeader(http.StatusOK)
 	})
 	s.mux.HandleFunc("GET /metrics", s.handleMetrics)
+	s.mux.HandleFunc("GET /v1/nodes", s.handleListNodes)
+	s.mux.HandleFunc("POST /v1/nodes/{id}/drain", s.handleDrainNode)
 }
 
 // ---- auth / errors ----
@@ -288,7 +286,8 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	rec := &store.Sandbox{
-		ID: id, Image: req.Image, State: store.SandboxPending, NodeID: s.defaultNodeID,
+		ID: id, Image: req.Image, State: store.SandboxPending,
+		Region: s.region, Runtime: s.runtimeTier,
 		CPU: spec.Cpu, MemoryMiB: spec.MemoryMib, DiskMiB: spec.DiskMib,
 		Labels: req.Labels, CreatedAt: time.Now(), LastActivity: time.Now(),
 	}
@@ -318,29 +317,20 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	// Placement: pick a node before persisting, so a capacity failure never
-	// leaves a record pointing at a node that cannot host it.
-	var placement *scheduler.Request
-	if s.placer != nil {
-		placement = &scheduler.Request{
-			SandboxID: id, Region: s.region, Image: req.Image,
-			CPU: spec.Cpu, MemoryMiB: spec.MemoryMib, DiskMiB: spec.DiskMib,
-			Runtime: s.runtimeTier, SpreadKey: req.Labels["eval-run"],
-		}
-		nodeID, err := s.placer.Schedule(placement)
-		if err != nil {
-			outcome = "no_capacity"
-			writeErr(w, http.StatusServiceUnavailable, "NO_CAPACITY", err.Error())
-			return
-		}
-		rec.NodeID = nodeID
+	// Placement reserves capacity durably before anything is persisted, so a
+	// capacity failure never leaves a record pointing at a node that cannot
+	// host it, and a crash here leaks nothing the sweep cannot reclaim.
+	nodeID, err := s.placer.Schedule(s.placementFor(rec))
+	if err != nil {
+		outcome = "no_capacity"
+		writeErr(w, http.StatusServiceUnavailable, "NO_CAPACITY", err.Error())
+		return
 	}
+	rec.NodeID = nodeID
 
 	if err := s.store.PutSandbox(rec); err != nil {
-		if s.placer != nil {
-			s.placer.ReleaseCreate(rec.NodeID)
-			s.placer.Release(rec.NodeID, placement)
-		}
+		_ = s.placer.FinishCreate(nodeID)
+		_ = s.placer.Release(rec.ID)
 		writeErr(w, http.StatusInternalServerError, "INTERNAL", err.Error())
 		return
 	}
@@ -348,7 +338,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 
 	nodeClient, err := s.nodeClientFor(rec)
 	if err != nil {
-		s.failCreate(rec, placement, err)
+		s.failCreate(rec, err)
 		writeErr(w, http.StatusServiceUnavailable, "NODE_UNREACHABLE", err.Error())
 		return
 	}
@@ -356,11 +346,9 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	ctx, cancel := context.WithTimeout(r.Context(), 60*time.Second)
 	defer cancel()
 	resp, err := nodeClient.CreateSandbox(ctx, &nodev1.CreateSandboxRequest{Spec: spec})
-	if s.placer != nil {
-		s.placer.ReleaseCreate(rec.NodeID)
-	}
+	_ = s.placer.FinishCreate(nodeID)
 	if err != nil {
-		s.failCreate(rec, placement, err)
+		s.failCreate(rec, err)
 		grpcToHTTP(w, err)
 		return
 	}
@@ -372,27 +360,32 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusCreated, map[string]any{"sandbox": rec})
 }
 
-// failCreate records the failure and returns committed capacity.
-func (s *Server) failCreate(rec *store.Sandbox, placement *scheduler.Request, cause error) {
+// placementFor derives a placement request from a sandbox record, so the
+// create and restore paths cannot drift apart.
+func (s *Server) placementFor(rec *store.Sandbox) *scheduler.Request {
+	return &scheduler.Request{
+		SandboxID: rec.ID, Region: s.region, Image: rec.Image,
+		CPU: rec.CPU, MemoryMiB: rec.MemoryMiB, DiskMiB: rec.DiskMiB,
+		Runtime: s.runtimeTier, SpreadKey: rec.Labels["eval-run"],
+	}
+}
+
+// failCreate records the failure and returns the reserved capacity.
+func (s *Server) failCreate(rec *store.Sandbox, cause error) {
 	rec.State = store.SandboxFailed
 	rec.Reason = cause.Error()
 	_ = s.store.PutSandbox(rec)
 	s.emit(rec.ID, "sandbox.lifecycle.failed", map[string]string{"reason": cause.Error()})
-	if s.placer != nil && placement != nil {
-		s.placer.Release(rec.NodeID, placement)
+	if err := s.placer.Release(rec.ID); err != nil {
+		log.Printf("sandbox %s: release reservation: %v", rec.ID, err)
 	}
 }
 
 // releasePlacement returns capacity for a sandbox that has stopped.
 func (s *Server) releasePlacement(rec *store.Sandbox) {
-	if s.placer == nil {
-		return
+	if err := s.placer.Release(rec.ID); err != nil {
+		log.Printf("sandbox %s: release reservation: %v", rec.ID, err)
 	}
-	s.placer.Release(rec.NodeID, &scheduler.Request{
-		SandboxID: rec.ID, Region: s.region, Image: rec.Image,
-		CPU: rec.CPU, MemoryMiB: rec.MemoryMiB, DiskMiB: rec.DiskMiB,
-		SpreadKey: rec.Labels["eval-run"],
-	})
 }
 
 func (s *Server) handleList(w http.ResponseWriter, r *http.Request) {

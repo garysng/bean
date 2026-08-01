@@ -88,16 +88,6 @@ func (r *NodeRouter) Evict(nodeID string) {
 	}
 }
 
-// staticRouter serves a single node, preserving the P0 single-node path.
-type staticRouter struct {
-	client nodev1.SandboxServiceClient
-}
-
-// NewStaticRouter routes every sandbox to one client (single-node mode).
-func NewStaticRouter(c nodev1.SandboxServiceClient) Router { return &staticRouter{client: c} }
-
-func (s *staticRouter) Client(string) (nodev1.SandboxServiceClient, error) { return s.client, nil }
-
 // Router resolves the SandboxService client for a sandbox's node.
 type Router interface {
 	Client(nodeID string) (nodev1.SandboxServiceClient, error)

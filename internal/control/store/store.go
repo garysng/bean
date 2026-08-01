@@ -90,6 +90,50 @@ CREATE TABLE IF NOT EXISTS prewarm_jobs (
   data TEXT NOT NULL,
   created_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS nodes (
+  id TEXT PRIMARY KEY,
+  region TEXT NOT NULL,
+  labels TEXT NOT NULL DEFAULT '{}',
+  runtimes TEXT NOT NULL DEFAULT '[]',
+  cpu_alloc REAL NOT NULL DEFAULT 0,
+  mem_alloc INTEGER NOT NULL DEFAULT 0,
+  disk_alloc INTEGER NOT NULL DEFAULT 0,
+  gpu_count INTEGER NOT NULL DEFAULT 0,
+  cpu_committed REAL NOT NULL DEFAULT 0,
+  mem_committed INTEGER NOT NULL DEFAULT 0,
+  disk_committed INTEGER NOT NULL DEFAULT 0,
+  gpu_committed INTEGER NOT NULL DEFAULT 0,
+  create_in_flight INTEGER NOT NULL DEFAULT 0,
+  max_creates INTEGER NOT NULL DEFAULT 16,
+  cached_images TEXT NOT NULL DEFAULT '{}',
+  nvme_cache INTEGER NOT NULL DEFAULT 0,
+  state TEXT NOT NULL DEFAULT 'READY',
+  advertise_addr TEXT NOT NULL DEFAULT '',
+  last_heartbeat INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_nodes_region_state ON nodes(region, state);
+-- One reservation per sandbox: the primary key makes Reserve idempotent
+-- and lets Release find the exact amounts to give back.
+CREATE TABLE IF NOT EXISTS reservations (
+  sandbox_id TEXT PRIMARY KEY,
+  node_id TEXT NOT NULL,
+  cpu REAL NOT NULL,
+  mem_mib INTEGER NOT NULL,
+  disk_mib INTEGER NOT NULL,
+  gpu INTEGER NOT NULL DEFAULT 0,
+  spread_key TEXT NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_reservations_node ON reservations(node_id);
+CREATE INDEX IF NOT EXISTS idx_reservations_spread ON reservations(spread_key);
+CREATE TABLE IF NOT EXISTS builds (
+  id TEXT PRIMARY KEY,
+  data TEXT NOT NULL,
+  state TEXT NOT NULL,
+  tag TEXT NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_builds_state ON builds(state);
 CREATE TABLE IF NOT EXISTS registry_credentials (
   host TEXT PRIMARY KEY,
   username TEXT NOT NULL,
@@ -99,6 +143,27 @@ CREATE TABLE IF NOT EXISTS registry_credentials (
 );
 `)
 	return err
+}
+
+// marshalJSON encodes a value for a JSON column, using an empty object or
+// array rather than SQL NULL so scans never have to handle nulls.
+func marshalJSON(v any) (string, error) {
+	if v == nil {
+		return "null", nil
+	}
+	b, err := json.Marshal(v)
+	if err != nil {
+		return "", err
+	}
+	return string(b), nil
+}
+
+// unmarshalJSON decodes a JSON column, tolerating empty and null values.
+func unmarshalJSON(s string, out any) error {
+	if s == "" || s == "null" {
+		return nil
+	}
+	return json.Unmarshal([]byte(s), out)
 }
 
 // ---- sandboxes ----
@@ -412,6 +477,73 @@ func (s *Store) DeleteImage(ref string) error {
 	defer s.mu.Unlock()
 	_, err := s.db.Exec(`DELETE FROM images WHERE ref=?`, ref)
 	return err
+}
+
+// ---- builds ----
+
+func (s *Store) PutBuild(b *ImageBuild) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	b.UpdatedAt = time.Now()
+	blob, err := json.Marshal(b)
+	if err != nil {
+		return err
+	}
+	tag := ""
+	if b.Plan != nil {
+		tag = b.Plan.Tag
+	}
+	_, err = s.db.Exec(
+		`INSERT INTO builds(id, data, state, tag, created_at) VALUES(?,?,?,?,?)
+		 ON CONFLICT(id) DO UPDATE SET data=excluded.data, state=excluded.state`,
+		b.ID, string(blob), string(b.State), tag, b.CreatedAt.Unix())
+	return err
+}
+
+// GetBuild returns nil (no error) when the build does not exist.
+func (s *Store) GetBuild(id string) (*ImageBuild, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	var blob string
+	err := s.db.QueryRow(`SELECT data FROM builds WHERE id=?`, id).Scan(&blob)
+	if err == sql.ErrNoRows {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, err
+	}
+	var b ImageBuild
+	if err := json.Unmarshal([]byte(blob), &b); err != nil {
+		return nil, err
+	}
+	return &b, nil
+}
+
+// ListBuilds returns builds newest first, optionally filtered by state.
+func (s *Store) ListBuilds(state BuildState) ([]*ImageBuild, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	rows, err := s.db.Query(`SELECT data FROM builds ORDER BY created_at DESC`)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+	var out []*ImageBuild
+	for rows.Next() {
+		var blob string
+		if err := rows.Scan(&blob); err != nil {
+			return nil, err
+		}
+		var b ImageBuild
+		if err := json.Unmarshal([]byte(blob), &b); err != nil {
+			return nil, err
+		}
+		if state != "" && b.State != state {
+			continue
+		}
+		out = append(out, &b)
+	}
+	return out, rows.Err()
 }
 
 // ---- registry credentials ----

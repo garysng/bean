@@ -3,6 +3,7 @@ package nodesvc
 import (
 	"context"
 	"net"
+	"path/filepath"
 	"testing"
 	"time"
 
@@ -12,17 +13,24 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/garysng/bean/internal/control/scheduler"
+	"github.com/garysng/bean/internal/control/store"
 	nodev1 "github.com/garysng/bean/internal/gen/bean/node/v1"
+	"github.com/garysng/bean/internal/node"
 )
 
 type stubLister struct{ specs []*nodev1.SandboxSpec }
 
 func (s stubLister) ExpectedForNode(string) []*nodev1.SandboxSpec { return s.specs }
 
-func start(t *testing.T, opts Options) (nodev1.NodeServiceClient, *scheduler.Scheduler, *Service) {
+func start(t *testing.T, opts Options) (nodev1.NodeServiceClient, *store.Store, *Service) {
 	t.Helper()
-	sched := scheduler.New(scheduler.DefaultWeights())
-	svc := New(sched, opts)
+	st, err := store.Open(filepath.Join(t.TempDir(), "nodesvc.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	sched := scheduler.New(st, scheduler.DefaultWeights())
+	svc := New(st, sched, opts)
 	lis, err := net.Listen("tcp", "127.0.0.1:0")
 	if err != nil {
 		t.Fatal(err)
@@ -36,7 +44,7 @@ func start(t *testing.T, opts Options) (nodev1.NodeServiceClient, *scheduler.Sch
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { conn.Close() })
-	return nodev1.NewNodeServiceClient(conn), sched, svc
+	return nodev1.NewNodeServiceClient(conn), st, svc
 }
 
 func regReq(nodeID string) *nodev1.RegisterRequest {
@@ -52,8 +60,8 @@ func regReq(nodeID string) *nodev1.RegisterRequest {
 	}
 }
 
-func TestRegisterAddsNodeToScheduler(t *testing.T) {
-	c, sched, _ := start(t, Options{BootstrapToken: "boot-tok", Lister: stubLister{}})
+func TestRegisterPersistsNode(t *testing.T) {
+	c, st, _ := start(t, Options{BootstrapToken: "boot-tok", Lister: stubLister{}})
 	resp, err := c.Register(context.Background(), regReq("n1"))
 	if err != nil {
 		t.Fatal(err)
@@ -64,15 +72,21 @@ func TestRegisterAddsNodeToScheduler(t *testing.T) {
 	if resp.HeartbeatIntervalSeconds <= 0 {
 		t.Error("heartbeat interval not advertised")
 	}
-	nodes := sched.Nodes()
+	// The node is persisted, so any replica can see and route to it.
+	nodes, err := st.LoadNodes()
+	if err != nil {
+		t.Fatal(err)
+	}
 	if len(nodes) != 1 || nodes[0].ID != "n1" || nodes[0].Region != "r1" {
-		t.Fatalf("scheduler nodes = %+v", nodes)
+		t.Fatalf("persisted nodes = %+v", nodes)
 	}
 	if nodes[0].Labels["pool"] != "nvme" || nodes[0].CPUAllocatable != 8 {
 		t.Errorf("node = %+v", nodes[0])
 	}
-	// The registered node is immediately schedulable.
-	if _, err := sched.Schedule(&scheduler.Request{
+	// It is immediately schedulable by a scheduler that never saw the
+	// registration, which is the property replicas depend on.
+	fresh := scheduler.New(st, scheduler.DefaultWeights())
+	if _, err := fresh.Schedule(&scheduler.Request{
 		SandboxID: "s1", Region: "r1", Image: "i", CPU: 1, MemoryMiB: 512, Runtime: "fc",
 	}); err != nil {
 		t.Errorf("schedule after register: %v", err)
@@ -105,7 +119,7 @@ func TestRegisterValidation(t *testing.T) {
 }
 
 func TestHeartbeatRenewsLease(t *testing.T) {
-	c, sched, _ := start(t, Options{BootstrapToken: "boot-tok"})
+	c, st, _ := start(t, Options{BootstrapToken: "boot-tok"})
 	ctx := context.Background()
 	reg, err := c.Register(ctx, regReq("n1"))
 	if err != nil {
@@ -125,7 +139,8 @@ func TestHeartbeatRenewsLease(t *testing.T) {
 	if !resp.LeaseOk {
 		t.Error("lease not confirmed")
 	}
-	if got := sched.Nodes()[0].State; got != scheduler.NodeReady {
+	nodes, _ := st.LoadNodes()
+	if got := nodes[0].State; got != scheduler.NodeReady {
 		t.Errorf("state = %s", got)
 	}
 }
@@ -181,10 +196,15 @@ func TestSyncStateReturnsExpected(t *testing.T) {
 
 func TestLivenessSweepNotifiesLost(t *testing.T) {
 	now := time.Now()
-	sched := scheduler.New(scheduler.DefaultWeights())
+	st, err := store.Open(filepath.Join(t.TempDir(), "sweep.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	sched := scheduler.New(st, scheduler.DefaultWeights())
 	sched.SetClock(func() time.Time { return now })
 	lostCh := make(chan string, 1)
-	svc := New(sched, Options{OnLost: func(id string) { lostCh <- id }})
+	svc := New(st, sched, Options{OnLost: func(id string) { lostCh <- id }})
 
 	if _, err := svc.Register(context.Background(), regReq("n1")); err != nil {
 		t.Fatal(err)
@@ -205,12 +225,18 @@ func TestLivenessSweepNotifiesLost(t *testing.T) {
 	}
 }
 
-func TestNodeAddrRegistry(t *testing.T) {
-	_, _, svc := start(t, Options{})
+func TestNodeAddrComesFromRegistration(t *testing.T) {
+	c, _, svc := start(t, Options{})
 	if _, ok := svc.NodeAddr("n1"); ok {
 		t.Error("unknown node should not resolve")
 	}
-	svc.SetNodeAddr("n1", "10.0.0.5:7443")
+	// The advertise address travels in registration labels, so a replica
+	// that never handled the registration can still route to the node.
+	req := regReq("n1")
+	req.Labels[node.LabelAdvertiseAddr] = "10.0.0.5:7443"
+	if _, err := c.Register(context.Background(), req); err != nil {
+		t.Fatal(err)
+	}
 	got, ok := svc.NodeAddr("n1")
 	if !ok || got != "10.0.0.5:7443" {
 		t.Errorf("addr = %q ok=%v", got, ok)

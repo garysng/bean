@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/garysng/bean/internal/control/scheduler"
 	"github.com/garysng/bean/internal/control/snapshot"
 	"github.com/garysng/bean/internal/control/store"
 	nodev1 "github.com/garysng/bean/internal/gen/bean/node/v1"
@@ -224,25 +223,15 @@ func (s *Server) createFromSnapshot(w http.ResponseWriter, r *http.Request,
 	rec.SnapshotID = snap.ID
 	spec.Image = snap.Image
 
-	var placement *scheduler.Request
-	if s.placer != nil {
-		placement = &scheduler.Request{
-			SandboxID: rec.ID, Region: s.region, Image: rec.Image,
-			CPU: spec.Cpu, MemoryMiB: spec.MemoryMib, DiskMiB: spec.DiskMib,
-			Runtime: s.runtimeTier, SpreadKey: req.Labels["eval-run"],
-		}
-		nodeID, perr := s.placer.Schedule(placement)
-		if perr != nil {
-			writeErr(w, http.StatusServiceUnavailable, "NO_CAPACITY", perr.Error())
-			return
-		}
-		rec.NodeID = nodeID
+	nodeID, err := s.placer.Schedule(s.placementFor(rec))
+	if err != nil {
+		writeErr(w, http.StatusServiceUnavailable, "NO_CAPACITY", err.Error())
+		return
 	}
+	rec.NodeID = nodeID
 	if err := s.store.PutSandbox(rec); err != nil {
-		if s.placer != nil {
-			s.placer.ReleaseCreate(rec.NodeID)
-			s.placer.Release(rec.NodeID, placement)
-		}
+		_ = s.placer.FinishCreate(nodeID)
+		_ = s.placer.Release(rec.ID)
 		writeErr(w, http.StatusInternalServerError, "INTERNAL", err.Error())
 		return
 	}
@@ -250,14 +239,14 @@ func (s *Server) createFromSnapshot(w http.ResponseWriter, r *http.Request,
 
 	nodeClient, err := s.nodeClientFor(rec)
 	if err != nil {
-		s.failCreate(rec, placement, err)
+		s.failCreate(rec, err)
 		writeErr(w, http.StatusServiceUnavailable, "NODE_UNREACHABLE", err.Error())
 		return
 	}
 
 	blobR, err := s.snapshots.Reader(snap.ID)
 	if err != nil {
-		s.failCreate(rec, placement, err)
+		s.failCreate(rec, err)
 		if errors.Is(err, snapshot.ErrBlobNotFound) {
 			writeErr(w, http.StatusNotFound, "SNAPSHOT_DATA_MISSING", err.Error())
 			return
@@ -269,14 +258,14 @@ func (s *Server) createFromSnapshot(w http.ResponseWriter, r *http.Request,
 
 	stream, err := nodeClient.RestoreSandbox(r.Context())
 	if err != nil {
-		s.failCreate(rec, placement, err)
+		s.failCreate(rec, err)
 		grpcToHTTP(w, err)
 		return
 	}
 	if err := stream.Send(&nodev1.RestoreSandboxFrame{
 		Frame: &nodev1.RestoreSandboxFrame_Spec{Spec: spec},
 	}); err != nil {
-		s.failCreate(rec, placement, err)
+		s.failCreate(rec, err)
 		grpcToHTTP(w, err)
 		return
 	}
@@ -288,7 +277,7 @@ func (s *Server) createFromSnapshot(w http.ResponseWriter, r *http.Request,
 			if serr := stream.Send(&nodev1.RestoreSandboxFrame{
 				Frame: &nodev1.RestoreSandboxFrame_Data{Data: buf[:n]},
 			}); serr != nil {
-				s.failCreate(rec, placement, serr)
+				s.failCreate(rec, serr)
 				grpcToHTTP(w, serr)
 				return
 			}
@@ -297,18 +286,16 @@ func (s *Server) createFromSnapshot(w http.ResponseWriter, r *http.Request,
 			break
 		}
 		if rerr != nil {
-			s.failCreate(rec, placement, rerr)
+			s.failCreate(rec, rerr)
 			writeErr(w, http.StatusInternalServerError, "INTERNAL", rerr.Error())
 			return
 		}
 	}
 
 	resp, err := stream.CloseAndRecv()
-	if s.placer != nil {
-		s.placer.ReleaseCreate(rec.NodeID)
-	}
+	_ = s.placer.FinishCreate(nodeID)
 	if err != nil {
-		s.failCreate(rec, placement, err)
+		s.failCreate(rec, err)
 		grpcToHTTP(w, err)
 		return
 	}

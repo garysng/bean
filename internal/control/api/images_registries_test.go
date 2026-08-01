@@ -2,48 +2,14 @@ package api
 
 import (
 	"net/http"
-	"net/http/httptest"
 	"net/url"
-	"path/filepath"
 	"strings"
 	"testing"
-
-	"github.com/garysng/bean/internal/control/image"
-	"github.com/garysng/bean/internal/control/secret"
-	"github.com/garysng/bean/internal/control/store"
-	nodev1 "github.com/garysng/bean/internal/gen/bean/node/v1"
 )
 
-// startImageStack builds a gateway with the image service and (optionally)
-// credential encryption enabled.
-func startImageStack(t *testing.T, withSecrets bool) *httptest.Server {
-	t.Helper()
-	st, err := store.Open(filepath.Join(t.TempDir(), "img.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { st.Close() })
-
-	opts := Options{
-		DefaultNodeID: "node-test", Region: "local", APIKey: testKey,
-		RuntimeTier: "local", Images: image.New(st, nil),
-	}
-	if withSecrets {
-		box, err := secret.NewBox("test-master-key")
-		if err != nil {
-			t.Fatal(err)
-		}
-		opts.Secrets = box
-	}
-	srv := NewServerWithOptions(st, NewStaticRouter(nodev1.SandboxServiceClient(nil)), nil, opts)
-	ts := httptest.NewServer(srv.Handler())
-	t.Cleanup(ts.Close)
-	return ts
-}
-
 func TestImageStatusUnknownRef(t *testing.T) {
-	ts := startImageStack(t, false)
-	resp, out := doReq(t, ts, "GET", "/v1/images/status?ref=never%3Aseen", nil)
+	env := startEnv(t, envOpts{})
+	resp, out := env.do("GET", "/v1/images/status?ref=never%3Aseen", nil)
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("status = %d: %v", resp.StatusCode, out)
 	}
@@ -53,16 +19,16 @@ func TestImageStatusUnknownRef(t *testing.T) {
 }
 
 func TestImageStatusRequiresRef(t *testing.T) {
-	ts := startImageStack(t, false)
-	resp, _ := doReq(t, ts, "GET", "/v1/images/status", nil)
+	env := startEnv(t, envOpts{})
+	resp, _ := env.do("GET", "/v1/images/status", nil)
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("status = %d, want 400", resp.StatusCode)
 	}
 }
 
 func TestPrewarmRegistersImages(t *testing.T) {
-	ts := startImageStack(t, false)
-	resp, out := doReq(t, ts, "POST", "/v1/images/prewarm", map[string]any{
+	env := startEnv(t, envOpts{})
+	resp, out := env.do("POST", "/v1/images/prewarm", map[string]any{
 		"refs":        []string{"python:3.12", "registry.example.com/team/app:v1"},
 		"targetNodes": 2,
 	})
@@ -76,7 +42,7 @@ func TestPrewarmRegistersImages(t *testing.T) {
 
 	// The referenced images are now known, with the OCI format because
 	// nothing has been converted.
-	_, out = doReq(t, ts, "GET", "/v1/images/status?ref="+url.QueryEscape("python:3.12"), nil)
+	_, out = env.do("GET", "/v1/images/status?ref="+url.QueryEscape("python:3.12"), nil)
 	if out["state"] != "PENDING" {
 		t.Errorf("state = %v, want PENDING", out["state"])
 	}
@@ -84,42 +50,42 @@ func TestPrewarmRegistersImages(t *testing.T) {
 		t.Errorf("format = %v, want oci", out["format"])
 	}
 
-	_, out = doReq(t, ts, "GET", "/v1/images", nil)
+	_, out = env.do("GET", "/v1/images", nil)
 	if n := len(out["images"].([]any)); n != 2 {
 		t.Errorf("images = %d, want 2", n)
 	}
 
 	// Job status reflects readiness (no nodes report cache in this stack).
-	_, out = doReq(t, ts, "GET", "/v1/images/prewarm/"+jobID, nil)
+	_, out = env.do("GET", "/v1/images/prewarm/"+jobID, nil)
 	if out["jobId"] != jobID {
 		t.Errorf("jobId = %v", out["jobId"])
 	}
 }
 
 func TestPrewarmValidationViaAPI(t *testing.T) {
-	ts := startImageStack(t, false)
-	resp, _ := doReq(t, ts, "POST", "/v1/images/prewarm", map[string]any{"refs": []string{}})
+	env := startEnv(t, envOpts{})
+	resp, _ := env.do("POST", "/v1/images/prewarm", map[string]any{"refs": []string{}})
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("status = %d, want 400", resp.StatusCode)
 	}
-	resp, _ = doReq(t, ts, "POST", "/v1/images/prewarm", map[string]any{"refs": []string{"bad ref"}})
+	resp, _ = env.do("POST", "/v1/images/prewarm", map[string]any{"refs": []string{"bad ref"}})
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("bad ref status = %d, want 400", resp.StatusCode)
 	}
 }
 
 func TestPrewarmJobNotFound(t *testing.T) {
-	ts := startImageStack(t, false)
-	resp, _ := doReq(t, ts, "GET", "/v1/images/prewarm/pw_missing", nil)
+	env := startEnv(t, envOpts{})
+	resp, _ := env.do("GET", "/v1/images/prewarm/pw_missing", nil)
 	if resp.StatusCode != http.StatusNotFound {
 		t.Errorf("status = %d, want 404", resp.StatusCode)
 	}
 }
 
 func TestRegistryCredentialLifecycle(t *testing.T) {
-	ts := startImageStack(t, true)
+	env := startEnv(t, envOpts{WithSecrets: true})
 
-	resp, out := doReq(t, ts, "PUT", "/v1/registries", map[string]any{
+	resp, out := env.do("PUT", "/v1/registries", map[string]any{
 		"host": "https://registry.example.com/", "username": "robot",
 		"secret": "super-secret-token",
 	})
@@ -135,7 +101,7 @@ func TestRegistryCredentialLifecycle(t *testing.T) {
 		t.Error("secret echoed in response")
 	}
 
-	resp, out = doReq(t, ts, "GET", "/v1/registries", nil)
+	resp, out = env.do("GET", "/v1/registries", nil)
 	regs := out["registries"].([]any)
 	if len(regs) != 1 {
 		t.Fatalf("registries = %v", regs)
@@ -148,23 +114,23 @@ func TestRegistryCredentialLifecycle(t *testing.T) {
 		t.Error("secret leaked in list response")
 	}
 
-	resp, _ = doReq(t, ts, "DELETE", "/v1/registries/registry.example.com", nil)
+	resp, _ = env.do("DELETE", "/v1/registries/registry.example.com", nil)
 	if resp.StatusCode != http.StatusNoContent {
 		t.Errorf("delete status = %d", resp.StatusCode)
 	}
-	resp, _ = doReq(t, ts, "DELETE", "/v1/registries/registry.example.com", nil)
+	resp, _ = env.do("DELETE", "/v1/registries/registry.example.com", nil)
 	if resp.StatusCode != http.StatusNotFound {
 		t.Errorf("second delete status = %d, want 404", resp.StatusCode)
 	}
 }
 
 func TestRegistryCredentialValidation(t *testing.T) {
-	ts := startImageStack(t, true)
-	resp, _ := doReq(t, ts, "PUT", "/v1/registries", map[string]any{"username": "u", "secret": "s"})
+	env := startEnv(t, envOpts{WithSecrets: true})
+	resp, _ := env.do("PUT", "/v1/registries", map[string]any{"username": "u", "secret": "s"})
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("missing host status = %d", resp.StatusCode)
 	}
-	resp, _ = doReq(t, ts, "PUT", "/v1/registries", map[string]any{"host": "h"})
+	resp, _ = env.do("PUT", "/v1/registries", map[string]any{"host": "h"})
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("missing secret status = %d", resp.StatusCode)
 	}
@@ -172,8 +138,8 @@ func TestRegistryCredentialValidation(t *testing.T) {
 
 func TestRegistryRequiresMasterKey(t *testing.T) {
 	// Without a key the endpoint refuses rather than storing plaintext.
-	ts := startImageStack(t, false)
-	resp, out := doReq(t, ts, "PUT", "/v1/registries", map[string]any{
+	env := startEnv(t, envOpts{})
+	resp, out := env.do("PUT", "/v1/registries", map[string]any{
 		"host": "r.example.com", "secret": "s",
 	})
 	if resp.StatusCode != http.StatusNotImplemented {
@@ -211,18 +177,9 @@ func TestNormalizeRegistryHost(t *testing.T) {
 }
 
 func TestImageEndpointsDisabledWithoutService(t *testing.T) {
-	st, err := store.Open(filepath.Join(t.TempDir(), "no-img.db"))
-	if err != nil {
-		t.Fatal(err)
-	}
-	t.Cleanup(func() { st.Close() })
-	srv := NewServerWithOptions(st, NewStaticRouter(nodev1.SandboxServiceClient(nil)), nil,
-		Options{APIKey: testKey, Region: "local"})
-	ts := httptest.NewServer(srv.Handler())
-	t.Cleanup(ts.Close)
-
+	env := startEnv(t, envOpts{WithoutImages: true})
 	for _, path := range []string{"/v1/images", "/v1/images/status?ref=x"} {
-		resp, _ := doReq(t, ts, "GET", path, nil)
+		resp, _ := env.do("GET", path, nil)
 		if resp.StatusCode != http.StatusNotImplemented {
 			t.Errorf("%s status = %d, want 501", path, resp.StatusCode)
 		}

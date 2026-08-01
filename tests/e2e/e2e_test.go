@@ -44,6 +44,10 @@ func TestMain(m *testing.M) {
 			fmt.Fprintln(os.Stderr, "e2e setup:", err)
 			return 1
 		}
+		if err := waitForCapacity(30 * time.Second); err != nil {
+			fmt.Fprintln(os.Stderr, "e2e setup:", err)
+			return 1
+		}
 		return m.Run()
 	}()
 	os.Exit(code)
@@ -93,22 +97,18 @@ func setup() error {
 	if err != nil {
 		return err
 	}
-
-	noded := exec.Command(nodedBin,
-		"--listen", fmt.Sprintf("127.0.0.1:%d", grpcPort),
-		"--runtime", "local",
-		"--agent-bin", agentBin,
-		"--base-dir", filepath.Join(binDir, "sandboxes"),
-		"--node-token", nodeToken)
-	noded.Stdout, noded.Stderr = os.Stderr, os.Stderr
-	if err := noded.Start(); err != nil {
+	nodeGRPCPort, err := freePort()
+	if err != nil {
 		return err
 	}
-	daemons = append(daemons, noded)
 
+	// The control plane starts first: nodes register outbound, so there is
+	// nothing to register with until it is listening.
 	api := exec.Command(apiBin,
 		"--listen", fmt.Sprintf("127.0.0.1:%d", httpPort),
-		"--noded", fmt.Sprintf("127.0.0.1:%d", grpcPort),
+		"--node-grpc", fmt.Sprintf("127.0.0.1:%d", nodeGRPCPort),
+		"--region", "local",
+		"--runtime-tier", "local",
 		"--db", filepath.Join(binDir, "e2e.db"),
 		"--api-key", apiKey,
 		"--node-token", nodeToken)
@@ -117,6 +117,23 @@ func setup() error {
 		return err
 	}
 	daemons = append(daemons, api)
+
+	noded := exec.Command(nodedBin,
+		"--listen", fmt.Sprintf("127.0.0.1:%d", grpcPort),
+		"--runtime", "local",
+		"--agent-bin", agentBin,
+		"--base-dir", filepath.Join(binDir, "sandboxes"),
+		"--node-token", nodeToken,
+		"--control-plane", fmt.Sprintf("127.0.0.1:%d", nodeGRPCPort),
+		"--node-id", "node-0",
+		"--region", "local",
+		"--advertise", fmt.Sprintf("127.0.0.1:%d", grpcPort),
+		"--cpu", "16", "--memory-mib", "16384")
+	noded.Stdout, noded.Stderr = os.Stderr, os.Stderr
+	if err := noded.Start(); err != nil {
+		return err
+	}
+	daemons = append(daemons, noded)
 
 	apiURL = fmt.Sprintf("http://127.0.0.1:%d", httpPort)
 	deadline := time.Now().Add(10 * time.Second)
@@ -132,6 +149,39 @@ func setup() error {
 			return fmt.Errorf("bean-api not healthy")
 		}
 		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+// waitForCapacity blocks until a node has registered and can host a
+// sandbox, which is what "the cluster is ready" means now that nodes always
+// register.
+func waitForCapacity(timeout time.Duration) error {
+	deadline := time.Now().Add(timeout)
+	for {
+		req, err := http.NewRequest("GET", apiURL+"/v1/nodes", nil)
+		if err != nil {
+			return err
+		}
+		req.Header.Set("Authorization", "Bearer "+apiKey)
+		resp, err := http.DefaultClient.Do(req)
+		if err == nil {
+			var body struct {
+				Nodes []struct {
+					State string `json:"state"`
+				} `json:"nodes"`
+			}
+			json.NewDecoder(resp.Body).Decode(&body)
+			resp.Body.Close()
+			for _, n := range body.Nodes {
+				if n.State == "READY" {
+					return nil
+				}
+			}
+		}
+		if time.Now().After(deadline) {
+			return fmt.Errorf("no ready node within %s", timeout)
+		}
+		time.Sleep(200 * time.Millisecond)
 	}
 }
 

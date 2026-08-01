@@ -3,16 +3,15 @@ package api
 import (
 	"io"
 	"net/http"
-	"net/http/httptest"
 	"strings"
 	"testing"
 )
 
-func scrape(t *testing.T, ts *httptest.Server) string {
+func scrape(t *testing.T, env *testEnv) string {
 	t.Helper()
 	// /metrics is unauthenticated: it is scraped locally and carries no
 	// sandbox contents.
-	resp, err := http.Get(ts.URL + "/metrics")
+	resp, err := http.Get(env.Server.URL + "/metrics")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -31,20 +30,20 @@ func scrape(t *testing.T, ts *httptest.Server) string {
 }
 
 func TestMetricsEndpointNeedsNoAuth(t *testing.T) {
-	ts := startStack(t)
-	if got := scrape(t, ts); got == "" {
+	env := startEnv(t, envOpts{})
+	if got := scrape(t, env); got == "" {
 		t.Error("empty metrics output")
 	}
 }
 
 func TestMetricsRecordCreateAndExec(t *testing.T) {
-	ts := startStack(t)
+	env := startEnv(t, envOpts{})
 
-	_, out := doReq(t, ts, "POST", "/v1/sandboxes", map[string]any{"image": "img:1"})
+	_, out := env.do("POST", "/v1/sandboxes", map[string]any{"image": "img:1"})
 	id := out["sandbox"].(map[string]any)["id"].(string)
-	doReq(t, ts, "POST", "/v1/sandboxes/"+id+"/exec", map[string]any{"cmd": []string{"true"}})
+	env.do("POST", "/v1/sandboxes/"+id+"/exec", map[string]any{"cmd": []string{"true"}})
 
-	body := scrape(t, ts)
+	body := scrape(t, env)
 	for _, want := range []string{
 		`bean_sandbox_creates_total{outcome="success"} 1`,
 		"bean_sandbox_create_duration_seconds_count",
@@ -59,16 +58,16 @@ func TestMetricsRecordCreateAndExec(t *testing.T) {
 }
 
 func TestMetricsStateGaugesReflectStore(t *testing.T) {
-	ts := startStack(t)
-	_, out := doReq(t, ts, "POST", "/v1/sandboxes", map[string]any{"image": "img:1"})
+	env := startEnv(t, envOpts{})
+	_, out := env.do("POST", "/v1/sandboxes", map[string]any{"image": "img:1"})
 	id := out["sandbox"].(map[string]any)["id"].(string)
 
-	if body := scrape(t, ts); !strings.Contains(body, `bean_sandboxes{state="RUNNING"} 1`) {
+	if body := scrape(t, env); !strings.Contains(body, `bean_sandboxes{state="RUNNING"} 1`) {
 		t.Errorf("running gauge wrong:\n%s", body)
 	}
-	doReq(t, ts, "DELETE", "/v1/sandboxes/"+id, nil)
+	env.do("DELETE", "/v1/sandboxes/"+id, nil)
 
-	body := scrape(t, ts)
+	body := scrape(t, env)
 	// The sandbox moved to STOPPED, and RUNNING must drop back to zero
 	// rather than keep its stale value.
 	if !strings.Contains(body, `bean_sandboxes{state="STOPPED"} 1`) {
@@ -80,19 +79,20 @@ func TestMetricsStateGaugesReflectStore(t *testing.T) {
 }
 
 func TestMetricsRecordFailedCreate(t *testing.T) {
-	ts := startStack(t)
+	env := startEnv(t, envOpts{})
 	// Invalid request never reaches a node: it counts as an error outcome.
-	doReq(t, ts, "POST", "/v1/sandboxes", map[string]any{})
-	if body := scrape(t, ts); !strings.Contains(body, `bean_sandbox_creates_total{outcome="error"} 1`) {
+	env.do("POST", "/v1/sandboxes", map[string]any{})
+	if body := scrape(t, env); !strings.Contains(body, `bean_sandbox_creates_total{outcome="error"} 1`) {
 		t.Errorf("error outcome not counted:\n%s", body)
 	}
 }
 
 func TestMetricsRegistryExposed(t *testing.T) {
-	ts, srv := startStackWithServer(t)
+	env := startEnv(t, envOpts{})
+	srv := env.API
 	// Binaries can add their own series to the same registry.
 	srv.Metrics().IncCounter("bean_custom_total", "Custom.", nil, 3)
-	if body := scrape(t, ts); !strings.Contains(body, "bean_custom_total 3") {
+	if body := scrape(t, env); !strings.Contains(body, "bean_custom_total 3") {
 		t.Errorf("custom metric missing:\n%s", body)
 	}
 }
