@@ -46,7 +46,3 @@ func (r *FCRuntime) Pause(ctx context.Context, id string) error {
 func (r *FCRuntime) Resume(ctx context.Context, id string) error {
 	return fmt.Errorf("fc runtime: not yet implemented")
 }
-
-func (r *FCRuntime) List(ctx context.Context) ([]string, error) {
-	return nil, nil
-}

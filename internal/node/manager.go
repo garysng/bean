@@ -483,12 +483,3 @@ func (m *Manager) RefreshGauges() {
 	m.metrics.SetGauge("bean_node_requests_in_flight",
 		"Data-plane requests currently in flight across sandboxes.", nil, inFlight)
 }
-
-// TouchActivity records data-plane activity (exec/files) for idle tracking.
-func (m *Manager) TouchActivity(id string) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	if sb, ok := m.sandboxes[id]; ok {
-		sb.lastActivity = time.Now()
-	}
-}

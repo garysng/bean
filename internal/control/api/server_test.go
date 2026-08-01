@@ -300,3 +300,50 @@ func TestExecNonZeroExit(t *testing.T) {
 		t.Errorf("exitCode = %v", out["exitCode"])
 	}
 }
+
+func TestResumeAndLogsHandlers(t *testing.T) {
+	ts := startStack(t)
+	_, out := doReq(t, ts, "POST", "/v1/sandboxes", map[string]any{"image": "x"})
+	id := out["sandbox"].(map[string]any)["id"].(string)
+
+	// Explicit pause then explicit resume (the transparent-wake path is
+	// covered separately; this exercises the resume handler directly).
+	if resp, _ := doReq(t, ts, "POST", "/v1/sandboxes/"+id+"/pause", nil); resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("pause status = %d", resp.StatusCode)
+	}
+	resp, _ := doReq(t, ts, "POST", "/v1/sandboxes/"+id+"/resume", nil)
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("resume status = %d", resp.StatusCode)
+	}
+	_, out = doReq(t, ts, "GET", "/v1/sandboxes/"+id, nil)
+	if got := out["sandbox"].(map[string]any)["state"]; got != "RUNNING" {
+		t.Errorf("state after resume = %v", got)
+	}
+
+	// Logs endpoint streams the sandbox log buffer.
+	req, _ := http.NewRequest("GET", ts.URL+"/v1/sandboxes/"+id+"/logs?tailLines=10", nil)
+	req.Header.Set("Authorization", "Bearer "+testKey)
+	lresp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer lresp.Body.Close()
+	if lresp.StatusCode != http.StatusOK {
+		t.Errorf("logs status = %d", lresp.StatusCode)
+	}
+	if ct := lresp.Header.Get("Content-Type"); !strings.HasPrefix(ct, "text/plain") {
+		t.Errorf("logs content-type = %q", ct)
+	}
+
+	// Both endpoints 404 for an unknown sandbox.
+	if resp, _ := doReq(t, ts, "POST", "/v1/sandboxes/sbx_missing/resume", nil); resp.StatusCode != http.StatusNotFound {
+		t.Errorf("resume unknown = %d, want 404", resp.StatusCode)
+	}
+	req2, _ := http.NewRequest("GET", ts.URL+"/v1/sandboxes/sbx_missing/logs", nil)
+	req2.Header.Set("Authorization", "Bearer "+testKey)
+	r2, _ := http.DefaultClient.Do(req2)
+	r2.Body.Close()
+	if r2.StatusCode != http.StatusNotFound {
+		t.Errorf("logs unknown = %d, want 404", r2.StatusCode)
+	}
+}

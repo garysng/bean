@@ -477,3 +477,82 @@ func TestUserProcessRestartableAfterExit(t *testing.T) {
 		t.Errorf("restart after exit failed: %v", err)
 	}
 }
+
+// hostPath is the containment check for process working directories,
+// which cannot use os.Root (exec needs a real path). It must reject
+// anything that resolves outside the sandbox root.
+func TestHostPathContainment(t *testing.T) {
+	root := t.TempDir()
+	s := NewServer("test", root)
+	t.Cleanup(func() { s.Close() })
+
+	allowed := []struct{ in, wantSuffix string }{
+		{"/", ""},
+		{"/workspace", "/workspace"},
+		{"/a/b/../c", "/a/c"},
+		{"/./workspace", "/workspace"},
+	}
+	for _, tc := range allowed {
+		got, err := s.hostPath(tc.in)
+		if err != nil {
+			t.Errorf("hostPath(%q) = error %v, want allowed", tc.in, err)
+			continue
+		}
+		if !strings.HasPrefix(got, root) {
+			t.Errorf("hostPath(%q) = %q, escaped root %q", tc.in, got, root)
+		}
+		if tc.wantSuffix != "" && !strings.HasSuffix(got, tc.wantSuffix) {
+			t.Errorf("hostPath(%q) = %q, want suffix %q", tc.in, got, tc.wantSuffix)
+		}
+	}
+
+	rejected := []string{
+		"",              // empty
+		"relative/path", // not absolute
+		"../escape",     // relative traversal
+		"./x",
+	}
+	for _, in := range rejected {
+		if got, err := s.hostPath(in); err == nil {
+			t.Errorf("hostPath(%q) = %q, want rejection", in, got)
+		} else if status.Code(err) != codes.InvalidArgument {
+			t.Errorf("hostPath(%q) error code = %v, want InvalidArgument", in, status.Code(err))
+		}
+	}
+
+	// Absolute paths whose cleaned form leaves the root must not escape:
+	// filepath.Clean collapses these to "/" or below, so the join stays put.
+	for _, in := range []string{"/..", "/../..", "/a/../../.."} {
+		got, err := s.hostPath(in)
+		if err != nil {
+			continue // rejecting outright is also acceptable
+		}
+		if !strings.HasPrefix(got, root) {
+			t.Errorf("hostPath(%q) = %q, escaped root %q", in, got, root)
+		}
+	}
+}
+
+func TestHostPathNoRootMeansHostRoot(t *testing.T) {
+	// Production PID1 runs with the real filesystem as its root.
+	s := NewServer("test", "")
+	t.Cleanup(func() { s.Close() })
+	got, err := s.hostPath("/etc/hosts")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "/etc/hosts" {
+		t.Errorf("got %q, want /etc/hosts", got)
+	}
+}
+
+func TestExecRejectsCwdOutsideRoot(t *testing.T) {
+	c := startTestAgent(t, t.TempDir())
+	_, err := c.Exec(context.Background(), &commonv1.ExecRequest{
+		Cmd: []string{"pwd"},
+		Cwd: "relative-dir",
+	})
+	if status.Code(err) != codes.InvalidArgument {
+		t.Errorf("err = %v, want InvalidArgument", err)
+	}
+}

@@ -48,6 +48,4 @@ type Runtime interface {
 	Destroy(ctx context.Context, id string, force bool) error
 	Pause(ctx context.Context, id string) error
 	Resume(ctx context.Context, id string) error
-	// List returns sandbox ids the runtime believes exist (for reconcile).
-	List(ctx context.Context) ([]string, error)
 }

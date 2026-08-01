@@ -164,13 +164,3 @@ func (r *LocalRuntime) Resume(ctx context.Context, id string) error {
 	r.mu.Unlock()
 	return nil
 }
-
-func (r *LocalRuntime) List(ctx context.Context) ([]string, error) {
-	r.mu.Lock()
-	defer r.mu.Unlock()
-	ids := make([]string, 0, len(r.procs))
-	for id := range r.procs {
-		ids = append(ids, id)
-	}
-	return ids, nil
-}
