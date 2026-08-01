@@ -69,6 +69,8 @@ class StubHandler(BaseHTTPRequestHandler):
                              "sandboxId": "sbx_stub1", "image": "python:3.12",
                              "name": body.get("name", ""), "sizeBytes": 2048},
             })
+        if self.path.endswith("/commit"):
+            return self._json(201, {"imageRef": body["tag"]})
         if self.path == "/v1/images/prewarm":
             return self._json(202, {"jobId": "pw_stub1",
                                     "ready": {r: 1 for r in body.get("refs", [])}})
@@ -235,6 +237,14 @@ class SDKTest(unittest.TestCase):
         sb = self.client.sandboxes.create(image="python:3.12")
         sb.snapshot(keep_running=False)
         self.assertEqual(sb.state, "STOPPED")
+
+    def test_commit_returns_image_ref_and_keeps_sandbox_running(self):
+        sb = self.client.sandboxes.create(image="python:3.12")
+        ref = sb.commit("myteam/prepared:v1")
+        self.assertEqual(ref, "myteam/prepared:v1")
+        # Unlike snapshot(keep_running=False), commit never stops the source:
+        # freezing the filesystem does not end the session.
+        self.assertEqual(sb.state, "RUNNING")
 
     def test_create_from_snapshot(self):
         sb = self.client.sandboxes.create(snapshot="snap_stub1")

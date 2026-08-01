@@ -153,6 +153,24 @@ class Sandbox:
             self.state = "STOPPED"
         return Snapshot._from_json(data["snapshot"], self._client)
 
+    def commit(self, tag: str) -> str:
+        """Freeze this sandbox's filesystem as a reusable base image.
+
+        Returns the image reference, which any sandbox can then start from.
+
+        This is not a snapshot. A snapshot carries memory and device state and
+        restores only on the runtime tier that produced it, so it recovers this
+        one sandbox. A committed image is just a filesystem, usable as anyone's
+        base — which is what sharing a prepared environment needs.
+
+        The sandbox keeps running. The tag must not already exist: images are
+        immutable, so a new version needs a new tag.
+        """
+        data = self._client._request(
+            "POST", f"/v1/sandboxes/{self.id}/commit", {"tag": tag}
+        )
+        return data["imageRef"]
+
     def events(self) -> List[Dict[str, Any]]:
         return self._client._request("GET", f"/v1/sandboxes/{self.id}/events")["events"]
 
