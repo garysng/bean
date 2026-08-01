@@ -45,11 +45,19 @@ func NewDirBlobs(dir string) (*DirBlobs, error) {
 	return &DirBlobs{dir: dir}, nil
 }
 
-func (d *DirBlobs) path(id string) (string, error) {
-	// Snapshot ids are platform-generated, but validate anyway: this value
-	// becomes a filesystem path.
+// validateID rejects ids that would escape their namespace. Snapshot ids are
+// platform-generated, but this value becomes a filesystem path in DirBlobs
+// and an object key in S3Blobs, so both check before using it.
+func validateID(id string) error {
 	if id == "" || strings.ContainsAny(id, "/\\.") {
-		return "", fmt.Errorf("invalid snapshot id %q", id)
+		return fmt.Errorf("invalid snapshot id %q", id)
+	}
+	return nil
+}
+
+func (d *DirBlobs) path(id string) (string, error) {
+	if err := validateID(id); err != nil {
+		return "", err
 	}
 	return filepath.Join(d.dir, id+".tar.gz"), nil
 }

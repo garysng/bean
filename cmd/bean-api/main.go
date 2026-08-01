@@ -24,6 +24,7 @@ import (
 	"github.com/garysng/bean/internal/control/api"
 	"github.com/garysng/bean/internal/control/image"
 	"github.com/garysng/bean/internal/control/nodesvc"
+	"github.com/garysng/bean/internal/control/s3"
 	"github.com/garysng/bean/internal/control/scheduler"
 	"github.com/garysng/bean/internal/control/secret"
 	"github.com/garysng/bean/internal/control/snapshot"
@@ -48,7 +49,14 @@ func main() {
 	secretKey := flag.String("secret-key", os.Getenv("BEAN_SECRET_KEY"),
 		"master key encrypting persisted credentials (empty disables registry credentials)")
 	snapshotDir := flag.String("snapshot-dir", "",
-		"directory holding snapshot blobs (default: <db dir>/snapshots)")
+		"directory holding snapshot blobs when no object store is configured (default: <db dir>/snapshots)")
+	s3Endpoint := flag.String("s3-endpoint", os.Getenv("BEAN_S3_ENDPOINT"),
+		"S3-compatible endpoint for snapshot blobs (or BEAN_S3_ENDPOINT); empty uses --snapshot-dir")
+	s3Bucket := flag.String("s3-snapshot-bucket", "bean-snapshots",
+		"bucket holding snapshot blobs")
+	s3Region := flag.String("s3-region", "us-east-1", "S3 region")
+	s3PathStyle := flag.Bool("s3-path-style", true,
+		"address buckets as /bucket/key (required by MinIO and most self-hosted gateways)")
 	flag.Parse()
 
 	if *apiKey == "" {
@@ -75,13 +83,39 @@ func main() {
 		log.Print("no --secret-key: registry credentials disabled (public images only)")
 	}
 
-	blobDir := *snapshotDir
-	if blobDir == "" {
-		blobDir = filepath.Join(filepath.Dir(*dbPath), "snapshots")
-	}
-	blobs, err := snapshot.NewDirBlobs(blobDir)
-	if err != nil {
-		log.Fatalf("snapshot storage: %v", err)
+	// Snapshot blobs go to object storage in production; multiple gateway
+	// replicas can only serve the same snapshot if it does not live on one
+	// replica's disk. A local directory remains the default for development
+	// and CI, where standing up MinIO would be friction for no benefit.
+	var blobs snapshot.Blobs
+	if *s3Endpoint != "" {
+		// Credentials come from the environment only. A flag would put the
+		// secret key in the process command line, visible to every local user.
+		s3c, err := s3.New(s3.Config{
+			Endpoint:  *s3Endpoint,
+			Region:    *s3Region,
+			AccessKey: os.Getenv("BEAN_S3_ACCESS_KEY"),
+			SecretKey: os.Getenv("BEAN_S3_SECRET_KEY"),
+			PathStyle: *s3PathStyle,
+		})
+		if err != nil {
+			log.Fatalf("snapshot storage: %v", err)
+		}
+		if blobs, err = snapshot.NewS3Blobs(ctx, s3c, *s3Bucket); err != nil {
+			log.Fatalf("snapshot storage: %v", err)
+		}
+		log.Printf("snapshot blobs: s3 %s bucket %s", *s3Endpoint, *s3Bucket)
+	} else {
+		blobDir := *snapshotDir
+		if blobDir == "" {
+			blobDir = filepath.Join(filepath.Dir(*dbPath), "snapshots")
+		}
+		dir, err := snapshot.NewDirBlobs(blobDir)
+		if err != nil {
+			log.Fatalf("snapshot storage: %v", err)
+		}
+		blobs = dir
+		log.Printf("snapshot blobs: directory %s", blobDir)
 	}
 
 	sched := scheduler.New(st, scheduler.DefaultWeights())
@@ -135,8 +169,8 @@ func main() {
 		_ = httpSrv.Shutdown(shutCtx)
 	}()
 
-	log.Printf("bean-api %s: HTTP %s, NodeService %s (region=%s runtime-tier=%s, snapshots in %s)",
-		version, *listen, *nodeGRPC, *region, *runtimeTier, blobDir)
+	log.Printf("bean-api %s: HTTP %s, NodeService %s (region=%s runtime-tier=%s)",
+		version, *listen, *nodeGRPC, *region, *runtimeTier)
 	if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatal(err)
 	}

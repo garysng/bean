@@ -8,11 +8,33 @@ on:
 jobs:
   go:
     runs-on: ubuntu-latest
+    # MinIO exercises the hand-rolled SigV4 against a real server. Without it
+    # the object-store tests skip, and a signing regression would only surface
+    # in production.
+    services:
+      minio:
+        image: bitnami/minio:latest
+        ports: ["9000:9000"]
+        env:
+          MINIO_ROOT_USER: beanci
+          MINIO_ROOT_PASSWORD: beancisecret
+    env:
+      BEAN_S3_ENDPOINT: http://127.0.0.1:9000
+      BEAN_S3_ACCESS_KEY: beanci
+      BEAN_S3_SECRET_KEY: beancisecret
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5
         with:
           go-version: "1.26"
+      - name: Wait for MinIO
+        run: |
+          for i in $(seq 1 30); do
+            curl -sf http://127.0.0.1:9000/minio/health/live && exit 0
+            sleep 2
+          done
+          echo "MinIO did not become ready" >&2
+          exit 1
       - name: Lint (gofmt + vet)
         run: |
           test -z "$(gofmt -l . | grep -v internal/gen)" || (gofmt -l . | grep -v internal/gen; exit 1)
