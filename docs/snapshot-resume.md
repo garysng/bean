@@ -77,7 +77,7 @@ base 镜像**不进** snapshot——restore 节点从常规镜像链路（overla
 #### runc 档：CRIU
 
 ```
-流程（beand 执行）：
+流程（noded 执行）：
 1. 状态置 SNAPSHOTTING;先 freeze（保证一致性）
 2. criu dump --tree <pid1> --leave-frozen：进程树+内存页+fd 表+unix socket
 3. containerd snapshotter 导出 upper layer → tar.zst 流式推 S3（presigned）
@@ -93,7 +93,7 @@ CRIU 已知限制（文档明确告知用户）：
 | GPU 状态 | 不可 checkpoint。带 GPU 的 sandbox 拒绝 snapshot（400） |
 | 挂载点一致性 | restore 节点复原相同挂载拓扑（agent mount、resolv.conf 等由 spec 重建） |
 | /dev/shm、大内存 | 内存页全量落盘,10 GiB 内存 ≈ 分钟级;snapshot 是重操作,API 文档标注 |
-| agent 进程 | agent 自身被一并 checkpoint;restore 后 agent 内存态恢复,socket 由 beand 重连（transport 重建逻辑 agent 已支持） |
+| agent 进程 | agent 自身被一并 checkpoint;restore 后 agent 内存态恢复,socket 由 noded 重连（transport 重建逻辑 agent 已支持） |
 
 #### runsc 档：gVisor save/restore
 
@@ -112,7 +112,7 @@ POST /sandboxes { "snapshot": "snap_...", ... }
 3. snapshotter 组装 rootfs：base + 解包 diff 为新 upper layer
 4. 网络重建：新 IP（不保证 IP 不变，文档明确）、netns/nftables 常规流程
 5. runsc restore / criu restore → RUNNING
-6. beand 重连 agent socket
+6. noded 重连 agent socket
 ```
 
 目标恢复时延：diff+checkpoint 1 GiB 以内 P50 < 15s（S3 并行分片拉取）。

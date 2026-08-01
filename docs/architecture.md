@@ -50,10 +50,10 @@ AI evaluation / agent rollout 场景（如 SWE-bench 类任务）的特点：
               ┌────────────────────┼────────────────────┐
               ▼                    ▼                    ▼
         ┌──────────┐         ┌──────────┐         ┌──────────┐
-        │ beand    │         │ beand    │         │ beand    │   ← 每节点一个
+        │ noded    │         │ noded    │         │ noded    │   ← 每节点一个
         │ (裸金属) │         │ (云 VM)  │         │ (裸金属) │      node daemon
         └────┬─────┘         └──────────┘         └──────────┘
-             │ overlaybd(ublk) 直驱 + beand 自管 FC;containerd 仅容器档可选
+             │ overlaybd(ublk) 直驱 + noded 自管 FC;containerd 仅容器档可选
         ┌────▼─────────────────────────────┐
         │  ├── 镜像: overlaybd ublk daemon  │ ← 块级 lazy-pull from S3
         │  └── runtime: fc(默认)│runc│runsc │ ← 内部自动分档（D3）
@@ -61,7 +61,7 @@ AI evaluation / agent rollout 场景（如 SWE-bench 类任务）的特点：
              │
         ┌────▼──────────────────────┐
         │ sandbox                    │  fc: microVM（vsock 通 agent）
-        │  └── bean-agent (init/PID1)│  container: runc/runsc（unix socket）
+        │  └── beand (init/PID1)│  container: runc/runsc（unix socket）
         │      └── 用户进程           │  agent: exec/PTY/文件/端口转发
         └───────────────────────────┘
 
@@ -73,11 +73,11 @@ AI evaluation / agent rollout 场景（如 SWE-bench 类任务）的特点：
 | 组件 | 语言 | 职责 |
 |---|---|---|
 | `api-gateway` | Go | REST + gRPC API、鉴权、配额（端口反代由 bean-proxy 承担,可合部） |
-| `scheduler` | Go | 节点选择（镜像亲和 + 资源 bin-packing）、租约管理 |
+| `scheduler` | Go | 节点选择（镜像亲和 + 资源 bin-packing）、租约管理——**control plane 逻辑模块**（`internal/control/scheduler`,与 bean-api 同进程:调度决策与 Postgres 事务扣量、指令下发需原子完成;成为瓶颈或需选主时再拆） |
 | `image-service` | Go | 镜像元数据索引、格式转换编排、prewarm、S3 blob GC（control plane 逻辑模块，P0–P2 内嵌 bean-api） |
-| `bean-proxy` | Go | 端口暴露反向代理：通配域名 TLS、路由到 beand → agent |
-| `beand` | Go | 节点 daemon：sandbox 生命周期、网络、镜像缓存、卷挂载、健康上报 |
-| `bean-agent` | Go（静态编译） | sandbox 内 PID1：exec、PTY、文件读写、端口转发 |
+| `bean-proxy` | Go | 端口暴露反向代理：通配域名 TLS、路由到 noded → agent |
+| `noded` | Go | 节点 daemon：sandbox 生命周期、网络、镜像缓存、卷挂载、健康上报 |
+| `beand` | Go（静态编译） | sandbox 内 PID1：exec、PTY、文件读写、端口转发 |
 | `sdk-python` | Python | evaluation/rollout 侧主 SDK |
 | `sdk-ts` | TypeScript | Web/Node 侧 SDK |
 | `cli` | Go | `bean` 命令行：sandbox 管理、镜像预热、调试 |
@@ -93,21 +93,21 @@ microVM（见 D9）——两种形态共享同一条镜像链路，用户无感�
 ### D2. overlaybd 直驱,无 containerd 热路径
 
 fc 主路径**不引入 containerd**（AgentENV 同款,其源码已在本地 /Users/mac/project/agentenv
-可参考）：beand 直接驱动 overlaybd 的 ublk daemon 组装块设备（S3 backing + 本地
+可参考）：noded 直接驱动 overlaybd 的 ublk daemon 组装块设备（S3 backing + 本地
 缓存）→ virtio-blk 挂 microVM。containerd 的三项职责在本设计中均有更直接的替代：
 
 | containerd 职责 | 本设计 |
 |---|---|
 | 镜像拉取/content store | blob 在 S3（image-service 离线转换）,元数据控制面下发;registry 不在热路径 |
 | snapshotter | overlaybd ublk daemon 直驱（AgentENV 的 uvm-ublk 实证） |
-| task 生命周期 | fc:beand 自管 FC 进程;容器档:containerd+runc（仅此处保留,可选依赖） |
+| task 生命周期 | fc:noded 自管 FC 进程;容器档:containerd+runc（仅此处保留,可选依赖） |
 
 容器档（GPU/无 KVM 降级）保留 containerd——runc 生命周期与 overlayfs 组装
-不值得自研;纯 fc 节点可完全不装 containerd。runtime 抽象接口见 beand-design §3。
+不值得自研;纯 fc 节点可完全不装 containerd。runtime 抽象接口见 noded-design §3。
 
 ### D3. 隔离分档 + 节点能力探测
 
-beand 启动时探测节点能力并上报：
+noded 启动时探测节点能力并上报：
 
 ```
 ├── /dev/kvm 可用（裸金属 or 嵌套虚拟化 VM）→ [runc, runsc, fc]
@@ -142,7 +142,7 @@ FC 档**不是**嵌套容器（Kata 式 guest 内再跑 containerd），而是 r
 overlaybd 组装镜像块设备：base 层（lazy-pull S3）+ overlaybd 可写层，
   在宿主侧合成【单一块设备】（业界一致做法：e2b/AgentENV 均 host 侧组装）
   → virtio-blk 挂给 microVM（guest 见一块盘）+ agent 盘（只读，见 D5）
-  → guest 内 bean-agent 作为 init：挂载 /proc /sys /dev 等（按 OCI 默认
+  → guest 内 beand 作为 init：挂载 /proc /sys /dev 等（按 OCI 默认
     mounts 复刻）、应用 image config（ENV/USER/WORKDIR/Entrypoint+Cmd）
     拉起用户进程
 ```
@@ -154,7 +154,7 @@ disk-diff 直接取宿主 overlaybd 可写层、guest 内零 union 复杂度。
 - 兼容性：ENV/ENTRYPOINT 等 config 语义由 agent 复刻（与容器档同一份代码）；
   guest 是完整真实 Linux 内核，兼容性优于 gVisor 模拟层。唯一差异：内核
   由平台统一打包提供（非宿主内核），对纯用户态 eval 负载无感。
-  详见 beand-design.md fcRuntime 节
+  详见 noded-design.md fcRuntime 节
 - agent 通信走 vsock（transport 抽象，与容器档 unix socket 同协议）
 - 网络：tap 设备接入节点 bean0 桥，nftables 规则与容器档一致
 - 该路线已被 AgentENV（Kimi K3 训练基础设施）在生产验证；实现参考其
@@ -166,7 +166,7 @@ disk-diff 直接取宿主 overlaybd 可写层、guest 内零 union 复杂度。
 |---|---|
 | 镜像 blob | **overlaybd 块级镜像**（层 = 块设备 diff）直存 S3，节点经 ublk 按需 range-read；registry 仅存元数据 |
 | 节点缓存 | 本地 NVMe 作为 S3 之上的块 chunk LRU 缓存；裸金属（大盘）与云 VM（小盘）仅命中率差异，架构统一 |
-| eval 产物 | agent/beand 经 presigned URL 直推 S3（control plane 签发，节点不持长期凭证） |
+| eval 产物 | agent/noded 经 presigned URL 直推 S3（control plane 签发，节点不持长期凭证） |
 | 大文件下载 | API 返回 presigned URL 重定向，不过 gateway 转发 |
 | 快照（P3–P4） | FC memory snapshot / rootfs diff 落 S3，支持跨节点 resume |
 | 卷 | shared-fs 卷后端（JuiceFS on S3）宿主挂载 + nfsd 导出（见 D10）;dataset 卷预留 |
@@ -181,11 +181,11 @@ eval 镜像任意、不可假设内含工具链。注入方式按档位：
 
 | 档 | 注入 | 通信 |
 |---|---|---|
-| fc（默认） | **agent 盘**：含 bean-agent 的只读小盘（erofs）作为附加 virtio-blk，guest 内核 init=盘内 agent | vsock + gRPC |
+| fc（默认） | **agent 盘**：含 beand 的只读小盘（erofs）作为附加 virtio-blk，guest 内核 init=盘内 agent | vsock + gRPC |
 | 容器档 | bind mount 只读挂入 + entrypoint override，agent 作 PID1 | unix socket + gRPC |
 
 共同点：用户镜像零修改;原 entrypoint/cmd/env/user/workdir 序列化进 spec，
-由 agent 按 Docker 语义托管拉起（详见 beand-design.md §3.1/§6）。
+由 agent 按 Docker 语义托管拉起（详见 noded-design.md §3.1/§6）。
 不走 CRI streaming exec：性能差、无文件 API、依赖长链路。
 
 ### D6. 网络：节点内 NAT，取裸金属/云 VM 最大公约数
@@ -196,7 +196,7 @@ sandbox netns ←veth→ 节点 bridge → SNAT 出网
 
 - 每 sandbox 独立 netns，节点本地私有网段（如 10.100.x.0/24 per node）
 - 默认策略：允许出网（拉依赖），禁止访问节点内网/元数据服务（169.254.169.254 等），sandbox 间互相隔离（nftables）
-- 端口暴露：`{sbxId}-{port}.{region}.sandbox.<domain>` → regional proxy → beand sbxproxy → 直连 sandbox IP（agent ForwardPort 仅兜底）,绕开云厂商 MAC/IP 白名单限制
+- 端口暴露：`{sbxId}-{port}.{region}.sandbox.<domain>` → regional proxy → noded sbxproxy → 直连 sandbox IP（agent ForwardPort 仅兜底）,绕开云厂商 MAC/IP 白名单限制
 - 不依赖 underlay/BGP，两种节点行为完全一致
 
 ### D7. 调度：镜像亲和优先的 bin-packing
@@ -231,7 +231,7 @@ cap:   [runc, runsc, fc] × 每节点并发创建余量（默认 16）
    w3·缓存盘类型：冷镜像 → NVMe 大缓存节点加分
    w4·打散：同 label（同一 eval run）适度反亲和，避免单节点故障吞掉整批
 
-3. 提交:Postgres 事务扣承诺量 + 写指令记录 → push 直连 beand.CreateSandbox（见 api-design §5.1）
+3. 提交:Postgres 事务扣承诺量 + 写指令记录 → push 直连 noded.CreateSandbox（见 api-design §5.1）
 4. 失败回退:节点报 FAILED（如 ENOSPC 竞态）→ 释放承诺量,重调度(≤3 次,
    排除失败节点),仍失败 → NO_CAPACITY 返回调用方
 ```
@@ -245,9 +245,9 @@ cap:   [runc, runsc, fc] × 每节点并发创建余量（默认 16）
 
 ### D8. 故障模型：租约 + 无状态重建
 
-- beand 定期心跳续约；租约超时 → 节点标记失联 → 其上 sandbox 标记 `lost`
+- noded 定期心跳续约；租约超时 → 节点标记失联 → 其上 sandbox 标记 `lost`
 - eval 任务无状态，上层（SDK/调用方）收到 `lost` 后重建即可
-- beand 重启后 reconcile：对账本地实际状态（存活 FC 进程 ∪ containerd task,如启用）vs control plane 期望状态（SyncState）
+- noded 重启后 reconcile：对账本地实际状态（存活 FC 进程 ∪ containerd task,如启用）vs control plane 期望状态（SyncState）
 - GC：idle 回收（lifecycle.onIdle 驱动）、镜像块 LRU 淘汰、孤儿 tap/netns/挂载清理
 
 ### D10. Volume：独立于镜像的一等数据资源
@@ -263,7 +263,7 @@ cap:   [runc, runsc, fc] × 每节点并发创建余量（默认 16）
 shared-fs 走宿主 NFS 而非 guest 内跑分布式 FS 客户端的原因：guest 零凭证零
 额外二进制、`none` 网络策略天然兼容（NFS 目标是宿主网关，与出公网正交）、
 宿主客户端缓存全 sandbox 共享（eval 同批读同数据时命中率高）、后端可换。
-详见 beand-design.md §3.3。
+详见 noded-design.md §3.3。
 
 ### D11. 多区域（Region/Cell）与 BYOC
 
@@ -271,8 +271,8 @@ shared-fs 走宿主 NFS 而非 guest 内跑分布式 FS 客户端的原因：gue
 
 ```
 Global Control Plane（bean-api / scheduler / Postgres,镜像元数据全局 digest 索引）
-   │ 托管 gRPC 接入层(TLS)+node token,beand/proxy 出向连接
-   ├── Region A：beand 节点池 + regional proxy ×N + region S3 backend
+   │ 托管 gRPC 接入层(TLS)+node token,noded/proxy 出向连接
+   ├── Region A：noded 节点池 + regional proxy ×N + region S3 backend
    └── Region B（BYOC）：客户节点 + 客户 S3,数据不出客户环境
 ```
 
@@ -286,8 +286,8 @@ Global Control Plane（bean-api / scheduler / Postgres,镜像元数据全局 dig
   （DNS 直达 region proxy,无全局中转）
 - **BYOC**：客户提供节点 + S3（+可选自有域名）,hosted control plane;
   控制面只见元数据,不持客户 S3 长期凭证——presigned/STS 由部署在客户侧的
-  轻量 token 服务签发;beand/proxy 出向 443 连托管接入层 + bootstrap token
-  注册（registration-only,可配人工 approve;详见 beand-design §7.0）
+  轻量 token 服务签发;noded/proxy 出向 443 连托管接入层 + bootstrap token
+  注册（registration-only,可配人工 approve;详见 noded-design §7.0）
 - **节点归属**：`region` 为一级字段（配置声明,Register 时控制面校验该 region
   已注册,生命周期内不可变）;`labels` 为自由标签（pool/disk/tenant 等）,
   调度请求经 `nodeSelector` 约束——GPU 池、BYOC 专属节点等用标签,不加字段
@@ -339,8 +339,8 @@ GET    /v1/sandboxes/{id}/logs
 
 ### 4.2 内部 gRPC
 
-- `control ↔ beand`：`NodeService`（Register/Heartbeat/SyncState）+ `SandboxService`（beand 实现，control 直连调用：Create/Destroy/Pause/Snapshot/Exec 转发/…）
-- `beand ↔ agent`：`AgentService`（Exec/StreamExec/ReadFile/WriteFile/ListDir/ForwardPort/…;容器档 unix socket、fc 档 vsock）
+- `control ↔ noded`：`NodeService`（Register/Heartbeat/SyncState）+ `SandboxService`（noded 实现，control 直连调用：Create/Destroy/Pause/Snapshot/Exec 转发/…）
+- `noded ↔ agent`：`AgentService`（Exec/StreamExec/ReadFile/WriteFile/ListDir/ForwardPort/…;容器档 unix socket、fc 档 vsock）
 
 proto 定义统一放 `proto/`，生成代码进各语言 SDK。
 
@@ -359,7 +359,7 @@ snapshot 对象独立状态机：CREATING → READY → DELETING（RESTORING 引
 ```
 
 `DELETE /sandboxes/{id}` 返回 202 后异步走 STOPPING → STOPPED（终态记录保留
-30 天后归档,见 beand-design GC）;`?force=true` 跳过 graceful 直接 kill。
+30 天后归档,见 noded-design GC）;`?force=true` 跳过 graceful 直接 kill。
 
 详见 [snapshot-resume.md](snapshot-resume.md)。
 
@@ -387,15 +387,14 @@ snapshot 对象独立状态机：CREATING → READY → DELETING（RESTORING 引
 bean/
 ├── proto/                  # gRPC 定义（single source of truth）
 ├── cmd/
-│   ├── bean-api/           # api-gateway 入口（P0–P2 内嵌 image-service 模块）
-│   ├── bean-scheduler/
+│   ├── bean-api/           # api-gateway 入口（内嵌 scheduler / image-service 模块）
 │   ├── bean-proxy/         # 端口暴露反向代理
-│   ├── beand/              # node daemon
-│   └── bean-agent/         # sandbox 内 agent（静态编译）
+│   ├── noded/              # node daemon
+│   └── beand/         # sandbox 内 agent（静态编译）
 ├── internal/
-│   ├── control/            # gateway/scheduler/image-service 实现
-│   ├── node/               # runtime 抽象、网络、镜像缓存、reconcile
-│   ├── agent/
+│   ├── control/            # api / scheduler / image / store 实现
+│   ├── node/               # noded: runtime 抽象、网络、镜像缓存、reconcile
+│   ├── beand/             # sandbox 内 daemon 实现
 │   └── store/              # Postgres / S3 访问层
 ├── sdk/
 │   ├── python/

@@ -27,12 +27,12 @@ const testKey = "bk_test_secret"
 var agentBin string
 
 func TestMain(m *testing.M) {
-	dir, err := os.MkdirTemp("", "bean-agent-bin")
+	dir, err := os.MkdirTemp("", "beand-bin")
 	if err != nil {
 		panic(err)
 	}
-	agentBin = filepath.Join(dir, "bean-agent")
-	cmd := exec.Command("go", "build", "-o", agentBin, "github.com/garysng/bean/cmd/bean-agent")
+	agentBin = filepath.Join(dir, "beand")
+	cmd := exec.Command("go", "build", "-o", agentBin, "github.com/garysng/bean/cmd/beand")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		panic("build agent: " + string(out))
 	}
@@ -41,7 +41,7 @@ func TestMain(m *testing.M) {
 	os.Exit(code)
 }
 
-// startStack runs beand (localRuntime) + bean-api in-process.
+// startStack runs noded (localRuntime) + bean-api in-process.
 func startStack(t *testing.T) *httptest.Server {
 	t.Helper()
 	mgr := node.NewManager(runtime.NewLocalRuntime(agentBin, t.TempDir()))

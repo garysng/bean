@@ -23,9 +23,12 @@ import (
 	nodev1 "github.com/garysng/bean/internal/gen/bean/node/v1"
 )
 
-const maxInlineFileBytes = 4 << 20 // 4 MiB
+const (
+	maxInlineFileBytes    = 4 << 20 // 4 MiB
+	maxExecTimeoutSeconds = 3600    // clamp: never hold a request for longer
+)
 
-// Server is the REST gateway. P0: single node, direct beand connection.
+// Server is the REST gateway. P0: single node, direct noded connection.
 type Server struct {
 	store  *store.Store
 	node   nodev1.SandboxServiceClient
@@ -347,6 +350,15 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "INVALID_ARGUMENT", err.Error())
 		return
 	}
+	if req.TimeoutSeconds < 0 {
+		writeErr(w, http.StatusBadRequest, "INVALID_ARGUMENT", "timeoutSeconds must be >= 0")
+		return
+	}
+	if req.TimeoutSeconds > maxExecTimeoutSeconds {
+		writeErr(w, http.StatusBadRequest, "INVALID_ARGUMENT",
+			fmt.Sprintf("timeoutSeconds exceeds max of %d", maxExecTimeoutSeconds))
+		return
+	}
 	timeout := time.Duration(req.TimeoutSeconds) * time.Second
 	if timeout <= 0 {
 		timeout = 10 * time.Minute
@@ -450,12 +462,20 @@ func (s *Server) handleReadFile(w http.ResponseWriter, r *http.Request) {
 	}
 	w.Header().Set("Content-Type", "application/octet-stream")
 	if first != nil {
-		_, _ = w.Write(first.Data)
+		if _, werr := w.Write(first.Data); werr != nil {
+			return
+		}
 	}
 	for {
 		chunk, rerr := stream.Recv()
-		if rerr != nil {
+		if rerr == io.EOF {
 			return
+		}
+		if rerr != nil {
+			// Response already committed with 200: abort the connection so the
+			// client sees a truncated transfer instead of a silent short read.
+			log.Printf("readFile %s %s: mid-stream error: %v", id, path, rerr)
+			panic(http.ErrAbortHandler)
 		}
 		if _, werr := w.Write(chunk.Data); werr != nil {
 			return
@@ -521,8 +541,12 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/plain; charset=utf-8")
 	for {
 		chunk, rerr := stream.Recv()
-		if rerr != nil {
+		if rerr == io.EOF {
 			return
+		}
+		if rerr != nil {
+			log.Printf("logs %s: mid-stream error: %v", id, rerr)
+			panic(http.ErrAbortHandler)
 		}
 		if _, werr := w.Write(chunk.Data); werr != nil {
 			return

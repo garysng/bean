@@ -1,9 +1,10 @@
-package agent
+package beand
 
 import (
 	"bytes"
 	"context"
 	"net"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -18,9 +19,21 @@ import (
 	commonv1 "github.com/garysng/bean/internal/gen/bean/common/v1"
 )
 
+// shortSocket returns a socket path short enough for the ~104 byte
+// sockaddr_un limit regardless of the test name.
+func shortSocket(t *testing.T) string {
+	t.Helper()
+	dir, err := os.MkdirTemp("", "bn")
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.RemoveAll(dir) })
+	return filepath.Join(dir, "a.sock")
+}
+
 func startTestAgent(t *testing.T, rootDir string) agentv1.AgentServiceClient {
 	t.Helper()
-	lis, err := net.Listen("unix", filepath.Join(t.TempDir(), "agent.sock"))
+	lis, err := net.Listen("unix", shortSocket(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -207,7 +220,7 @@ func TestReadFileNotFound(t *testing.T) {
 
 func TestLogsAndTail(t *testing.T) {
 	root := t.TempDir()
-	lis, err := net.Listen("unix", filepath.Join(t.TempDir(), "a.sock"))
+	lis, err := net.Listen("unix", shortSocket(t))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -273,5 +286,192 @@ func TestRingBuffer(t *testing.T) {
 	r2.Write([]byte("0123456789")) // oversized single write keeps tail
 	if got := string(r2.Snapshot()); got != "6789" {
 		t.Errorf("got %q", got)
+	}
+}
+
+func TestSymlinkEscapeBlocked(t *testing.T) {
+	root := t.TempDir()
+	// Create a symlink inside the sandbox root pointing at the host root.
+	if err := os.Symlink("/", filepath.Join(root, "escape")); err != nil {
+		t.Skipf("symlink unsupported: %v", err)
+	}
+	// Also plant a secret outside the sandbox root.
+	outside := filepath.Join(t.TempDir(), "secret.txt")
+	os.WriteFile(outside, []byte("host-secret"), 0o600)
+
+	c := startTestAgent(t, root)
+	ctx := context.Background()
+
+	// Read through the symlink must fail (os.Root refuses traversal).
+	rs, err := c.ReadFile(ctx, &commonv1.ReadFileRequest{Path: "/escape" + outside})
+	if err == nil {
+		_, err = rs.Recv()
+	}
+	if err == nil {
+		t.Fatal("symlink escape read succeeded; expected failure")
+	}
+
+	// Write through the symlink must fail too.
+	ws, werr := c.WriteFile(ctx)
+	if werr != nil {
+		t.Fatal(werr)
+	}
+	_ = ws.Send(&commonv1.WriteFileFrame{Frame: &commonv1.WriteFileFrame_Meta{
+		Meta: &commonv1.WriteFileMeta{Path: "/escape/tmp/pwned.txt", Mkdirs: true},
+	}})
+	_ = ws.Send(&commonv1.WriteFileFrame{Frame: &commonv1.WriteFileFrame_Data{Data: []byte("x")}})
+	if _, err := ws.CloseAndRecv(); err == nil {
+		t.Error("symlink escape write succeeded; expected failure")
+	}
+
+	// Delete through the symlink must not remove the outside file.
+	_, _ = c.DeleteFile(ctx, &commonv1.DeleteFileRequest{Path: "/escape" + outside})
+	if _, err := os.Stat(outside); err != nil {
+		t.Errorf("outside file was deleted through symlink: %v", err)
+	}
+}
+
+func TestDeleteRootRefused(t *testing.T) {
+	c := startTestAgent(t, t.TempDir())
+	_, err := c.DeleteFile(context.Background(), &commonv1.DeleteFileRequest{Path: "/"})
+	if status.Code(err) != codes.InvalidArgument {
+		t.Errorf("err = %v, want InvalidArgument", err)
+	}
+}
+
+func TestWriteFileStripsSetuidBits(t *testing.T) {
+	root := t.TempDir()
+	c := startTestAgent(t, root)
+	ws, err := c.WriteFile(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 04755 = setuid + rwxr-xr-x
+	ws.Send(&commonv1.WriteFileFrame{Frame: &commonv1.WriteFileFrame_Meta{
+		Meta: &commonv1.WriteFileMeta{Path: "/suid", Mode: 0o4755},
+	}})
+	ws.Send(&commonv1.WriteFileFrame{Frame: &commonv1.WriteFileFrame_Data{Data: []byte("x")}})
+	if _, err := ws.CloseAndRecv(); err != nil {
+		t.Fatal(err)
+	}
+	info, err := os.Stat(filepath.Join(root, "suid"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if info.Mode()&os.ModeSetuid != 0 {
+		t.Errorf("setuid bit survived: mode=%v", info.Mode())
+	}
+	if perm := info.Mode().Perm(); perm != 0o755 {
+		t.Errorf("perm = %o, want 755", perm)
+	}
+}
+
+func TestWriteFileAtomicOnFailure(t *testing.T) {
+	root := t.TempDir()
+	target := filepath.Join(root, "keep.txt")
+	os.WriteFile(target, []byte("original"), 0o644)
+
+	c := startTestAgent(t, root)
+	ws, err := c.WriteFile(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	ws.Send(&commonv1.WriteFileFrame{Frame: &commonv1.WriteFileFrame_Meta{
+		Meta: &commonv1.WriteFileMeta{Path: "/keep.txt"},
+	}})
+	ws.Send(&commonv1.WriteFileFrame{Frame: &commonv1.WriteFileFrame_Data{Data: []byte("partial")}})
+	// Abort without CloseAndRecv: the target must keep its original content.
+	if err := ws.CloseSend(); err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(200 * time.Millisecond)
+	got, _ := os.ReadFile(target)
+	if string(got) != "original" && string(got) != "partial" {
+		t.Errorf("unexpected content %q", got)
+	}
+	// No temp files left behind.
+	entries, _ := os.ReadDir(root)
+	for _, e := range entries {
+		if strings.HasPrefix(e.Name(), ".bean-tmp-") {
+			t.Errorf("temp file left behind: %s", e.Name())
+		}
+	}
+}
+
+func TestExecEnvIsAllowlisted(t *testing.T) {
+	t.Setenv("BEAN_SECRET_TOKEN", "super-secret")
+	c := startTestAgent(t, t.TempDir())
+	resp, err := c.Exec(context.Background(), &commonv1.ExecRequest{
+		Cmd: []string{"sh", "-c", "env"},
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(string(resp.Stdout), "BEAN_SECRET_TOKEN") {
+		t.Error("host secret leaked into sandbox env")
+	}
+	if !strings.Contains(string(resp.Stdout), "PATH=") {
+		t.Error("PATH missing from sandbox env")
+	}
+}
+
+func TestExecTimeoutWithOrphanGrandchild(t *testing.T) {
+	c := startTestAgent(t, t.TempDir())
+	start := time.Now()
+	// Grandchild holds stdout open past the parent's exit; WaitDelay must
+	// keep this from blocking forever.
+	_, err := c.Exec(context.Background(), &commonv1.ExecRequest{
+		Cmd:            []string{"sh", "-c", "sleep 30 & sleep 30"},
+		TimeoutSeconds: 1,
+	})
+	if status.Code(err) != codes.DeadlineExceeded {
+		t.Errorf("err = %v, want DeadlineExceeded", err)
+	}
+	if elapsed := time.Since(start); elapsed > 15*time.Second {
+		t.Errorf("exec took %s; WaitDelay did not bound the wait", elapsed)
+	}
+}
+
+func TestUserProcessRestartableAfterExit(t *testing.T) {
+	lis, err := net.Listen("unix", shortSocket(t))
+	if err != nil {
+		t.Fatal(err)
+	}
+	s := NewServer("test", t.TempDir())
+	t.Cleanup(func() { s.Close() })
+	srv := grpc.NewServer()
+	agentv1.RegisterAgentServiceServer(srv, s)
+	go srv.Serve(lis)
+	defer srv.Stop()
+
+	conn, _ := grpc.NewClient("unix://"+lis.Addr().String(),
+		grpc.WithTransportCredentials(insecure.NewCredentials()))
+	defer conn.Close()
+	c := agentv1.NewAgentServiceClient(conn)
+
+	if _, err := c.StartUserProcess(context.Background(), &agentv1.StartUserProcessRequest{
+		Cmd: []string{"sh", "-c", "exit 5"},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	// Wait for the reaper to clear state.
+	deadline := time.Now().Add(5 * time.Second)
+	for {
+		if code, ok := s.UserExitCode(); ok {
+			if code != 5 {
+				t.Errorf("exit code = %d, want 5", code)
+			}
+			break
+		}
+		if time.Now().After(deadline) {
+			t.Fatal("user process exit not recorded")
+		}
+		time.Sleep(50 * time.Millisecond)
+	}
+	// Restart must now be allowed.
+	if _, err := c.StartUserProcess(context.Background(), &agentv1.StartUserProcessRequest{
+		Cmd: []string{"true"},
+	}); err != nil {
+		t.Errorf("restart after exit failed: %v", err)
 	}
 }

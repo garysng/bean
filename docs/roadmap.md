@@ -11,9 +11,9 @@ overlaybd、envd、jailer/FC 管理的完整实证,逐模块对照）。
 
 - `proto/`：NodeService / SandboxService / AgentService v1 定义 + buf 工程化
 - guest 内核 + agent 盘构建（先手工构建,流水线 P2）
-- `beand`：overlaybd ublk 直驱（先预转换镜像全量本地,lazy-pull P2）、
+- `noded`：overlaybd ublk 直驱（先预转换镜像全量本地,lazy-pull P2）、
   jailer+FC 进程管理、agent 盘注入、tap/bridge/NAT 基础网络
-- `bean-agent`：init 挂载矩阵、vsock gRPC、image config 复刻拉起、同步 exec、
+- `beand`：init 挂载矩阵、vsock gRPC、image config 复刻拉起、同步 exec、
   文件读写、僵尸回收
 - `bean-api` 最小实现：POST/GET/DELETE sandboxes、exec、files（单节点直连，无调度器）
 - state：先 SQLite/内存（Postgres 接口抽象好）
@@ -31,7 +31,7 @@ curl DELETE → 资源清零（FC 进程/tap/ublk 设备/挂载无残留）
 **范围**
 
 - scheduler：Register/Heartbeat/租约、push 直连指令下发 + SyncState 对账、bin-packing + 镜像亲和 v1（按 ref 精确匹配）;region 字段进模型（单 region 运行）
-- Postgres 状态落地、终态/孤儿 GC（P1 仅显式 kill + LOST 清理;idle 回收随 P3 lifecycle）、beand 重启 reconcile
+- Postgres 状态落地、终态/孤儿 GC（P1 仅显式 kill + LOST 清理;idle 回收随 P3 lifecycle）、noded 重启 reconcile
 - 网络隔离完整版（nftables 规则集、DNS 注入、egress-only/none 策略）
 - Python SDK（sync + async + run_batch）、CLI 核心命令（run/ls/exec/cp/logs/kill）
 - batchCreate、标签批量销毁
@@ -48,7 +48,7 @@ curl DELETE → 资源清零（FC 进程/tap/ublk 设备/挂载无残留）
   离线转换、块缓存、record-trace 预取
 - fc 宿主侧加固（jailer 参数收紧、cgroup 包裹、tc/conntrack 限制）
 - prewarm API + 编排、镜像亲和 v2（块级 bloom + 字节占比）
-- guest 内核 + agent 盘构建发布流水线（beand-design §3.4）
+- guest 内核 + agent 盘构建发布流水线（noded-design §3.4）
 - 产物直推 S3（presigned 链路）、sandbox 日志归档
 - Events（状态机发件 → Postgres + WS 订阅）;OTel 统一导出 + per-sandbox 资源指标
 - 凭证体系：node token（托管接入层 TLS + 应用层身份）、STS/presigned 全覆盖
@@ -63,7 +63,7 @@ curl DELETE → 资源清零（FC 进程/tap/ublk 设备/挂载无残留）
 - WS 流式 exec + PTY（会话重连）、CLI 交互模式（run -it / attach）
 - bean-proxy（regional）：通配域名 TLS、端口暴露（反代直连 sandbox IP）、sandbox token 鉴权、PAUSED 透明唤醒
 - pause/resume（fc PauseVM）+ PAUSED 透明唤醒
-- lifecycle 自动化：idle 检测（beand 本地）、onIdle pause/kill、PAUSED 请求透明唤醒
+- lifecycle 自动化：idle 检测（noded 本地）、onIdle pause/kill、PAUSED 请求透明唤醒
 - fc 档 snapshot 本节点路径（memory+disk → S3）
 - **shared-fs 卷**（宿主挂 JuiceFS + 内核 nfsd 导出、agent NFS 挂载、后端配额）
 - TS SDK、e2b 迁移对照文档

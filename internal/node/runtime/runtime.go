@@ -13,7 +13,9 @@ const (
 	StatePulling  State = "PULLING"
 	StateStarting State = "STARTING"
 	StateRunning  State = "RUNNING"
+	StatePausing  State = "PAUSING"
 	StatePaused   State = "PAUSED"
+	StateResuming State = "RESUMING"
 	StateStopped  State = "STOPPED"
 	StateFailed   State = "FAILED"
 )

@@ -2,9 +2,12 @@ package node
 
 import (
 	"context"
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -15,12 +18,12 @@ import (
 var agentBin string
 
 func TestMain(m *testing.M) {
-	dir, err := os.MkdirTemp("", "bean-agent-bin")
+	dir, err := os.MkdirTemp("", "beand-bin")
 	if err != nil {
 		panic(err)
 	}
-	agentBin = filepath.Join(dir, "bean-agent")
-	cmd := exec.Command("go", "build", "-o", agentBin, "github.com/garysng/bean/cmd/bean-agent")
+	agentBin = filepath.Join(dir, "beand")
+	cmd := exec.Command("go", "build", "-o", agentBin, "github.com/garysng/bean/cmd/beand")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		panic("build agent: " + string(out))
 	}
@@ -61,8 +64,10 @@ func TestCreateDestroy(t *testing.T) {
 	if sb.State != runtime.StateRunning {
 		t.Errorf("state = %s, want RUNNING", sb.State)
 	}
-	if _, err := m.AgentConn(ctx, "sbx-1"); err != nil {
+	if _, rel, err := m.AgentConn(ctx, "sbx-1"); err != nil {
 		t.Fatal(err)
+	} else {
+		rel()
 	}
 	if err := m.Destroy(ctx, "sbx-1", false); err != nil {
 		t.Fatal(err)
@@ -104,8 +109,10 @@ func TestPauseResumeAndWake(t *testing.T) {
 		t.Error("expected error pausing PAUSED sandbox")
 	}
 	// AgentConn transparently wakes
-	if _, err := m.AgentConn(ctx, "p1"); err != nil {
+	if _, rel, err := m.AgentConn(ctx, "p1"); err != nil {
 		t.Fatal(err)
+	} else {
+		rel()
 	}
 	if got := m.StateOf("p1"); got != runtime.StateRunning {
 		t.Errorf("state after wake = %s, want RUNNING", got)
@@ -158,8 +165,10 @@ func TestIdleSweepPause(t *testing.T) {
 		time.Sleep(100 * time.Millisecond)
 	}
 	// wake via AgentConn resets activity; sandbox back to RUNNING
-	if _, err := m.AgentConn(ctx, "idle-pause"); err != nil {
+	if _, rel, err := m.AgentConn(ctx, "idle-pause"); err != nil {
 		t.Fatal(err)
+	} else {
+		rel()
 	}
 	if got := m.StateOf("idle-pause"); got != runtime.StateRunning {
 		t.Errorf("state = %s", got)
@@ -177,3 +186,93 @@ func TestStatuses(t *testing.T) {
 		t.Errorf("statuses = %+v", sts)
 	}
 }
+
+func TestAgentConnNotFoundIsTyped(t *testing.T) {
+	m := newTestManager(t)
+	_, _, err := m.AgentConn(context.Background(), "nope")
+	if !errors.Is(err, ErrSandboxNotFound) {
+		t.Errorf("err = %v, want ErrSandboxNotFound", err)
+	}
+}
+
+func TestCreateFailureDoesNotLeakEntry(t *testing.T) {
+	// A runtime whose Create always fails must leave no residue in the map.
+	m := NewManager(&failingRuntime{})
+	t.Cleanup(m.Close)
+	if _, err := m.Create(context.Background(), spec("boom")); err == nil {
+		t.Fatal("expected create error")
+	}
+	if m.Get("boom") != nil {
+		t.Error("failed sandbox left in manager map")
+	}
+	if len(m.Statuses()) != 0 {
+		t.Errorf("statuses = %v, want empty", m.Statuses())
+	}
+}
+
+func TestIdleSweepSkipsInFlight(t *testing.T) {
+	m := newTestManager(t)
+	ctx := context.Background()
+	sp := spec("busy", func(s *nodev1.SandboxSpec) {
+		s.Lifecycle = &nodev1.Lifecycle{HasIdleTimeout: true, IdleTimeoutSeconds: 1, OnIdle: "kill"}
+	})
+	if _, err := m.Create(ctx, sp); err != nil {
+		t.Fatal(err)
+	}
+	// Hold an in-flight marker across the idle deadline.
+	_, release, err := m.AgentConn(ctx, "busy")
+	if err != nil {
+		t.Fatal(err)
+	}
+	time.Sleep(2500 * time.Millisecond)
+	if m.StateOf("busy") != runtime.StateRunning {
+		t.Fatalf("in-flight sandbox was swept: state=%s", m.StateOf("busy"))
+	}
+	release()
+	// After release it becomes eligible again.
+	deadline := time.Now().Add(5 * time.Second)
+	for m.Get("busy") != nil {
+		if time.Now().After(deadline) {
+			t.Fatal("sandbox not swept after release")
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+}
+
+func TestConcurrentPauseOnlyOneWins(t *testing.T) {
+	m := newTestManager(t)
+	ctx := context.Background()
+	if _, err := m.Create(ctx, spec("race1")); err != nil {
+		t.Fatal(err)
+	}
+	var wg sync.WaitGroup
+	var okCount atomic.Int32
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if err := m.Pause(ctx, "race1"); err == nil {
+				okCount.Add(1)
+			}
+		}()
+	}
+	wg.Wait()
+	if got := okCount.Load(); got != 1 {
+		t.Errorf("successful pauses = %d, want 1", got)
+	}
+	if m.StateOf("race1") != runtime.StatePaused {
+		t.Errorf("state = %s", m.StateOf("race1"))
+	}
+}
+
+// failingRuntime always fails Create.
+type failingRuntime struct{}
+
+func (f *failingRuntime) Name() string { return "failing" }
+func (f *failingRuntime) Create(context.Context, *runtime.Spec) (*runtime.Handle, error) {
+	return nil, errors.New("synthetic create failure")
+}
+func (f *failingRuntime) Destroy(context.Context, string, bool) error { return nil }
+func (f *failingRuntime) Pause(context.Context, string) error         { return nil }
+func (f *failingRuntime) Resume(context.Context, string) error        { return nil }
+func (f *failingRuntime) List(context.Context) ([]string, error)      { return nil, nil }

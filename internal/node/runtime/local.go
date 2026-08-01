@@ -12,7 +12,7 @@ import (
 )
 
 // LocalRuntime runs each sandbox as a host process tree: the real
-// bean-agent binary confined to a per-sandbox root dir. It is the
+// beand binary confined to a per-sandbox root dir. It is the
 // dev/CI runtime (darwin/linux, no KVM needed) and exercises the exact
 // same agent gRPC surface as the fc tier.
 type LocalRuntime struct {
@@ -61,6 +61,17 @@ func (r *LocalRuntime) Create(ctx context.Context, spec *Spec) (*Handle, error) 
 	done := make(chan struct{})
 	go func() { _ = cmd.Wait(); close(done) }()
 
+	// cleanupFailed tears down everything created above.
+	cleanupFailed := func() {
+		_ = signalGroup(cmd.Process.Pid, syscall.SIGKILL)
+		select {
+		case <-done:
+		case <-time.After(2 * time.Second):
+		}
+		_ = os.RemoveAll(sockDir)
+		_ = os.RemoveAll(filepath.Join(r.baseDir, spec.SandboxID))
+	}
+
 	// Wait for the agent socket to appear.
 	deadline := time.Now().Add(5 * time.Second)
 	for {
@@ -68,12 +79,12 @@ func (r *LocalRuntime) Create(ctx context.Context, spec *Spec) (*Handle, error) 
 			break
 		}
 		if time.Now().After(deadline) {
-			_ = cmd.Process.Kill()
+			cleanupFailed()
 			return nil, fmt.Errorf("agent socket not ready: %s", sock)
 		}
 		select {
 		case <-ctx.Done():
-			_ = cmd.Process.Kill()
+			cleanupFailed()
 			return nil, ctx.Err()
 		case <-time.After(20 * time.Millisecond):
 		}
@@ -134,7 +145,9 @@ func (r *LocalRuntime) Pause(ctx context.Context, id string) error {
 	if err := signalGroup(sb.cmd.Process.Pid, syscall.SIGSTOP); err != nil {
 		return err
 	}
+	r.mu.Lock()
 	sb.paused = true
+	r.mu.Unlock()
 	return nil
 }
 
@@ -146,7 +159,9 @@ func (r *LocalRuntime) Resume(ctx context.Context, id string) error {
 	if err := signalGroup(sb.cmd.Process.Pid, syscall.SIGCONT); err != nil {
 		return err
 	}
+	r.mu.Lock()
 	sb.paused = false
+	r.mu.Unlock()
 	return nil
 }
 

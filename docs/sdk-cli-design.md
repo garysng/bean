@@ -133,7 +133,7 @@ await sbx.kill();
 
 ## 4. CLI（`bean`，Go）
 
-与 beand 同 repo 同发版；cobra 框架;配置 `~/.config/bean/config.yaml`（多 profile：endpoint + key）。
+与 noded 同 repo 同发版；cobra 框架;配置 `~/.config/bean/config.yaml`（多 profile：endpoint + key）。
 
 ### 4.1 命令面
 

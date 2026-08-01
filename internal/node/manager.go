@@ -1,8 +1,9 @@
-// Package node implements beand: sandbox lifecycle management on one node.
+// Package node implements noded: sandbox lifecycle management on one node.
 package node
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"sync"
@@ -16,7 +17,7 @@ import (
 	"github.com/garysng/bean/internal/node/runtime"
 )
 
-// Sandbox is beand's in-memory record of one sandbox.
+// Sandbox is noded's in-memory record of one sandbox.
 type Sandbox struct {
 	Spec   *nodev1.SandboxSpec
 	Handle *runtime.Handle
@@ -25,6 +26,7 @@ type Sandbox struct {
 
 	conn         *grpc.ClientConn
 	lastActivity time.Time
+	inFlight     int // data-plane requests in progress; idle sweep skips these
 }
 
 // Manager owns all sandboxes on this node.
@@ -87,7 +89,7 @@ func (m *Manager) Create(ctx context.Context, spec *nodev1.SandboxSpec) (*Sandbo
 	}
 	handle, err := m.rt.Create(ctx, rspec)
 	if err != nil {
-		m.setFailed(spec.SandboxId, err.Error())
+		m.dropFailed(spec.SandboxId)
 		return nil, err
 	}
 
@@ -95,14 +97,14 @@ func (m *Manager) Create(ctx context.Context, spec *nodev1.SandboxSpec) (*Sandbo
 		grpc.WithTransportCredentials(insecure.NewCredentials()))
 	if err != nil {
 		_ = m.rt.Destroy(context.Background(), spec.SandboxId, true)
-		m.setFailed(spec.SandboxId, "agent dial: "+err.Error())
-		return nil, err
+		m.dropFailed(spec.SandboxId)
+		return nil, fmt.Errorf("agent dial: %w", err)
 	}
 	if err := waitHealthy(ctx, conn, 5*time.Second); err != nil {
 		conn.Close()
 		_ = m.rt.Destroy(context.Background(), spec.SandboxId, true)
-		m.setFailed(spec.SandboxId, "agent health: "+err.Error())
-		return nil, err
+		m.dropFailed(spec.SandboxId)
+		return nil, fmt.Errorf("agent health: %w", err)
 	}
 
 	m.mu.Lock()
@@ -146,13 +148,13 @@ func waitHealthy(ctx context.Context, conn *grpc.ClientConn, timeout time.Durati
 	}
 }
 
-func (m *Manager) setFailed(id, reason string) {
+// dropFailed removes a sandbox whose creation failed. The runtime has
+// already been cleaned up, so keeping a FAILED entry would leak memory
+// with no way to reclaim it.
+func (m *Manager) dropFailed(id string) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if sb, ok := m.sandboxes[id]; ok {
-		sb.State = runtime.StateFailed
-		sb.Reason = reason
-	}
+	delete(m.sandboxes, id)
 }
 
 // Get returns the sandbox or nil.
@@ -160,6 +162,36 @@ func (m *Manager) Get(id string) *Sandbox {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return m.sandboxes[id]
+}
+
+// SpecOf returns the sandbox spec under lock (nil if absent).
+func (m *Manager) SpecOf(id string) *nodev1.SandboxSpec {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if sb, ok := m.sandboxes[id]; ok {
+		return sb.Spec
+	}
+	return nil
+}
+
+// StatusOf returns a snapshot of the sandbox status (nil if absent).
+func (m *Manager) StatusOf(id string) *nodev1.SandboxStatus {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	sb, ok := m.sandboxes[id]
+	if !ok {
+		return nil
+	}
+	st := &nodev1.SandboxStatus{
+		SandboxId:        id,
+		State:            string(sb.State),
+		Reason:           sb.Reason,
+		LastActivityUnix: sb.lastActivity.Unix(),
+	}
+	if sb.Handle != nil {
+		st.StartedAtUnix = sb.Handle.StartedAt.Unix()
+	}
+	return st
 }
 
 // StateOf returns the sandbox state under lock ("" if absent).
@@ -172,30 +204,50 @@ func (m *Manager) StateOf(id string) runtime.State {
 	return ""
 }
 
+// ErrSandboxNotFound reports an unknown sandbox id (maps to gRPC NotFound).
+var ErrSandboxNotFound = errors.New("sandbox not found")
+
 // AgentConn returns a live agent connection for RUNNING sandboxes,
-// transparently resuming PAUSED ones (wake-on-request).
-func (m *Manager) AgentConn(ctx context.Context, id string) (*grpc.ClientConn, error) {
+// transparently resuming PAUSED ones (wake-on-request). The returned
+// release func must be called when the data-plane request finishes; it
+// clears the in-flight marker that keeps the idle sweep from pausing or
+// killing a sandbox mid-request.
+func (m *Manager) AgentConn(ctx context.Context, id string) (*grpc.ClientConn, func(), error) {
 	m.mu.Lock()
 	sb, ok := m.sandboxes[id]
 	if !ok {
 		m.mu.Unlock()
-		return nil, fmt.Errorf("sandbox %s not found", id)
+		return nil, nil, fmt.Errorf("%w: %s", ErrSandboxNotFound, id)
 	}
 	state := sb.State
 	conn := sb.conn
 	sb.lastActivity = time.Now()
+	sb.inFlight++
 	m.mu.Unlock()
+
+	release := func() {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		if cur, ok := m.sandboxes[id]; ok {
+			if cur.inFlight > 0 {
+				cur.inFlight--
+			}
+			cur.lastActivity = time.Now()
+		}
+	}
 
 	switch state {
 	case runtime.StateRunning:
-		return conn, nil
+		return conn, release, nil
 	case runtime.StatePaused:
 		if err := m.Resume(ctx, id); err != nil {
-			return nil, fmt.Errorf("wake: %w", err)
+			release()
+			return nil, nil, fmt.Errorf("wake: %w", err)
 		}
-		return conn, nil
+		return conn, release, nil
 	default:
-		return nil, fmt.Errorf("sandbox %s not runnable (state=%s)", id, state)
+		release()
+		return nil, nil, fmt.Errorf("sandbox %s not runnable (state=%s)", id, state)
 	}
 }
 
@@ -216,20 +268,33 @@ func (m *Manager) Destroy(ctx context.Context, id string, force bool) error {
 }
 
 func (m *Manager) Pause(ctx context.Context, id string) error {
+	// Claim the transition under lock so concurrent pauses cannot both proceed.
 	m.mu.Lock()
 	sb, ok := m.sandboxes[id]
-	m.mu.Unlock()
 	if !ok {
-		return fmt.Errorf("sandbox %s not found", id)
+		m.mu.Unlock()
+		return fmt.Errorf("%w: %s", ErrSandboxNotFound, id)
 	}
 	if sb.State != runtime.StateRunning {
-		return fmt.Errorf("sandbox %s not RUNNING (state=%s)", id, sb.State)
+		state := sb.State
+		m.mu.Unlock()
+		return fmt.Errorf("sandbox %s not RUNNING (state=%s)", id, state)
 	}
+	sb.State = runtime.StatePausing
+	m.mu.Unlock()
+
 	if err := m.rt.Pause(ctx, id); err != nil {
+		m.mu.Lock()
+		if cur, ok := m.sandboxes[id]; ok && cur.State == runtime.StatePausing {
+			cur.State = runtime.StateRunning
+		}
+		m.mu.Unlock()
 		return err
 	}
 	m.mu.Lock()
-	sb.State = runtime.StatePaused
+	if cur, ok := m.sandboxes[id]; ok {
+		cur.State = runtime.StatePaused
+	}
 	m.mu.Unlock()
 	return nil
 }
@@ -237,22 +302,36 @@ func (m *Manager) Pause(ctx context.Context, id string) error {
 func (m *Manager) Resume(ctx context.Context, id string) error {
 	m.mu.Lock()
 	sb, ok := m.sandboxes[id]
-	m.mu.Unlock()
 	if !ok {
-		return fmt.Errorf("sandbox %s not found", id)
+		m.mu.Unlock()
+		return fmt.Errorf("%w: %s", ErrSandboxNotFound, id)
 	}
-	if sb.State != runtime.StatePaused {
-		if sb.State == runtime.StateRunning {
-			return nil // idempotent
-		}
-		return fmt.Errorf("sandbox %s not PAUSED (state=%s)", id, sb.State)
+	switch sb.State {
+	case runtime.StateRunning:
+		m.mu.Unlock()
+		return nil // idempotent
+	case runtime.StatePaused:
+		sb.State = runtime.StateResuming
+		m.mu.Unlock()
+	default:
+		state := sb.State
+		m.mu.Unlock()
+		return fmt.Errorf("sandbox %s not PAUSED (state=%s)", id, state)
 	}
+
 	if err := m.rt.Resume(ctx, id); err != nil {
+		m.mu.Lock()
+		if cur, ok := m.sandboxes[id]; ok && cur.State == runtime.StateResuming {
+			cur.State = runtime.StatePaused
+		}
+		m.mu.Unlock()
 		return err
 	}
 	m.mu.Lock()
-	sb.State = runtime.StateRunning
-	sb.lastActivity = time.Now()
+	if cur, ok := m.sandboxes[id]; ok {
+		cur.State = runtime.StateRunning
+		cur.lastActivity = time.Now()
+	}
 	m.mu.Unlock()
 	return nil
 }
@@ -303,6 +382,9 @@ func (m *Manager) sweepIdle() {
 		lc := sb.Spec.GetLifecycle()
 		if lc == nil || !lc.HasIdleTimeout || sb.State != runtime.StateRunning {
 			continue
+		}
+		if sb.inFlight > 0 {
+			continue // never freeze/kill a sandbox with a request in progress
 		}
 		idle := now.Sub(sb.lastActivity)
 		if idle >= time.Duration(lc.IdleTimeoutSeconds)*time.Second {

@@ -14,7 +14,7 @@ sandbox 内运行的是 **AI 生成的不可信代码**（eval 任务、agent ro
 | 资源滥用 | 挖矿、fork 炸弹、磁盘写满 | cgroup 硬限制（A3） |
 | 出网滥用 | 作为跳板攻击外部、DDoS | egress 策略 + 带宽限速（A4） |
 | 恶意镜像 | 供应链投毒 | 镜像来源控制（A6） |
-| agent 攻击面 | 从容器内攻击 agent → beand | 最小 API + socket 权限（A7） |
+| agent 攻击面 | 从容器内攻击 agent → noded | 最小 API + socket 权限（A7） |
 
 ### A2. 隔离档位（内部机制，不对外暴露;分档规则见 architecture.md D3）
 
@@ -53,7 +53,7 @@ seccomp、宿主 cgroup 包裹、可写层盘大小硬限、guest 资源自限�
 
 ### A4. 网络安全
 
-见 beand-design.md §5，安全语义汇总：
+见 noded-design.md §5，安全语义汇总：
 
 - 默认 `egress-only`：可出公网（拉依赖是 eval 刚需），**禁止**：sandbox 间互访、节点内网段（RFC1918）、云元数据（169.254.169.254 / fd00:ec2::254）
 - 出网带宽 per-sandbox 限速（tc，默认 100 Mbps）+ conntrack 连接数上限（防端口扫描/DDoS 放大）
@@ -61,20 +61,20 @@ seccomp、宿主 cgroup 包裹、可写层盘大小硬限、guest 资源自限�
   卷不破坏该承诺——dataset 卷是本地块设备,shared-fs 卷走宿主 NFS（流量仅达宿主网关,
   不出节点）,均与「出公网」正交。若连宿主共享存储也要禁,创建时不挂卷即可
 - DNS 走节点转发器，可记录审计日志
-- 入站零暴露：无 DNAT，唯一入口是 proxy → beand → agent 的应用层链路
+- 入站零暴露：无 DNAT，唯一入口是 proxy → noded → agent 的应用层链路
 
 ### A5. 凭证与信任链
 
 ```
 S3 长期凭证：仅 control plane 持有
    ├── 节点产物上传/snapshot：presigned URL（TTL 15min，绑定 key 前缀 + content-length）
-   ├── overlaybd 块读取：beand 持 STS 只读角色（限 blob bucket 前缀，1h 轮换）
+   ├── overlaybd 块读取：noded 持 STS 只读角色（限 blob bucket 前缀，1h 轮换）
    └── sandbox 内直传产物：presigned PUT URL 注入（即使泄漏也只能写指定 key）
-控制面 ↔ beand：TLS 单向（云上托管 gRPC 接入层终结,节点零证书配置）
+控制面 ↔ noded：TLS 单向（云上托管 gRPC 接入层终结,节点零证书配置）
    + 应用层 node token（短期,内存持有,绑定 nodeId——控制面校验节点只能
-   操作自己的 sandbox）;注册凭 bootstrap token,凭证分层见 beand-design §7.0
-beand ↔ agent：容器档 unix socket（0700，host 侧仅 beand 用户可达;容器内挂载点
-   仅 root 可读）;fc 档 vsock（host 侧 FC API socket 仅 beand 可达,guest 内
+   操作自己的 sandbox）;注册凭 bootstrap token,凭证分层见 noded-design §7.0
+noded ↔ agent：容器档 unix socket（0700，host 侧仅 noded 用户可达;容器内挂载点
+   仅 root 可读）;fc 档 vsock（host 侧 FC API socket 仅 noded 可达,guest 内
    /dev/vsock 默认仅 root 可开——非 root 用户进程无法调用 agent API）
 sandbox token（JWT）：签名密钥控制面持有，绑定 sandbox-id + 过期时间
 ```
@@ -88,14 +88,14 @@ sandbox token（JWT）：签名密钥控制面持有，绑定 sandbox-id + 过�
 ### A7. agent 攻击面控制
 
 - agent 对 sandbox 内进程暴露的唯一接口是 unix socket（容器档）/ vsock（fc 档），均 root-only（A5）
-- agent 以 root 跑（需 setuid 到镜像 USER），但其 API 只允许来自 beand 侧 socket 的指令——容器内即使 root 也只能调用与自己权限等价的操作，无提权增益
+- agent 以 root 跑（需 setuid 到镜像 USER），但其 API 只允许来自 noded 侧 socket 的指令——容器内即使 root 也只能调用与自己权限等价的操作，无提权增益
 - agent 二进制只读挂载，容器内不可替换
-- beand 侧对 agent 响应做长度/速率限制，防被攻陷的 agent 反打 beand
+- noded 侧对 agent 响应做长度/速率限制，防被攻陷的 agent 反打 noded
 
 ### A8. 平台面
 
 - API 全写操作审计（who/what/when，Postgres + S3 归档）
-- 节点最小化：专用 OS 镜像、无多余服务、beand 非 root 化评估（P3;containerd 如启用,P5）
+- 节点最小化：专用 OS 镜像、无多余服务、noded 非 root 化评估（P3;containerd 如启用,P5）
 - 每周期跑 sandbox 逃逸回归测试集（FC/KVM 攻击面为主;容器档引入后加 gVisor exploit suite 子集）
 
 ---
@@ -109,7 +109,7 @@ sandbox token（JWT）：签名密钥控制面持有，绑定 sandbox-id + 过�
 | 阶段 | 缓存命中目标 | 冷路径目标 | 手段 |
 |---|---|---|---|
 | API + 调度 | 50 ms | 50 ms | 内存化调度器状态，无同步外呼 |
-| 指令送达 beand | 50 ms | 50 ms | push 直连 gRPC（控制面→beand） |
+| 指令送达 noded | 50 ms | 50 ms | push 直连 gRPC（控制面→noded） |
 | 镜像就绪 | ~0（已缓存） | 2–6 s | overlaybd：仅拉元数据+启动热块（见 B2） |
 | rootfs 设备就绪 | 100 ms | 200 ms | ublk 设备组装、overlaybd 元数据缓存 |
 | netns/网络 | 50 ms | 50 ms | veth/nftables 批量原子操作;IPAM 内存位图 |
@@ -117,7 +117,7 @@ sandbox token（JWT）：签名密钥控制面持有，绑定 sandbox-id + 过�
 | agent ready | 100 ms | 100 ms | 静态二进制,无依赖加载 |
 | **合计** | **≈1–1.2 s** | **≈4–8 s** | |
 
-每阶段打点进创建耗时直方图（beand exporter），回归监控。
+每阶段打点进创建耗时直方图（noded exporter），回归监控。
 
 ### B2. overlaybd lazy-pull from S3
 
@@ -145,7 +145,7 @@ CreateSandbox → overlaybd/ublk 组装块设备（元数据数 MiB）→ 立即
 
 ### B3. 缓存与预热策略
 
-1. **节点缓存**（beand-design §4.2）：镜像粒度 LRU + chunk LRU，S3 为 source of truth
+1. **节点缓存**（noded-design §4.2）：镜像粒度 LRU + chunk LRU，S3 为 source of truth
 2. **prewarm API**：eval 批次开始前，编排层按「批次镜像清单 × 目标并发」计算
    节点覆盖数下发预热;image-service 按节点缓存水位挑目标节点
 3. **镜像亲和调度**：score = w1·(已缓存层字节占比) + w2·(空闲资源匹配) + w3·(缓存盘类型)
@@ -161,4 +161,4 @@ CreateSandbox → overlaybd/ublk 组装块设备（元数据数 MiB）→ 立即
 - gateway `batchCreate` → 调度器批量决策（单次锁内完成 bin-packing，避免 2000 次抢锁）
 - per-node 并发创建上限（默认 16），超出排队——瞬时风暴变节点内流水线
 - S3 天然抗并发读；registry 不在热路径（blob 全在 S3）
-- 复用连接：beand 的 S3 client 连接池 + HTTP/2
+- 复用连接：noded 的 S3 client 连接池 + HTTP/2

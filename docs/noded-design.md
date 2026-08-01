@@ -1,12 +1,13 @@
-# beand（Node Daemon）与 bean-agent 详细设计
+# noded（Node Daemon）与 beand（In-Sandbox Daemon）详细设计
 
-> beand：每节点一个的守护进程，sandbox 生命周期的实际执行者。
-> bean-agent：sandbox 内 PID1，exec/文件/端口的执行末端。
+> **noded**：每节点一个的守护进程（二进制 `noded`），sandbox 生命周期的实际执行者。
+> **beand**：sandbox 内的 init/PID1（二进制 `beand`），exec/文件/端口的执行末端。
+> 命名约定：**noded 在宿主上，beand 在 sandbox 内**。
 
-## 1. beand 总体结构
+## 1. noded 总体结构
 
 ```
-beand
+noded
 ├── server/          gRPC server（NodeService client 侧 + 数据面 SandboxService 实现）
 ├── runtime/         Runtime 接口 + fc/runc/runsc 实现
 ├── image/           ublk 设备/overlaybd 配置管理、S3 blob 缓存、prewarm
@@ -19,7 +20,7 @@ beand
 └── report/          能力探测、心跳、资源水位、缓存清单摘要
 ```
 
-单二进制 `beand`，systemd 管理，配置文件 `/etc/bean/beand.yaml`：
+单二进制 `noded`，systemd 管理，配置文件 `/etc/bean/noded.yaml`：
 
 ```yaml
 nodeId: auto            # 默认机器指纹生成
@@ -33,7 +34,7 @@ bootstrapToken: <region bootstrap token>        # 首次注册用,见 §7.0
 controlPlane: grpcs://<hosted-gateway>:443
                         # 云上托管 gRPC 接入层（nexus 同款模式,示例:
                         # grpc-bean.internal....:443）,TLS 由托管网关终结;
-                        # beand 出向长连,指令经 CommandChannel 多路复用下发
+                        # noded 出向长连,指令经 CommandChannel 多路复用下发
 s3:
   endpoint: https://s3.ap-east-1.example.com    # 本 region S3 backend
 containerd: null        # 可选:仅容器档节点配置（GPU/无 KVM,P5）;纯 fc 节点不装
@@ -82,7 +83,7 @@ type Runtime interface {
 
 | 实现 | 底层 | 职责边界 |
 |---|---|---|
-| `fcRuntime`（主档,P0 起点） | 自研：beand 直接管 firecracker 进程 + jailer;**无 containerd** | overlaybd ublk 块设备 virtio-blk 直挂;vsock 通 agent;memory snapshot/fork 原生（见 §3.1） |
+| `fcRuntime`（主档,P0 起点） | 自研：noded 直接管 firecracker 进程 + jailer;**无 containerd** | overlaybd ublk 块设备 virtio-blk 直挂;vsock 通 agent;memory snapshot/fork 原生（见 §3.1） |
 | `runcRuntime`（P5 按需,GPU/可信） | containerd task API + runc shim | Checkpoint 用 CRIU;需节点装 containerd |
 | `runscRuntime`（P5,无 KVM 降级） | containerd + runsc shim | Checkpoint 用 gVisor save/restore |
 
@@ -103,12 +104,12 @@ type Runtime interface {
 1. image 模块产出 rootfs 块设备：overlaybd base 层（lazy-pull S3）+ overlaybd
    可写层在宿主合成【单一块设备】（拍板：host 侧组装,e2b/AgentENV 同款;
    配额=可写层文件大小,snapshot disk-diff 直接取宿主层）
-2. beand 起 jailer→firecracker：
-   virtio-blk: rootfs 盘 + agent 盘(只读 erofs,含 bean-agent 与工具) 
+2. noded 起 jailer→firecracker：
+   virtio-blk: rootfs 盘 + agent 盘(只读 erofs,含 beand 与工具) 
                + N 个 dataset 卷盘（如有）
    vsock、tap 网卡、virtio-balloon;guest 内核（平台统一打包,见 §3.4）
-   kernel cmdline: init=/run/bean-agent（agent 盘由内核挂载后执行）
-3. guest 内 bean-agent 作为 init：
+   kernel cmdline: init=/run/beand（agent 盘由内核挂载后执行）
+3. guest 内 beand 作为 init：
    a. 挂载矩阵：/proc /sys /dev /dev/shm /dev/pts /dev/mqueue /tmp
       （按 OCI runtime spec 默认 mounts 复刻）
    b. 挂载 rootfs 盘并切根（guest 只见一块 rootfs 盘，零 union 逻辑）
@@ -143,7 +144,7 @@ type Runtime interface {
 **超卖策略（全部为配置项，非硬编码）**
 
 ```yaml
-# beand.yaml（节点级覆盖）/ 调度器全局默认
+# noded.yaml（节点级覆盖）/ 调度器全局默认
 overcommit:
   cpu: 3.0        # allocatable = 物理核 × 该系数;1.0 = 不超卖
   memory: 1.0     # 内存默认不超卖（fc 档 balloon 回收不改承诺量记账）
@@ -151,7 +152,7 @@ overcommit:
 
 - CPU：eval 突发型负载默认 3.0;CPU 密集型节点池可配 1.0;cgroup cpu.weight 按
   规格比例分配保公平;`dedicated: true`（预留字段）→ vCPU pin，不参与超卖
-- 内存：容器档按 RSS 实际水位天然复用;fc 档靠 balloon——beand 周期驱动
+- 内存：容器档按 RSS 实际水位天然复用;fc 档靠 balloon——noded 周期驱动
   气球回收空闲 guest 内存,调度器按「规格承诺量」与「气球后实际占用」双水位记账:
   新建看承诺量（保证 resume/突发有量），告警看实际占用
 - 系数变更仅影响后续调度决策，存量 sandbox 不受影响;调低导致承诺量超出新
@@ -201,7 +202,7 @@ POST /sandboxes { ..., "volumes": [
 **shared-fs 数据面：宿主 NFS 导出（e2b 同款路线,经其源码验证）**
 
 ```
-后端（宿主挂载,beand volume 模块管理）：JuiceFS(on S3+Redis) / CephFS / 本地盘
+后端（宿主挂载,noded volume 模块管理）：JuiceFS(on S3+Redis) / CephFS / 本地盘
     ▼
 宿主内核 nfsd 导出 per-volume 目录（拍板：内核 nfsd,零用户态开销、成熟度最高;
     配额由后端执行——JuiceFS 目录配额/CephFS quota）
@@ -215,7 +216,7 @@ guest/容器内 agent 执行: mount -t nfs -o fg,hard <宿主网关IP>:/<volumeN
 - **`none` 策略天然兼容**——NFS 目标是宿主网关,与「出公网」正交,零外传承诺不破
 - **宿主客户端缓存全 sandbox 共享**——同批 eval 读同数据,宿主拉一次全员命中
   （guest 内独立客户端则 N 份缓存 N 份回源）
-- 后端可换（JuiceFS/CephFS/本地盘），beand 只见宿主路径
+- 后端可换（JuiceFS/CephFS/本地盘），noded 只见宿主路径
 - 代价：多一跳 NFS 协议;小文件/元数据密集负载偏慢——该类负载引导到可写层
   （dataset 卷启用后,大流量只读再迁过去）
 
@@ -237,15 +238,15 @@ guest/容器内 agent 执行: mount -t nfs -o fg,hard <宿主网关IP>:/<volumeN
 
 ## 3.4 Guest 内核与 agent 盘的构建发布
 
-fc 档两个平台工件,均由 CI 构建、S3 分发、beand 启动时按版本拉取到本地：
+fc 档两个平台工件,均由 CI 构建、S3 分发、noded 启动时按版本拉取到本地：
 
 | 工件 | 内容 | 构建 | 版本策略 |
 |---|---|---|---|
 | guest 内核 | 6.x LTS,内嵌 virtio/vsock/nfs/overlayfs 等必需项的精简 config,bzImage | 内核源码 + config 入库,CI 复现构建 | 独立版本号;manifest 记录,snapshot restore 校验一致性 |
-| agent 盘 | erofs 只读镜像:bean-agent 静态二进制 + busybox 级工具 | CI 打包,与 beand 同版本发布 | 随 beand 版本;旧版本保留至无运行中引用 |
+| agent 盘 | erofs 只读镜像:beand 静态二进制 + busybox 级工具 | CI 打包,与 noded 同版本发布 | 随 noded 版本;旧版本保留至无运行中引用 |
 
 - 存放：`s3://bean/artifacts/{kernel,agent-disk}/<version>/` + sha256 校验
-- beand 配置声明版本（默认跟随 beand 发布版），本地缓存 `/var/lib/bean/artifacts/`
+- noded 配置声明版本（默认跟随 noded 发布版），本地缓存 `/var/lib/bean/artifacts/`
 - 容器档的 agent 直接用 agent 盘内同一个二进制 bind mount，两档单一构建产物
 
 ## 4. 镜像模块
@@ -341,31 +342,31 @@ table inet bean {
   连接数上限（防扫描/DDoS 放大）
 - `networkPolicy: none` → netns 无默认路由，纯本地回环（宿主 NFS/网关地址除外,见 §3.3）
 - `allow-list`（预留）→ per-sandbox 链插入目标 CIDR accept
-- 端口暴露不开入站 DNAT——regional proxy → beand sbxproxy → 直连 sandbox IP
+- 端口暴露不开入站 DNAT——regional proxy → noded sbxproxy → 直连 sandbox IP
   （见 api-design.md §6.2）;节点防火墙入站仅对 control plane/proxy 开放
 
 ### 5.3 fcRuntime 兼容
 
 FC microVM 用 tap 设备替代 veth 的 netns 端，同样挂 bean0 桥，nftables 规则不变。
 
-## 6. bean-agent
+## 6. beand
 
 ### 6.1 注入与启动
 
 > 本节描述**容器档注入**（bind mount + entrypoint override,随 P5 引入）;
 > fc 主路径的 agent 盘注入见 §3.1/§3.4。
 
-1. beand 发布目录 `/var/lib/bean/agent/<version>/bean-agent`（静态编译，musl，≈8 MiB）
-2. OCI spec 增加只读 bind mount：`/var/lib/bean/agent/<ver>/bean-agent → /.bean/agent`
+1. noded 发布目录 `/var/lib/bean/agent/<version>/beand`（静态编译，musl，≈8 MiB）
+2. OCI spec 增加只读 bind mount：`/var/lib/bean/agent/<ver>/beand → /.bean/agent`
    以及 socket 目录 `/run/bean/<id>/ → /.bean/run/`（读写）
 3. entrypoint override 为 `/.bean/agent`；原 image 的 entrypoint/cmd/env/user/workdir
    序列化进 spec annotation，由 agent 读取
-4. agent 启动即 listen unix socket `/.bean/run/agent.sock`（beand 从 host 侧
+4. agent 启动即 listen unix socket `/.bean/run/agent.sock`（noded 从 host 侧
    `/run/bean/<id>/agent.sock` 直连），上报 Ready
 5. `autoStartCmd=true` 或收到 StartUserProcess 时，agent 按原 entrypoint 语义
    fork 用户进程（setuid 到镜像 USER、应用 env/workdir）
 
-版本升级：agent 随 beand 包发布，目录带版本号，运行中 sandbox 不受影响（旧版本目录保留至无引用）。
+版本升级：agent 随 noded 包发布，目录带版本号，运行中 sandbox 不受影响（旧版本目录保留至无引用）。
 
 路径冲突：`/.bean` 若与镜像内容冲突（极罕见），创建失败并明确报错，可配置备用挂载点。
 
@@ -387,12 +388,12 @@ FC microVM 用 tap 设备替代 veth 的 netns 端，同样挂 bean0 桥，nftab
 - 流式 gRPC chunk（1 MiB/帧），保留 mode/uid/gid；目录树操作提供 `tar` 模式
   （上传 tar 自动解包、下载目录打 tar）——eval 批量注入 repo 快照的主路径
 - 大文件产物直推 S3：agent 收到含 presigned URL 的指令后在容器内直接
-  PUT（走 sandbox 出网路径），不占 beand 带宽
+  PUT（走 sandbox 出网路径），不占 noded 带宽
 
 ### 6.5 日志
 
 - 用户进程 stdout/stderr → 环形缓冲（8 MiB）+ 可选实时流
-- 销毁前 beand 触发 agent 将全量日志经 presigned URL 归档 S3
+- 销毁前 noded 触发 agent 将全量日志经 presigned URL 归档 S3
 
 ### 6.6 传输层抽象
 
@@ -406,7 +407,7 @@ fc 档 agent 代码零改动，只换 transport（vsock）与注入载体（agen
 ```
 管理员：控制面注册 region（S3 endpoint、proxy 组、BYOC token 服务地址）
       → 生成 region bootstrap token（短 TTL 24h,可限次数,可撤销）
-节点：beand 配置 token 启动 → Register(token, region, capabilities, labels)
+节点：noded 配置 token 启动 → Register(token, region, capabilities, labels)
     → 控制面校验 region 已注册 + token 有效（BYOC region 可配人工 approve）
     → 控制面签发 node token（短期,绑定 nodeId+region）
     → 后续所有 RPC 携带 node token metadata,心跳自动续期
@@ -438,7 +439,7 @@ BYOC：客户节点出向连托管接入层即可（443,零证书配置）,身�
   其上 RUNNING sandbox 标 LOST、调度停止派发
 - 网络闪断恢复：流重建后全量状态上报一次;控制面在此期间的直连指令失败会重试,超过阈值触发重调度
 
-### 7.2 beand 重启 reconcile
+### 7.2 noded 重启 reconcile
 
 ```
 1. 枚举本地实际状态：存活 firecracker 进程（jailer 目录 /run/bean/fc/<id>/ +
@@ -457,14 +458,14 @@ netns/veth/nftables 链均带 `bean-<id>` 命名规约，孤儿扫描按前缀�
 
 | 对象 | 策略 |
 |---|---|
-| sandbox idle | beand 本地 idle 检测（lifecycle 随 create 下发）:无 exec/端口/文件活动持续 idleTimeout → 执行 onIdle(pause/kill) 并发 event——不依赖控制面在线 |
+| sandbox idle | noded 本地 idle 检测（lifecycle 随 create 下发）:无 exec/端口/文件活动持续 idleTimeout → 执行 onIdle(pause/kill) 并发 event——不依赖控制面在线 |
 | PAUSED 滞留 | 默认不回收;管理员可选开启全局策略（P4 后由 snapshot 归档替代） |
 | 镜像/chunk 缓存 | §4.2 水位 LRU |
 | exec 会话 | 断连 60s 无重连 |
 | 临时文件（S3 暂存下载） | S3 lifecycle 规则 1 天 |
 | Postgres 终态 sandbox 记录 | 控制面归档任务，30 天转冷 |
 
-## 8. beand 自身可观测
+## 8. noded 自身可观测
 
 - OTLP 导出（Prometheus 端点保留）：sandbox 创建各阶段耗时直方图（拉镜像/rootfs/启动/agent ready）、
   缓存命中率、nftables 规则数、IPAM 使用率

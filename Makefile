@@ -1,7 +1,15 @@
 GOBIN := $(shell go env GOPATH)/bin
 PROTO_FILES := $(shell find proto -name '*.proto')
 
-.PHONY: all build proto test test-e2e lint vet cover clean
+# Pinned so generated code is reproducible across machines and CI.
+PROTOC_GEN_GO_VERSION      := v1.36.11
+PROTOC_GEN_GO_GRPC_VERSION := v1.6.2
+
+.PHONY: all build proto proto-tools test test-e2e lint vet cover clean
+
+proto-tools:
+	go install google.golang.org/protobuf/cmd/protoc-gen-go@$(PROTOC_GEN_GO_VERSION)
+	go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@$(PROTOC_GEN_GO_GRPC_VERSION)
 
 all: build
 

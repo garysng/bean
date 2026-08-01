@@ -2,6 +2,7 @@ package node
 
 import (
 	"context"
+	"errors"
 	"io"
 
 	"google.golang.org/grpc/codes"
@@ -19,6 +20,15 @@ type GRPCServer struct {
 }
 
 func NewGRPCServer(mgr *Manager) *GRPCServer { return &GRPCServer{mgr: mgr} }
+
+// connErr maps AgentConn failures to gRPC codes: unknown sandbox -> NotFound,
+// non-runnable state -> FailedPrecondition (docs/api-design.md error table).
+func connErr(err error) error {
+	if errors.Is(err, ErrSandboxNotFound) {
+		return status.Errorf(codes.NotFound, "%v", err)
+	}
+	return status.Errorf(codes.FailedPrecondition, "%v", err)
+}
 
 func (s *GRPCServer) CreateSandbox(ctx context.Context, req *nodev1.CreateSandboxRequest) (*nodev1.CreateSandboxResponse, error) {
 	if req.GetSpec() == nil {
@@ -56,32 +66,25 @@ func (s *GRPCServer) ResumeSandbox(ctx context.Context, req *nodev1.ResumeSandbo
 }
 
 func (s *GRPCServer) GetSandbox(ctx context.Context, req *nodev1.GetSandboxRequest) (*nodev1.GetSandboxResponse, error) {
-	sb := s.mgr.Get(req.SandboxId)
-	if sb == nil {
+	st := s.mgr.StatusOf(req.SandboxId)
+	if st == nil {
 		return nil, status.Errorf(codes.NotFound, "sandbox %s not found", req.SandboxId)
-	}
-	st := &nodev1.SandboxStatus{
-		SandboxId: req.SandboxId,
-		State:     string(sb.State),
-		Reason:    sb.Reason,
-	}
-	if sb.Handle != nil {
-		st.StartedAtUnix = sb.Handle.StartedAt.Unix()
 	}
 	return &nodev1.GetSandboxResponse{Status: st}, nil
 }
 
 func (s *GRPCServer) StartUserProcess(ctx context.Context, req *nodev1.StartUserProcessNodeRequest) (*nodev1.StartUserProcessNodeResponse, error) {
-	sb := s.mgr.Get(req.SandboxId)
-	if sb == nil {
+	spec := s.mgr.SpecOf(req.SandboxId)
+	if spec == nil {
 		return nil, status.Errorf(codes.NotFound, "sandbox %s not found", req.SandboxId)
 	}
-	conn, err := s.mgr.AgentConn(ctx, req.SandboxId)
+	conn, release, err := s.mgr.AgentConn(ctx, req.SandboxId)
 	if err != nil {
-		return nil, status.Errorf(codes.FailedPrecondition, "%v", err)
+		return nil, connErr(err)
 	}
+	defer release()
 	resp, err := agentv1.NewAgentServiceClient(conn).StartUserProcess(ctx, &agentv1.StartUserProcessRequest{
-		Cmd: sb.Spec.Cmd, Env: sb.Spec.Env,
+		Cmd: spec.Cmd, Env: spec.Env,
 	})
 	if err != nil {
 		return nil, err
@@ -92,20 +95,20 @@ func (s *GRPCServer) StartUserProcess(ctx context.Context, req *nodev1.StartUser
 // ---- data plane passthrough ----
 
 func (s *GRPCServer) Exec(ctx context.Context, req *commonv1.ExecRequest) (*commonv1.ExecResponse, error) {
-	conn, err := s.mgr.AgentConn(ctx, req.SandboxId)
+	conn, release, err := s.mgr.AgentConn(ctx, req.SandboxId)
 	if err != nil {
-		return nil, status.Errorf(codes.FailedPrecondition, "%v", err)
+		return nil, connErr(err)
 	}
-	defer s.mgr.TouchActivity(req.SandboxId)
+	defer release()
 	return agentv1.NewAgentServiceClient(conn).Exec(ctx, req)
 }
 
 func (s *GRPCServer) ReadFile(req *commonv1.ReadFileRequest, stream nodev1.SandboxService_ReadFileServer) error {
-	conn, err := s.mgr.AgentConn(stream.Context(), req.SandboxId)
+	conn, release, err := s.mgr.AgentConn(stream.Context(), req.SandboxId)
 	if err != nil {
-		return status.Errorf(codes.FailedPrecondition, "%v", err)
+		return connErr(err)
 	}
-	defer s.mgr.TouchActivity(req.SandboxId)
+	defer release()
 	up, err := agentv1.NewAgentServiceClient(conn).ReadFile(stream.Context(), req)
 	if err != nil {
 		return err
@@ -133,11 +136,11 @@ func (s *GRPCServer) WriteFile(stream nodev1.SandboxService_WriteFileServer) err
 	if meta == nil {
 		return status.Error(codes.InvalidArgument, "first frame must be meta")
 	}
-	conn, err := s.mgr.AgentConn(stream.Context(), meta.SandboxId)
+	conn, release, err := s.mgr.AgentConn(stream.Context(), meta.SandboxId)
 	if err != nil {
-		return status.Errorf(codes.FailedPrecondition, "%v", err)
+		return connErr(err)
 	}
-	defer s.mgr.TouchActivity(meta.SandboxId)
+	defer release()
 	up, err := agentv1.NewAgentServiceClient(conn).WriteFile(stream.Context())
 	if err != nil {
 		return err
@@ -165,28 +168,29 @@ func (s *GRPCServer) WriteFile(stream nodev1.SandboxService_WriteFileServer) err
 }
 
 func (s *GRPCServer) DeleteFile(ctx context.Context, req *commonv1.DeleteFileRequest) (*commonv1.DeleteFileResponse, error) {
-	conn, err := s.mgr.AgentConn(ctx, req.SandboxId)
+	conn, release, err := s.mgr.AgentConn(ctx, req.SandboxId)
 	if err != nil {
-		return nil, status.Errorf(codes.FailedPrecondition, "%v", err)
+		return nil, connErr(err)
 	}
-	defer s.mgr.TouchActivity(req.SandboxId)
+	defer release()
 	return agentv1.NewAgentServiceClient(conn).DeleteFile(ctx, req)
 }
 
 func (s *GRPCServer) ListDir(ctx context.Context, req *commonv1.ListDirRequest) (*commonv1.ListDirResponse, error) {
-	conn, err := s.mgr.AgentConn(ctx, req.SandboxId)
+	conn, release, err := s.mgr.AgentConn(ctx, req.SandboxId)
 	if err != nil {
-		return nil, status.Errorf(codes.FailedPrecondition, "%v", err)
+		return nil, connErr(err)
 	}
-	defer s.mgr.TouchActivity(req.SandboxId)
+	defer release()
 	return agentv1.NewAgentServiceClient(conn).ListDir(ctx, req)
 }
 
 func (s *GRPCServer) GetLogs(req *commonv1.GetLogsRequest, stream nodev1.SandboxService_GetLogsServer) error {
-	conn, err := s.mgr.AgentConn(stream.Context(), req.SandboxId)
+	conn, release, err := s.mgr.AgentConn(stream.Context(), req.SandboxId)
 	if err != nil {
-		return status.Errorf(codes.FailedPrecondition, "%v", err)
+		return connErr(err)
 	}
+	defer release()
 	up, err := agentv1.NewAgentServiceClient(conn).GetLogs(stream.Context(), req)
 	if err != nil {
 		return err

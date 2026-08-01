@@ -10,15 +10,22 @@ import urllib.request
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
-__all__ = ["BeanClient", "Sandbox", "ExecResult", "BeanAPIError"]
+__all__ = ["BeanClient", "Sandbox", "ExecResult", "BeanAPIError", "BeanConnectionError"]
 
 
 class BeanAPIError(Exception):
-    def __init__(self, code: str, message: str, http_status: int):
+    def __init__(self, code: str, message: str, http_status: int = 0):
         super().__init__(f"{code}: {message}")
         self.code = code
         self.message = message
         self.http_status = http_status
+
+
+class BeanConnectionError(BeanAPIError):
+    """Transport-level failure (connection refused, DNS, timeout)."""
+
+    def __init__(self, message: str):
+        super().__init__("CONNECTION_ERROR", message, 0)
 
 
 @dataclass
@@ -162,24 +169,35 @@ class _Sandboxes:
 
 
 class BeanClient:
-    def __init__(self, api_key: Optional[str] = None, base_url: Optional[str] = None):
+    def __init__(
+        self,
+        api_key: Optional[str] = None,
+        base_url: Optional[str] = None,
+        timeout: float = 900.0,
+    ):
         self.api_key = api_key or os.environ.get("BEAN_API_KEY", "")
         self.base_url = (base_url or os.environ.get("BEAN_BASE_URL", "http://127.0.0.1:8080")).rstrip("/")
+        self.timeout = timeout
         self.sandboxes = _Sandboxes(self)
 
     def _request_raw(self, method: str, path: str, body: Optional[bytes] = None) -> bytes:
         req = urllib.request.Request(self.base_url + path, data=body, method=method)
         req.add_header("Authorization", f"Bearer {self.api_key}")
         try:
-            with urllib.request.urlopen(req, timeout=900) as resp:
+            with urllib.request.urlopen(req, timeout=self.timeout) as resp:
                 return resp.read()
         except urllib.error.HTTPError as e:
+            # HTTPError subclasses URLError, so it must be handled first.
             raw = e.read()
             try:
                 err = json.loads(raw)["error"]
                 raise BeanAPIError(err["code"], err["message"], e.code) from None
             except (KeyError, ValueError):
                 raise BeanAPIError("HTTP_ERROR", raw.decode(errors="replace"), e.code) from None
+        except urllib.error.URLError as e:
+            raise BeanConnectionError(f"{self.base_url}: {e.reason}") from None
+        except (TimeoutError, OSError) as e:
+            raise BeanConnectionError(f"{self.base_url}: {e}") from None
 
     def _request(self, method: str, path: str, body: Optional[dict] = None) -> Any:
         payload = json.dumps(body).encode() if body is not None else None

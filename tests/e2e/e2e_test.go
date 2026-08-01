@@ -1,6 +1,6 @@
 //go:build e2e
 
-// Package e2e runs the full stack as real processes: beand (local
+// Package e2e runs the full stack as real processes: noded (local
 // runtime) + bean-api, exercised via REST and the bean CLI binary.
 package e2e
 
@@ -20,7 +20,10 @@ import (
 	"time"
 )
 
-const apiKey = "bk_e2e_key"
+const (
+	apiKey    = "bk_e2e_key"
+	nodeToken = "nt_e2e_token"
+)
 
 var (
 	apiURL  string
@@ -65,11 +68,11 @@ func freePort() (int, error) {
 }
 
 func setup() error {
-	agentBin, err := build("bean-agent")
+	agentBin, err := build("beand")
 	if err != nil {
 		return err
 	}
-	beandBin, err := build("beand")
+	nodedBin, err := build("noded")
 	if err != nil {
 		return err
 	}
@@ -91,22 +94,24 @@ func setup() error {
 		return err
 	}
 
-	beand := exec.Command(beandBin,
+	noded := exec.Command(nodedBin,
 		"--listen", fmt.Sprintf("127.0.0.1:%d", grpcPort),
 		"--runtime", "local",
 		"--agent-bin", agentBin,
-		"--base-dir", filepath.Join(binDir, "sandboxes"))
-	beand.Stdout, beand.Stderr = os.Stderr, os.Stderr
-	if err := beand.Start(); err != nil {
+		"--base-dir", filepath.Join(binDir, "sandboxes"),
+		"--node-token", nodeToken)
+	noded.Stdout, noded.Stderr = os.Stderr, os.Stderr
+	if err := noded.Start(); err != nil {
 		return err
 	}
-	daemons = append(daemons, beand)
+	daemons = append(daemons, noded)
 
 	api := exec.Command(apiBin,
 		"--listen", fmt.Sprintf("127.0.0.1:%d", httpPort),
-		"--beand", fmt.Sprintf("127.0.0.1:%d", grpcPort),
+		"--noded", fmt.Sprintf("127.0.0.1:%d", grpcPort),
 		"--db", filepath.Join(binDir, "e2e.db"),
-		"--api-key", apiKey)
+		"--api-key", apiKey,
+		"--node-token", nodeToken)
 	api.Stdout, api.Stderr = os.Stderr, os.Stderr
 	if err := api.Start(); err != nil {
 		return err

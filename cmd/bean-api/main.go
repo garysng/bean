@@ -1,5 +1,5 @@
 // bean-api is the REST gateway. P0: single-node deployment connecting
-// directly to one beand.
+// directly to one noded.
 package main
 
 import (
@@ -15,15 +15,17 @@ import (
 	"github.com/garysng/bean/internal/control/api"
 	"github.com/garysng/bean/internal/control/store"
 	nodev1 "github.com/garysng/bean/internal/gen/bean/node/v1"
+	"github.com/garysng/bean/internal/node"
 )
 
 var version = "dev"
 
 func main() {
 	listen := flag.String("listen", "127.0.0.1:8080", "HTTP listen address")
-	beandAddr := flag.String("beand", "127.0.0.1:7443", "beand gRPC address")
+	nodedAddr := flag.String("noded", "127.0.0.1:7443", "noded gRPC address")
 	dbPath := flag.String("db", "bean.db", "SQLite database path")
 	apiKey := flag.String("api-key", os.Getenv("BEAN_API_KEY"), "API key (or BEAN_API_KEY env)")
+	nodeToken := flag.String("node-token", os.Getenv("BEAN_NODE_TOKEN"), "token for noded calls")
 	flag.Parse()
 
 	if *apiKey == "" {
@@ -36,9 +38,13 @@ func main() {
 	}
 	defer st.Close()
 
-	conn, err := grpc.NewClient(*beandAddr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	unaryTok, streamTok := node.TokenClientInterceptors(*nodeToken)
+	conn, err := grpc.NewClient(*nodedAddr,
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithUnaryInterceptor(unaryTok),
+		grpc.WithStreamInterceptor(streamTok))
 	if err != nil {
-		log.Fatalf("dial beand: %v", err)
+		log.Fatalf("dial noded: %v", err)
 	}
 	defer conn.Close()
 
@@ -47,8 +53,13 @@ func main() {
 		Addr:              *listen,
 		Handler:           srv.Handler(),
 		ReadHeaderTimeout: 10 * time.Second,
+		// Body reads are bounded per-handler via LimitReader; keep a generous
+		// ReadTimeout to stop slow-body attacks without breaking uploads.
+		ReadTimeout: 5 * time.Minute,
+		IdleTimeout: 120 * time.Second,
+		// No WriteTimeout: exec/logs/file reads legitimately stream for long.
 	}
-	log.Printf("bean-api %s listening on %s (beand=%s)", version, *listen, *beandAddr)
+	log.Printf("bean-api %s listening on %s (noded=%s)", version, *listen, *nodedAddr)
 	if err := httpSrv.ListenAndServe(); err != nil {
 		log.Fatal(err)
 	}

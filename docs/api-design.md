@@ -5,9 +5,9 @@
 
 ## 1. 设计原则
 
-- **REST 对外，gRPC 对内**：SDK/CLI 走 REST（+WebSocket 流式），control ↔ beand ↔ agent 走 gRPC
+- **REST 对外，gRPC 对内**：SDK/CLI 走 REST（+WebSocket 流式），control ↔ noded ↔ agent 走 gRPC
 - **幂等**：所有创建类接口支持 `Idempotency-Key` 头，state store 唯一约束去重
-- **大对象不进 gateway**：文件上传/下载超过阈值（默认 4 MiB）一律 presigned URL 直连 S3 或 beand 直连
+- **大对象不进 gateway**：文件上传/下载超过阈值（默认 4 MiB）一律 presigned URL 直连 S3 或 noded 直连
 - **proto 是 single source of truth**：REST DTO 由 proto 派生，OpenAPI spec 生成
 
 ## 2. 鉴权
@@ -130,7 +130,7 @@ S→C: {"type":"stdout"|"stderr","data":"<base64>"}
 S→C: {"type":"exit","exitCode":0}
 ```
 
-链路：client → gateway（升级）→ beand gRPC stream → agent。gateway 只做帧透传与鉴权。
+链路：client → gateway（升级）→ noded gRPC stream → agent。gateway 只做帧透传与鉴权。
 
 ### 3.3 Files
 
@@ -144,7 +144,7 @@ POST /sandboxes/{id}/files:uploadUrl   {"path": "...", "sizeBytes": 123456789}
      // 两段式：client PUT S3 → 调 commit → gateway 指令 agent FetchToSandbox
      //（agent 经 presigned GET 拉入 sandbox 内目标路径）
 POST /sandboxes/{id}/files:downloadUrl {"path": "..."}
-     → { "url": "<presigned GET>" }    // beand 把文件推 S3 暂存后签 URL
+     → { "url": "<presigned GET>" }    // noded 把文件推 S3 暂存后签 URL
 DELETE /sandboxes/{id}/files?path=...
 ```
 
@@ -171,7 +171,7 @@ GET  /images/{ref}/status         → { "blobReady": true, "cachedNodes": 7, "si
 
 ### 3.6 Volumes
 
-镜像与卷为两种正交资源（镜像=环境，卷=数据，独立生命周期）。数据面见 beand-design.md §3.3。
+镜像与卷为两种正交资源（镜像=环境，卷=数据，独立生命周期）。数据面见 noded-design.md §3.3。
 
 首期仅 `shared-fs` 类型（`dataset` 预留，暂不排期）：
 
@@ -229,9 +229,9 @@ GET /metrics                                            // Prometheus 格式（�
 
 **OTel 采集**：
 
-- 平台组件（gateway/scheduler/beand/agent）trace/metrics/logs 统一 OTLP 导出
+- 平台组件（gateway/scheduler/noded/agent）trace/metrics/logs 统一 OTLP 导出
   （Prometheus 兼容端点保留）;request_id 贯穿即 trace id
-- **per-sandbox 资源指标**：beand 按 sandbox 采 cpu/mem/io/net 时序（cgroup/FC
+- **per-sandbox 资源指标**：noded 按 sandbox 采 cpu/mem/io/net 时序（cgroup/FC
   stats）,resource attributes 带 sandbox_id/labels——可按 eval-run 聚合消耗
 - **sandbox 内应用 OTLP 透传（可选开启）**：agent 在 sandbox 内 listen
   localhost:4317,应用 trace 经 vsock/socket 转发出去并打 sandbox 标签
@@ -239,16 +239,16 @@ GET /metrics                                            // Prometheus 格式（�
 ## 4. 内部 gRPC proto 草案
 
 ```protobuf
-// proto/bean/node/v1/node.proto —— control plane ↔ beand
-service NodeService {                                              // beand → control（出向）
+// proto/bean/node/v1/node.proto —— control plane ↔ noded
+service NodeService {                                              // noded → control（出向）
   rpc Register(RegisterRequest) returns (RegisterResponse);        // 能力/资源画像上报
   rpc Heartbeat(stream HeartbeatRequest) returns (stream HeartbeatResponse);
       // 双向流：↑ 心跳+资源水位+sandbox 状态摘要+镜像缓存清单摘要（bloom/hash）
       // ↓ 租约确认（指令下发走 push 直连，见 5.1）
-  rpc SyncState(SyncStateRequest) returns (SyncStateResponse);     // beand 重启对账：拉全量期望状态
+  rpc SyncState(SyncStateRequest) returns (SyncStateResponse);     // noded 重启对账：拉全量期望状态
 }
 
-service SandboxService {                       // beand 实现,control/gateway 作为 client 直连
+service SandboxService {                       // noded 实现,control/gateway 作为 client 直连
   rpc CreateSandbox(CreateSandboxRequest) returns (CreateSandboxResponse);
       // spec 含 volumes: repeated VolumeMount（dataset 盘 ref / shared-fs 导出名）
   rpc RestoreSandbox(RestoreSandboxRequest) returns (RestoreSandboxResponse);  // 从 snapshot
@@ -261,7 +261,7 @@ service SandboxService {                       // beand 实现,control/gateway �
   rpc PrewarmImage(PrewarmImageRequest) returns (PrewarmImageResponse);
   rpc PrepareVolume(PrepareVolumeRequest) returns (PrepareVolumeResponse);
       // shared-fs 后端挂载确认（dataset 预留）
-  // 数据面：gateway/proxy 直连 beand 转发（携带 sandbox-id 路由头）,纯透传 AgentService：
+  // 数据面：gateway/proxy 直连 noded 转发（携带 sandbox-id 路由头）,纯透传 AgentService：
   rpc Exec(ExecRequest) returns (ExecResponse);
   rpc StreamExec(stream StreamExecFrame) returns (stream StreamExecFrame);
   rpc ReadFile(ReadFileRequest) returns (stream FileChunk);
@@ -272,7 +272,7 @@ service SandboxService {                       // beand 实现,control/gateway �
   rpc ForwardPort(stream PortFrame) returns (stream PortFrame);   // proxy 数据面
 }
 
-// proto/bean/agent/v1/agent.proto —— beand ↔ bean-agent（fc 档 vsock 主路径 / 容器档 unix socket,P5）
+// proto/bean/agent/v1/agent.proto —— noded ↔ beand（fc 档 vsock 主路径 / 容器档 unix socket,P5）
 service AgentService {
   rpc Exec(ExecRequest) returns (ExecResponse);
   rpc StreamExec(stream StreamExecFrame) returns (stream StreamExecFrame);
@@ -297,23 +297,23 @@ service AgentService {
 - `CreateSandboxRequest` 含完整 `SandboxSpec`（image ref、resources、isolation、
   network、agent 注入参数、S3 产物 presigned URL 束）
 - `ExecRequest/StreamExecFrame` 在 SandboxService 与 AgentService 中共享 message
-  定义（`proto/bean/common/v1/exec.proto`），beand 纯透传
+  定义（`proto/bean/common/v1/exec.proto`），noded 纯透传
 
 ## 5. 控制流细节
 
 ### 5.1 指令下发模型：push 直连
 
-控制面直接 gRPC 调用 beand 的 `SandboxService`（beand 是 gRPC server,同 region 内网直连,node token 校验）——与 e2b/AgentENV/CubeSandbox 的业界一致做法相同，调度路径最短：
+控制面直接 gRPC 调用 noded 的 `SandboxService`（noded 是 gRPC server,同 region 内网直连,node token 校验）——与 e2b/AgentENV/CubeSandbox 的业界一致做法相同，调度路径最短：
 
 ```
 scheduler 决策（内存态 + Postgres 事务扣承诺量、写指令记录）
-  → 直连 beand.CreateSandbox（同步返回受理结果）
-  → beand 异步执行,状态变更经 Heartbeat 上报
+  → 直连 noded.CreateSandbox（同步返回受理结果）
+  → noded 异步执行,状态变更经 Heartbeat 上报
 ```
 
-- **连接方向闭合**：数据面（gateway/proxy → beand 的 exec/文件/端口）要求同
-  region 内网可达（regional proxy 与节点同域部署）。控制面 → beand 的指令在
-  节点「出向-only、入站零暴露」前提下这样闭合：beand 启动即向托管接入层建立
+- **连接方向闭合**：数据面（gateway/proxy → noded 的 exec/文件/端口）要求同
+  region 内网可达（regional proxy 与节点同域部署）。控制面 → noded 的指令在
+  节点「出向-only、入站零暴露」前提下这样闭合：noded 启动即向托管接入层建立
   **长连 gRPC 双向流（CommandChannel）**,控制面把 SandboxService 调用多路复用
   到该流上下发（请求/响应帧带 command_id 关联）——语义仍是 push 直连（控制面
   发起、同步等响应）,只是传输承载在节点出向连接上;node token 在流建立时校验,
@@ -321,12 +321,12 @@ scheduler 决策（内存态 + Postgres 事务扣承诺量、写指令记录）
 - **可靠性不靠 pull,靠写库 + 对账**：
   - 指令先写 Postgres（audit + 状态机 source of truth）,RPC 只是投递方式
   - RPC 超时/失败 → 有限重试;仍失败 → 释放承诺量重调度（见 architecture D7）
-  - beand 按 command_id 幂等去重（重试安全）
-  - beand 重启 → `SyncState`（拉全量期望状态）对账,补投丢失指令
+  - noded 按 command_id 幂等去重（重试安全）
+  - noded 重启 → `SyncState`（拉全量期望状态）对账,补投丢失指令
 - Heartbeat 双向流职责收敛为：↑ 心跳/资源水位/sandbox 状态/缓存摘要,
   ↓ 租约确认（不再承担指令通知）
 
-proto 见 §4（NodeService.SyncState 承担重启对账;SandboxService 由 beand 实现、
+proto 见 §4（NodeService.SyncState 承担重启对账;SandboxService 由 noded 实现、
 control plane 作为 client 直连调用）。
 
 ### 5.2 Lifecycle 自动化语义
@@ -339,7 +339,7 @@ control plane 作为 client 直连调用）。
 | `"0s"` | 活动一结束立即触发 onIdle（eval 批量：`onIdle: kill` 用完即走） |
 | `"300s"` | 闲置 5 分钟触发 onIdle |
 
-- **idle 判定**（beand 本地,不依赖控制面）：无 exec 会话 + 无端口活跃连接 +
+- **idle 判定**（noded 本地,不依赖控制面）：无 exec 会话 + 无端口活跃连接 +
   无文件 API 操作,持续 idleTimeout;任一活动重置计时
 - **唤醒是平台默认行为（非配置）**：gateway/proxy 对 PAUSED sandbox 收到
   exec/端口/文件请求 → 触发 resume（fc 亚秒）→ 阻塞至恢复后透传;并发唤醒
@@ -355,9 +355,9 @@ control plane 作为 client 直连调用）。
 
 ```
 client → gateway：Bearer key / sandbox token
-gateway：state store 查 sandbox → nodeId → beand 地址（缓存 + 失效订阅）
-gateway → beand：gRPC（同 region 内网,node token 校验）
-beand → agent：vsock（fc 主路径;容器档 unix socket,P5）
+gateway：state store 查 sandbox → nodeId → noded 地址（缓存 + 失效订阅）
+gateway → noded：gRPC（同 region 内网,node token 校验）
+noded → agent：vsock（fc 主路径;容器档 unix socket,P5）
 ```
 
 状态语义：PAUSED → 触发透明唤醒,请求阻塞至 resume（超过唤醒时限,默认 10s,
@@ -378,9 +378,9 @@ beand → agent：vsock（fc 主路径;容器档 unix socket,P5）
 ```
 浏览器 → {sbxId}-{port}.{region}.sandbox.<domain>（DNS 直达该 region 的 proxy）
        → regional proxy：解析 Host → 鉴权（6.3）
-       → 路由查询：state store 查 sandbox → nodeId → beand 地址
+       → 路由查询：state store 查 sandbox → nodeId → noded 地址
          （本地 LRU 缓存 30s + 心跳失效推送;PAUSED → 触发透明唤醒后重路由）
-       → HTTP 反代 → beand 内嵌 sandbox-proxy（节点侧反代）
+       → HTTP 反代 → noded 内嵌 sandbox-proxy（节点侧反代）
        → 直连 sandbox IP:port（fc 档 tap IP / 容器档 veth IP,节点内路由）
 ```
 
@@ -389,7 +389,7 @@ beand → agent：vsock（fc 主路径;容器档 unix socket,P5）
 - agent 的 `ForwardPort` 保留为兜底路径（未来 localhost-only 服务等场景）
 - WebSocket 天然升级透传;连接级超时（>620s,躲上游 LB）、per-sandbox
   并发/带宽限制;proxy 侧连接活跃度喂 idle 判定（lifecycle）
-- beand 侧 sandbox-proxy 亦做 nftables 之外的第二层校验（仅放行已暴露端口）
+- noded 侧 sandbox-proxy 亦做 nftables 之外的第二层校验（仅放行已暴露端口）
 
 ### 6.3 端口鉴权
 
@@ -419,4 +419,4 @@ beand → agent：vsock（fc 主路径;容器档 unix socket,P5）
 - **审计日志**：所有写操作（create/destroy/exec 摘要）落 Postgres + 定期归档 S3
 - **sandbox 日志**：agent 环形缓冲（默认 8 MiB）实时查询；销毁时终态日志 +
   stdout/stderr 全量经 presigned URL 归档 S3（路径：`s3://<bucket>/logs/{sandboxId}/`）
-- **trace**：request_id 全链路透传，OTel 埋点（gateway、beand、agent）
+- **trace**：request_id 全链路透传，OTel 埋点（gateway、noded、agent）

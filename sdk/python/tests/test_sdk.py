@@ -9,14 +9,23 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from bean import BeanAPIError, BeanClient  # noqa: E402
+from bean import BeanAPIError, BeanClient, BeanConnectionError  # noqa: E402
 
 
 class StubHandler(BaseHTTPRequestHandler):
     store = {}
+    protocol_version = "HTTP/1.0"  # no keep-alive: avoids teardown races
 
     def log_message(self, *a):
         pass
+
+    def handle_one_request(self):
+        # Swallow connection resets during shutdown so they do not surface as
+        # spurious test errors.
+        try:
+            super().handle_one_request()
+        except (ConnectionResetError, BrokenPipeError):
+            self.close_connection = True
 
     def _auth_ok(self):
         return self.headers.get("Authorization") == "Bearer test-key"
@@ -85,6 +94,7 @@ class SDKTest(unittest.TestCase):
     @classmethod
     def tearDownClass(cls):
         cls.httpd.shutdown()
+        cls.httpd.server_close()
 
     def test_create_and_exec(self):
         sb = self.client.sandboxes.create(image="python:3.12", labels={"a": "b"})
@@ -122,6 +132,20 @@ class SDKTest(unittest.TestCase):
         with self.client.sandboxes.create(image="x") as sb:
             self.assertEqual(sb.state, "RUNNING")
         self.assertEqual(sb.state, "STOPPED")
+
+
+    def test_connection_error_is_wrapped(self):
+        # 192.0.2.0/24 is TEST-NET-1 (RFC 5737): guaranteed unroutable, so the
+        # request fails at the transport layer rather than hitting a live port.
+        c = BeanClient(api_key="k", base_url="http://192.0.2.1:8080", timeout=1)
+        with self.assertRaises(BeanConnectionError) as cm:
+            c.sandboxes.list()
+        self.assertEqual(cm.exception.code, "CONNECTION_ERROR")
+        self.assertIsInstance(cm.exception, BeanAPIError)
+
+    def test_timeout_configurable(self):
+        c = BeanClient(api_key="k", base_url=self.client.base_url, timeout=1.5)
+        self.assertEqual(c.timeout, 1.5)
 
 
 if __name__ == "__main__":

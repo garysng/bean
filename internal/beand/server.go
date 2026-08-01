@@ -1,13 +1,18 @@
-// Package agent implements the in-sandbox bean-agent gRPC service.
-package agent
+// Package beand implements the in-sandbox daemon (beand) gRPC service.
+package beand
 
 import (
 	"bytes"
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
+	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"time"
 
@@ -31,19 +36,39 @@ type Server struct {
 	startedAt time.Time
 	// rootDir confines file operations; "" means host root (production PID1).
 	rootDir string
-	logs    *RingBuffer
+	// root is an os.Root handle on rootDir. All file operations go through it
+	// so symlinks cannot escape the sandbox (os.Root refuses traversal out).
+	root *os.Root
+	logs *RingBuffer
 
-	mu       sync.Mutex
-	userProc *os.Process
+	mu           sync.Mutex
+	userProc     *os.Process
+	userExitCode *int
 }
 
 func NewServer(version, rootDir string) *Server {
-	return &Server{
+	s := &Server{
 		version:   version,
 		startedAt: time.Now(),
 		rootDir:   rootDir,
 		logs:      NewRingBuffer(8 << 20),
 	}
+	dir := rootDir
+	if dir == "" {
+		dir = "/"
+	}
+	if root, err := os.OpenRoot(dir); err == nil {
+		s.root = root
+	}
+	return s
+}
+
+// Close releases the root handle.
+func (s *Server) Close() error {
+	if s.root != nil {
+		return s.root.Close()
+	}
+	return nil
 }
 
 // Logs exposes the user-process log buffer (writer side used by process manager).
@@ -56,8 +81,28 @@ func (s *Server) Health(ctx context.Context, _ *agentv1.HealthRequest) (*agentv1
 	}, nil
 }
 
-// resolvePath confines a sandbox-visible path under rootDir and rejects escapes.
-func (s *Server) resolvePath(p string) (string, error) {
+// rootRelative validates a sandbox-visible absolute path and returns it
+// relative to the sandbox root, for use with os.Root operations. os.Root
+// itself refuses symlink traversal outside the root, so this only handles
+// argument validation and the absolute -> relative conversion.
+func (s *Server) rootRelative(p string) (string, error) {
+	if p == "" || !filepath.IsAbs(p) {
+		return "", status.Error(codes.InvalidArgument, "path must be absolute")
+	}
+	if s.root == nil {
+		return "", status.Error(codes.Internal, "sandbox root unavailable")
+	}
+	rel := strings.TrimPrefix(filepath.Clean(p), "/")
+	if rel == "" {
+		rel = "."
+	}
+	return rel, nil
+}
+
+// hostPath maps a sandbox-visible path to a host path for process cwd.
+// Unlike file ops it cannot use os.Root (exec needs a real path), so it
+// keeps the lexical containment check.
+func (s *Server) hostPath(p string) (string, error) {
 	if p == "" || !filepath.IsAbs(p) {
 		return "", status.Error(codes.InvalidArgument, "path must be absolute")
 	}
@@ -66,11 +111,23 @@ func (s *Server) resolvePath(p string) (string, error) {
 		return cleaned, nil
 	}
 	joined := filepath.Join(s.rootDir, cleaned)
-	root := filepath.Clean(s.rootDir) + string(os.PathSeparator)
-	if joined != filepath.Clean(s.rootDir) && !bytes.HasPrefix([]byte(joined+string(os.PathSeparator)), []byte(root)) {
+	root := filepath.Clean(s.rootDir)
+	if joined != root && !strings.HasPrefix(joined, root+string(os.PathSeparator)) {
 		return "", status.Error(codes.InvalidArgument, "path escapes sandbox root")
 	}
 	return joined, nil
+}
+
+// fsErr maps filesystem errors to gRPC status codes.
+func fsErr(op string, err error) error {
+	switch {
+	case os.IsNotExist(err):
+		return status.Errorf(codes.NotFound, "%s: not found", op)
+	case os.IsPermission(err):
+		return status.Errorf(codes.PermissionDenied, "%s: %v", op, err)
+	default:
+		return status.Errorf(codes.Internal, "%s: %v", op, err)
+	}
 }
 
 func (s *Server) Exec(ctx context.Context, req *commonv1.ExecRequest) (*commonv1.ExecResponse, error) {
@@ -91,7 +148,7 @@ func (s *Server) Exec(ctx context.Context, req *commonv1.ExecRequest) (*commonv1
 
 	cmd := exec.CommandContext(cctx, req.Cmd[0], req.Cmd[1:]...)
 	if req.Cwd != "" {
-		cwd, err := s.resolvePath(req.Cwd)
+		cwd, err := s.hostPath(req.Cwd)
 		if err != nil {
 			return nil, err
 		}
@@ -99,13 +156,16 @@ func (s *Server) Exec(ctx context.Context, req *commonv1.ExecRequest) (*commonv1
 	} else if s.rootDir != "" {
 		cmd.Dir = s.rootDir
 	}
-	cmd.Env = os.Environ()
-	for k, v := range req.Env {
-		cmd.Env = append(cmd.Env, k+"="+v)
-	}
+	cmd.Env = buildEnv(req.Env)
 	if len(req.Stdin) > 0 {
 		cmd.Stdin = bytes.NewReader(req.Stdin)
 	}
+	// Run in its own process group and kill the whole group on timeout,
+	// then bound the wait so a grandchild holding the output pipe cannot
+	// block Wait forever.
+	cmd.SysProcAttr = execSysProcAttr()
+	cmd.Cancel = func() error { return killGroup(cmd) }
+	cmd.WaitDelay = 5 * time.Second
 
 	stdout := newCappedBuffer(maxOut)
 	stderr := newCappedBuffer(maxOut)
@@ -137,16 +197,13 @@ func (s *Server) Exec(ctx context.Context, req *commonv1.ExecRequest) (*commonv1
 }
 
 func (s *Server) ReadFile(req *commonv1.ReadFileRequest, stream agentv1.AgentService_ReadFileServer) error {
-	path, err := s.resolvePath(req.Path)
+	rel, err := s.rootRelative(req.Path)
 	if err != nil {
 		return err
 	}
-	f, err := os.Open(path)
+	f, err := s.root.Open(rel)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return status.Errorf(codes.NotFound, "file not found: %s", req.Path)
-		}
-		return status.Errorf(codes.Internal, "open: %v", err)
+		return fsErr("open "+req.Path, err)
 	}
 	defer f.Close()
 
@@ -159,7 +216,7 @@ func (s *Server) ReadFile(req *commonv1.ReadFileRequest, stream agentv1.AgentSer
 			}
 		}
 		if rerr != nil {
-			if rerr.Error() == "EOF" {
+			if errors.Is(rerr, io.EOF) {
 				return nil
 			}
 			return status.Errorf(codes.Internal, "read: %v", rerr)
@@ -176,30 +233,41 @@ func (s *Server) WriteFile(stream agentv1.AgentService_WriteFileServer) error {
 	if meta == nil {
 		return status.Error(codes.InvalidArgument, "first frame must be meta")
 	}
-	path, err := s.resolvePath(meta.Path)
+	rel, err := s.rootRelative(meta.Path)
 	if err != nil {
 		return err
 	}
 	if meta.Mkdirs {
-		if err := os.MkdirAll(filepath.Dir(path), 0o755); err != nil {
-			return status.Errorf(codes.Internal, "mkdirs: %v", err)
+		if err := s.mkdirAllRoot(filepath.Dir(rel)); err != nil {
+			return fsErr("mkdirs "+meta.Path, err)
 		}
 	}
-	mode := os.FileMode(meta.Mode)
+	// Mask off setuid/setgid/sticky: callers may not create privileged files.
+	mode := os.FileMode(meta.Mode) & 0o777
 	if mode == 0 {
 		mode = 0o644
 	}
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, mode)
+
+	// Write to a temp file in the same directory, then rename atomically so a
+	// mid-stream failure never leaves a truncated target behind.
+	tmpRel := filepath.Join(filepath.Dir(rel), fmt.Sprintf(".bean-tmp-%s", randSuffix()))
+	f, err := s.root.OpenFile(tmpRel, os.O_CREATE|os.O_EXCL|os.O_WRONLY, mode)
 	if err != nil {
-		return status.Errorf(codes.Internal, "open: %v", err)
+		return fsErr("create temp for "+meta.Path, err)
 	}
-	defer f.Close()
+	committed := false
+	defer func() {
+		f.Close()
+		if !committed {
+			_ = s.root.Remove(tmpRel)
+		}
+	}()
 
 	var written int64
 	for {
 		frame, rerr := stream.Recv()
 		if rerr != nil {
-			if errors.Is(rerr, errEOF()) || rerr.Error() == "EOF" {
+			if errors.Is(rerr, io.EOF) {
 				break
 			}
 			return status.Errorf(codes.Internal, "recv: %v", rerr)
@@ -211,34 +279,76 @@ func (s *Server) WriteFile(stream agentv1.AgentService_WriteFileServer) error {
 		n, werr := f.Write(data)
 		written += int64(n)
 		if werr != nil {
-			return status.Errorf(codes.Internal, "write: %v", werr)
+			return fsErr("write "+meta.Path, werr)
 		}
 	}
+	if err := f.Sync(); err != nil {
+		return fsErr("sync "+meta.Path, err)
+	}
+	if err := f.Close(); err != nil {
+		return fsErr("close "+meta.Path, err)
+	}
+	if err := s.root.Rename(tmpRel, rel); err != nil {
+		return fsErr("commit "+meta.Path, err)
+	}
+	committed = true
 	return stream.SendAndClose(&commonv1.WriteFileResponse{BytesWritten: written})
 }
 
+// mkdirAllRoot creates dir and parents inside the sandbox root.
+func (s *Server) mkdirAllRoot(dir string) error {
+	if dir == "" || dir == "." || dir == "/" {
+		return nil
+	}
+	parts := strings.Split(filepath.Clean(dir), string(os.PathSeparator))
+	cur := ""
+	for _, p := range parts {
+		if p == "" || p == "." {
+			continue
+		}
+		cur = filepath.Join(cur, p)
+		if err := s.root.Mkdir(cur, 0o755); err != nil && !os.IsExist(err) {
+			return err
+		}
+	}
+	return nil
+}
+
+func randSuffix() string {
+	var b [8]byte
+	if _, err := rand.Read(b[:]); err != nil {
+		return "fallback"
+	}
+	return hex.EncodeToString(b[:])
+}
+
 func (s *Server) DeleteFile(ctx context.Context, req *commonv1.DeleteFileRequest) (*commonv1.DeleteFileResponse, error) {
-	path, err := s.resolvePath(req.Path)
+	rel, err := s.rootRelative(req.Path)
 	if err != nil {
 		return nil, err
 	}
-	if err := os.RemoveAll(path); err != nil {
-		return nil, status.Errorf(codes.Internal, "delete: %v", err)
+	if rel == "." {
+		return nil, status.Error(codes.InvalidArgument, "refusing to delete sandbox root")
+	}
+	if err := s.root.RemoveAll(rel); err != nil && !os.IsNotExist(err) {
+		return nil, fsErr("delete "+req.Path, err)
 	}
 	return &commonv1.DeleteFileResponse{}, nil
 }
 
 func (s *Server) ListDir(ctx context.Context, req *commonv1.ListDirRequest) (*commonv1.ListDirResponse, error) {
-	path, err := s.resolvePath(req.Path)
+	rel, err := s.rootRelative(req.Path)
 	if err != nil {
 		return nil, err
 	}
-	entries, err := os.ReadDir(path)
+	d, err := s.root.Open(rel)
 	if err != nil {
-		if os.IsNotExist(err) {
-			return nil, status.Errorf(codes.NotFound, "dir not found: %s", req.Path)
-		}
-		return nil, status.Errorf(codes.Internal, "readdir: %v", err)
+		return nil, fsErr("opendir "+req.Path, err)
+	}
+	defer d.Close()
+	entries, err := d.ReadDir(-1)
+	if err != nil {
+		return nil, fsErr("readdir "+req.Path, err)
 	}
 	resp := &commonv1.ListDirResponse{}
 	for _, e := range entries {
@@ -282,29 +392,49 @@ func (s *Server) StartUserProcess(ctx context.Context, req *agentv1.StartUserPro
 	}
 	cmd := exec.Command(argv[0], argv[1:]...)
 	if req.Workdir != "" {
-		wd, err := s.resolvePath(req.Workdir)
+		wd, err := s.hostPath(req.Workdir)
 		if err != nil {
 			return nil, err
 		}
 		cmd.Dir = wd
+	} else if s.rootDir != "" {
+		cmd.Dir = s.rootDir
 	}
-	cmd.Env = os.Environ()
-	for k, v := range req.Env {
-		cmd.Env = append(cmd.Env, k+"="+v)
-	}
+	cmd.Env = buildEnv(req.Env)
 	cmd.Stdout = s.logs
 	cmd.Stderr = s.logs
+	cmd.SysProcAttr = execSysProcAttr()
 	if err := cmd.Start(); err != nil {
 		return nil, status.Errorf(codes.Internal, "start: %v", err)
 	}
 	s.userProc = cmd.Process
-	go func() { _ = cmd.Wait() }()
+	// Reap and clear state so a crashed user process can be restarted.
+	go func() {
+		err := cmd.Wait()
+		exitCode := 0
+		if ee, ok := err.(*exec.ExitError); ok {
+			exitCode = ee.ExitCode()
+		} else if err != nil {
+			exitCode = -1
+		}
+		fmt.Fprintf(s.logs, "\n[beand] user process exited: code=%d\n", exitCode)
+		s.mu.Lock()
+		s.userProc = nil
+		s.userExitCode = &exitCode
+		s.mu.Unlock()
+	}()
 	return &agentv1.StartUserProcessResponse{Pid: int64(cmd.Process.Pid)}, nil
 }
 
-func errEOF() error { return errEOFSentinel }
-
-var errEOFSentinel = errors.New("EOF")
+// UserExitCode returns the last user-process exit code, if it has exited.
+func (s *Server) UserExitCode() (int, bool) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	if s.userExitCode == nil {
+		return 0, false
+	}
+	return *s.userExitCode, true
+}
 
 func tailLines(data []byte, n int) []byte {
 	if n <= 0 || len(data) == 0 {
