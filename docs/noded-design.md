@@ -467,8 +467,13 @@ netns/veth/nftables 链均带 `bean-<id>` 命名规约，孤儿扫描按前缀�
 
 ## 8. noded 自身可观测
 
-- OTLP 导出（Prometheus 端点保留）：sandbox 创建各阶段耗时直方图（拉镜像/rootfs/启动/agent ready）、
-  缓存命中率、nftables 规则数、IPAM 使用率
+- Prometheus 端点 `--metrics <addr>` → `GET /metrics`（免鉴权,本地采集）;OTLP 导出后续包同一 registry：
+  - `bean_node_create_phase_seconds{phase,runtime}` 创建各阶段耗时直方图
+    （phase: runtime_create / agent_ready / total;后续补 image_pull / rootfs / network）
+  - `bean_node_creates_total{outcome,runtime}`、`bean_node_destroys_total{outcome,runtime}`
+  - `bean_node_idle_actions_total{action,outcome}` idle 回收动作
+  - `bean_node_sandboxes{state}`、`bean_node_requests_in_flight`（scrape 时重算）
+  - 待补：缓存命中率、nftables 规则数、IPAM 使用率
 - per-sandbox 资源时序（cgroup/FC stats → OTLP,attributes 带 sandbox_id/labels）;
   agent 可选透传 sandbox 内应用 OTLP（localhost:4317 → vsock 转发）
 - 结构化日志（zap），request_id 透传

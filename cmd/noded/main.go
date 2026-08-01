@@ -7,10 +7,12 @@ import (
 	"flag"
 	"log"
 	"net"
+	"net/http"
 	"os"
 	"os/signal"
 	"strings"
 	"syscall"
+	"time"
 
 	"google.golang.org/grpc"
 
@@ -39,6 +41,7 @@ func main() {
 	memAlloc := flag.Int64("memory-mib", 8192, "allocatable memory (MiB)")
 	diskAlloc := flag.Int64("disk-mib", 102400, "allocatable sandbox disk (MiB)")
 	labelsFlag := flag.String("labels", "", "comma-separated node labels, e.g. pool=nvme,zone=a")
+	metricsAddr := flag.String("metrics", "", "HTTP address for /metrics (empty = disabled)")
 	flag.Parse()
 
 	if *nodeToken == "" && !isLoopback(*listen) {
@@ -74,6 +77,32 @@ func main() {
 		log.Println("shutting down")
 		srv.GracefulStop()
 	}()
+
+	// Metrics endpoint: scraped locally, so no auth and no sandbox contents.
+	if *metricsAddr != "" {
+		mux := http.NewServeMux()
+		mux.HandleFunc("GET /metrics", func(w http.ResponseWriter, _ *http.Request) {
+			mgr.RefreshGauges()
+			w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
+			if err := mgr.Metrics().WritePrometheus(w); err != nil {
+				log.Printf("write metrics: %v", err)
+			}
+		})
+		mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
+			w.WriteHeader(http.StatusOK)
+		})
+		metricsSrv := &http.Server{
+			Addr:              *metricsAddr,
+			Handler:           mux,
+			ReadHeaderTimeout: 10 * time.Second,
+		}
+		go func() {
+			if err := metricsSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				log.Printf("metrics server: %v", err)
+			}
+		}()
+		log.Printf("metrics on http://%s/metrics", *metricsAddr)
+	}
 
 	// Multi-node mode: dial out to the control plane, register, then keep
 	// the heartbeat alive. Nodes need no inbound path for this.

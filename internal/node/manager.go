@@ -15,6 +15,7 @@ import (
 	agentv1 "github.com/garysng/bean/internal/gen/bean/agent/v1"
 	nodev1 "github.com/garysng/bean/internal/gen/bean/node/v1"
 	"github.com/garysng/bean/internal/node/runtime"
+	"github.com/garysng/bean/internal/obs"
 )
 
 // Sandbox is noded's in-memory record of one sandbox.
@@ -31,7 +32,8 @@ type Sandbox struct {
 
 // Manager owns all sandboxes on this node.
 type Manager struct {
-	rt runtime.Runtime
+	rt      runtime.Runtime
+	metrics *obs.Registry
 
 	mu        sync.Mutex
 	sandboxes map[string]*Sandbox
@@ -42,11 +44,23 @@ type Manager struct {
 func NewManager(rt runtime.Runtime) *Manager {
 	m := &Manager{
 		rt:        rt,
+		metrics:   obs.NewRegistry(),
 		sandboxes: map[string]*Sandbox{},
 		stopCh:    make(chan struct{}),
 	}
 	go m.idleLoop()
 	return m
+}
+
+// Metrics exposes the node's registry for the /metrics endpoint.
+func (m *Manager) Metrics() *obs.Registry { return m.metrics }
+
+// observePhase records one create-phase duration. Phase names mirror the
+// cold-start budget in docs/security-and-startup.md B1.
+func (m *Manager) observePhase(phase string, d time.Duration) {
+	m.metrics.ObserveDuration("bean_node_create_phase_seconds",
+		"Sandbox create latency by phase.",
+		map[string]string{"phase": phase, "runtime": m.rt.Name()}, d)
 }
 
 func (m *Manager) Close() {
@@ -87,7 +101,19 @@ func (m *Manager) Create(ctx context.Context, spec *nodev1.SandboxSpec) (*Sandbo
 		Cmd:          spec.Cmd,
 		AutoStartCmd: spec.AutoStartCmd,
 	}
+
+	createStart := time.Now()
+	outcome := "error"
+	defer func() {
+		m.metrics.IncCounter("bean_node_creates_total",
+			"Sandbox creates handled by this node.",
+			map[string]string{"outcome": outcome, "runtime": m.rt.Name()}, 1)
+		m.observePhase("total", time.Since(createStart))
+	}()
+
+	rtStart := time.Now()
 	handle, err := m.rt.Create(ctx, rspec)
+	m.observePhase("runtime_create", time.Since(rtStart))
 	if err != nil {
 		m.dropFailed(spec.SandboxId)
 		return nil, err
@@ -100,7 +126,10 @@ func (m *Manager) Create(ctx context.Context, spec *nodev1.SandboxSpec) (*Sandbo
 		m.dropFailed(spec.SandboxId)
 		return nil, fmt.Errorf("agent dial: %w", err)
 	}
-	if err := waitHealthy(ctx, conn, 5*time.Second); err != nil {
+	healthStart := time.Now()
+	err = waitHealthy(ctx, conn, 5*time.Second)
+	m.observePhase("agent_ready", time.Since(healthStart))
+	if err != nil {
 		conn.Close()
 		_ = m.rt.Destroy(context.Background(), spec.SandboxId, true)
 		m.dropFailed(spec.SandboxId)
@@ -112,6 +141,7 @@ func (m *Manager) Create(ctx context.Context, spec *nodev1.SandboxSpec) (*Sandbo
 	sb.conn = conn
 	sb.State = runtime.StateRunning
 	m.mu.Unlock()
+	outcome = "success"
 
 	if spec.AutoStartCmd {
 		// Fire-and-forget: replay of the image entrypoint. In localRuntime
@@ -264,7 +294,19 @@ func (m *Manager) Destroy(ctx context.Context, id string, force bool) error {
 	if sb.conn != nil {
 		_ = sb.conn.Close()
 	}
-	return m.rt.Destroy(ctx, id, force)
+	start := time.Now()
+	err := m.rt.Destroy(ctx, id, force)
+	m.observePhase("destroy", time.Since(start))
+	m.metrics.IncCounter("bean_node_destroys_total", "Sandbox destroys handled by this node.",
+		map[string]string{"outcome": boolOutcome(err == nil), "runtime": m.rt.Name()}, 1)
+	return err
+}
+
+func boolOutcome(ok bool) string {
+	if ok {
+		return "success"
+	}
+	return "error"
 }
 
 func (m *Manager) Pause(ctx context.Context, id string) error {
@@ -403,12 +445,43 @@ func (m *Manager) sweepIdle() {
 			err = m.Pause(ctx, a.id)
 		}
 		cancel()
+		m.metrics.IncCounter("bean_node_idle_actions_total",
+			"Sandboxes acted on by the idle sweep.",
+			map[string]string{"action": a.onIdle, "outcome": boolOutcome(err == nil)}, 1)
 		if err != nil {
 			log.Printf("idle sweep %s (%s): %v", a.id, a.onIdle, err)
 		} else {
 			log.Printf("idle sweep: sandbox %s -> %s", a.id, a.onIdle)
 		}
 	}
+}
+
+// RefreshGauges recomputes node-level gauges; called at scrape time so the
+// numbers are authoritative rather than incrementally maintained.
+func (m *Manager) RefreshGauges() {
+	m.mu.Lock()
+	counts := map[string]float64{}
+	var inFlight float64
+	for _, sb := range m.sandboxes {
+		counts[string(sb.State)]++
+		inFlight += float64(sb.inFlight)
+	}
+	m.mu.Unlock()
+
+	for _, st := range []runtime.State{
+		runtime.StateStarting, runtime.StateRunning, runtime.StatePausing,
+		runtime.StatePaused, runtime.StateResuming, runtime.StateFailed,
+	} {
+		if _, ok := counts[string(st)]; !ok {
+			counts[string(st)] = 0
+		}
+	}
+	for st, n := range counts {
+		m.metrics.SetGauge("bean_node_sandboxes", "Sandboxes on this node by state.",
+			map[string]string{"state": st}, n)
+	}
+	m.metrics.SetGauge("bean_node_requests_in_flight",
+		"Data-plane requests currently in flight across sandboxes.", nil, inFlight)
 }
 
 // TouchActivity records data-plane activity (exec/files) for idle tracking.

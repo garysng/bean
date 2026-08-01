@@ -6,6 +6,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"testing"
@@ -276,3 +277,94 @@ func (f *failingRuntime) Destroy(context.Context, string, bool) error { return n
 func (f *failingRuntime) Pause(context.Context, string) error         { return nil }
 func (f *failingRuntime) Resume(context.Context, string) error        { return nil }
 func (f *failingRuntime) List(context.Context) ([]string, error)      { return nil, nil }
+
+func TestManagerMetricsRecordPhases(t *testing.T) {
+	m := newTestManager(t)
+	ctx := context.Background()
+	if _, err := m.Create(ctx, spec("met1")); err != nil {
+		t.Fatal(err)
+	}
+
+	var b strings.Builder
+	if err := m.Metrics().WritePrometheus(&b); err != nil {
+		t.Fatal(err)
+	}
+	out := b.String()
+	for _, want := range []string{
+		`bean_node_creates_total{outcome="success",runtime="local"} 1`,
+		`phase="runtime_create"`,
+		`phase="agent_ready"`,
+		`phase="total"`,
+		"bean_node_create_phase_seconds_count",
+	} {
+		if !strings.Contains(out, want) {
+			t.Errorf("missing %q in:\n%s", want, out)
+		}
+	}
+}
+
+func TestManagerMetricsRecordFailedCreate(t *testing.T) {
+	m := NewManager(&failingRuntime{})
+	t.Cleanup(m.Close)
+	if _, err := m.Create(context.Background(), spec("boom")); err == nil {
+		t.Fatal("expected failure")
+	}
+	var b strings.Builder
+	m.Metrics().WritePrometheus(&b)
+	if !strings.Contains(b.String(), `bean_node_creates_total{outcome="error",runtime="failing"} 1`) {
+		t.Errorf("failed create not counted:\n%s", b.String())
+	}
+}
+
+func TestManagerRefreshGauges(t *testing.T) {
+	m := newTestManager(t)
+	ctx := context.Background()
+	if _, err := m.Create(ctx, spec("g1")); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Pause(ctx, "g1"); err != nil {
+		t.Fatal(err)
+	}
+	m.RefreshGauges()
+
+	var b strings.Builder
+	m.Metrics().WritePrometheus(&b)
+	out := b.String()
+	if !strings.Contains(out, `bean_node_sandboxes{state="PAUSED"} 1`) {
+		t.Errorf("paused gauge wrong:\n%s", out)
+	}
+	// States with nothing in them report zero rather than being absent.
+	if !strings.Contains(out, `bean_node_sandboxes{state="RUNNING"} 0`) {
+		t.Errorf("running gauge not zeroed:\n%s", out)
+	}
+	if !strings.Contains(out, "bean_node_requests_in_flight 0") {
+		t.Errorf("in-flight gauge missing:\n%s", out)
+	}
+}
+
+func TestManagerMetricsCountDestroyAndIdleActions(t *testing.T) {
+	m := newTestManager(t)
+	ctx := context.Background()
+	sp := spec("idle-metric", func(s *nodev1.SandboxSpec) {
+		s.Lifecycle = &nodev1.Lifecycle{HasIdleTimeout: true, IdleTimeoutSeconds: 1, OnIdle: "kill"}
+	})
+	if _, err := m.Create(ctx, sp); err != nil {
+		t.Fatal(err)
+	}
+	deadline := time.Now().Add(5 * time.Second)
+	for m.Get("idle-metric") != nil {
+		if time.Now().After(deadline) {
+			t.Fatal("idle sweep did not fire")
+		}
+		time.Sleep(100 * time.Millisecond)
+	}
+	var b strings.Builder
+	m.Metrics().WritePrometheus(&b)
+	out := b.String()
+	if !strings.Contains(out, `bean_node_idle_actions_total{action="kill",outcome="success"} 1`) {
+		t.Errorf("idle action not counted:\n%s", out)
+	}
+	if !strings.Contains(out, `bean_node_destroys_total{outcome="success",runtime="local"} 1`) {
+		t.Errorf("destroy not counted:\n%s", out)
+	}
+}
