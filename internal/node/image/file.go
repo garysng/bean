@@ -61,7 +61,11 @@ func cloneSparse(base, dst string, sizeMiB int64) error {
 	}
 	defer out.Close()
 
-	if _, err := io.Copy(out, src); err != nil {
+	// Zero runs in the base image are skipped rather than written. A freshly
+	// made filesystem is mostly empty, so copying it byte for byte would make
+	// every sandbox cost the base image's provisioned size on disk — the thing
+	// sparse files exist to avoid.
+	if err := copySkippingZeros(out, src); err != nil {
 		return fmt.Errorf("image: copy base: %w", err)
 	}
 	// Truncate up rather than writing zeroes: the tail stays unallocated.
@@ -69,4 +73,38 @@ func cloneSparse(base, dst string, sizeMiB int64) error {
 		return fmt.Errorf("image: size rootfs: %w", err)
 	}
 	return out.Sync()
+}
+
+// copySkippingZeros writes src to dst, seeking over all-zero blocks so they
+// stay unallocated.
+func copySkippingZeros(dst *os.File, src io.Reader) error {
+	const chunk = 256 << 10
+	buf := make([]byte, chunk)
+	var offset int64
+	for {
+		n, err := io.ReadFull(src, buf)
+		if n > 0 {
+			if !allZero(buf[:n]) {
+				if _, werr := dst.WriteAt(buf[:n], offset); werr != nil {
+					return werr
+				}
+			}
+			offset += int64(n)
+		}
+		if err == io.EOF || err == io.ErrUnexpectedEOF {
+			return nil
+		}
+		if err != nil {
+			return err
+		}
+	}
+}
+
+func allZero(b []byte) bool {
+	for _, c := range b {
+		if c != 0 {
+			return false
+		}
+	}
+	return true
 }

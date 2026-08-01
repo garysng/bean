@@ -67,12 +67,21 @@ type fcVM struct {
 	cmd    *exec.Cmd
 	client *fcClient
 	rootfs *image.Rootfs
-	// vsockPath is the host socket Firecracker created for guest connections.
-	vsockPath string
-	paused    bool
+	paused bool
 	// done closes when the VMM process exits, so waiters do not poll.
 	done chan struct{}
 }
+
+// Names inside a sandbox directory. Every path Firecracker records — the vsock
+// UDS and both drives — is relative to that directory, so a snapshot taken by
+// one sandbox restores into another. See startVMM.
+const (
+	vsockName     = "vsock.sock"
+	agentDiskName = "agent.ext4"
+)
+
+// vsockHostPath is where callers on the host find the socket.
+func (v *fcVM) vsockHostPath() string { return filepath.Join(v.dir, vsockName) }
 
 func NewFCRuntime(fcBin, kernel, agentDisk, baseDir string, images image.Provider) *FCRuntime {
 	return &FCRuntime{
@@ -138,12 +147,25 @@ func (r *FCRuntime) create(ctx context.Context, spec *Spec, restoreFrom io.Reade
 	}
 	cleanup = append(cleanup, func() { _ = rootfs.Release() })
 
+	// The rootfs must sit in the sandbox directory for the relative drive path
+	// to resolve. The provider is free to put it elsewhere, so this is checked
+	// rather than assumed: a mismatch would only surface as a failed restore.
+	if filepath.Dir(rootfs.Device) != dir {
+		return nil, fmt.Errorf("fc: rootfs %s is not in the sandbox directory %s",
+			rootfs.Device, dir)
+	}
+
+	// A symlink gives the shared agent disk a name inside this sandbox, so its
+	// drive path can be relative like the rootfs. One inode, no copy.
+	if err := os.Symlink(r.AgentDiskPath, filepath.Join(dir, agentDiskName)); err != nil {
+		return nil, fmt.Errorf("fc: link agent disk: %w", err)
+	}
+
 	vm := &fcVM{
-		id:        spec.SandboxID,
-		dir:       dir,
-		rootfs:    rootfs,
-		vsockPath: filepath.Join(dir, "vsock.sock"),
-		done:      make(chan struct{}),
+		id:     spec.SandboxID,
+		dir:    dir,
+		rootfs: rootfs,
+		done:   make(chan struct{}),
 	}
 
 	apiSocket := filepath.Join(dir, "api.sock")
@@ -173,7 +195,7 @@ func (r *FCRuntime) create(ctx context.Context, spec *Spec, restoreFrom io.Reade
 
 	return &Handle{
 		SandboxID:  spec.SandboxID,
-		AgentAddr:  vsock.Addr{SocketPath: vm.vsockPath, Port: agentVsockPort}.Target(),
+		AgentAddr:  vsock.Addr{SocketPath: vm.vsockHostPath(), Port: agentVsockPort}.Target(),
 		StartedAt:  time.Now(),
 		PID:        vm.cmd.Process.Pid,
 		RuntimeTag: r.Name(),
@@ -215,6 +237,12 @@ func (r *FCRuntime) startVMM(ctx context.Context, vm *fcVM, apiSocket string) er
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// The working directory is the sandbox's own, which is what makes the vsock
+	// UDS path relative and therefore portable across a restore: Firecracker
+	// saves that path into the machine state and refuses to override it on load,
+	// so a relative path is the only way a snapshot taken by one sandbox can be
+	// restored into another.
+	cmd.Dir = vm.dir
 
 	if err := cmd.Start(); err != nil {
 		return fmt.Errorf("fc: start firecracker: %w", err)
@@ -266,22 +294,31 @@ func (r *FCRuntime) configureAndBoot(ctx context.Context, vm *fcVM, spec *Spec) 
 	// Drive order determines device naming in the guest: the first attached
 	// drive is /dev/vda, the second /dev/vdb. guestRootfsDevice depends on
 	// that, so the agent disk must be registered first.
+	//
+	// Both paths are relative to the VMM's working directory. Firecracker saves
+	// device paths into the machine state and resolves them again on restore,
+	// so an absolute path would send a restored VM looking for the source
+	// sandbox's files. Relative paths resolve inside whichever sandbox
+	// directory the VMM was started in. The agent disk is symlinked in for the
+	// same reason.
 	if err := vm.client.put(ctx, "/drives/agent", fcDrive{
-		DriveID: "agent", PathOnHost: r.AgentDiskPath,
+		DriveID: "agent", PathOnHost: agentDiskName,
 		IsRootDevice: true, IsReadOnly: true,
 	}); err != nil {
 		return err
 	}
 
 	if err := vm.client.put(ctx, "/drives/rootfs", fcDrive{
-		DriveID: "rootfs", PathOnHost: vm.rootfs.Device,
+		DriveID: "rootfs", PathOnHost: filepath.Base(vm.rootfs.Device),
 		IsRootDevice: false, IsReadOnly: vm.rootfs.ReadOnly,
 	}); err != nil {
 		return err
 	}
 
 	if err := vm.client.put(ctx, "/vsock", fcVsock{
-		GuestCID: guestCID, UDSPath: vm.vsockPath,
+		// Relative to the VMM's working directory, which is this sandbox's
+		// state directory: that is what survives a snapshot/restore.
+		GuestCID: guestCID, UDSPath: vsockName,
 	}); err != nil {
 		return err
 	}

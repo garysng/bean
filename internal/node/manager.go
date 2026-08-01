@@ -372,9 +372,51 @@ func (m *Manager) Snapshot(ctx context.Context, id string, w io.Writer) error {
 			log.Printf("sandbox %s: resume after snapshot failed: %v", id, rerr)
 		}
 	}
+
+	// Taking a snapshot resets the guest's transport, so the cached connection
+	// is dead even though the sandbox is running again. Reconnecting here keeps
+	// that a detail of snapshotting rather than an error the next exec reports.
+	if rerr := m.redialAgent(ctx, id); rerr != nil {
+		log.Printf("sandbox %s: reconnect after snapshot failed: %v", id, rerr)
+	}
+
 	restore()
 	if err != nil {
 		return fmt.Errorf("checkpoint: %w", err)
+	}
+	return nil
+}
+
+// redialAgent replaces a sandbox's agent connection.
+func (m *Manager) redialAgent(ctx context.Context, id string) error {
+	m.mu.Lock()
+	sb, ok := m.sandboxes[id]
+	if !ok {
+		m.mu.Unlock()
+		return fmt.Errorf("%w: %s", ErrSandboxNotFound, id)
+	}
+	old, handle := sb.conn, sb.Handle
+	m.mu.Unlock()
+
+	conn, err := m.connectAgent(ctx, handle)
+	if err != nil {
+		return err
+	}
+
+	m.mu.Lock()
+	sb, ok = m.sandboxes[id]
+	if !ok {
+		// Destroyed while dialling: drop the new connection rather than
+		// attaching it to a record that no longer exists.
+		m.mu.Unlock()
+		conn.Close()
+		return fmt.Errorf("%w: %s", ErrSandboxNotFound, id)
+	}
+	sb.conn = conn
+	m.mu.Unlock()
+
+	if old != nil {
+		old.Close()
 	}
 	return nil
 }
@@ -427,28 +469,51 @@ func (m *Manager) RestoreSandbox(ctx context.Context, spec *nodev1.SandboxSpec,
 // dialAgent connects to a sandbox's agent and waits for it to be healthy,
 // cleaning up the sandbox if it never comes up.
 func (m *Manager) dialAgent(ctx context.Context, id string, handle *runtime.Handle) (*grpc.ClientConn, error) {
-	conn, err := grpc.NewClient(handle.AgentAddr,
+	conn, err := m.connectAgent(ctx, handle)
+	if err != nil {
+		// A sandbox whose agent never answers is not usable, so creation tears
+		// it down rather than leaving a record pointing at nothing.
+		_ = m.rt.Destroy(context.Background(), id, true)
+		m.dropFailed(id)
+		return nil, err
+	}
+	return conn, nil
+}
+
+// connectAgent dials a sandbox's agent and waits for it to answer, without
+// touching the sandbox record. Reconnecting to a healthy sandbox must not
+// destroy it on failure, which is why this is separate from dialAgent.
+func (m *Manager) connectAgent(ctx context.Context, handle *runtime.Handle) (*grpc.ClientConn, error) {
+	// The address is handed to the dialer verbatim rather than parsed by gRPC:
+	// a vsock target carries a socket path and a port, which gRPC's name
+	// resolution rejects as "too many colons". passthrough turns off that
+	// parsing, so the runtime tier owns the address format.
+	conn, err := grpc.NewClient("passthrough:///"+handle.AgentAddr,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
 		// A microVM agent is reachable over vsock rather than a socket path,
 		// so the transport depends on the runtime tier while everything above
 		// this line does not.
 		grpc.WithContextDialer(dialAgentAddr))
 	if err != nil {
-		_ = m.rt.Destroy(context.Background(), id, true)
-		m.dropFailed(id)
 		return nil, fmt.Errorf("agent dial: %w", err)
 	}
 	healthStart := time.Now()
-	err = waitHealthy(ctx, conn, 5*time.Second)
+	// A microVM has to boot a kernel and pivot to the user image before its
+	// agent listens, which takes longer than a process-level sandbox needs.
+	err = waitHealthy(ctx, conn, agentReadyTimeout)
 	m.observePhase("agent_ready", time.Since(healthStart))
 	if err != nil {
 		conn.Close()
-		_ = m.rt.Destroy(context.Background(), id, true)
-		m.dropFailed(id)
 		return nil, fmt.Errorf("agent health: %w", err)
 	}
 	return conn, nil
 }
+
+// agentReadyTimeout bounds how long a sandbox has to bring its agent up.
+// Measured microVM boot to a healthy agent is around two seconds, so this
+// leaves room for a loaded node without waiting so long that a genuinely
+// broken sandbox ties up a create.
+const agentReadyTimeout = 20 * time.Second
 
 // specToRuntime projects the proto spec onto the runtime's view.
 func specToRuntime(spec *nodev1.SandboxSpec) *runtime.Spec {
