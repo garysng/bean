@@ -1,7 +1,10 @@
-# 实现状态与 fcRuntime 实装计划
+# 实现状态
 
-> 快照日期：2026-08-01。覆盖率 81.5%，CI 全绿（lint/race 单测/e2e/SDK/proto drift）。
-> 已在 Linux x86_64 上验证（12 包 race 单测 + e2e + SDK 全通过），无 darwin 平台假设。
+> 快照日期：2026-08-02。CI 全绿（lint / race 单测 / e2e / SDK / proto drift），
+> 覆盖率 80.5%。控制面与节点面均在 Linux x86_64 上验证过，无 darwin 平台假设。
+>
+> **microVM 档已实装并在真 KVM 机器上跑通**：Alpine 3.20 启动 2.2s，
+> host 经 vsock exec 拿到输出，snapshot 20 MiB、restore 1.8s。
 
 ## 1. 已完成
 
@@ -9,24 +12,26 @@
 
 | 组件 | 状态 | 说明 |
 |---|---|---|
-| `bean-api` REST gateway | ✅ | sandboxes CRUD、exec、files、logs、events、pause/resume、metrics;API key 鉴权、配额位、请求体限流、超时钳制 |
-| `scheduler` | ✅ | 两级放置（region → 节点）、硬过滤（runtime 能力/labels/承诺量/创建并发）、打分（镜像亲和/装箱/NVMe/spread）、按承诺量记账不超卖、批量放置、READY/SUSPECT/LOST/DRAINING |
+| `bean-api` REST gateway | ✅ | sandboxes CRUD、exec、files、logs、events、pause/resume、snapshot、image、metrics;API key 鉴权、配额位、请求体限流、超时钳制 |
+| `scheduler` | ✅ | 两级放置（region → 节点）、硬过滤（runtime 能力/labels/承诺量/创建并发）、打分（镜像亲和/装箱/NVMe/spread）;**承诺量落库**,事务内条件更新,多副本不会重复放置、重启不丢账 |
 | `nodesvc` | ✅ | Register（bootstrap token 校验 + 签发 node token）、Heartbeat 双向流续租、SyncState、租约过期回调 |
-| `store` | ✅ | SQLite（Postgres 接口已抽象）:sandbox 记录、事件历史 |
+| `store` | ✅ | SQLite（Postgres 接口已抽象）:sandbox / snapshot / image / prewarm job / 节点与预留 |
 | 事件 | ✅ | 状态机统一发件 → 持久化 + SSE 实时订阅（按 sandbox/label 过滤,慢订阅者丢弃计数） |
 | image API | ✅ | ref/digest/overlaybd 产物三层语义、状态机、prewarm job;registry 凭证 AES-256-GCM 加密存储 |
-| snapshot | ✅ 控制面 | 创建/列表/删除/引用计数、从 snapshot 创建 sandbox;blob 存储接口化（本地目录,S3 待接） |
+| snapshot | ✅ | 创建/列表/删除/引用计数、从 snapshot 创建;**blob 存 S3**（本地目录为 dev 默认） |
+| S3 存储层 | ✅ | 标准库自实现 SigV4（不引 AWS SDK）、分片上传、range 读;集成测试在 CI 里打真 MinIO |
 | 路由 | ✅ | `NodeRouter` per-node 连接池,数据面按记录里的 nodeID 解析 |
 
 ### 节点面
 
 | 组件 | 状态 | 说明 |
 |---|---|---|
-| `noded` | ✅ | Manager（创建/销毁/pause/resume、透明唤醒、本地 idle 回收、in-flight 保护）、SandboxService gRPC、node token 鉴权、metrics |
+| `noded` | ✅ | Manager（创建/销毁/pause/resume/snapshot/restore、透明唤醒、本地 idle 回收、in-flight 保护）、SandboxService gRPC、node token 鉴权、metrics |
 | `Registrar` | ✅ | 出向注册（无需入站）、SyncState 对账销毁孤儿、心跳带状态与承诺量、指数退避重连 |
-| `beand`（sandbox 内） | ✅ | exec（超时/截断/进程组 kill/WaitDelay）、文件（os.Root 防逃逸、原子写）、logs 环形缓冲、用户进程托管与回收 |
-| `LocalRuntime` | ✅ | 进程级 sandbox（dev/CI），跑真 beand 二进制,验证与 fc 档相同的 agent gRPC 面 |
-| `fcRuntime` | ⛔ 骨架 | 见 §3 |
+| `beand`（sandbox 内） | ✅ | 双档 listener（unix socket / **AF_VSOCK**）、**microVM 内作 PID 1**（挂伪文件系统 → pivot 用户镜像）、exec（超时/截断/进程组 kill）、文件（os.Root 防逃逸、原子写）、logs 环形缓冲 |
+| `FCRuntime` | ✅ | **真 Firecracker microVM**:VMM 进程管理、agent 盘为 root device + 用户镜像为第二盘、vsock、pause/resume、full snapshot / restore、销毁清理 |
+| `image.Provider` | ✅ | 接口 + `FileProvider`（稀疏 ext4 克隆）;overlaybd 作为第二实现待接 |
+| `LocalRuntime` | ✅ | 进程级 sandbox（dev/CI，含 darwin），跑真 beand 二进制,验证与 fc 档相同的 agent gRPC 面 |
 
 ### 客户端
 
@@ -37,84 +42,54 @@ pause/resume/events -f/snapshot/image）。
 ### 可观测
 
 `bean-api /metrics`：创建结果与延迟、exec 延迟、各状态 sandbox 数、事件计数与订阅数。
-`noded /metrics`：创建阶段耗时（runtime_create / agent_ready / total）、
-创建/销毁/idle 动作计数、节点 sandbox 状态与 in-flight。
+`noded /metrics`：创建阶段耗时、创建/销毁/idle/snapshot 计数、节点 sandbox 状态与 in-flight。
+
+fc 档实测创建耗时分解：`runtime_create` 274ms（起 VMM）、
+`agent_ready` 1.93s（内核启动 + pivot + listen）、`total` 2.2s。
+**内核启动是主要成本**,后续加速从这里入手。
 
 ### 验证覆盖
 
-- 单节点 e2e：真进程 gateway + noded + CLI，create→exec→files→pause→唤醒→events→destroy
-- 多节点 e2e：1 gateway + 2 自注册 noded，放置分散、exec 路由正确、容量耗尽 503、释放后可再创建
-- 安全回归：symlink 逃逸阻断、setuid 位剥离、host env 不泄漏、超时后孤儿孙进程不挂起
-- 并发回归：并发放置恰好 N 个成功、并发 pause 只一个胜出、连接池无竞态
-- snapshot e2e：写文件 → snapshot → 从 snapshot 创建 → exec 读回内容一致;
-  克隆间互相独立、fan-out 多份、引用计数拒删、blob 随记录删除
+- **microVM 全链路**（真 KVM 机器,经 Manager 与 CLI 两层）：create → exec →
+  cp 双向 → pause → 透明唤醒 → snapshot → 从 snapshot 创建 → 验证时点语义
+  （快照后写入不出现在克隆里）→ 克隆间互相独立 → destroy 无残留
+- 单节点 / 多节点 e2e：真进程 gateway + noded + CLI（local 档）
+- scheduler 持久化属性：两副本并发放置恰好 N 个成功、重启不丢承诺量、
+  LOST 跨副本只报一次、孤儿预留可回收
+- S3：真 MinIO 上分片上传、abort 不留可读对象、range 读、含空格的 key
+- 安全回归：symlink 逃逸阻断、setuid 位剥离、host env 不泄漏、孤儿孙进程不挂起
+- vsock：CONNECT 握手不过读、Close 唤醒阻塞的 Accept、端口可重绑
 
 ## 2. 与设计的差距
 
 | 项 | 状态 |
 |---|---|
-| fcRuntime（真 microVM） | ⛔ 未实装,**唯一实质缺口** |
-| overlaybd 镜像链路 | ⛔ 未实装（依赖 fc 档）;image 状态机与 API 已就位 |
-| prewarm 节点侧执行 | ⚠️ API 与 job 状态已就位,节点侧拉取随 overlaybd 落地 |
-| snapshot 的 fc 档实现 | ⚠️ 控制面全通;LocalRuntime 用 tar 真跑通,fc 档 memory snapshot 待实装 |
+| overlaybd 镜像链路（S3 lazy-pull） | ⛔ 未实装 —— **当前唯一实质缺口**;`image.Provider` 接口已就位,overlaybd 已装在节点上 |
+| build image（BuildKit + Dockerfile 语义） | ⛔ 未开始;设计见 `docs/image-build.md` |
+| prewarm 节点侧执行 | ⚠️ API 与 job 状态已就位,节点侧随 overlaybd 落地 |
+| diff snapshot（增量） | ⚠️ 当前 full snapshot;Firecracker 支持 diff,接口无需改 |
 | fork / shared-fs 卷 / proxy 端口暴露 | ⛔ P3–P4 范围,未开始 |
 | OTLP 导出 | ⚠️ registry 已就位,包一层即可 |
 | Postgres | ⚠️ 接口已抽象,当前 SQLite |
-| 创建阶段指标 image_pull/rootfs/network | ⚠️ 埋点位已留,等 fc 档 |
+| 创建阶段指标 image_pull / network | ⚠️ 埋点位已留,等 overlaybd 与网络 |
 
-## 3. fcRuntime 实装计划
+## 3. 节点前提
 
-### 3.1 前置环境
+fc 档需要：
 
-**已备好**（192.168.75.52，root 可登录）：Linux x86_64、16 核 / 23 GB、
-`/dev/kvm` 可用（AMD svm）、Go 1.24.5、Firecracker + Jailer v1.10.1、TCMU 可用。
+- `/dev/kvm`（Intel VT-x 或 AMD SVM）
+- Firecracker 二进制、guest 内核镜像、agent 盘（`hack/build-assets.sh` 构建）
+- **AMD 主机需 `kvm.ignore_msrs=Y`**：Firecracker 保存快照时读 Intel 专有的
+  MSR 0x3a,AMD 上 KVM 会拒绝。`NewFCTier` 启动时检查并给出修复命令,
+  而不是等到快照失败才暴露。
 
-**限制**：内核 5.15（< 6.0）→ 无 `/dev/ublk-control`，overlaybd 需走 **tcmu 后端**
-（功能完整，性能不如 ublk）。若要 ublk 需装 HWE 内核（`linux-generic-hwe-22.04`，6.8）
-并重启。
-
-**仍需**：`overlaybd` 组件、S3 或兼容对象存储。参考实现在本地
-`/Users/mac/project/agentenv`（AgentENV，uvm-ublk 直驱 overlaybd + FC 的完整实证）。
-
-### 3.2 实装顺序
-
-1. **guest 内核 + agent 盘**（先手工构建，流水线后置）
-   - 6.x 精简 config，内嵌 virtio-blk/net/vsock、erofs、nfs
-   - agent 盘：erofs 只读镜像，含静态编译 `beand` + 最小工具
-   - 验收：`firecracker` 手工起 VM，guest 内 `beand` 能 listen vsock
-2. **overlaybd 块设备组装**（`internal/node/image`）
-   - 预转换镜像 → ublk 设备（先全量本地，lazy-pull 后置）
-   - 产出 `runtime.RootfsMount`（块设备路径），与 Runtime 解耦
-   - 验收：给定镜像 ref 拿到可挂载块设备，`mount` 后内容正确
-3. **`fcRuntime.Create`**
-   - jailer + firecracker 进程管理、virtio-blk×2（rootfs + agent 盘）、vsock、tap
-   - guest 内 beand 作 init：挂载矩阵 → 切根 → 应用 image config → listen
-   - 验收：`Manager.Create` 走 fc 档拿到健康 agent，现有 manager 测试全过
-4. **vsock transport**
-   - beand 的 listener 抽象加 vsock 实现;noded 侧 dial vsock
-   - 验收：`internal/beand` 现有测试在 vsock 传输下同样通过
-5. **销毁与对账**
-   - FC 进程/tap/ublk 设备/挂载点清理;reconcile 枚举存活 FC 进程
-   - 验收：destroy 后无残留（e2e 已有断言，换 fc 档复用）
-6. **补齐阶段指标**：image_pull / rootfs / network 三个 phase 埋点
-
-### 3.3 可复用的现有资产
-
-fcRuntime 只需实现 `runtime.Runtime` 接口（7 个方法，含 Checkpoint/Restore），
-**上层完全不用改**：
-Manager、gRPC 面、scheduler、gateway、SDK、CLI、e2e 断言都与 runtime 无关。
-`LocalRuntime` 已证明这层抽象成立——同一套 manager/e2e 测试换实现即可复用。
-
-### 3.4 风险
-
-| 风险 | 缓解 |
-|---|---|
-| guest 内核 config 调试耗时 | 先用 AgentENV 的 config 起步 |
-| vsock 与 unix socket 语义差异 | transport 抽象已就位,协议层不变 |
-| ublk 内核要求 | 节点 OS 统一基线;tcmu 后端兜底 |
-| 清理不彻底导致残留 | 沿用 `bean-<id>` 命名规约 + 现有孤儿扫描 |
+overlaybd 需要 ublk（内核 ≥ 6.0)或 tcmu 后端。当前验证机是 Ubuntu 20.04 +
+内核 5.15,无 `/dev/ublk-control`,所以 overlaybd 走 **tcmu**;
+换 22.04 + HWE 6.8 才有 ublk（性能更好）。
 
 ## 4. 下一步
 
-环境已就绪，控制面（含 image/snapshot/registry 认证）已完整且在 Linux 上验证过。
-按 §3.2 顺序实装 fcRuntime 即可，第一步是 guest 内核 + agent 盘。
+1. **overlaybd 接入** `image.Provider`：S3 lazy-pull 替代 FileProvider 的全量拷贝。
+   这是最后一个实质缺口,也是 eval 场景「镜像零转换」卖点的落地点。
+2. **build image**：BuildKit 驱动 Dockerfile 完整语义,产物直接是 overlaybd 格式。
+3. 加速创建：2.2s 里 1.9s 是内核启动,精简 guest config 或用 snapshot 预热池。
