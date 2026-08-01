@@ -30,7 +30,9 @@
 | `Registrar` | ✅ | 出向注册（无需入站）、SyncState 对账销毁孤儿、心跳带状态与承诺量、指数退避重连 |
 | `beand`（sandbox 内） | ✅ | 双档 listener（unix socket / **AF_VSOCK**）、**microVM 内作 PID 1**（挂伪文件系统 → pivot 用户镜像）、exec（超时/截断/进程组 kill）、文件（os.Root 防逃逸、原子写）、logs 环形缓冲 |
 | `FCRuntime` | ✅ | **真 Firecracker microVM**:VMM 进程管理、agent 盘为 root device + 用户镜像为第二盘、vsock、pause/resume、full snapshot / restore、销毁清理 |
-| `image.Provider` | ✅ | 接口 + `FileProvider`（稀疏 ext4 克隆）;overlaybd 作为第二实现待接 |
+| `image.Provider` | ✅ | `DevMapperProvider`（**共享只读基础镜像 + 每 sandbox CoW,一个 sandbox 只占 8 KiB**）、`FileProvider`（全量拷贝,兜底）、`PullingProvider`（首次使用时拉取转换,并发去重） |
+| OCI 镜像拉取与转换 | ✅ | 节点直接说 distribution API（不依赖 docker/containerd）:manifest / 多平台 index / token 挑战 / **layer 断点续传**;whiteout 语义、路径逃逸防护;转换产物带 sidecar 记录 ref |
+| prewarm | ✅ | 控制面后台调 `PrewarmImage`,节点拉取转换;节点心跳上报 `cachedImages`,**镜像亲和打分与 prewarm 进度因此才真正生效**（之前从未被填充） |
 | `LocalRuntime` | ✅ | 进程级 sandbox（dev/CI，含 darwin），跑真 beand 二进制,验证与 fc 档相同的 agent gRPC 面 |
 
 ### 客户端
@@ -44,9 +46,13 @@ pause/resume/events -f/snapshot/image）。
 `bean-api /metrics`：创建结果与延迟、exec 延迟、各状态 sandbox 数、事件计数与订阅数。
 `noded /metrics`：创建阶段耗时、创建/销毁/idle/snapshot 计数、节点 sandbox 状态与 in-flight。
 
-fc 档实测创建耗时分解：`runtime_create` 274ms（起 VMM）、
-`agent_ready` 1.93s（内核启动 + pivot + listen）、`total` 2.2s。
+fc 档实测（镜像已缓存）：`runtime_create` ~200-270ms（起 VMM）、
+`agent_ready` ~1.9s（内核启动 + pivot + listen）、`total` ~2.2s。
 **内核启动是主要成本**,后续加速从这里入手。
+
+snapshot：checkpoint 1.5s、restore 1.8s、bundle 约 16-20 MiB。
+镜像首次拉取转换：busybox 5-10s,alpine 在网络不稳时 2m45s ——
+所以 prewarm 是必需的,不是优化。
 
 ### 验证覆盖
 
@@ -64,14 +70,13 @@ fc 档实测创建耗时分解：`runtime_create` 274ms（起 VMM）、
 
 | 项 | 状态 |
 |---|---|
-| overlaybd 镜像链路（S3 lazy-pull） | ⛔ 未实装 —— **当前唯一实质缺口**;`image.Provider` 接口已就位,overlaybd 已装在节点上 |
-| build image（BuildKit + Dockerfile 语义） | ⛔ 未开始;设计见 `docs/image-build.md` |
-| prewarm 节点侧执行 | ⚠️ API 与 job 状态已就位,节点侧随 overlaybd 落地 |
+| build image（BuildKit + Dockerfile 语义） | ⛔ 未开始 —— **当前最大缺口**;设计见 `docs/image-build.md` |
+| overlaybd lazy-pull | ⚠️ 当前是「拉全量 + 转换 + CoW 共享」,已能用且成本低（每 sandbox 8 KiB）;overlaybd 的价值在于**首次拉取**也按需,节点已装好组件,接同一个 `image.Provider` 接口即可 |
 | diff snapshot（增量） | ⚠️ 当前 full snapshot;Firecracker 支持 diff,接口无需改 |
 | fork / shared-fs 卷 / proxy 端口暴露 | ⛔ P3–P4 范围,未开始 |
 | OTLP 导出 | ⚠️ registry 已就位,包一层即可 |
 | Postgres | ⚠️ 接口已抽象,当前 SQLite |
-| 创建阶段指标 image_pull / network | ⚠️ 埋点位已留,等 overlaybd 与网络 |
+| 创建阶段指标 network | ⚠️ 埋点位已留,等网络实装 |
 
 ## 3. 节点前提
 
@@ -89,7 +94,10 @@ overlaybd 需要 ublk（内核 ≥ 6.0)或 tcmu 后端。当前验证机是 Ubun
 
 ## 4. 下一步
 
-1. **overlaybd 接入** `image.Provider`：S3 lazy-pull 替代 FileProvider 的全量拷贝。
-   这是最后一个实质缺口,也是 eval 场景「镜像零转换」卖点的落地点。
-2. **build image**：BuildKit 驱动 Dockerfile 完整语义,产物直接是 overlaybd 格式。
-3. 加速创建：2.2s 里 1.9s 是内核启动,精简 guest config 或用 snapshot 预热池。
+1. **build image**：BuildKit 驱动 Dockerfile 完整语义。当前只能用现成的 registry
+   镜像,自己构建还得走外部流程。
+2. **加速创建**：2.2s 里 1.9s 是内核启动。精简 guest config,或维护一个
+   snapshot 预热池（restore 1.8s 也不快,但可以在请求到来前就备好）。
+3. **overlaybd lazy-pull**：让首次拉取也按需读块,而不是拉全量再转换。
+   现在 CoW 已经解决了「每 sandbox 的成本」,overlaybd 解决的是
+   「首次使用一个大镜像的等待时间」。
