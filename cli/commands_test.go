@@ -3,6 +3,7 @@ package cli
 import (
 	"bytes"
 	"encoding/json"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -73,6 +74,23 @@ func stubAPI(t *testing.T) (*httptest.Server, *[]string) {
 		json.NewEncoder(w).Encode(map[string]any{"events": []map[string]any{
 			{"type": "sandbox.lifecycle.created", "timestamp": "2026-08-01T00:00:00Z"},
 			{"type": "sandbox.lifecycle.running", "timestamp": "2026-08-01T00:00:01Z"}}})
+	})
+	mux.HandleFunc("GET /v1/events", func(w http.ResponseWriter, r *http.Request) {
+		seen = append(seen, "stream:sandbox="+r.URL.Query().Get("sandbox")+
+			",label="+r.URL.Query().Get("label"))
+		w.Header().Set("Content-Type", "text/event-stream")
+		w.WriteHeader(200)
+		io.WriteString(w, ": connected\n\n")
+		for _, typ := range []string{"sandbox.lifecycle.created", "sandbox.lifecycle.failed"} {
+			data := map[string]any{"type": typ, "sandboxId": "sbx_cli1",
+				"timestamp": "2026-08-01T00:00:00Z", "version": "v1"}
+			if typ == "sandbox.lifecycle.failed" {
+				data["data"] = map[string]string{"reason": "boom"}
+			}
+			b, _ := json.Marshal(data)
+			io.WriteString(w, "event: "+typ+"\ndata: "+string(b)+"\n\n")
+		}
+		io.WriteString(w, ": keepalive\n\n")
 	})
 	mux.HandleFunc("PUT /v1/sandboxes/{id}/files", func(w http.ResponseWriter, r *http.Request) {
 		seen = append(seen, "upload:"+r.URL.Query().Get("path"))
@@ -308,5 +326,48 @@ func TestClientTimeoutFromEnv(t *testing.T) {
 	t.Setenv("BEAN_TIMEOUT", "garbage")
 	if got := NewClient("http://x", "k").HTTP.Timeout; got != 15*time.Minute {
 		t.Errorf("invalid value should fall back to default, got %s", got)
+	}
+}
+
+func TestCmdEventsFollow(t *testing.T) {
+	ts, seen := stubAPI(t)
+	out, errStr, code := runCLI(t, ts, "events", "-f", "sbx_cli1", "--label", "run=a")
+	if code != 0 {
+		t.Fatalf("code=%d err=%q", code, errStr)
+	}
+	for _, want := range []string{"sbx_cli1", "sandbox.lifecycle.created", "sandbox.lifecycle.failed"} {
+		if !strings.Contains(out, want) {
+			t.Errorf("out missing %q: %q", want, out)
+		}
+	}
+	// The reason from event data is surfaced inline.
+	if !strings.Contains(out, "boom") {
+		t.Errorf("expected failure reason in output: %q", out)
+	}
+	// Comment/keepalive lines must not leak into output.
+	if strings.Contains(out, "connected") || strings.Contains(out, "keepalive") {
+		t.Errorf("SSE comments leaked: %q", out)
+	}
+	if (*seen)[0] != "stream:sandbox=sbx_cli1,label=run=a" {
+		t.Errorf("stream call = %q", (*seen)[0])
+	}
+}
+
+func TestCmdEventsFollowClusterWide(t *testing.T) {
+	ts, seen := stubAPI(t)
+	// No sandbox id: follow everything.
+	if _, errStr, code := runCLI(t, ts, "events", "--follow"); code != 0 {
+		t.Fatalf("code=%d err=%q", code, errStr)
+	}
+	if (*seen)[0] != "stream:sandbox=,label=" {
+		t.Errorf("stream call = %q", (*seen)[0])
+	}
+}
+
+func TestCmdEventsRequiresIDWithoutFollow(t *testing.T) {
+	ts, _ := stubAPI(t)
+	_, errStr, code := runCLI(t, ts, "events")
+	if code != 125 || !strings.Contains(errStr, "usage") {
+		t.Errorf("code=%d stderr=%q", code, errStr)
 	}
 }

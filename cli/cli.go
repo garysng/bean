@@ -2,6 +2,7 @@
 package cli
 
 import (
+	"bufio"
 	"bytes"
 	"encoding/json"
 	"fmt"
@@ -136,7 +137,7 @@ commands:
   pause SBX | resume SBX
   logs SBX [--tail N]
   cp LOCAL sbx:SBX:/path | sbx:SBX:/path LOCAL
-  events SBX
+  events SBX | events -f [SBX] [--label k=v]    # -f follows the live stream
 env: BEAN_BASE_URL (default http://127.0.0.1:8080), BEAN_API_KEY`
 
 func envOr(k, def string) string {
@@ -154,6 +155,13 @@ func parseFlags(args []string) (map[string]string, []string) {
 		if a == "--" {
 			pos = append(pos, args[i+1:]...)
 			break
+		}
+		// Short flags (-f, -it) are boolean-only; long flags may take a value.
+		if len(a) > 1 && a[0] == '-' && a[1] != '-' {
+			for _, r := range a[1:] {
+				flags[string(r)] = "true"
+			}
+			continue
 		}
 		if strings.HasPrefix(a, "--") {
 			key := strings.TrimPrefix(a, "--")
@@ -308,6 +316,61 @@ func cmdLogs(c *Client, args []string, stdout io.Writer) error {
 	return err
 }
 
+// streamEvents follows the SSE event stream until interrupted.
+func streamEvents(c *Client, sandbox, label string, stdout io.Writer) error {
+	q := url.Values{}
+	if sandbox != "" {
+		q.Set("sandbox", sandbox)
+	}
+	if label != "" {
+		q.Set("label", label)
+	}
+	path := "/v1/events"
+	if len(q) > 0 {
+		path += "?" + q.Encode()
+	}
+	resp, err := c.do("GET", path, nil)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		data, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))
+	}
+
+	sc := bufio.NewScanner(resp.Body)
+	sc.Buffer(make([]byte, 0, 64*1024), 1<<20)
+	for sc.Scan() {
+		line := sc.Text()
+		// Skip comments (": connected"/": keepalive"), blanks and the
+		// event: name line; the data: line carries the full payload.
+		if !strings.HasPrefix(line, "data:") {
+			continue
+		}
+		payload := strings.TrimSpace(strings.TrimPrefix(line, "data:"))
+		if payload == "" {
+			continue
+		}
+		var ev struct {
+			Type      string            `json:"type"`
+			SandboxID string            `json:"sandboxId"`
+			Timestamp time.Time         `json:"timestamp"`
+			Data      map[string]string `json:"data"`
+		}
+		if err := json.Unmarshal([]byte(payload), &ev); err != nil {
+			continue
+		}
+		extra := ""
+		if reason := ev.Data["reason"]; reason != "" {
+			extra = "  " + reason
+		}
+		fmt.Fprintf(stdout, "%s  %s  %s%s\n",
+			ev.Timestamp.Format(time.RFC3339), ev.SandboxID, ev.Type, extra)
+	}
+	return sc.Err()
+}
+
 // cmdCp copies LOCAL -> sbx:ID:/path or sbx:ID:/path -> LOCAL.
 func cmdCp(c *Client, args []string, stdout io.Writer) error {
 	_, pos := parseFlags(args)
@@ -382,9 +445,17 @@ func splitSbxPath(s string) (id, path string, err error) {
 }
 
 func cmdEvents(c *Client, args []string, stdout io.Writer) error {
-	_, pos := parseFlags(args)
+	flags, pos := parseFlags(args)
+	if flags["follow"] == "true" || flags["f"] == "true" {
+		// Follow streams cluster-wide unless a sandbox or label narrows it.
+		sandbox := ""
+		if len(pos) > 0 {
+			sandbox = pos[0]
+		}
+		return streamEvents(c, sandbox, flags["label"], stdout)
+	}
 	if len(pos) < 1 {
-		return fmt.Errorf("usage: bean events SBX")
+		return fmt.Errorf("usage: bean events SBX [-f] [--label k=v]")
 	}
 	var out struct {
 		Events []struct {

@@ -64,7 +64,7 @@ url = sbx.ports.expose(8888, auth="token")                 # → https://...
 # —— 进程 / 日志 / 事件 ——
 sbx.start()                                                # 拉起原 entrypoint
 for line in sbx.logs(follow=True): ...
-for ev in client.events.subscribe(labels={"eval-run": "r0731"}): ...   # WS 实时
+for ev in client.events.subscribe(labels={"eval-run": "r0731"}): ...   # SSE 实时
 sbx.events()                                               # 历史
 
 # —— volume（独立资源：镜像=环境,卷=数据,跨 sandbox 留存;首期仅 shared-fs）——
@@ -145,6 +145,7 @@ bean ls  [--label k=v] [--state RUNNING] [-o json|table|wide]
 bean exec SBX [-i -t] -- CMD...
 bean cp   ./local sbx:SBX:/path    |    sbx:SBX:/path ./local     # 目录自动 tar
 bean logs SBX [-f --tail 100]
+bean events SBX             # 历史;`-f [SBX] [--label k=v]` 跟随实时流(SSE)
 bean kill SBX...            # 支持 --label 批量
 bean attach SBX             # 重连 detach 的 PTY 会话
 bean start SBX              # 拉起原 entrypoint

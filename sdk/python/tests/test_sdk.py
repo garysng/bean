@@ -9,7 +9,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from bean import BeanAPIError, BeanClient, BeanConnectionError  # noqa: E402
+from bean import BeanAPIError, BeanClient, BeanConnectionError, Event  # noqa: E402
 
 
 class StubHandler(BaseHTTPRequestHandler):
@@ -62,6 +62,21 @@ class StubHandler(BaseHTTPRequestHandler):
     def do_GET(self):
         if not self._auth_ok():
             return self._json(401, {"error": {"code": "UNAUTHENTICATED", "message": "no"}})
+        if self.path.startswith("/v1/events"):
+            self.send_response(200)
+            self.send_header("Content-Type", "text/event-stream")
+            self.end_headers()
+            # Preamble comment, two real events, a keepalive, then EOF.
+            self.wfile.write(b": connected\n\n")
+            for typ, sid in (("sandbox.lifecycle.created", "sbx_1"),
+                             ("sandbox.lifecycle.running", "sbx_1")):
+                payload = json.dumps({"type": typ, "sandboxId": sid,
+                                      "timestamp": "2026-08-01T00:00:00Z",
+                                      "data": {"k": "v"}, "version": "v1"})
+                self.wfile.write(f"event: {typ}\ndata: {payload}\n\n".encode())
+            self.wfile.write(b": keepalive\n\n")
+            self.wfile.flush()
+            return
         if self.path == "/v1/sandboxes":
             return self._json(200, {"sandboxes": list(StubHandler.store.values())})
         if self.path.startswith("/v1/sandboxes/sbx_stub1/files?"):
@@ -142,6 +157,33 @@ class SDKTest(unittest.TestCase):
             c.sandboxes.list()
         self.assertEqual(cm.exception.code, "CONNECTION_ERROR")
         self.assertIsInstance(cm.exception, BeanAPIError)
+
+    def test_events_subscribe_yields_events(self):
+        got = list(self.client.events.subscribe())
+        if len(got) != 2:
+            self.fail(f"expected 2 events, got {got}")
+        self.assertIsInstance(got[0], Event)
+        self.assertEqual(got[0].type, "sandbox.lifecycle.created")
+        self.assertEqual(got[0].sandbox_id, "sbx_1")
+        self.assertEqual(got[0].data, {"k": "v"})
+        self.assertEqual(got[1].type, "sandbox.lifecycle.running")
+
+    def test_events_subscribe_filters_are_sent(self):
+        # Filters go on the query string; the stub accepts any and replays.
+        got = list(self.client.events.subscribe(sandbox_id="sbx_1",
+                                                labels={"eval-run": "r1"}))
+        self.assertEqual(len(got), 2)
+
+    def test_events_subscribe_auth_error(self):
+        bad = BeanClient(api_key="wrong", base_url=self.client.base_url)
+        with self.assertRaises(BeanAPIError) as cm:
+            list(bad.events.subscribe())
+        self.assertEqual(cm.exception.code, "UNAUTHENTICATED")
+
+    def test_events_subscribe_connection_error(self):
+        c = BeanClient(api_key="k", base_url="http://192.0.2.1:8080")
+        with self.assertRaises(BeanConnectionError):
+            list(c.events.subscribe(timeout=1))
 
     def test_timeout_configurable(self):
         c = BeanClient(api_key="k", base_url=self.client.base_url, timeout=1.5)

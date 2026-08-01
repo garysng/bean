@@ -24,6 +24,26 @@ func TestParseFlagsBool(t *testing.T) {
 	}
 }
 
+func TestParseFlagsShortFlags(t *testing.T) {
+	flags, pos := parseFlags([]string{"-f", "sbx1", "--label", "k=v"})
+	if flags["f"] != "true" {
+		t.Errorf("flags = %v, want f=true", flags)
+	}
+	if len(pos) != 1 || pos[0] != "sbx1" {
+		t.Errorf("pos = %v", pos)
+	}
+	// Bundled short flags each become their own key.
+	flags, _ = parseFlags([]string{"-it"})
+	if flags["i"] != "true" || flags["t"] != "true" {
+		t.Errorf("bundled flags = %v", flags)
+	}
+	// A bare "-" stays positional.
+	_, pos = parseFlags([]string{"-"})
+	if len(pos) != 1 || pos[0] != "-" {
+		t.Errorf("pos = %v, want [-]", pos)
+	}
+}
+
 func TestSplitSbxPath(t *testing.T) {
 	id, path, err := splitSbxPath("sbx:sbx_abc:/workspace/a.txt")
 	if err != nil || id != "sbx_abc" || path != "/workspace/a.txt" {

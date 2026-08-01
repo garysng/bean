@@ -10,7 +10,10 @@ import urllib.request
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 
-__all__ = ["BeanClient", "Sandbox", "ExecResult", "BeanAPIError", "BeanConnectionError"]
+__all__ = [
+    "BeanClient", "Sandbox", "ExecResult", "Event",
+    "BeanAPIError", "BeanConnectionError",
+]
 
 
 class BeanAPIError(Exception):
@@ -35,6 +38,25 @@ class ExecResult:
     stderr: str
     truncated: bool
     duration_ms: int
+
+
+@dataclass
+class Event:
+    type: str
+    sandbox_id: str
+    timestamp: str
+    data: Dict[str, str] = field(default_factory=dict)
+    version: str = "v1"
+
+    @classmethod
+    def _from_json(cls, obj: Dict[str, Any]) -> "Event":
+        return cls(
+            type=obj.get("type", ""),
+            sandbox_id=obj.get("sandboxId", ""),
+            timestamp=obj.get("timestamp", ""),
+            data=obj.get("data") or {},
+            version=obj.get("version", "v1"),
+        )
 
 
 @dataclass
@@ -168,6 +190,65 @@ class _Sandboxes:
         ]
 
 
+class _Events:
+    def __init__(self, client: "BeanClient"):
+        self._client = client
+
+    def subscribe(
+        self,
+        sandbox_id: Optional[str] = None,
+        labels: Optional[Dict[str, str]] = None,
+        timeout: Optional[float] = None,
+    ):
+        """Yield Event objects from the server-sent event stream.
+
+        Blocks until the connection drops or the caller stops iterating,
+        so batch runs can react to lifecycle changes without polling.
+        """
+        params: Dict[str, str] = {}
+        if sandbox_id:
+            params["sandbox"] = sandbox_id
+        if labels:
+            k, v = next(iter(labels.items()))
+            params["label"] = f"{k}={v}"
+        path = "/v1/events"
+        if params:
+            path += "?" + urllib.parse.urlencode(params)
+
+        req = urllib.request.Request(self._client.base_url + path, method="GET")
+        req.add_header("Authorization", f"Bearer {self._client.api_key}")
+        req.add_header("Accept", "text/event-stream")
+        try:
+            resp = urllib.request.urlopen(req, timeout=timeout)
+        except urllib.error.HTTPError as e:
+            raw = e.read()
+            try:
+                err = json.loads(raw)["error"]
+                raise BeanAPIError(err["code"], err["message"], e.code) from None
+            except (KeyError, ValueError):
+                raise BeanAPIError("HTTP_ERROR", raw.decode(errors="replace"), e.code) from None
+        except urllib.error.URLError as e:
+            raise BeanConnectionError(f"{self._client.base_url}: {e.reason}") from None
+        except (TimeoutError, OSError) as e:
+            raise BeanConnectionError(f"{self._client.base_url}: {e}") from None
+
+        with resp:
+            for raw_line in resp:
+                line = raw_line.decode("utf-8", errors="replace").rstrip("\r\n")
+                # Comment lines (": connected", ": keepalive") and blank
+                # separators carry no payload.
+                if not line or line.startswith(":") or line.startswith("event:"):
+                    continue
+                if line.startswith("data:"):
+                    payload = line[len("data:"):].strip()
+                    if not payload:
+                        continue
+                    try:
+                        yield Event._from_json(json.loads(payload))
+                    except ValueError:
+                        continue
+
+
 class BeanClient:
     def __init__(
         self,
@@ -179,6 +260,7 @@ class BeanClient:
         self.base_url = (base_url or os.environ.get("BEAN_BASE_URL", "http://127.0.0.1:8080")).rstrip("/")
         self.timeout = timeout
         self.sandboxes = _Sandboxes(self)
+        self.events = _Events(self)
 
     def _request_raw(self, method: str, path: str, body: Optional[bytes] = None) -> bytes:
         req = urllib.request.Request(self.base_url + path, data=body, method=method)
