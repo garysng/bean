@@ -54,6 +54,9 @@ type FCRuntime struct {
 	BaseDir string
 	// Images supplies the rootfs block device.
 	Images image.Provider
+	// Committer seals a sandbox's filesystem into a new base image. Nil
+	// disables commit, which is what a node that only runs sandboxes wants.
+	Committer *image.Committer
 
 	mu   sync.Mutex
 	vms  map[string]*fcVM
@@ -111,6 +114,23 @@ func (r *FCRuntime) CachedImages() (map[string]int64, error) {
 		return nil, errors.New("fc: no image provider")
 	}
 	return r.Images.Cached()
+}
+
+// CommitSandbox seals a sandbox's filesystem into a base image under tag.
+//
+// The sandbox must be paused so the filesystem is not moving underneath the
+// read; the caller owns that, since only it knows whether the sandbox should
+// keep running afterwards.
+func (r *FCRuntime) CommitSandbox(ctx context.Context, id, tag string) error {
+	if r.Committer == nil {
+		return errors.New("fc: commit not configured")
+	}
+	vm, err := r.get(id)
+	if err != nil {
+		return err
+	}
+	_, err = r.Committer.Commit(ctx, vm.rootfs.Device, tag)
+	return err
 }
 
 func (r *FCRuntime) Create(ctx context.Context, spec *Spec) (*Handle, error) {

@@ -118,6 +118,8 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		err = cmdEvents(c, rest, stdout)
 	case "snapshot":
 		err = cmdSnapshot(c, rest, stdout)
+	case "commit":
+		err = cmdCommit(c, rest, stdout)
 	case "image":
 		err = cmdImage(c, rest, stdout)
 	case "version":
@@ -143,6 +145,7 @@ commands:
   logs SBX [--tail N]
   cp LOCAL sbx:SBX:/path | sbx:SBX:/path LOCAL
   events SBX | events -f [SBX] [--label k=v]    # -f follows the live stream
+  commit SBX --tag REF                          # freeze the filesystem as an image
   snapshot create SBX [--name N] [--no-keep-running]
   snapshot ls [--label k=v] | snapshot rm SNAP
   run --snapshot SNAP                           # restore instead of image
@@ -331,6 +334,27 @@ func cmdLogs(c *Client, args []string, stdout io.Writer) error {
 }
 
 // cmdSnapshot handles snapshot create/ls/rm.
+// cmdCommit turns a sandbox's filesystem into a reusable base image.
+//
+// Distinct from snapshot: a snapshot restores this one sandbox including its
+// memory, on the tier that made it. A committed image is a filesystem anyone can
+// start from — the "set it up interactively, then share it" path.
+func cmdCommit(c *Client, args []string, stdout io.Writer) error {
+	flags, pos := parseFlags(args)
+	if len(pos) == 0 || flags["tag"] == "" {
+		return fmt.Errorf("usage: bean commit SBX --tag REF")
+	}
+	var out struct {
+		ImageRef string `json:"imageRef"`
+	}
+	if err := c.doJSON("POST", "/v1/sandboxes/"+pos[0]+"/commit",
+		map[string]any{"tag": flags["tag"]}, &out); err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "committed %s -> %s\n", pos[0], out.ImageRef)
+	return nil
+}
+
 func cmdSnapshot(c *Client, args []string, stdout io.Writer) error {
 	flags, pos := parseFlags(args)
 	if len(pos) == 0 {

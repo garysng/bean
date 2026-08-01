@@ -41,8 +41,16 @@ func NewFCTier(cfg FCTierConfig) (Runtime, error) {
 		}
 	}
 
-	return NewFCRuntime(cfg.FirecrackerBin, cfg.KernelPath, cfg.AgentDiskPath,
-		cfg.BaseDir, selectProvider(cfg)), nil
+	rt := NewFCRuntime(cfg.FirecrackerBin, cfg.KernelPath, cfg.AgentDiskPath,
+		cfg.BaseDir, selectProvider(cfg))
+	// Committed images land beside pulled ones, because a committed image is a
+	// base image like any other — that is the point of committing rather than
+	// snapshotting.
+	rt.Committer = &image.Committer{
+		ImageDir: cfg.ImageDir,
+		WorkDir:  filepath.Join(cfg.ImageDir, ".work"),
+	}
+	return rt, nil
 }
 
 // selectProvider picks how a rootfs is assembled.

@@ -108,6 +108,20 @@ func (s *GRPCServer) PrewarmImage(ctx context.Context, req *nodev1.PrewarmImageR
 	return &nodev1.PrewarmImageResponse{Ready: true}, nil
 }
 
+// CommitSandbox seals a sandbox's filesystem into a base image.
+func (s *GRPCServer) CommitSandbox(ctx context.Context, req *nodev1.CommitSandboxRequest) (*nodev1.CommitSandboxResponse, error) {
+	if req.Tag == "" {
+		return nil, status.Error(codes.InvalidArgument, "tag required")
+	}
+	if err := s.mgr.CommitSandbox(ctx, req.SandboxId, req.Tag); err != nil {
+		if errors.Is(err, ErrSandboxNotFound) {
+			return nil, status.Errorf(codes.NotFound, "sandbox %s not found", req.SandboxId)
+		}
+		return nil, status.Errorf(codes.Internal, "commit %s: %v", req.SandboxId, err)
+	}
+	return &nodev1.CommitSandboxResponse{ImageRef: req.Tag}, nil
+}
+
 // ---- data plane passthrough ----
 
 func (s *GRPCServer) Exec(ctx context.Context, req *commonv1.ExecRequest) (*commonv1.ExecResponse, error) {

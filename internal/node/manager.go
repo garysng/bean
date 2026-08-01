@@ -14,6 +14,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 
 	agentv1 "github.com/garysng/bean/internal/gen/bean/agent/v1"
+	commonv1 "github.com/garysng/bean/internal/gen/bean/common/v1"
 	nodev1 "github.com/garysng/bean/internal/gen/bean/node/v1"
 	"github.com/garysng/bean/internal/node/runtime"
 	"github.com/garysng/bean/internal/obs"
@@ -383,6 +384,104 @@ func (m *Manager) Snapshot(ctx context.Context, id string, w io.Writer) error {
 	restore()
 	if err != nil {
 		return fmt.Errorf("checkpoint: %w", err)
+	}
+	return nil
+}
+
+// CommitSandbox turns a sandbox's filesystem into a base image.
+//
+// The sandbox is frozen for the read and returned to its prior state
+// afterwards, the same discipline Snapshot uses: a filesystem read while
+// processes are writing to it would capture a torn state that fails to mount.
+func (m *Manager) CommitSandbox(ctx context.Context, id, tag string) error {
+	committer, ok := m.rt.(runtime.SandboxCommitter)
+	if !ok {
+		return fmt.Errorf("runtime %s cannot commit sandboxes", m.rt.Name())
+	}
+
+	// The guest has to flush before its filesystem is read from the host.
+	// Pausing stops the vCPUs but leaves the guest's page cache dirty, and a
+	// commit reads the block device — so without this the image silently lacks
+	// whatever the sandbox wrote most recently, which is exactly the work the
+	// user is trying to keep. (A snapshot needs no such step: Firecracker
+	// captures guest memory, so the dirty pages travel with it.)
+	//
+	// This runs before the state transition is claimed, because flushing goes
+	// through the agent and the data plane only serves runnable sandboxes.
+	if m.StateOf(id) == runtime.StateRunning {
+		if err := m.syncGuest(ctx, id); err != nil {
+			return fmt.Errorf("flush guest filesystem: %w", err)
+		}
+	}
+
+	m.mu.Lock()
+	sb, ok := m.sandboxes[id]
+	if !ok {
+		m.mu.Unlock()
+		return fmt.Errorf("%w: %s", ErrSandboxNotFound, id)
+	}
+	prev := sb.State
+	if prev != runtime.StateRunning && prev != runtime.StatePaused {
+		m.mu.Unlock()
+		return fmt.Errorf("sandbox %s is %s; commit needs RUNNING or PAUSED", id, prev)
+	}
+	sb.State = runtime.StateSnapshotting
+	m.mu.Unlock()
+
+	restore := func() {
+		m.mu.Lock()
+		if cur, ok := m.sandboxes[id]; ok && cur.State == runtime.StateSnapshotting {
+			cur.State = prev
+		}
+		m.mu.Unlock()
+	}
+
+	if prev == runtime.StateRunning {
+		if err := m.rt.Pause(ctx, id); err != nil {
+			restore()
+			return fmt.Errorf("freeze for commit: %w", err)
+		}
+	}
+
+	start := time.Now()
+	err := committer.CommitSandbox(ctx, id, tag)
+	m.observePhase("commit", time.Since(start))
+	m.metrics.IncCounter("bean_node_commits_total",
+		"Sandbox commits on this node.",
+		map[string]string{"outcome": boolOutcome(err == nil), "runtime": m.rt.Name()}, 1)
+
+	if prev == runtime.StateRunning {
+		if rerr := m.rt.Resume(ctx, id); rerr != nil {
+			log.Printf("sandbox %s: resume after commit failed: %v", id, rerr)
+		}
+	}
+	restore()
+	if err != nil {
+		return fmt.Errorf("commit: %w", err)
+	}
+	return nil
+}
+
+// syncGuest asks the agent to flush the guest's filesystem, so what the host
+// then reads from the block device includes everything the sandbox wrote.
+func (m *Manager) syncGuest(ctx context.Context, id string) error {
+	conn, release, err := m.AgentConn(ctx, id)
+	if err != nil {
+		return err
+	}
+	defer release()
+
+	syncCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	res, err := agentv1.NewAgentServiceClient(conn).Exec(syncCtx, &commonv1.ExecRequest{
+		SandboxId: id,
+		Cmd:       []string{"/bin/sh", "-c", "sync"},
+	})
+	if err != nil {
+		return err
+	}
+	if res.ExitCode != 0 {
+		return fmt.Errorf("sync exited %d: %s", res.ExitCode, res.Stderr)
 	}
 	return nil
 }

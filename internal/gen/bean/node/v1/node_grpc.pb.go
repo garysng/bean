@@ -206,6 +206,7 @@ const (
 	SandboxService_RestoreSandbox_FullMethodName   = "/bean.node.v1.SandboxService/RestoreSandbox"
 	SandboxService_StartUserProcess_FullMethodName = "/bean.node.v1.SandboxService/StartUserProcess"
 	SandboxService_PrewarmImage_FullMethodName     = "/bean.node.v1.SandboxService/PrewarmImage"
+	SandboxService_CommitSandbox_FullMethodName    = "/bean.node.v1.SandboxService/CommitSandbox"
 	SandboxService_Exec_FullMethodName             = "/bean.node.v1.SandboxService/Exec"
 	SandboxService_StreamExec_FullMethodName       = "/bean.node.v1.SandboxService/StreamExec"
 	SandboxService_ReadFile_FullMethodName         = "/bean.node.v1.SandboxService/ReadFile"
@@ -239,6 +240,10 @@ type SandboxServiceClient interface {
 	// A first pull can take minutes — longer than a create should block — so the
 	// control plane warms images before placing work that needs them.
 	PrewarmImage(ctx context.Context, in *PrewarmImageRequest, opts ...grpc.CallOption) (*PrewarmImageResponse, error)
+	// CommitSandbox seals a sandbox's filesystem into a base image. Unlike a
+	// snapshot the result carries no memory state and is not bound to the tier
+	// that made it, so any sandbox can start from it.
+	CommitSandbox(ctx context.Context, in *CommitSandboxRequest, opts ...grpc.CallOption) (*CommitSandboxResponse, error)
 	// Data plane passthrough to AgentService.
 	Exec(ctx context.Context, in *v1.ExecRequest, opts ...grpc.CallOption) (*v1.ExecResponse, error)
 	StreamExec(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[v1.StreamExecFrame, v1.StreamExecFrame], error)
@@ -353,6 +358,16 @@ func (c *sandboxServiceClient) PrewarmImage(ctx context.Context, in *PrewarmImag
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(PrewarmImageResponse)
 	err := c.cc.Invoke(ctx, SandboxService_PrewarmImage_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sandboxServiceClient) CommitSandbox(ctx context.Context, in *CommitSandboxRequest, opts ...grpc.CallOption) (*CommitSandboxResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(CommitSandboxResponse)
+	err := c.cc.Invoke(ctx, SandboxService_CommitSandbox_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -477,6 +492,10 @@ type SandboxServiceServer interface {
 	// A first pull can take minutes — longer than a create should block — so the
 	// control plane warms images before placing work that needs them.
 	PrewarmImage(context.Context, *PrewarmImageRequest) (*PrewarmImageResponse, error)
+	// CommitSandbox seals a sandbox's filesystem into a base image. Unlike a
+	// snapshot the result carries no memory state and is not bound to the tier
+	// that made it, so any sandbox can start from it.
+	CommitSandbox(context.Context, *CommitSandboxRequest) (*CommitSandboxResponse, error)
 	// Data plane passthrough to AgentService.
 	Exec(context.Context, *v1.ExecRequest) (*v1.ExecResponse, error)
 	StreamExec(grpc.BidiStreamingServer[v1.StreamExecFrame, v1.StreamExecFrame]) error
@@ -521,6 +540,9 @@ func (UnimplementedSandboxServiceServer) StartUserProcess(context.Context, *Star
 }
 func (UnimplementedSandboxServiceServer) PrewarmImage(context.Context, *PrewarmImageRequest) (*PrewarmImageResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method PrewarmImage not implemented")
+}
+func (UnimplementedSandboxServiceServer) CommitSandbox(context.Context, *CommitSandboxRequest) (*CommitSandboxResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method CommitSandbox not implemented")
 }
 func (UnimplementedSandboxServiceServer) Exec(context.Context, *v1.ExecRequest) (*v1.ExecResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Exec not implemented")
@@ -708,6 +730,24 @@ func _SandboxService_PrewarmImage_Handler(srv interface{}, ctx context.Context, 
 	return interceptor(ctx, in, info, handler)
 }
 
+func _SandboxService_CommitSandbox_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(CommitSandboxRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SandboxServiceServer).CommitSandbox(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SandboxService_CommitSandbox_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SandboxServiceServer).CommitSandbox(ctx, req.(*CommitSandboxRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _SandboxService_Exec_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(v1.ExecRequest)
 	if err := dec(in); err != nil {
@@ -832,6 +872,10 @@ var SandboxService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "PrewarmImage",
 			Handler:    _SandboxService_PrewarmImage_Handler,
+		},
+		{
+			MethodName: "CommitSandbox",
+			Handler:    _SandboxService_CommitSandbox_Handler,
 		},
 		{
 			MethodName: "Exec",

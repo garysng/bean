@@ -83,3 +83,14 @@ type ImageLister interface {
 	// CachedImages maps image reference to its size on this node.
 	CachedImages() (map[string]int64, error)
 }
+
+// SandboxCommitter is implemented by runtimes that can turn a sandbox's
+// filesystem into a base image.
+//
+// This is not a snapshot: the result has no memory state and is not bound to the
+// runtime that produced it, so other sandboxes — on any tier — can start from
+// it. The sandbox must be paused for the read to be consistent, which the caller
+// arranges since only it knows whether the sandbox should keep running.
+type SandboxCommitter interface {
+	CommitSandbox(ctx context.Context, id, tag string) error
+}
