@@ -45,8 +45,12 @@ type Server struct {
 	placer        Placer
 	defaultNodeID string
 	region        string
-	apiKey        string
-	mux           *http.ServeMux
+	// runtimeTier is the node capability sandboxes require. Runtime tiers
+	// are internal (docs/architecture.md D3): callers never choose one.
+	runtimeTier string
+	apiKey      string
+	bus         *eventBus
+	mux         *http.ServeMux
 }
 
 // NewServer builds a single-node gateway routing everything to one noded.
@@ -58,8 +62,31 @@ func NewServer(st *store.Store, nodeClient nodev1.SandboxServiceClient, nodeID, 
 // nodes. Pass a nil placer to keep single-node behaviour.
 func NewServerWithRouter(st *store.Store, router Router, placer Placer,
 	defaultNodeID, region, apiKey string) *Server {
+	return NewServerWithOptions(st, router, placer, Options{
+		DefaultNodeID: defaultNodeID, Region: region, APIKey: apiKey,
+	})
+}
+
+// Options configures the gateway.
+type Options struct {
+	DefaultNodeID string
+	Region        string
+	APIKey        string
+	// RuntimeTier is the node capability required for placement; defaults
+	// to "fc" (the main tier) when empty.
+	RuntimeTier string
+}
+
+// NewServerWithOptions is the full constructor.
+func NewServerWithOptions(st *store.Store, router Router, placer Placer, opts Options) *Server {
+	tier := opts.RuntimeTier
+	if tier == "" {
+		tier = "fc"
+	}
 	s := &Server{store: st, router: router, placer: placer,
-		defaultNodeID: defaultNodeID, region: region, apiKey: apiKey, mux: http.NewServeMux()}
+		defaultNodeID: opts.DefaultNodeID, region: opts.Region,
+		runtimeTier: tier, apiKey: opts.APIKey,
+		bus: newEventBus(), mux: http.NewServeMux()}
 	s.routes()
 	return s
 }
@@ -85,6 +112,9 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /v1/sandboxes/{id}/files/ls", s.handleListDir)
 	s.mux.HandleFunc("GET /v1/sandboxes/{id}/logs", s.handleLogs)
 	s.mux.HandleFunc("GET /v1/sandboxes/{id}/events", s.handleEvents)
+	// Live subscription (Server-Sent Events): no extra dependency, works
+	// through proxies, and the browser/SDK story is simple.
+	s.mux.HandleFunc("GET /v1/events", s.handleEventStream)
 	s.mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
 		w.WriteHeader(http.StatusOK)
 	})
@@ -230,7 +260,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		placement = &scheduler.Request{
 			SandboxID: id, Region: s.region, Image: req.Image,
 			CPU: spec.Cpu, MemoryMiB: spec.MemoryMib, DiskMiB: spec.DiskMib,
-			Runtime: "local", SpreadKey: req.Labels["eval-run"],
+			Runtime: s.runtimeTier, SpreadKey: req.Labels["eval-run"],
 		}
 		nodeID, err := s.placer.Schedule(placement)
 		if err != nil {
@@ -686,10 +716,66 @@ func (s *Server) handleEvents(w http.ResponseWriter, r *http.Request) {
 }
 
 func (s *Server) emit(sandboxID, typ string, data map[string]string) {
-	if err := s.store.AppendEvent(&store.Event{
+	ev := &store.Event{
 		Type: typ, Timestamp: time.Now(), SandboxID: sandboxID, Data: data, Version: "v1",
-	}); err != nil {
+	}
+	if err := s.store.AppendEvent(ev); err != nil {
 		log.Printf("emit event %s %s: %v", sandboxID, typ, err)
+	}
+	// Label filtering for subscribers needs the sandbox's labels; a missing
+	// record only costs label-filtered subscribers this one event.
+	var labels map[string]string
+	if rec, err := s.store.GetSandbox(sandboxID); err == nil && rec != nil {
+		labels = rec.Labels
+	}
+	s.bus.publish(ev, labels)
+}
+
+// handleEventStream streams lifecycle events as SSE until the client
+// disconnects. Filters: ?sandbox=<id> and/or ?label=k=v.
+func (s *Server) handleEventStream(w http.ResponseWriter, r *http.Request) {
+	flusher, ok := w.(http.Flusher)
+	if !ok {
+		writeErr(w, http.StatusInternalServerError, "INTERNAL", "streaming unsupported")
+		return
+	}
+	labelKey, labelVal := parseLabelFilter(r.URL.Query().Get("label"))
+	sub, unsubscribe := s.bus.subscribe(r.URL.Query().Get("sandbox"), labelKey, labelVal)
+	defer unsubscribe()
+
+	w.Header().Set("Content-Type", "text/event-stream")
+	w.Header().Set("Cache-Control", "no-cache")
+	w.Header().Set("Connection", "keep-alive")
+	w.WriteHeader(http.StatusOK)
+	// Comment line so clients see a response immediately.
+	_, _ = io.WriteString(w, ": connected\n\n")
+	flusher.Flush()
+
+	keepalive := time.NewTicker(25 * time.Second)
+	defer keepalive.Stop()
+
+	for {
+		select {
+		case <-r.Context().Done():
+			return
+		case ev, ok := <-sub.ch:
+			if !ok {
+				return
+			}
+			payload, err := json.Marshal(ev)
+			if err != nil {
+				continue
+			}
+			if _, err := fmt.Fprintf(w, "event: %s\ndata: %s\n\n", ev.Type, payload); err != nil {
+				return
+			}
+			flusher.Flush()
+		case <-keepalive.C:
+			if _, err := io.WriteString(w, ": keepalive\n\n"); err != nil {
+				return
+			}
+			flusher.Flush()
+		}
 	}
 }
 

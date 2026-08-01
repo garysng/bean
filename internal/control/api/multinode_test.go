@@ -79,7 +79,9 @@ func startMultiNodeStack(t *testing.T, n int) (*httptest.Server, *scheduler.Sche
 
 	router := NewNodeRouter(res, "")
 	t.Cleanup(router.Close)
-	srv := NewServerWithRouter(st, router, sched, "", "r1", testKey)
+	srv := NewServerWithOptions(st, router, sched, Options{
+		Region: "r1", APIKey: testKey, RuntimeTier: "local",
+	})
 	ts := httptest.NewServer(srv.Handler())
 	t.Cleanup(ts.Close)
 	return ts, sched, ids
@@ -184,7 +186,9 @@ func TestMultiNodeUnreachableNode(t *testing.T) {
 	t.Cleanup(func() { st.Close() })
 	router := NewNodeRouter(res, "")
 	t.Cleanup(router.Close)
-	ts := httptest.NewServer(NewServerWithRouter(st, router, sched, "", "r1", testKey).Handler())
+	ts := httptest.NewServer(NewServerWithOptions(st, router, sched, Options{
+		Region: "r1", APIKey: testKey, RuntimeTier: "local",
+	}).Handler())
 	t.Cleanup(ts.Close)
 
 	resp, out := doReq(t, ts, "POST", "/v1/sandboxes", map[string]any{"image": "img:1"})

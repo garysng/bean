@@ -37,6 +37,8 @@ func main() {
 	nodeToken := flag.String("node-token", os.Getenv("BEAN_NODE_TOKEN"), "token for noded calls")
 	bootstrapToken := flag.String("bootstrap-token", os.Getenv("BEAN_BOOTSTRAP_TOKEN"),
 		"token nodes must present to register (multi-node mode)")
+	runtimeTier := flag.String("runtime-tier", "fc",
+		"node capability required for placement (fc|local|runc|runsc)")
 	flag.Parse()
 
 	if *apiKey == "" {
@@ -54,7 +56,7 @@ func main() {
 
 	var srv *api.Server
 	if *nodeGRPC != "" {
-		srv = setupMultiNode(ctx, st, *nodeGRPC, *region, *apiKey, *nodeToken, *bootstrapToken)
+		srv = setupMultiNode(ctx, st, *nodeGRPC, *region, *apiKey, *nodeToken, *bootstrapToken, *runtimeTier)
 	} else {
 		srv = setupSingleNode(st, *nodedAddr, *apiKey, *nodeToken)
 		log.Printf("single-node mode (noded=%s)", *nodedAddr)
@@ -98,7 +100,7 @@ func setupSingleNode(st *store.Store, nodedAddr, apiKey, nodeToken string) *api.
 
 // setupMultiNode serves NodeService and places sandboxes via the scheduler.
 func setupMultiNode(ctx context.Context, st *store.Store,
-	nodeGRPCAddr, region, apiKey, nodeToken, bootstrapToken string) *api.Server {
+	nodeGRPCAddr, region, apiKey, nodeToken, bootstrapToken, runtimeTier string) *api.Server {
 	sched := scheduler.New(scheduler.DefaultWeights())
 
 	svc := nodesvc.New(sched, nodesvc.Options{
@@ -130,8 +132,11 @@ func setupMultiNode(ctx context.Context, st *store.Store,
 		router.Close()
 	}()
 
-	log.Printf("multi-node mode: NodeService on %s (region=%s)", nodeGRPCAddr, region)
-	return api.NewServerWithRouter(st, router, sched, "", region, apiKey)
+	log.Printf("multi-node mode: NodeService on %s (region=%s runtime-tier=%s)",
+		nodeGRPCAddr, region, runtimeTier)
+	return api.NewServerWithOptions(st, router, sched, api.Options{
+		Region: region, APIKey: apiKey, RuntimeTier: runtimeTier,
+	})
 }
 
 // markNodeSandboxesLost flags a lost node's sandboxes so callers can

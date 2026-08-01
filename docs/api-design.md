@@ -212,11 +212,14 @@ POST   /sandboxes    { "snapshot": "snap_...", ... }     // 从 snapshot 创建�
           // 命名对齐 e2b（sandbox.lifecycle.* 点分层级）,便于生态兼容
 
 GET /sandboxes/{id}/events?pageToken=      // 历史（Postgres events 表,分页）
-WS  /events?label=eval-run%3Dr0731         // 实时订阅（按 label/id 过滤;
-                                           //  批量 eval 用事件驱动替代轮询）
+GET /events?sandbox=<id>&label=k%3Dv       // 实时订阅（SSE:text/event-stream;
+                                           //  按 sandbox/label 过滤;批量 eval
+                                           //  用事件驱动替代轮询）
 ```
 
-实现：状态机变更处统一发件 → Postgres（历史）+ 内存 pub/sub（WS）。
+实现：状态机变更处统一发件 → Postgres（历史）+ 内存 pub/sub（订阅）。
+订阅传输选 **SSE** 而非 WebSocket：无额外依赖、穿代理稳、浏览器/SDK 接入简单;
+慢订阅者按 64 事件缓冲后丢弃并计数（一个卡住的客户端不能拖住 API）。
 webhook 推送为 P5 储备项。
 
 ### 3.9 Logs / 可观测

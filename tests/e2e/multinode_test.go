@@ -77,7 +77,8 @@ func TestE2EMultiNode(t *testing.T) {
 		"--db", filepath.Join(dir, "mn.db"),
 		"--api-key", mnAPIKey,
 		"--node-token", mnNodeToken,
-		"--bootstrap-token", mnBootstrap)
+		"--bootstrap-token", mnBootstrap,
+		"--runtime-tier", "local")
 	api.Stdout, api.Stderr = os.Stderr, os.Stderr
 	if err := api.Start(); err != nil {
 		t.Fatal(err)
