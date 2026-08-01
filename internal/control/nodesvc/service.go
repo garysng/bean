@@ -18,6 +18,7 @@ import (
 
 	"github.com/garysng/bean/internal/control/scheduler"
 	nodev1 "github.com/garysng/bean/internal/gen/bean/node/v1"
+	"github.com/garysng/bean/internal/node"
 )
 
 // SandboxLister supplies the expected sandbox set for a node (SyncState).
@@ -102,6 +103,9 @@ func (s *Service) Register(ctx context.Context, req *nodev1.RegisterRequest) (*n
 	token := "nt_" + randHex(16)
 	s.mu.Lock()
 	s.tokens[req.NodeId] = token
+	if addr := req.Labels[node.LabelAdvertiseAddr]; addr != "" {
+		s.addrs[req.NodeId] = addr
+	}
 	s.mu.Unlock()
 
 	log.Printf("node %s registered (region=%s runtimes=%v)", req.NodeId, req.Region, caps.GetRuntimes())

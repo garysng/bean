@@ -3,6 +3,7 @@
 package main
 
 import (
+	"context"
 	"flag"
 	"log"
 	"net"
@@ -27,6 +28,17 @@ func main() {
 	baseDir := flag.String("base-dir", "/var/lib/bean/sandboxes", "sandbox base directory")
 	nodeToken := flag.String("node-token", os.Getenv("BEAN_NODE_TOKEN"),
 		"shared token required from callers (empty = no auth, loopback dev only)")
+	controlPlane := flag.String("control-plane", "",
+		"NodeService address; set to register with a control plane (multi-node mode)")
+	nodeID := flag.String("node-id", "", "node id (default: derived from listen address)")
+	region := flag.String("region", "local", "region this node belongs to")
+	bootstrapToken := flag.String("bootstrap-token", os.Getenv("BEAN_BOOTSTRAP_TOKEN"),
+		"token presented when registering")
+	advertise := flag.String("advertise", "", "address the control plane should dial (default: --listen)")
+	cpuAlloc := flag.Float64("cpu", 4, "allocatable vCPU advertised to the scheduler")
+	memAlloc := flag.Int64("memory-mib", 8192, "allocatable memory (MiB)")
+	diskAlloc := flag.Int64("disk-mib", 102400, "allocatable sandbox disk (MiB)")
+	labelsFlag := flag.String("labels", "", "comma-separated node labels, e.g. pool=nvme,zone=a")
 	flag.Parse()
 
 	if *nodeToken == "" && !isLoopback(*listen) {
@@ -63,10 +75,57 @@ func main() {
 		srv.GracefulStop()
 	}()
 
+	// Multi-node mode: dial out to the control plane, register, then keep
+	// the heartbeat alive. Nodes need no inbound path for this.
+	if *controlPlane != "" {
+		id := *nodeID
+		if id == "" {
+			id = "node-" + strings.ReplaceAll(*listen, ":", "-")
+		}
+		adv := *advertise
+		if adv == "" {
+			adv = *listen
+		}
+		reg := node.NewRegistrar(mgr, *controlPlane, id, *region, *bootstrapToken,
+			parseLabels(*labelsFlag), []string{rt.Name()},
+			&nodev1.NodeResources{
+				CpuAllocatable:       *cpuAlloc,
+				MemoryAllocatableMib: *memAlloc,
+				DiskSandboxesMib:     *diskAlloc,
+			})
+		reg.Advertise = adv
+		ctx, cancel := context.WithCancel(context.Background())
+		defer cancel()
+		go func() {
+			if err := reg.Run(ctx); err != nil && ctx.Err() == nil {
+				log.Printf("registrar stopped: %v", err)
+			}
+		}()
+		log.Printf("registering with control plane %s as %s (advertise=%s)", *controlPlane, id, adv)
+	}
+
 	log.Printf("noded %s (runtime=%s) listening on %s", version, rt.Name(), *listen)
 	if err := srv.Serve(lis); err != nil {
 		log.Fatal(err)
 	}
+}
+
+// parseLabels turns "k=v,k2=v2" into a map.
+func parseLabels(s string) map[string]string {
+	if s == "" {
+		return nil
+	}
+	out := map[string]string{}
+	for _, pair := range strings.Split(s, ",") {
+		pair = strings.TrimSpace(pair)
+		if pair == "" {
+			continue
+		}
+		if k, v, ok := strings.Cut(pair, "="); ok {
+			out[strings.TrimSpace(k)] = strings.TrimSpace(v)
+		}
+	}
+	return out
 }
 
 // isLoopback reports whether addr binds only to a loopback interface.

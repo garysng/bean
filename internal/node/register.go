@@ -13,6 +13,10 @@ import (
 	"github.com/garysng/bean/internal/node/runtime"
 )
 
+// LabelAdvertiseAddr carries a node's data-plane address through
+// registration labels.
+const LabelAdvertiseAddr = "bean.io/advertise-addr"
+
 // Registrar keeps a node registered with the control plane: it registers
 // once, then maintains the heartbeat stream and reconciles on restart.
 // The node dials out, so no inbound path to the control plane is needed.
@@ -24,6 +28,9 @@ type Registrar struct {
 	BootstrapToken string
 	Resources      *nodev1.NodeResources
 	Runtimes       []string
+	// Advertise is the address the control plane should dial for this
+	// node's data plane. Empty means the control plane must already know.
+	Advertise string
 
 	mgr *Manager
 
@@ -77,11 +84,21 @@ func (r *Registrar) Run(ctx context.Context) error {
 
 // session performs one register -> reconcile -> heartbeat cycle.
 func (r *Registrar) session(ctx context.Context, client nodev1.NodeServiceClient) error {
+	labels := r.Labels
+	if r.Advertise != "" {
+		// Carry the data-plane address in labels so the control plane can
+		// route to this node without a separate discovery mechanism.
+		labels = make(map[string]string, len(r.Labels)+1)
+		for k, v := range r.Labels {
+			labels[k] = v
+		}
+		labels[LabelAdvertiseAddr] = r.Advertise
+	}
 	resp, err := client.Register(ctx, &nodev1.RegisterRequest{
 		BootstrapToken: r.BootstrapToken,
 		NodeId:         r.NodeID,
 		Region:         r.Region,
-		Labels:         r.Labels,
+		Labels:         labels,
 		Capabilities:   &nodev1.NodeCapabilities{Runtimes: r.Runtimes},
 		Resources:      r.Resources,
 	})
