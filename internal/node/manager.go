@@ -428,7 +428,11 @@ func (m *Manager) RestoreSandbox(ctx context.Context, spec *nodev1.SandboxSpec,
 // cleaning up the sandbox if it never comes up.
 func (m *Manager) dialAgent(ctx context.Context, id string, handle *runtime.Handle) (*grpc.ClientConn, error) {
 	conn, err := grpc.NewClient(handle.AgentAddr,
-		grpc.WithTransportCredentials(insecure.NewCredentials()))
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		// A microVM agent is reachable over vsock rather than a socket path,
+		// so the transport depends on the runtime tier while everything above
+		// this line does not.
+		grpc.WithContextDialer(dialAgentAddr))
 	if err != nil {
 		_ = m.rt.Destroy(context.Background(), id, true)
 		m.dropFailed(id)

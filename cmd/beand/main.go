@@ -6,8 +6,6 @@ package main
 import (
 	"flag"
 	"log"
-	"net"
-	"os"
 
 	"google.golang.org/grpc"
 
@@ -22,8 +20,7 @@ func main() {
 	rootDir := flag.String("root", "", "confine file ops under this dir (dev mode); empty = host root")
 	flag.Parse()
 
-	_ = os.Remove(*listenAddr)
-	lis, err := net.Listen("unix", *listenAddr)
+	lis, err := beand.Listen(*listenAddr)
 	if err != nil {
 		log.Fatalf("listen %s: %v", *listenAddr, err)
 	}
