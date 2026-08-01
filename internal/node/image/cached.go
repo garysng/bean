@@ -123,3 +123,19 @@ func (c *cachedRefs) invalidate() {
 
 // invalidateCache lets a conversion tell a provider its image list changed.
 func (p *FileProvider) invalidateCache() { p.cache.invalidate() }
+
+// createSparse makes a file of the given size without allocating it, which is
+// what keeps a provisioned-but-unused image or copy-on-write store from costing
+// its full size on disk. The exclusive create is deliberate: two concurrent
+// conversions must not end up writing the same file.
+func createSparse(path string, sizeMiB int64) error {
+	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
+	if err != nil {
+		return fmt.Errorf("image: create %s: %w", filepath.Base(path), err)
+	}
+	defer f.Close()
+	if err := f.Truncate(sizeMiB << 20); err != nil {
+		return fmt.Errorf("image: size %s: %w", filepath.Base(path), err)
+	}
+	return nil
+}

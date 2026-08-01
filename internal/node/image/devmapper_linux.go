@@ -248,18 +248,6 @@ func dmName(sandboxID string) string {
 	return "bean-" + sandboxID
 }
 
-func createSparse(path string, sizeMiB int64) error {
-	f, err := os.OpenFile(path, os.O_CREATE|os.O_EXCL|os.O_WRONLY, 0o600)
-	if err != nil {
-		return fmt.Errorf("image: create cow store: %w", err)
-	}
-	defer f.Close()
-	if err := f.Truncate(sizeMiB << 20); err != nil {
-		return fmt.Errorf("image: size cow store: %w", err)
-	}
-	return nil
-}
-
 func attachLoop(path string, readOnly bool) (string, error) {
 	args := []string{"--find", "--show"}
 	if readOnly {
