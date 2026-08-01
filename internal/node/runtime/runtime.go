@@ -84,6 +84,26 @@ type ImageLister interface {
 	CachedImages() (map[string]int64, error)
 }
 
+// ImageBuilder is implemented by runtimes on nodes that can build images.
+//
+// Building is optional per node: it needs BuildKit, and a cluster may well want
+// dedicated builder nodes rather than every sandbox host carrying the dependency.
+type ImageBuilder interface {
+	// BuildImage builds a base image and returns its reference.
+	BuildImage(ctx context.Context, req BuildRequest) (string, error)
+}
+
+// BuildRequest describes a build at the runtime boundary. It mirrors the node's
+// image.BuildRequest without importing it, so the runtime interface does not
+// depend on the image package's internals.
+type BuildRequest struct {
+	Tag        string
+	Dockerfile string
+	ContextTar []byte
+	BuildArgs  map[string]string
+	SizeMiB    int64
+}
+
 // SandboxCommitter is implemented by runtimes that can turn a sandbox's
 // filesystem into a base image.
 //

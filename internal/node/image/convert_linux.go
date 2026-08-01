@@ -54,7 +54,7 @@ func (c *Converter) Convert(ctx context.Context, imageRef string) (path string, 
 		return "", err
 	}
 
-	final := filepath.Join(c.ImageDir, name+".ext4")
+	final := filepath.Join(c.ImageDir, name+imageSuffix)
 	if _, err := os.Stat(final); err == nil {
 		// Already converted. Images are immutable once written — a tag that
 		// moves is a different digest and so a different file.
@@ -66,72 +66,16 @@ func (c *Converter) Convert(ctx context.Context, imageRef string) (path string, 
 		return "", err
 	}
 
-	if err := os.MkdirAll(c.WorkDir, 0o700); err != nil {
-		return "", fmt.Errorf("image: create work dir: %w", err)
-	}
-	if err := os.MkdirAll(c.ImageDir, 0o700); err != nil {
-		return "", fmt.Errorf("image: create image dir: %w", err)
-	}
-
-	// A unique name, but not a created file: makeExt4 creates it exclusively so
-	// that two conversions cannot end up sharing one.
-	tmpPath, err := reserveTempName(c.WorkDir, name)
-	if err != nil {
-		return "", err
-	}
-	defer func() {
-		if err != nil {
-			os.Remove(tmpPath)
-		}
-	}()
-
-	size := c.sizeFor(manifest)
-	if err = makeExt4(tmpPath, size); err != nil {
-		return "", err
-	}
-
-	mnt, err := os.MkdirTemp(c.WorkDir, "mnt.*")
-	if err != nil {
-		return "", fmt.Errorf("image: create mountpoint: %w", err)
-	}
-	defer os.RemoveAll(mnt)
-
-	if err = mount(tmpPath, mnt); err != nil {
-		return "", err
-	}
-	// Unmounting has to happen before the move, and has to happen even if a
-	// layer fails, or the image file stays busy and the work dir cannot be
-	// cleaned.
-	defer func() {
-		if uerr := unmount(mnt); uerr != nil && err == nil {
-			err = uerr
-		}
-	}()
-
-	for i, layer := range manifest.Layers {
-		if err = c.applyLayer(ctx, ref, layer, mnt); err != nil {
-			return "", fmt.Errorf("image: apply layer %d/%d: %w", i+1, len(manifest.Layers), err)
-		}
-	}
-
-	if err = prepareGuestDirs(mnt); err != nil {
-		return "", err
-	}
-
-	if err = unmount(mnt); err != nil {
-		return "", err
-	}
-	if err = os.Rename(tmpPath, final); err != nil {
-		return "", fmt.Errorf("image: publish base image: %w", err)
-	}
-
-	// The sidecar records which reference this file came from, which is how the
-	// node reports what it has cached. It is written after the image so a
-	// sidecar never advertises an image that is not yet usable.
-	if err = recordRef(c.ImageDir, imageRef); err != nil {
-		return "", fmt.Errorf("image: record reference: %w", err)
-	}
-	return final, nil
+	return writeBaseImage(c.ImageDir, c.WorkDir, imageRef, c.sizeFor(manifest),
+		func(root string) error {
+			for i, layer := range manifest.Layers {
+				if err := c.applyLayer(ctx, ref, layer, root); err != nil {
+					return fmt.Errorf("image: apply layer %d/%d: %w",
+						i+1, len(manifest.Layers), err)
+				}
+			}
+			return nil
+		})
 }
 
 // sizeFor picks a filesystem size. Layers are compressed, so their total is a

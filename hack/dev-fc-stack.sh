@@ -77,6 +77,7 @@ nohup "$BIN/noded" \
   --cpu 8 --memory-mib 16384 \
   --labels tier=fc \
   --metrics "127.0.0.1:$NODE_METRICS_PORT" \
+  --buildkit-addr "${BUILDKIT_ADDR:-unix:///run/bean/buildkitd.sock}" \
   >"$RUN/noded.log" 2>&1 &
 
 # Registration is what makes the node placeable, so waiting for it here means a

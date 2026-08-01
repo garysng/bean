@@ -129,6 +129,7 @@ func (s *Server) routes() {
 	// would otherwise collide with sibling routes like prewarm.
 	s.mux.HandleFunc("GET /v1/images/status", s.handleImageStatus)
 	s.mux.HandleFunc("POST /v1/images/prewarm", s.handlePrewarm)
+	s.mux.HandleFunc("POST /v1/images/build", s.handleBuild)
 	s.mux.HandleFunc("GET /v1/images/prewarm/{jobId}", s.handlePrewarmStatus)
 	s.mux.HandleFunc("PUT /v1/registries", s.handlePutRegistry)
 	s.mux.HandleFunc("GET /v1/registries", s.handleListRegistries)

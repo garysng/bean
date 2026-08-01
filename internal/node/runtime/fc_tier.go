@@ -18,4 +18,9 @@ type FCTierConfig struct {
 	// RegistryAuth supplies credentials for private registries. Nil pulls
 	// anonymously, which covers public images.
 	RegistryAuth image.CredentialSource
+	// BuildkitAddr enables image builds on this node, e.g.
+	// "unix:///run/bean/buildkitd.sock". Empty leaves builds disabled.
+	BuildkitAddr string
+	// BuildctlBin is the BuildKit client binary.
+	BuildctlBin string
 }

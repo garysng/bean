@@ -2,14 +2,17 @@
 package cli
 
 import (
+	"archive/tar"
 	"bufio"
 	"bytes"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
 	"net/url"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -120,6 +123,8 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		err = cmdSnapshot(c, rest, stdout)
 	case "commit":
 		err = cmdCommit(c, rest, stdout)
+	case "build":
+		err = cmdBuild(c, rest, stdout)
 	case "image":
 		err = cmdImage(c, rest, stdout)
 	case "version":
@@ -145,6 +150,7 @@ commands:
   logs SBX [--tail N]
   cp LOCAL sbx:SBX:/path | sbx:SBX:/path LOCAL
   events SBX | events -f [SBX] [--label k=v]    # -f follows the live stream
+  build --tag REF [--file Dockerfile] [CONTEXT] # build an image on the platform
   commit SBX --tag REF                          # freeze the filesystem as an image
   snapshot create SBX [--name N] [--no-keep-running]
   snapshot ls [--label k=v] | snapshot rm SNAP
@@ -334,6 +340,201 @@ func cmdLogs(c *Client, args []string, stdout io.Writer) error {
 }
 
 // cmdSnapshot handles snapshot create/ls/rm.
+// cmdBuild builds an image from a Dockerfile on the platform.
+//
+// The build context is packed and uploaded, so the user needs no local Docker
+// and the build cache is shared across the cluster rather than sitting on one
+// laptop.
+func cmdBuild(c *Client, args []string, stdout io.Writer) error {
+	// Long flags only: the shared parser treats short flags as boolean, which
+	// `events -f` depends on, so `-t REF` would silently lose its value.
+	flags, pos := parseFlags(args)
+	tag := flags["tag"]
+	if tag == "" {
+		return fmt.Errorf("usage: bean build --tag REF [--file Dockerfile] [CONTEXT_DIR]")
+	}
+
+	dockerfile := flags["file"]
+	contextDir := "."
+	if len(pos) > 0 {
+		contextDir = pos[0]
+	}
+	if dockerfile == "" {
+		dockerfile = filepath.Join(contextDir, "Dockerfile")
+	}
+
+	content, err := os.ReadFile(dockerfile)
+	if err != nil {
+		return fmt.Errorf("read %s: %w", dockerfile, err)
+	}
+
+	body := map[string]any{"tag": tag, "dockerfile": string(content)}
+
+	// The context is only packed when the Dockerfile needs it: a build that
+	// only runs commands should not upload the working directory.
+	if needsContext(string(content)) {
+		tarball, err := packContext(contextDir, dockerfile)
+		if err != nil {
+			return err
+		}
+		body["contextTar"] = base64.StdEncoding.EncodeToString(tarball)
+		fmt.Fprintf(stdout, "uploading %d KiB of build context\n", len(tarball)>>10)
+	}
+
+	if bargs := parseBuildArgs(flags["build-arg"]); len(bargs) > 0 {
+		body["buildArgs"] = bargs
+	}
+
+	var out struct {
+		ImageRef string `json:"imageRef"`
+		NodeID   string `json:"nodeId"`
+		State    string `json:"state"`
+	}
+	if err := c.doJSON("POST", "/v1/images/build", body, &out); err != nil {
+		return err
+	}
+	fmt.Fprintf(stdout, "%s\t%s\tbuilding on %s\n", out.ImageRef, out.State, out.NodeID)
+	fmt.Fprintf(stdout, "follow with: bean image status %s\n", out.ImageRef)
+	return nil
+}
+
+// needsContext reports whether a Dockerfile references the build context. COPY
+// and ADD are the only instructions that read it.
+func needsContext(dockerfile string) bool {
+	for _, line := range strings.Split(dockerfile, "\n") {
+		fields := strings.Fields(line)
+		if len(fields) == 0 {
+			continue
+		}
+		switch strings.ToUpper(fields[0]) {
+		case "COPY", "ADD":
+			return true
+		}
+	}
+	return false
+}
+
+// parseBuildArgs reads "K=V,K2=V2".
+func parseBuildArgs(s string) map[string]string {
+	if s == "" {
+		return nil
+	}
+	out := map[string]string{}
+	for _, pair := range strings.Split(s, ",") {
+		if k, v, ok := strings.Cut(strings.TrimSpace(pair), "="); ok {
+			out[k] = v
+		}
+	}
+	return out
+}
+
+// packContext tars a directory for upload, skipping the Dockerfile itself
+// (which travels inline) and anything .dockerignore excludes.
+func packContext(dir, dockerfilePath string) ([]byte, error) {
+	ignore, err := loadDockerignore(dir)
+	if err != nil {
+		return nil, err
+	}
+	dfAbs, _ := filepath.Abs(dockerfilePath)
+
+	var buf bytes.Buffer
+	tw := tar.NewWriter(&buf)
+	err = filepath.Walk(dir, func(path string, info os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, rerr := filepath.Rel(dir, path)
+		if rerr != nil || rel == "." {
+			return rerr
+		}
+		if abs, _ := filepath.Abs(path); abs == dfAbs {
+			return nil
+		}
+		if ignore(rel) {
+			if info.IsDir() {
+				return filepath.SkipDir
+			}
+			return nil
+		}
+		// Symlinks are recorded as links rather than followed, so a link out of
+		// the context does not drag in whatever it points at.
+		var link string
+		if info.Mode()&os.ModeSymlink != 0 {
+			if link, err = os.Readlink(path); err != nil {
+				return err
+			}
+		}
+		hdr, herr := tar.FileInfoHeader(info, link)
+		if herr != nil {
+			return herr
+		}
+		hdr.Name = filepath.ToSlash(rel)
+		if werr := tw.WriteHeader(hdr); werr != nil {
+			return werr
+		}
+		if !info.Mode().IsRegular() {
+			return nil
+		}
+		f, oerr := os.Open(path)
+		if oerr != nil {
+			return oerr
+		}
+		defer f.Close()
+		_, cerr := io.Copy(tw, f)
+		return cerr
+	})
+	if err != nil {
+		return nil, fmt.Errorf("pack build context: %w", err)
+	}
+	if err := tw.Close(); err != nil {
+		return nil, err
+	}
+	return buf.Bytes(), nil
+}
+
+// loadDockerignore returns a predicate matching excluded paths. The matching is
+// prefix and glob based, which covers the patterns in practice without
+// reimplementing Docker's full rule set.
+func loadDockerignore(dir string) (func(string) bool, error) {
+	raw, err := os.ReadFile(filepath.Join(dir, ".dockerignore"))
+	if err != nil {
+		if os.IsNotExist(err) {
+			// .git is always excluded: it is large, never needed by a build,
+			// and shipping it would leak history into the context.
+			return func(rel string) bool {
+				return rel == ".git" || strings.HasPrefix(rel, ".git/")
+			}, nil
+		}
+		return nil, err
+	}
+
+	var patterns []string
+	for _, line := range strings.Split(string(raw), "\n") {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		patterns = append(patterns, strings.TrimSuffix(line, "/"))
+	}
+	return func(rel string) bool {
+		if rel == ".git" || strings.HasPrefix(rel, ".git/") {
+			return true
+		}
+		for _, p := range patterns {
+			if rel == p || strings.HasPrefix(rel, p+"/") {
+				return true
+			}
+			if ok, _ := filepath.Match(p, rel); ok {
+				return true
+			}
+			if ok, _ := filepath.Match(p, filepath.Base(rel)); ok {
+				return true
+			}
+		}
+		return false
+	}, nil
+}
+
 // cmdCommit turns a sandbox's filesystem into a reusable base image.
 //
 // Distinct from snapshot: a snapshot restores this one sandbox including its

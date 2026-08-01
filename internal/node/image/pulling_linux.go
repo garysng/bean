@@ -36,11 +36,6 @@ type pullResult struct {
 	err  error
 }
 
-// cacheInvalidator is implemented by providers that cache their image list.
-type cacheInvalidator interface {
-	invalidateCache()
-}
-
 func NewPullingProvider(inner Provider, converter *Converter) *PullingProvider {
 	return &PullingProvider{
 		Inner:     inner,
@@ -100,11 +95,6 @@ func (p *PullingProvider) ensure(ctx context.Context, imageRef string) error {
 	_, err := p.Converter.Convert(context.WithoutCancel(ctx), imageRef)
 	if err != nil {
 		result.err = fmt.Errorf("image: convert %s: %w", imageRef, err)
-	} else if inv, ok := p.Inner.(cacheInvalidator); ok {
-		// The inner provider caches its image list for heartbeats, so a new
-		// image has to make it drop that; otherwise the node keeps reporting
-		// the old set and the scheduler never learns about the image.
-		inv.invalidateCache()
 	}
 	close(result.done)
 

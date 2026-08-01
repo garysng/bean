@@ -486,6 +486,21 @@ func (m *Manager) syncGuest(ctx context.Context, id string) error {
 	return nil
 }
 
+// BuildImage builds a base image on this node.
+func (m *Manager) BuildImage(ctx context.Context, req runtime.BuildRequest) (string, error) {
+	builder, ok := m.rt.(runtime.ImageBuilder)
+	if !ok {
+		return "", fmt.Errorf("runtime %s cannot build images", m.rt.Name())
+	}
+	start := time.Now()
+	ref, err := builder.BuildImage(ctx, req)
+	m.observePhase("image_build", time.Since(start))
+	m.metrics.IncCounter("bean_node_image_builds_total",
+		"Image builds on this node.",
+		map[string]string{"outcome": boolOutcome(err == nil), "runtime": m.rt.Name()}, 1)
+	return ref, err
+}
+
 // CachedImages reports the images this node holds, for the heartbeat.
 //
 // A runtime with no image cache returns nothing rather than an error: the local

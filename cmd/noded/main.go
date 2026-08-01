@@ -51,6 +51,9 @@ func main() {
 		"prepared base images (fc runtime)")
 	defaultDiskMiB := flag.Int64("default-disk-mib", 2048,
 		"sandbox rootfs size when the spec does not bound it (fc runtime)")
+	buildkitAddr := flag.String("buildkit-addr", "",
+		"buildkitd address enabling image builds on this node, e.g. unix:///run/bean/buildkitd.sock")
+	buildctlBin := flag.String("buildctl-bin", "buildctl", "BuildKit client binary")
 	flag.Parse()
 
 	if *nodeToken == "" && !isLoopback(*listen) {
@@ -69,6 +72,8 @@ func main() {
 			BaseDir:        *baseDir,
 			ImageDir:       *imageDir,
 			DefaultDiskMiB: *defaultDiskMiB,
+			BuildkitAddr:   *buildkitAddr,
+			BuildctlBin:    *buildctlBin,
 		})
 		if err != nil {
 			log.Fatalf("fc runtime: %v", err)

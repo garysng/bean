@@ -48,7 +48,7 @@ func (c *Committer) Commit(ctx context.Context, device, tag string) (path string
 		return "", err
 	}
 
-	final := filepath.Join(c.ImageDir, name+".ext4")
+	final := filepath.Join(c.ImageDir, name+imageSuffix)
 	if _, err := os.Stat(final); err == nil {
 		// Images are immutable: committing over an existing tag would change
 		// what every sandbox already started from it believes about its own

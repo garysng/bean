@@ -7,6 +7,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 )
 
 // A node reports which images it holds so the scheduler can prefer a node that
@@ -19,7 +20,12 @@ import (
 // index means a half-written conversion cannot corrupt the record of every other
 // image, and a manually deleted image takes its own record with it.
 
-const refSuffix = ".ref"
+const (
+	// imageSuffix is the extension of a base image file.
+	imageSuffix = ".ext4"
+	// refSuffix is the extension of the sidecar naming its reference.
+	refSuffix = ".ref"
+)
 
 // recordRef notes which reference an image file corresponds to.
 func recordRef(imageDir, imageRef string) error {
@@ -72,7 +78,7 @@ func cachedImages(imageDir string) (map[string]int64, error) {
 		}
 
 		base := strings.TrimSuffix(e.Name(), refSuffix)
-		info, err := os.Stat(filepath.Join(imageDir, base+".ext4"))
+		info, err := os.Stat(filepath.Join(imageDir, base+imageSuffix))
 		if err != nil {
 			// The sidecar outlived its image; nothing is cached.
 			continue
@@ -82,47 +88,58 @@ func cachedImages(imageDir string) (map[string]int64, error) {
 	return out, nil
 }
 
-// cachedRefs is a small in-process cache so a heartbeat does not scan the image
-// directory every few seconds. It is invalidated on conversion rather than
-// expiring, since the node is the only thing that adds images.
+// cachedRefs caches the image listing so a heartbeat, which fires every few
+// seconds, does not scan the directory each time.
+//
+// Staleness is detected from the directory's modification time rather than by
+// explicit invalidation. Publishing an image writes a sidecar into this
+// directory, which updates its mtime — so every path that adds an image
+// invalidates the cache by construction. The earlier design had each writer call
+// an invalidate method, and the build path was added without one: a built image
+// stayed invisible to the scheduler until the node restarted.
 type cachedRefs struct {
 	mu    sync.Mutex
-	valid bool
+	stamp time.Time
 	refs  map[string]int64
 }
 
 func (c *cachedRefs) get(imageDir string) (map[string]int64, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	if c.valid {
-		// A copy, so a caller cannot mutate the cache.
-		out := make(map[string]int64, len(c.refs))
-		for k, v := range c.refs {
-			out[k] = v
+
+	if info, err := os.Stat(imageDir); err == nil {
+		// The cached listing stands as long as the directory has not changed
+		// since it was taken.
+		if c.refs != nil && !info.ModTime().After(c.stamp) {
+			return copyRefs(c.refs), nil
 		}
-		return out, nil
+	} else if !os.IsNotExist(err) {
+		return nil, fmt.Errorf("image: stat image dir: %w", err)
 	}
+
+	// The stamp is taken before the scan, not from the directory's mtime after
+	// it. A write landing during the scan leaves an mtime the scan may not have
+	// seen; comparing against a pre-scan time means the next call re-reads
+	// rather than trusting a listing that could be missing that image.
+	stamp := time.Now()
 	refs, err := cachedImages(imageDir)
 	if err != nil {
 		return nil, fmt.Errorf("image: list cached images: %w", err)
 	}
 	c.refs = refs
-	c.valid = true
+	c.stamp = stamp
+	return copyRefs(refs), nil
+}
+
+// copyRefs returns a copy, so a caller cannot mutate what later heartbeats
+// report.
+func copyRefs(refs map[string]int64) map[string]int64 {
 	out := make(map[string]int64, len(refs))
 	for k, v := range refs {
 		out[k] = v
 	}
-	return out, nil
+	return out
 }
-
-func (c *cachedRefs) invalidate() {
-	c.mu.Lock()
-	c.valid = false
-	c.mu.Unlock()
-}
-
-// invalidateCache lets a conversion tell a provider its image list changed.
-func (p *FileProvider) invalidateCache() { p.cache.invalidate() }
 
 // createSparse makes a file of the given size without allocating it, which is
 // what keeps a provisioned-but-unused image or copy-on-write store from costing

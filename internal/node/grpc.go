@@ -12,6 +12,7 @@ import (
 	agentv1 "github.com/garysng/bean/internal/gen/bean/agent/v1"
 	commonv1 "github.com/garysng/bean/internal/gen/bean/common/v1"
 	nodev1 "github.com/garysng/bean/internal/gen/bean/node/v1"
+	"github.com/garysng/bean/internal/node/runtime"
 )
 
 // GRPCServer implements nodev1.SandboxServiceServer on top of Manager.
@@ -120,6 +121,32 @@ func (s *GRPCServer) CommitSandbox(ctx context.Context, req *nodev1.CommitSandbo
 		return nil, status.Errorf(codes.Internal, "commit %s: %v", req.SandboxId, err)
 	}
 	return &nodev1.CommitSandboxResponse{ImageRef: req.Tag}, nil
+}
+
+// BuildImage builds a base image from a Dockerfile on this node.
+//
+// The call blocks for the build's duration, which can be minutes. That is the
+// right shape here: the control plane runs it in the background and reports
+// progress, so an intermediate polling protocol between the two would add a
+// state machine without adding information.
+func (s *GRPCServer) BuildImage(ctx context.Context, req *nodev1.BuildImageRequest) (*nodev1.BuildImageResponse, error) {
+	if req.Tag == "" {
+		return nil, status.Error(codes.InvalidArgument, "tag required")
+	}
+	if req.Dockerfile == "" {
+		return nil, status.Error(codes.InvalidArgument, "dockerfile required")
+	}
+	ref, err := s.mgr.BuildImage(ctx, runtime.BuildRequest{
+		Tag:        req.Tag,
+		Dockerfile: req.Dockerfile,
+		ContextTar: req.ContextTar,
+		BuildArgs:  req.BuildArgs,
+		SizeMiB:    req.SizeMib,
+	})
+	if err != nil {
+		return nil, status.Errorf(codes.Internal, "build %s: %v", req.Tag, err)
+	}
+	return &nodev1.BuildImageResponse{ImageRef: ref}, nil
 }
 
 // ---- data plane passthrough ----

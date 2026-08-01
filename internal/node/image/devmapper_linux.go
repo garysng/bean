@@ -188,7 +188,7 @@ func (p *DevMapperProvider) basePath(imageRef string) (string, error) {
 	if err != nil {
 		return "", err
 	}
-	path := filepath.Join(p.ImageDir, name+".ext4")
+	path := filepath.Join(p.ImageDir, name+imageSuffix)
 	if _, err := os.Stat(path); err != nil {
 		if os.IsNotExist(err) {
 			return "", fmt.Errorf("%w: %s", ErrNotCached, imageRef)
@@ -298,5 +298,3 @@ func run(name string, args ...string) error {
 	}
 	return nil
 }
-
-func (p *DevMapperProvider) invalidateCache() { p.cache.invalidate() }

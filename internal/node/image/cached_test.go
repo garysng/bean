@@ -4,6 +4,7 @@ import (
 	"os"
 	"path/filepath"
 	"testing"
+	"time"
 )
 
 // The sidecar mechanism is what makes a node's image cache visible to the
@@ -119,10 +120,12 @@ func TestCachedImagesIgnoresMalformedSidecar(t *testing.T) {
 	}
 }
 
-// TestCachedRefsCachesUntilInvalidated matters because a heartbeat fires every
-// few seconds: scanning the image directory each time would be wasteful, but a
-// stale list means the scheduler never learns about a new image.
-func TestCachedRefsCachesUntilInvalidated(t *testing.T) {
+// TestCachedRefsSeesNewImagesWithoutBeingTold is the property that replaced
+// explicit invalidation. Every writer publishes into this directory, so
+// detecting the change here means a new image cannot be invisible because a
+// caller forgot to invalidate — which is exactly how a built image stayed hidden
+// from the scheduler until its node restarted.
+func TestCachedRefsSeesNewImagesWithoutBeingTold(t *testing.T) {
 	dir := t.TempDir()
 	seedCachedImage(t, dir, "first:1", 64)
 
@@ -135,23 +138,37 @@ func TestCachedRefsCachesUntilInvalidated(t *testing.T) {
 		t.Fatalf("initial read = %v", got)
 	}
 
-	// A new image is not seen until the cache is told about it.
+	// The directory's mtime has one-second granularity on some filesystems, so
+	// the write has to be distinguishable from the read that preceded it.
+	time.Sleep(1100 * time.Millisecond)
 	seedCachedImage(t, dir, "second:1", 64)
-	got, err = c.get(dir)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if len(got) != 1 {
-		t.Errorf("cache re-scanned the directory; got %v", got)
-	}
 
-	c.invalidate()
 	got, err = c.get(dir)
 	if err != nil {
 		t.Fatal(err)
 	}
 	if len(got) != 2 {
-		t.Errorf("after invalidation = %v, want both images", got)
+		t.Errorf("after a new image = %v, want both", got)
+	}
+}
+
+// TestCachedRefsAvoidsRescanningUnchangedDirectory checks the caching actually
+// happens: a heartbeat every few seconds should not re-read the directory.
+func TestCachedRefsAvoidsRescanningUnchangedDirectory(t *testing.T) {
+	dir := t.TempDir()
+	seedCachedImage(t, dir, "stable:1", 64)
+
+	var c cachedRefs
+	if _, err := c.get(dir); err != nil {
+		t.Fatal(err)
+	}
+	before := c.stamp
+
+	if _, err := c.get(dir); err != nil {
+		t.Fatal(err)
+	}
+	if !c.stamp.Equal(before) {
+		t.Error("re-scanned an unchanged directory")
 	}
 }
 

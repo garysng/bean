@@ -207,6 +207,7 @@ const (
 	SandboxService_StartUserProcess_FullMethodName = "/bean.node.v1.SandboxService/StartUserProcess"
 	SandboxService_PrewarmImage_FullMethodName     = "/bean.node.v1.SandboxService/PrewarmImage"
 	SandboxService_CommitSandbox_FullMethodName    = "/bean.node.v1.SandboxService/CommitSandbox"
+	SandboxService_BuildImage_FullMethodName       = "/bean.node.v1.SandboxService/BuildImage"
 	SandboxService_Exec_FullMethodName             = "/bean.node.v1.SandboxService/Exec"
 	SandboxService_StreamExec_FullMethodName       = "/bean.node.v1.SandboxService/StreamExec"
 	SandboxService_ReadFile_FullMethodName         = "/bean.node.v1.SandboxService/ReadFile"
@@ -244,6 +245,9 @@ type SandboxServiceClient interface {
 	// snapshot the result carries no memory state and is not bound to the tier
 	// that made it, so any sandbox can start from it.
 	CommitSandbox(ctx context.Context, in *CommitSandboxRequest, opts ...grpc.CallOption) (*CommitSandboxResponse, error)
+	// BuildImage builds a base image from a Dockerfile. The build runs on the
+	// node, where BuildKit and the image cache already are.
+	BuildImage(ctx context.Context, in *BuildImageRequest, opts ...grpc.CallOption) (*BuildImageResponse, error)
 	// Data plane passthrough to AgentService.
 	Exec(ctx context.Context, in *v1.ExecRequest, opts ...grpc.CallOption) (*v1.ExecResponse, error)
 	StreamExec(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[v1.StreamExecFrame, v1.StreamExecFrame], error)
@@ -374,6 +378,16 @@ func (c *sandboxServiceClient) CommitSandbox(ctx context.Context, in *CommitSand
 	return out, nil
 }
 
+func (c *sandboxServiceClient) BuildImage(ctx context.Context, in *BuildImageRequest, opts ...grpc.CallOption) (*BuildImageResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(BuildImageResponse)
+	err := c.cc.Invoke(ctx, SandboxService_BuildImage_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 func (c *sandboxServiceClient) Exec(ctx context.Context, in *v1.ExecRequest, opts ...grpc.CallOption) (*v1.ExecResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(v1.ExecResponse)
@@ -496,6 +510,9 @@ type SandboxServiceServer interface {
 	// snapshot the result carries no memory state and is not bound to the tier
 	// that made it, so any sandbox can start from it.
 	CommitSandbox(context.Context, *CommitSandboxRequest) (*CommitSandboxResponse, error)
+	// BuildImage builds a base image from a Dockerfile. The build runs on the
+	// node, where BuildKit and the image cache already are.
+	BuildImage(context.Context, *BuildImageRequest) (*BuildImageResponse, error)
 	// Data plane passthrough to AgentService.
 	Exec(context.Context, *v1.ExecRequest) (*v1.ExecResponse, error)
 	StreamExec(grpc.BidiStreamingServer[v1.StreamExecFrame, v1.StreamExecFrame]) error
@@ -543,6 +560,9 @@ func (UnimplementedSandboxServiceServer) PrewarmImage(context.Context, *PrewarmI
 }
 func (UnimplementedSandboxServiceServer) CommitSandbox(context.Context, *CommitSandboxRequest) (*CommitSandboxResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method CommitSandbox not implemented")
+}
+func (UnimplementedSandboxServiceServer) BuildImage(context.Context, *BuildImageRequest) (*BuildImageResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method BuildImage not implemented")
 }
 func (UnimplementedSandboxServiceServer) Exec(context.Context, *v1.ExecRequest) (*v1.ExecResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Exec not implemented")
@@ -748,6 +768,24 @@ func _SandboxService_CommitSandbox_Handler(srv interface{}, ctx context.Context,
 	return interceptor(ctx, in, info, handler)
 }
 
+func _SandboxService_BuildImage_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(BuildImageRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SandboxServiceServer).BuildImage(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SandboxService_BuildImage_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SandboxServiceServer).BuildImage(ctx, req.(*BuildImageRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _SandboxService_Exec_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(v1.ExecRequest)
 	if err := dec(in); err != nil {
@@ -876,6 +914,10 @@ var SandboxService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "CommitSandbox",
 			Handler:    _SandboxService_CommitSandbox_Handler,
+		},
+		{
+			MethodName: "BuildImage",
+			Handler:    _SandboxService_BuildImage_Handler,
 		},
 		{
 			MethodName: "Exec",

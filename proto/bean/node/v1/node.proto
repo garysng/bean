@@ -37,6 +37,9 @@ service SandboxService {
   // snapshot the result carries no memory state and is not bound to the tier
   // that made it, so any sandbox can start from it.
   rpc CommitSandbox(CommitSandboxRequest) returns (CommitSandboxResponse);
+  // BuildImage builds a base image from a Dockerfile. The build runs on the
+  // node, where BuildKit and the image cache already are.
+  rpc BuildImage(BuildImageRequest) returns (BuildImageResponse);
   // Data plane passthrough to AgentService.
   rpc Exec(bean.common.v1.ExecRequest) returns (bean.common.v1.ExecResponse);
   rpc StreamExec(stream bean.common.v1.StreamExecFrame) returns (stream bean.common.v1.StreamExecFrame);
@@ -216,5 +219,20 @@ message CommitSandboxRequest {
 }
 
 message CommitSandboxResponse {
+  string image_ref = 1;
+}
+
+message BuildImageRequest {
+  string tag = 1;
+  // dockerfile is the file's content, carried inline so a caller need not ship
+  // a file just to run a few commands.
+  string dockerfile = 2;
+  // context_tar is the build context for COPY and ADD; empty is valid.
+  bytes context_tar = 3;
+  map<string, string> build_args = 4;
+  int64 size_mib = 5;
+}
+
+message BuildImageResponse {
   string image_ref = 1;
 }

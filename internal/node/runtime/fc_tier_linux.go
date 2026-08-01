@@ -50,6 +50,23 @@ func NewFCTier(cfg FCTierConfig) (Runtime, error) {
 		ImageDir: cfg.ImageDir,
 		WorkDir:  filepath.Join(cfg.ImageDir, ".work"),
 	}
+
+	// Builds are enabled only when BuildKit is reachable, so a node that cannot
+	// build says so at startup rather than accepting a build and failing it.
+	if cfg.BuildkitAddr != "" {
+		builder := &image.Builder{
+			Buildctl:       cfg.BuildctlBin,
+			Addr:           cfg.BuildkitAddr,
+			ImageDir:       cfg.ImageDir,
+			WorkDir:        filepath.Join(cfg.ImageDir, ".work"),
+			DefaultSizeMiB: cfg.DefaultDiskMiB,
+		}
+		if err := builder.Available(); err != nil {
+			return nil, fmt.Errorf("fc tier: builds requested but %w", err)
+		}
+		rt.Builder = builder
+		log.Printf("fc tier: image builds via buildkit at %s", cfg.BuildkitAddr)
+	}
 	return rt, nil
 }
 

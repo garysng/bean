@@ -57,6 +57,10 @@ type FCRuntime struct {
 	// Committer seals a sandbox's filesystem into a new base image. Nil
 	// disables commit, which is what a node that only runs sandboxes wants.
 	Committer *image.Committer
+	// Builder builds images from Dockerfiles. Nil disables builds on this node,
+	// which is the right default: building needs BuildKit, and a cluster may
+	// prefer dedicated builder nodes over the dependency everywhere.
+	Builder *image.Builder
 
 	mu   sync.Mutex
 	vms  map[string]*fcVM
@@ -131,6 +135,23 @@ func (r *FCRuntime) CommitSandbox(ctx context.Context, id, tag string) error {
 	}
 	_, err = r.Committer.Commit(ctx, vm.rootfs.Device, tag)
 	return err
+}
+
+// BuildImage builds a base image from a Dockerfile on this node.
+func (r *FCRuntime) BuildImage(ctx context.Context, req BuildRequest) (string, error) {
+	if r.Builder == nil {
+		return "", errors.New("fc: builds not configured on this node")
+	}
+	if _, err := r.Builder.Build(ctx, image.BuildRequest{
+		Tag:        req.Tag,
+		Dockerfile: req.Dockerfile,
+		ContextTar: req.ContextTar,
+		BuildArgs:  req.BuildArgs,
+		SizeMiB:    req.SizeMiB,
+	}); err != nil {
+		return "", err
+	}
+	return req.Tag, nil
 }
 
 func (r *FCRuntime) Create(ctx context.Context, spec *Spec) (*Handle, error) {
