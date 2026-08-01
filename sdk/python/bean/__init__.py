@@ -2,8 +2,11 @@
 
 from __future__ import annotations
 
+import base64
+import io
 import json
 import os
+import tarfile
 import urllib.error
 import urllib.parse
 import urllib.request
@@ -306,6 +309,35 @@ class _Images:
     def prewarm_status(self, job_id: str) -> Dict[str, Any]:
         return self._client._request("GET", f"/v1/images/prewarm/{job_id}")
 
+    def build(
+        self,
+        tag: str,
+        dockerfile: str,
+        context_dir: Optional[str] = None,
+        build_args: Optional[Dict[str, str]] = None,
+        size_mib: int = 0,
+    ) -> Dict[str, Any]:
+        """Build an image from a Dockerfile on the platform.
+
+        Returns immediately with the image reference and the node building it;
+        a build takes minutes, so follow it with status(tag) until the state is
+        READY or FAILED.
+
+        dockerfile is the file's content, not a path. context_dir is packed and
+        uploaded for COPY and ADD, so no local Docker is needed and the build
+        cache is shared across the cluster rather than living on one machine.
+        """
+        body: Dict[str, Any] = {"tag": tag, "dockerfile": dockerfile}
+        if build_args:
+            body["buildArgs"] = build_args
+        if size_mib:
+            body["sizeMiB"] = size_mib
+        if context_dir:
+            body["contextTar"] = base64.b64encode(
+                _pack_context(context_dir)
+            ).decode("ascii")
+        return self._client._request("POST", "/v1/images/build", body)
+
 
 class _Events:
     def __init__(self, client: "BeanClient"):
@@ -406,3 +438,23 @@ class BeanClient:
         if not data:
             return {}
         return json.loads(data)
+
+
+def _pack_context(directory: str) -> bytes:
+    """Tar a build context for upload.
+
+    .git is always excluded: it is large, never needed by a build, and shipping
+    it would put the repository's history into the context.
+    """
+    buf = io.BytesIO()
+    with tarfile.open(fileobj=buf, mode="w") as tf:
+        for root, dirs, files in os.walk(directory):
+            dirs[:] = [d for d in dirs if d != ".git"]
+            for name in files:
+                full = os.path.join(root, name)
+                rel = os.path.relpath(full, directory)
+                # The Dockerfile travels inline, so it is not packed here.
+                if rel == "Dockerfile":
+                    continue
+                tf.add(full, arcname=rel)
+    return buf.getvalue()

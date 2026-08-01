@@ -34,6 +34,7 @@
 | OCI 镜像拉取与转换 | ✅ | 节点直接说 distribution API（不依赖 docker/containerd）:manifest / 多平台 index / token 挑战 / **layer 断点续传**;whiteout 语义、路径逃逸防护;转换产物带 sidecar 记录 ref |
 | prewarm | ✅ | 控制面后台调 `PrewarmImage`,节点拉取转换;节点心跳上报 `cachedImages`,**镜像亲和打分与 prewarm 进度因此才真正生效**（之前从未被填充） |
 | commit | ✅ | 把 sandbox 文件系统封成 base image（`CommitSandbox` RPC）。**先 sync guest 再 pause**——只 pause 的话 guest page cache 还是脏的,读块设备会丢掉刚写的东西 |
+| build image（Dockerfile） | ✅ | `bean build --tag REF .`,BuildKit 在节点上执行。**导出 `type=tar` 扁平 rootfs**,不组装层也不过 registry,和拉取路径共用同一个 image writer |
 | `LocalRuntime` | ✅ | 进程级 sandbox（dev/CI，含 darwin），跑真 beand 二进制,验证与 fc 档相同的 agent gRPC 面 |
 
 ### 客户端
@@ -73,8 +74,7 @@ snapshot：checkpoint 1.5s、restore 1.8s、bundle 约 16-20 MiB。
 
 | 项 | 状态 |
 |---|---|
-| build image：Dockerfile / 声明式 steps（BuildKit） | ⛔ 未开始 —— **当前最大缺口**;设计见 `docs/image-build.md` §3.1–3.2 |
-| build image：commit 路径 | ✅ `bean commit SBX --tag REF`,零转换（产物直接是 base image） |
+| build image：声明式 steps（Modal 风格链式 API） | ⛔ 未开始;Dockerfile 路径已通,steps 只是另一个前端编译到同一个 plan（`docs/image-build.md` §3.2、§5） |
 | overlaybd lazy-pull | ⚠️ 当前是「拉全量 + 转换 + CoW 共享」,已能用且成本低（每 sandbox 8 KiB）;overlaybd 的价值在于**首次拉取**也按需,节点已装好组件,接同一个 `image.Provider` 接口即可 |
 | diff snapshot（增量） | ⚠️ 当前 full snapshot;Firecracker 支持 diff,接口无需改 |
 | fork / shared-fs 卷 / proxy 端口暴露 | ⛔ P3–P4 范围,未开始 |
@@ -98,8 +98,8 @@ overlaybd 需要 ublk（内核 ≥ 6.0)或 tcmu 后端。当前验证机是 Ubun
 
 ## 4. 下一步
 
-1. **build image 的 Dockerfile / steps 路径**：BuildKit 驱动完整语义。
-   commit 路径已能覆盖「交互式装好再固化」,但「从 Dockerfile 可重复构建」还没有。
+1. **build 的构建日志与取消**：现在 build 是「起了就等」,失败只能从 image state
+   看到 FAILED。日志落存储 + 可流式查看 + `cancel` 才算完整（`docs/image-build.md` §6）。
 2. **加速创建**：2.2s 里 1.9s 是内核启动。精简 guest config,或维护一个
    snapshot 预热池（restore 1.8s 也不快,但可以在请求到来前就备好）。
 3. **overlaybd lazy-pull**：让首次拉取也按需读块,而不是拉全量再转换。

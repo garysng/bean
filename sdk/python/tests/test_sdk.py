@@ -71,6 +71,10 @@ class StubHandler(BaseHTTPRequestHandler):
             })
         if self.path.endswith("/commit"):
             return self._json(201, {"imageRef": body["tag"]})
+        if self.path == "/v1/images/build":
+            return self._json(202, {"imageRef": body["tag"], "nodeId": "node-a",
+                                    "state": "BUILDING",
+                                    "hadContext": bool(body.get("contextTar"))})
         if self.path == "/v1/images/prewarm":
             return self._json(202, {"jobId": "pw_stub1",
                                     "ready": {r: 1 for r in body.get("refs", [])}})
@@ -245,6 +249,34 @@ class SDKTest(unittest.TestCase):
         # Unlike snapshot(keep_running=False), commit never stops the source:
         # freezing the filesystem does not end the session.
         self.assertEqual(sb.state, "RUNNING")
+
+    def test_build_accepts_dockerfile_without_a_context(self):
+        out = self.client.images.build(
+            tag="myteam/app:v1",
+            dockerfile="FROM alpine:3.20\nRUN echo hi\n",
+        )
+        self.assertEqual(out["imageRef"], "myteam/app:v1")
+        self.assertEqual(out["state"], "BUILDING")
+        # A Dockerfile that only runs commands should not upload anything.
+        self.assertFalse(out["hadContext"])
+
+    def test_build_packs_context_directory(self):
+        import os
+        import tempfile
+        with tempfile.TemporaryDirectory() as d:
+            with open(os.path.join(d, "app.py"), "w") as f:
+                f.write("print('hi')\n")
+            # .git must never be shipped: large, useless to a build, and it
+            # would put the repository history in the context.
+            os.makedirs(os.path.join(d, ".git"))
+            with open(os.path.join(d, ".git", "config"), "w") as f:
+                f.write("secret\n")
+            out = self.client.images.build(
+                tag="myteam/withctx:v1",
+                dockerfile="FROM alpine:3.20\nCOPY app.py /app.py\n",
+                context_dir=d,
+            )
+        self.assertTrue(out["hadContext"])
 
     def test_create_from_snapshot(self):
         sb = self.client.sandboxes.create(snapshot="snap_stub1")
