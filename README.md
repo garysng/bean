@@ -30,6 +30,7 @@ Container-native sandbox platform for AI evaluation workloads.
 | [docs/sdk-cli-design.md](docs/sdk-cli-design.md) | Python/TS SDK 接口、CLI 命令面、代码生成策略 |
 | [docs/competitive-analysis.md](docs/competitive-analysis.md) | AgentENV/CubeSandbox/e2b/Daytona/Modal/Morph 等竞品对比与差异化定位 |
 | [docs/roadmap.md](docs/roadmap.md) | P0–P5 实施路线、验收标准、风险登记簿 |
+| [docs/status.md](docs/status.md) | **当前实现状态**、与设计的差距、fcRuntime 实装计划 |
 
 ## 规划中的 Repo 结构
 
@@ -47,4 +48,6 @@ bean/
 
 ## Status
 
-设计阶段。实施从 [roadmap](docs/roadmap.md) P0 开始。
+控制面链路已实装并测试（单节点 + 多节点 + 调度 + 事件 + 指标，覆盖率 82.5%，
+CI 全绿）。当前 runtime 为 `LocalRuntime`（进程级 sandbox，dev/CI 用）;
+**Firecracker 档待实装，需 Linux+KVM 环境** —— 详见 [docs/status.md](docs/status.md)。
