@@ -252,9 +252,12 @@ func TestLogsAndTail(t *testing.T) {
 
 func TestStartUserProcess(t *testing.T) {
 	c := startTestAgent(t, t.TempDir())
+	// Long-running so the process is still alive for the double-start check
+	// (the reaper clears state once it exits — see
+	// TestUserProcessRestartableAfterExit).
 	resp, err := c.StartUserProcess(context.Background(), &agentv1.StartUserProcessRequest{
 		Entrypoint: []string{"sh", "-c"},
-		Cmd:        []string{"echo started"},
+		Cmd:        []string{"sleep 30"},
 	})
 	if err != nil {
 		t.Fatal(err)
@@ -262,14 +265,13 @@ func TestStartUserProcess(t *testing.T) {
 	if resp.Pid <= 0 {
 		t.Errorf("pid = %d", resp.Pid)
 	}
-	// double start rejected
+	// starting a second process while one is running is rejected
 	_, err = c.StartUserProcess(context.Background(), &agentv1.StartUserProcessRequest{
 		Entrypoint: []string{"true"},
 	})
 	if status.Code(err) != codes.FailedPrecondition {
 		t.Errorf("err = %v, want FailedPrecondition", err)
 	}
-	time.Sleep(50 * time.Millisecond)
 }
 
 func TestRingBuffer(t *testing.T) {

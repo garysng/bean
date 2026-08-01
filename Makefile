@@ -28,7 +28,7 @@ test:
 
 cover:
 	go test -race -count=1 -coverprofile=coverage.out \
-		-coverpkg=./internal/agent/...,./internal/node/...,./internal/control/...,./cli/... \
+		-coverpkg=./internal/beand/...,./internal/node/...,./internal/control/...,./cli/... \
 		./internal/... ./cli/...
 	go tool cover -func=coverage.out | tail -1
 
