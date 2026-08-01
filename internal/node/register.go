@@ -131,6 +131,10 @@ func (r *Registrar) session(ctx context.Context, client nodev1.NodeServiceClient
 				NodeToken: r.nodeToken,
 				Sandboxes: r.mgr.Statuses(),
 				Usage:     r.usage(),
+				// The node is the authority on what it holds, so it reports its
+				// image cache rather than the control plane inferring it. Image
+				// affinity and prewarm progress both read this.
+				CachedImages: r.mgr.CachedImages(),
 			}); err != nil {
 				return fmt.Errorf("heartbeat send: %w", err)
 			}

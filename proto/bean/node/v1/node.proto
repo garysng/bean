@@ -29,6 +29,10 @@ service SandboxService {
   // frame carries the spec; the rest is checkpoint data.
   rpc RestoreSandbox(stream RestoreSandboxFrame) returns (RestoreSandboxResponse);
   rpc StartUserProcess(StartUserProcessNodeRequest) returns (StartUserProcessNodeResponse);
+  // PrewarmImage makes an image ready on the node without creating a sandbox.
+  // A first pull can take minutes — longer than a create should block — so the
+  // control plane warms images before placing work that needs them.
+  rpc PrewarmImage(PrewarmImageRequest) returns (PrewarmImageResponse);
   // Data plane passthrough to AgentService.
   rpc Exec(bean.common.v1.ExecRequest) returns (bean.common.v1.ExecResponse);
   rpc StreamExec(stream bean.common.v1.StreamExecFrame) returns (stream bean.common.v1.StreamExecFrame);
@@ -69,6 +73,11 @@ message HeartbeatRequest {
   string node_token = 2;
   repeated SandboxStatus sandboxes = 3;
   NodeUsage usage = 4;
+  // cached_images maps image reference to its size on this node. The node is
+  // the authority on what it holds, so it reports rather than the control
+  // plane inferring; the scheduler uses it for image affinity and prewarm
+  // progress.
+  map<string, int64> cached_images = 5;
 }
 
 message NodeUsage {
@@ -183,4 +192,13 @@ message StartUserProcessNodeRequest {
 
 message StartUserProcessNodeResponse {
   int64 pid = 1;
+}
+
+message PrewarmImageRequest {
+  string image = 1;
+}
+
+message PrewarmImageResponse {
+  // ready is true once the image can be used without a further pull.
+  bool ready = 1;
 }

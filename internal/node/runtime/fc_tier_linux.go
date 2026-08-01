@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"log"
 	"os"
+	"path/filepath"
 	"strings"
 
 	"github.com/garysng/bean/internal/node/image"
@@ -52,17 +53,29 @@ func NewFCTier(cfg FCTierConfig) (Runtime, error) {
 // base image works everywhere but makes a fan-out of clones cost the image size
 // each time, so it is the fallback rather than the default.
 func selectProvider(cfg FCTierConfig) image.Provider {
+	var assembler image.Provider
 	dm := image.NewDevMapperProvider(cfg.BaseDir, cfg.ImageDir, cfg.DefaultDiskMiB)
 	if err := dm.Available(); err != nil {
 		log.Printf("fc tier: %v; falling back to copying base images", err)
-		return &image.FileProvider{
+		assembler = &image.FileProvider{
 			BaseDir:        cfg.BaseDir,
 			ImageDir:       cfg.ImageDir,
 			DefaultSizeMiB: cfg.DefaultDiskMiB,
 		}
+	} else {
+		log.Printf("fc tier: rootfs via device-mapper copy-on-write")
+		assembler = dm
 	}
-	log.Printf("fc tier: rootfs via device-mapper copy-on-write")
-	return dm
+
+	// Pulling wraps assembly rather than replacing it: obtaining a base image
+	// and giving a sandbox a writable view of it are separate problems, and the
+	// copy-on-write assembly is worth having whichever way the base arrived.
+	return image.NewPullingProvider(assembler, &image.Converter{
+		Registry:       image.NewRegistry(cfg.RegistryAuth),
+		ImageDir:       cfg.ImageDir,
+		WorkDir:        filepath.Join(cfg.ImageDir, ".work"),
+		DefaultSizeMiB: cfg.DefaultDiskMiB,
+	})
 }
 
 // checkSnapshotSupport verifies the host can save a vCPU's state.

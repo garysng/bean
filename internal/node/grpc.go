@@ -93,6 +93,21 @@ func (s *GRPCServer) StartUserProcess(ctx context.Context, req *nodev1.StartUser
 	return &nodev1.StartUserProcessNodeResponse{Pid: resp.Pid}, nil
 }
 
+// PrewarmImage makes an image usable on this node ahead of any sandbox.
+//
+// The call blocks until the image is ready, so the control plane learns the
+// outcome rather than polling. A first pull can take minutes — longer than a
+// create should block — which is why warming is a separate operation.
+func (s *GRPCServer) PrewarmImage(ctx context.Context, req *nodev1.PrewarmImageRequest) (*nodev1.PrewarmImageResponse, error) {
+	if req.Image == "" {
+		return nil, status.Error(codes.InvalidArgument, "image required")
+	}
+	if err := s.mgr.PrewarmImage(ctx, req.Image); err != nil {
+		return nil, status.Errorf(codes.Internal, "prewarm %s: %v", req.Image, err)
+	}
+	return &nodev1.PrewarmImageResponse{Ready: true}, nil
+}
+
 // ---- data plane passthrough ----
 
 func (s *GRPCServer) Exec(ctx context.Context, req *commonv1.ExecRequest) (*commonv1.ExecResponse, error) {

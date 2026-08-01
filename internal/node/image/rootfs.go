@@ -61,6 +61,10 @@ type Provider interface {
 	// sandbox, so a later Prepare is fast. It is the node side of the
 	// control plane's prewarm job.
 	Prewarm(ctx context.Context, imageRef string) error
+	// Cached reports the images held locally and their sizes. The node reports
+	// this in its heartbeat, which is what lets the scheduler prefer a node
+	// that already has an image and lets a prewarm job show progress.
+	Cached() (map[string]int64, error)
 }
 
 // FileProvider backs each sandbox with a sparse file formatted as ext4. It
@@ -77,6 +81,8 @@ type FileProvider struct {
 	ImageDir string
 	// DefaultSizeMiB applies when a spec does not bound the disk.
 	DefaultSizeMiB int64
+
+	cache cachedRefs
 }
 
 func (p *FileProvider) Name() string { return "file" }
@@ -119,6 +125,11 @@ func (p *FileProvider) Prepare(ctx context.Context, sandboxID, imageRef string, 
 func (p *FileProvider) Prewarm(ctx context.Context, imageRef string) error {
 	_, err := p.basePath(imageRef)
 	return err
+}
+
+// Cached lists the base images present locally.
+func (p *FileProvider) Cached() (map[string]int64, error) {
+	return p.cache.get(p.ImageDir)
 }
 
 // basePath resolves the prepared base image for a ref, reporting ErrNotCached

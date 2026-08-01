@@ -96,6 +96,23 @@ func NewFCRuntime(fcBin, kernel, agentDisk, baseDir string, images image.Provide
 
 func (r *FCRuntime) Name() string { return "fc" }
 
+// PrewarmImage makes an image ready ahead of a sandbox, so a create does not
+// pay for a first pull.
+func (r *FCRuntime) PrewarmImage(ctx context.Context, imageRef string) error {
+	if r.Images == nil {
+		return errors.New("fc: no image provider")
+	}
+	return r.Images.Prewarm(ctx, imageRef)
+}
+
+// CachedImages reports the images available on this node.
+func (r *FCRuntime) CachedImages() (map[string]int64, error) {
+	if r.Images == nil {
+		return nil, errors.New("fc: no image provider")
+	}
+	return r.Images.Cached()
+}
+
 func (r *FCRuntime) Create(ctx context.Context, spec *Spec) (*Handle, error) {
 	return r.create(ctx, spec, nil)
 }

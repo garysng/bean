@@ -1,12 +1,16 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"io"
+	"log"
 	"net/http"
+	"time"
 
 	"github.com/garysng/bean/internal/control/image"
 	"github.com/garysng/bean/internal/control/store"
+	nodev1 "github.com/garysng/bean/internal/gen/bean/node/v1"
 )
 
 // Image endpoints. A caller only ever supplies a native OCI reference;
@@ -94,7 +98,52 @@ func (s *Server) handlePrewarm(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "INVALID_ARGUMENT", err.Error())
 		return
 	}
+
+	// The job is accepted and the nodes are warmed in the background: a first
+	// pull can take minutes, which is far longer than an HTTP request should be
+	// held open. Callers follow progress through the job status endpoint.
+	go s.runPrewarmJob(job.ID, req.Refs, req.Region)
+
 	writeJSON(w, http.StatusAccepted, job)
+}
+
+// runPrewarmJob asks nodes to warm each image, recording which succeeded.
+func (s *Server) runPrewarmJob(jobID string, refs []string, region string) {
+	nodes, err := s.placer.Nodes()
+	if err != nil {
+		log.Printf("prewarm %s: list nodes: %v", jobID, err)
+		return
+	}
+
+	for _, node := range nodes {
+		// Only nodes that can take work are worth warming, and only in the
+		// requested region: an image cached elsewhere does not help placement.
+		if node.State != string(store.NodeReady) {
+			continue
+		}
+		if region != "" && node.Region != region {
+			continue
+		}
+		client, err := s.router.Client(node.ID)
+		if err != nil {
+			log.Printf("prewarm %s: node %s: %v", jobID, node.ID, err)
+			continue
+		}
+		for _, ref := range refs {
+			// Each image gets its own generous deadline: converting a large
+			// image legitimately takes minutes, and one slow image should not
+			// abandon the rest.
+			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Minute)
+			_, err := client.PrewarmImage(ctx, &nodev1.PrewarmImageRequest{Image: ref})
+			cancel()
+			if err != nil {
+				log.Printf("prewarm %s: %s on %s: %v", jobID, ref, node.ID, err)
+			}
+			// Success is not recorded here: the node reports what it holds in
+			// its heartbeat, and that is the authority. Writing it from this
+			// side would let the two disagree after a node loses its disk.
+		}
+	}
 }
 
 func (s *Server) handlePrewarmStatus(w http.ResponseWriter, r *http.Request) {

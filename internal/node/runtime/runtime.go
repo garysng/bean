@@ -65,3 +65,21 @@ type Runtime interface {
 	// checkpoint supplies the filesystem (and, for microVMs, memory).
 	Restore(ctx context.Context, spec *Spec, r io.Reader) (*Handle, error)
 }
+
+// ImageWarmer is implemented by runtimes that can make an image ready before a
+// sandbox needs it. It is separate from Runtime because not every tier has a
+// meaningful notion of a cached image — LocalRuntime runs a host binary — and a
+// method that all implementations had to stub would say less than an optional
+// one that callers check for.
+type ImageWarmer interface {
+	// PrewarmImage blocks until the image can be used without a further fetch.
+	PrewarmImage(ctx context.Context, imageRef string) error
+}
+
+// ImageLister is implemented by runtimes that hold a local image cache. The node
+// reports this so the scheduler can prefer a node that already has an image, and
+// so a prewarm job can show progress.
+type ImageLister interface {
+	// CachedImages maps image reference to its size on this node.
+	CachedImages() (map[string]int64, error)
+}

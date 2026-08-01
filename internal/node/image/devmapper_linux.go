@@ -39,6 +39,8 @@ type DevMapperProvider struct {
 	// bases counts sandboxes per base image, so the shared read-only loop
 	// device is torn down when the last one goes rather than leaking.
 	bases map[string]*sharedBase
+
+	cache cachedRefs
 }
 
 type sharedBase struct {
@@ -176,6 +178,11 @@ func (p *DevMapperProvider) Prewarm(ctx context.Context, imageRef string) error 
 	return err
 }
 
+// Cached lists the base images present locally.
+func (p *DevMapperProvider) Cached() (map[string]int64, error) {
+	return p.cache.get(p.ImageDir)
+}
+
 func (p *DevMapperProvider) basePath(imageRef string) (string, error) {
 	name, err := refToFilename(imageRef)
 	if err != nil {
@@ -303,3 +310,5 @@ func run(name string, args ...string) error {
 	}
 	return nil
 }
+
+func (p *DevMapperProvider) invalidateCache() { p.cache.invalidate() }

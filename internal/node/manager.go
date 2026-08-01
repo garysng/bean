@@ -387,6 +387,43 @@ func (m *Manager) Snapshot(ctx context.Context, id string, w io.Writer) error {
 	return nil
 }
 
+// CachedImages reports the images this node holds, for the heartbeat.
+//
+// A runtime with no image cache returns nothing rather than an error: the local
+// tier runs a host binary, so there is genuinely nothing cached, and a heartbeat
+// should not fail over it.
+func (m *Manager) CachedImages() map[string]int64 {
+	lister, ok := m.rt.(runtime.ImageLister)
+	if !ok {
+		return nil
+	}
+	cached, err := lister.CachedImages()
+	if err != nil {
+		log.Printf("list cached images: %v", err)
+		return nil
+	}
+	return cached
+}
+
+// PrewarmImage makes an image ready on this node.
+//
+// Not every runtime has a notion of a cached image — the local tier runs a host
+// binary — so a runtime that cannot warm reports success rather than an error:
+// there is nothing to prepare, which is the same outcome the caller wanted.
+func (m *Manager) PrewarmImage(ctx context.Context, imageRef string) error {
+	warmer, ok := m.rt.(runtime.ImageWarmer)
+	if !ok {
+		return nil
+	}
+	start := time.Now()
+	err := warmer.PrewarmImage(ctx, imageRef)
+	m.observePhase("image_prewarm", time.Since(start))
+	m.metrics.IncCounter("bean_node_image_prewarms_total",
+		"Image prewarm attempts on this node.",
+		map[string]string{"outcome": boolOutcome(err == nil), "runtime": m.rt.Name()}, 1)
+	return err
+}
+
 // redialAgent replaces a sandbox's agent connection.
 func (m *Manager) redialAgent(ctx context.Context, id string) error {
 	m.mu.Lock()

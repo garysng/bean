@@ -205,6 +205,7 @@ const (
 	SandboxService_SnapshotSandbox_FullMethodName  = "/bean.node.v1.SandboxService/SnapshotSandbox"
 	SandboxService_RestoreSandbox_FullMethodName   = "/bean.node.v1.SandboxService/RestoreSandbox"
 	SandboxService_StartUserProcess_FullMethodName = "/bean.node.v1.SandboxService/StartUserProcess"
+	SandboxService_PrewarmImage_FullMethodName     = "/bean.node.v1.SandboxService/PrewarmImage"
 	SandboxService_Exec_FullMethodName             = "/bean.node.v1.SandboxService/Exec"
 	SandboxService_StreamExec_FullMethodName       = "/bean.node.v1.SandboxService/StreamExec"
 	SandboxService_ReadFile_FullMethodName         = "/bean.node.v1.SandboxService/ReadFile"
@@ -234,6 +235,10 @@ type SandboxServiceClient interface {
 	// frame carries the spec; the rest is checkpoint data.
 	RestoreSandbox(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[RestoreSandboxFrame, RestoreSandboxResponse], error)
 	StartUserProcess(ctx context.Context, in *StartUserProcessNodeRequest, opts ...grpc.CallOption) (*StartUserProcessNodeResponse, error)
+	// PrewarmImage makes an image ready on the node without creating a sandbox.
+	// A first pull can take minutes — longer than a create should block — so the
+	// control plane warms images before placing work that needs them.
+	PrewarmImage(ctx context.Context, in *PrewarmImageRequest, opts ...grpc.CallOption) (*PrewarmImageResponse, error)
 	// Data plane passthrough to AgentService.
 	Exec(ctx context.Context, in *v1.ExecRequest, opts ...grpc.CallOption) (*v1.ExecResponse, error)
 	StreamExec(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[v1.StreamExecFrame, v1.StreamExecFrame], error)
@@ -338,6 +343,16 @@ func (c *sandboxServiceClient) StartUserProcess(ctx context.Context, in *StartUs
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(StartUserProcessNodeResponse)
 	err := c.cc.Invoke(ctx, SandboxService_StartUserProcess_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sandboxServiceClient) PrewarmImage(ctx context.Context, in *PrewarmImageRequest, opts ...grpc.CallOption) (*PrewarmImageResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(PrewarmImageResponse)
+	err := c.cc.Invoke(ctx, SandboxService_PrewarmImage_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -458,6 +473,10 @@ type SandboxServiceServer interface {
 	// frame carries the spec; the rest is checkpoint data.
 	RestoreSandbox(grpc.ClientStreamingServer[RestoreSandboxFrame, RestoreSandboxResponse]) error
 	StartUserProcess(context.Context, *StartUserProcessNodeRequest) (*StartUserProcessNodeResponse, error)
+	// PrewarmImage makes an image ready on the node without creating a sandbox.
+	// A first pull can take minutes — longer than a create should block — so the
+	// control plane warms images before placing work that needs them.
+	PrewarmImage(context.Context, *PrewarmImageRequest) (*PrewarmImageResponse, error)
 	// Data plane passthrough to AgentService.
 	Exec(context.Context, *v1.ExecRequest) (*v1.ExecResponse, error)
 	StreamExec(grpc.BidiStreamingServer[v1.StreamExecFrame, v1.StreamExecFrame]) error
@@ -499,6 +518,9 @@ func (UnimplementedSandboxServiceServer) RestoreSandbox(grpc.ClientStreamingServ
 }
 func (UnimplementedSandboxServiceServer) StartUserProcess(context.Context, *StartUserProcessNodeRequest) (*StartUserProcessNodeResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method StartUserProcess not implemented")
+}
+func (UnimplementedSandboxServiceServer) PrewarmImage(context.Context, *PrewarmImageRequest) (*PrewarmImageResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method PrewarmImage not implemented")
 }
 func (UnimplementedSandboxServiceServer) Exec(context.Context, *v1.ExecRequest) (*v1.ExecResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Exec not implemented")
@@ -668,6 +690,24 @@ func _SandboxService_StartUserProcess_Handler(srv interface{}, ctx context.Conte
 	return interceptor(ctx, in, info, handler)
 }
 
+func _SandboxService_PrewarmImage_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(PrewarmImageRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SandboxServiceServer).PrewarmImage(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SandboxService_PrewarmImage_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SandboxServiceServer).PrewarmImage(ctx, req.(*PrewarmImageRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _SandboxService_Exec_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(v1.ExecRequest)
 	if err := dec(in); err != nil {
@@ -788,6 +828,10 @@ var SandboxService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "StartUserProcess",
 			Handler:    _SandboxService_StartUserProcess_Handler,
+		},
+		{
+			MethodName: "PrewarmImage",
+			Handler:    _SandboxService_PrewarmImage_Handler,
 		},
 		{
 			MethodName: "Exec",

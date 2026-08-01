@@ -77,6 +77,21 @@ const (
 	ImageFailed ImageState = "FAILED"
 )
 
+// NodeState is a node's liveness as the control plane sees it. The scheduler
+// places only on READY nodes; the rest describe stages of losing one.
+type NodeState string
+
+const (
+	// NodeReady: heartbeating and accepting placements.
+	NodeReady NodeState = "READY"
+	// NodeSuspect: a heartbeat is overdue but the lease has not expired.
+	NodeSuspect NodeState = "SUSPECT"
+	// NodeLost: the lease expired; its sandboxes are considered gone.
+	NodeLost NodeState = "LOST"
+	// NodeDraining: still serving its sandboxes, taking no new ones.
+	NodeDraining NodeState = "DRAINING"
+)
+
 // ImageSource records how an image came to exist, which determines its
 // conversion cost (see docs/image-build.md §2).
 type ImageSource string
