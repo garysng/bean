@@ -10,6 +10,7 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 
+	commonv1 "github.com/garysng/bean/internal/gen/bean/common/v1"
 	nodev1 "github.com/garysng/bean/internal/gen/bean/node/v1"
 	"github.com/garysng/bean/internal/node/runtime"
 )
@@ -68,5 +69,50 @@ func TestTokenAuthDisabledWhenEmpty(t *testing.T) {
 	_, err := c.GetSandbox(context.Background(), &nodev1.GetSandboxRequest{SandboxId: "missing"})
 	if status.Code(err) != codes.NotFound {
 		t.Errorf("err = %v, want NotFound", err)
+	}
+}
+
+func TestTokenClientInterceptorsAttachToken(t *testing.T) {
+	// Server enforces a token; the client interceptors must supply it.
+	mgr := NewManager(runtime.NewLocalRuntime(agentBin, t.TempDir()))
+	t.Cleanup(mgr.Close)
+	lis, err := net.Listen("tcp", "127.0.0.1:0")
+	if err != nil {
+		t.Fatal(err)
+	}
+	unary, stream := TokenAuth("tok-123")
+	srv := grpc.NewServer(grpc.UnaryInterceptor(unary), grpc.StreamInterceptor(stream))
+	nodev1.RegisterSandboxServiceServer(srv, NewGRPCServer(mgr))
+	go srv.Serve(lis)
+	t.Cleanup(srv.Stop)
+
+	cu, cs := TokenClientInterceptors("tok-123")
+	conn, err := grpc.NewClient(lis.Addr().String(),
+		grpc.WithTransportCredentials(insecure.NewCredentials()),
+		grpc.WithUnaryInterceptor(cu), grpc.WithStreamInterceptor(cs))
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer conn.Close()
+	c := nodev1.NewSandboxServiceClient(conn)
+
+	// Unary passes auth (NotFound proves it reached the handler).
+	if _, err := c.GetSandbox(context.Background(), &nodev1.GetSandboxRequest{SandboxId: "x"}); status.Code(err) != codes.NotFound {
+		t.Errorf("unary: err = %v, want NotFound", err)
+	}
+	// Stream passes auth too.
+	st, err := c.GetLogs(context.Background(), &commonv1.GetLogsRequest{SandboxId: "x"})
+	if err == nil {
+		_, err = st.Recv()
+	}
+	if status.Code(err) != codes.NotFound {
+		t.Errorf("stream: err = %v, want NotFound", err)
+	}
+}
+
+func TestWithTokenEmptyIsNoop(t *testing.T) {
+	ctx := context.Background()
+	if got := WithToken(ctx, ""); got != ctx {
+		t.Error("empty token should return the original context")
 	}
 }
