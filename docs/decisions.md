@@ -159,6 +159,30 @@ publish 用「写临时目录 + rename」,所以中断的 unpack 不会留下残
 会产生 `UFFD_EVENT_REMOVE`,handler 必须把对应页面置零而不是回读文件
 (否则会复活脏数据)。
 
+### 2.4 三家竞品对照
+
+| 维度 | e2b | agentenv | tensorlake | bean(现状) |
+|---|---|---|---|---|
+| VMM | fork 了 firecracker(私有,加 gdb feature) | 上游 FC | 未公开 | 上游 FC 1.15.1 |
+| guest 内核 | 自己 config + patch,源码取 `amazonlinux/linux`,**不 fork** | prebuilt(R2 站) | 未公开 | **FC CI prebuilt + config 入库** |
+| 内存恢复 | UFFD(`uffd/` + `prefetch/`,cgo) | UFFD(`uffd-core/`,Rust) | 未公开细节,声称 sub-second | **UFFD(已实测 7ms load)** |
+| rootfs 按需 | 未见 | UFFD 后端接 overlaybd | 磁盘快照 O(changed bytes),单文件改动 167ms | dm-snapshot CoW(8 KiB/sandbox),**lazy-pull 未做** |
+| 磁盘快照增量 | 未见 | 未见 | **有**(他们的差异化点) | 无(full snapshot) |
+
+**从对照里得到的三个判断:**
+
+1. **UFFD 是共识,不是选项。** 三家全都做了,而且 e2b/agentenv 都各写了一个
+   完整的 handler 包。我们原来打算的「缓存解开的 memory 文件」只是把成本
+   从「每次」降到「每快照一次」,UFFD 才是把成本降到「每个实际访问的页」。
+   两者不冲突 —— 我们现在两个都有。
+2. **不要 fork 内核。** e2b fork 了 VMM 但**没有** fork 内核,只维护一个 config。
+   这是维护面最小的做法,我们跟。
+3. **磁盘增量快照是我们最大的缺口。** tensorlake 把它当核心卖点
+   (O(changed bytes) vs O(disk size))。我们的 rootfs 已经走 sparse extent list,
+   所以成本跟着「写了多少」而不是「provision 了多少」—— 方向对了,
+   但还是 full snapshot,没有基于上一次快照的增量。Firecracker 原生支持
+   diff snapshot,接口不用改。
+
 ## 3. rootfs:dm-snapshot 而非 overlaybd/TCMU
 
 **已实测**:每 sandbox 磁盘成本 8 KiB(共享只读 base + 每 sandbox CoW)。
@@ -182,7 +206,35 @@ UFFD 缺页直接从 overlaybd 镜像读。这是比我们现在更远的一步�
   需要 mainline PPA 或升级发行版。收益是 ublk(overlaybd 的更快后端)。
   这台机器是 VM(`/dev/vda2`),换内核后 nested KVM 能否保持可用未验证。
 - **destroy 耗时 5.2s**:比 create 慢 5 倍,独立问题,未归因。
-- **内核对比**:CI prebuilt 6.1.102 vs 现有 6.1.175,未测。
+  怀疑是 `SendCtrlAltDel` 后等 guest 自己关机的那段(3s 超时 + 5s 等待),
+  但没验证。
+- **diff snapshot(增量)**:tensorlake 的核心差异化点,我们没有。
+  Firecracker 原生支持,接口不用改。
+- **日志与 CLI 输出标准化**:日志全是 `log.Printf`(71 处),无结构化、
+  无级别、不带 request_id。CLI exit code 只有 0 和 125,无 `--json`。
+
+## 5. 启动优化总账
+
+按贡献排序,全部真机实测:
+
+```
+gRPC 重连退避         -800 ms   改 BaseDelay 1s → 20ms
+关串口 (quiet)        -493 ms   8250 UART 同步写
+换 CI 内核             -90 ms   6.1.175 → 6.1.102
+health 轮询粒度        -40 ms   50ms → 10ms
+─────────────────────────────
+create   2200 ms → 952 ms
+
+UFFD 按需供页        -1296 ms   /snapshot/load 1303ms → 7ms
+unpack 缓存           -550 ms   每快照解一次而非每次 restore
+─────────────────────────────
+restore  1500 ms → 950 ms(首次 1617ms)
+```
+
+**教训:最大的两块都不在「内核/虚拟化」层,而在我们自己的代码里。**
+gRPC 退避和串口加起来 1293ms,占冷启动优化的 96%。
+一开始我以为瓶颈是 guest 内核启动,归因之后才发现内核只占其中 90ms。
+先测再改,这条在这次是决定性的。
 
 ## 参考
 
