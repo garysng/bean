@@ -190,14 +190,29 @@ local 档跑宿主进程,没有「缓存镜像」这个概念,让它 stub 掉四
 | 容器档 | cgroup v2 `cpu.max`（硬）+ `cpu.weight` | `memory.max` + `memory.swap.max=0` |
 | fc 档 | vCPU 数 = ceil(cpu)，宿主侧 FC 进程再包 cgroup（cpu.max 双保险 + weight 公平） | guest 内存 = memoryMiB;virtio-balloon 空闲回收 |
 
-**超卖策略（全部为配置项，非硬编码）**
+**超卖策略 ✅ 已实装**(flag,不是 YAML):
 
-```yaml
-# noded.yaml（节点级覆盖）/ 调度器全局默认
-overcommit:
-  cpu: 3.0        # allocatable = 物理核 × 该系数;1.0 = 不超卖
-  memory: 1.0     # 内存默认不超卖（fc 档 balloon 回收不改承诺量记账）
 ```
+--overcommit-cpu 3.0        # 上报的 allocatable = --cpu × 该系数;1.0 = 不超卖
+--overcommit-memory 1.0     # 内存默认不超卖
+```
+
+实测:`--cpu 8 --overcommit-cpu 3.0` → `/v1/nodes` 报 `cpuAllocatable: 24`。
+
+**为什么在节点侧而不是调度器侧算**:合适的系数取决于这个节点是干什么的
+(CPU 密集池要 1.0,通用池可以更高),而 `NodeRecord.CPUAllocatable` 的注释
+本来就写着「已包含超卖系数」—— 保持只有一处地方做这个决定。
+
+**为什么 CPU 与内存默认值不同**:CPU 超了只是变慢(内核分时),内存超了是进程被杀。
+fc 档理论上内存有富余(FC 按需供页,guest 实际 RSS 远低于声明值),
+但那个偏差**没有实测过**,而且宿主侧没有 cgroup 包裹 VMM 进程(security §A3),
+压力下没有内核层面的公平性保证。这两条是抬高内存系数的前置条件。
+
+**拒绝 < 1.0 而不是钳制**:想「留出四分之一」的人会写 0.75,
+钳到 1.0 是无视他,照收则上报得比实际少而日志里没有任何解释。
+少报容量应该用 `--cpu` 直接给小一点的数,错误信息里说了这一点。
+上限 20 是为了让小数点打错(3.0 → 30)当场报错,
+否则它表现为无法解释的超时而不是配置错误。
 
 - CPU：eval 突发型负载默认 3.0;CPU 密集型节点池可配 1.0;cgroup cpu.weight 按
   规格比例分配保公平;`dedicated: true`（预留字段）→ vCPU pin，不参与超卖

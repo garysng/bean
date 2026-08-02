@@ -222,9 +222,17 @@ func (p *DevMapperProvider) acquireBase(basePath string) (*sharedBase, error) {
 		return base, nil
 	}
 
-	loopDev, err := attachLoop(basePath, true)
+	// A device may already be attached to this base from before the node
+	// restarted, since the count above does not survive the process. Adopting it
+	// is what keeps a restart from leaking one loop device per base image.
+	loopDev, err := findLoop(basePath)
 	if err != nil {
 		return nil, err
+	}
+	if loopDev == "" {
+		if loopDev, err = attachLoop(basePath, true); err != nil {
+			return nil, err
+		}
 	}
 	sectors, err := deviceSectors(loopDev)
 	if err != nil {
@@ -238,6 +246,11 @@ func (p *DevMapperProvider) acquireBase(basePath string) (*sharedBase, error) {
 
 // releaseBase drops a reference and detaches the shared device when the last
 // sandbox using it goes away.
+//
+// The detach is allowed to fail. A device adopted from before a restart may
+// still be backing sandboxes this process does not know about, and the kernel
+// refuses to detach a device that is in use — which is the outcome we want, so
+// it is not worth reporting as an error.
 func (p *DevMapperProvider) releaseBase(basePath string) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
@@ -250,7 +263,7 @@ func (p *DevMapperProvider) releaseBase(basePath string) {
 		return
 	}
 	delete(p.bases, basePath)
-	detachLoop(base.loopDev)
+	_ = detachLoop(base.loopDev)
 }
 
 // dmName derives a mapping name. Device-mapper names are a flat namespace
@@ -275,6 +288,37 @@ func attachLoop(path string, readOnly bool) (string, error) {
 		return "", fmt.Errorf("image: losetup returned no device for %s", path)
 	}
 	return dev, nil
+}
+
+// findLoop returns an existing loop device backed by path, or "" if there is
+// none.
+//
+// This exists because the reference count that decides when to detach a shared
+// base lives in this process's memory. A restarted node starts that count at
+// zero, so without looking first it would attach the same base image again and
+// leave the previous device held for the life of the host — one leak per
+// restart, and the file it pins cannot be reclaimed.
+//
+// Reusing rather than cleaning up is deliberate: a device found here may still
+// be serving sandboxes from before the restart, so detaching it would break
+// them. Adopting it is correct either way, since a read-only base is identical
+// however many holders it has.
+func findLoop(path string) (string, error) {
+	// --associated lists only the devices backed by this file, so the caller does
+	// not have to parse and match every loop device on the host.
+	out, err := exec.Command("losetup", "--noheadings", "--output", "NAME",
+		"--associated", path).Output()
+	if err != nil {
+		// An older losetup without --associated is not a failure: the caller
+		// falls back to attaching, which is what it did before this existed.
+		return "", nil
+	}
+	for _, line := range strings.Split(string(out), "\n") {
+		if dev := strings.TrimSpace(line); dev != "" {
+			return dev, nil
+		}
+	}
+	return "", nil
 }
 
 func detachLoop(dev string) error {

@@ -62,6 +62,15 @@ func main() {
 	cpuTemplate := flag.String("cpu-template", "none",
 		"mask guest CPU features so memory snapshots survive a move between CPU "+
 			"generations: none|portable (fc runtime)")
+	overcommitCPU := flag.Float64("overcommit-cpu", 1.0,
+		"multiply allocatable CPU by this factor; evaluation workloads are bursty, "+
+			"so 1.0 leaves capacity idle. Oversubscribing CPU degrades gracefully "+
+			"(the kernel time-slices)")
+	overcommitMemory := flag.Float64("overcommit-memory", 1.0,
+		"multiply allocatable memory by this factor. Unlike CPU this does not "+
+			"degrade gracefully — being wrong means a killed process — and there is "+
+			"no cgroup around the VMM processes to enforce fairness, so raise it "+
+			"only with measurements")
 	trackDirtyPages := flag.Bool("track-dirty-pages", false,
 		"log guest writes so checkpoints can capture only what changed; must be on "+
 			"from boot, so a guest started without it can never produce an "+
@@ -95,6 +104,19 @@ func main() {
 	// A misspelled template must stop the node rather than fall back to none:
 	// the fallback silently produces snapshots bound to this host's CPU, and
 	// nothing surfaces that until a restore elsewhere misbehaves.
+	overcommit := node.Overcommit{CPU: *overcommitCPU, Memory: *overcommitMemory}
+	if err := overcommit.Validate(); err != nil {
+		log.Fatalf("--overcommit-*: %v", err)
+	}
+	if overcommit.Enabled() {
+		// Stated at startup because it changes what the node admits, and a node
+		// quietly accepting several times the work is hard to explain afterwards.
+		slog.Warn("resource overcommit on",
+			"cpu", *overcommitCPU, "memory", *overcommitMemory,
+			"reportedCPU", overcommit.ApplyCPU(*cpuAlloc),
+			"reportedMemoryMiB", overcommit.ApplyMemory(*memAlloc))
+	}
+
 	tmpl, err := runtime.ParseCPUTemplate(*cpuTemplate)
 	if err != nil {
 		log.Fatalf("--cpu-template: %v", err)
@@ -200,9 +222,12 @@ func main() {
 		}
 		reg := node.NewRegistrar(mgr, *controlPlane, id, *region, *bootstrapToken,
 			parseLabels(*labelsFlag), []string{rt.Name()},
+			// Scaled here rather than in the scheduler: the right factor depends on
+			// what this node is for, and the scheduler treats what it receives as
+			// the final allocatable figure.
 			&nodev1.NodeResources{
-				CpuAllocatable:       *cpuAlloc,
-				MemoryAllocatableMib: *memAlloc,
+				CpuAllocatable:       overcommit.ApplyCPU(*cpuAlloc),
+				MemoryAllocatableMib: overcommit.ApplyMemory(*memAlloc),
 				DiskSandboxesMib:     *diskAlloc,
 				CpuVendor:            cpuVendor,
 				CpuFamily:            cpuFamily,

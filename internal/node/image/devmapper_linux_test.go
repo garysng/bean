@@ -378,3 +378,70 @@ func copyFileContents(src, dest string) error {
 	}
 	return out.Sync()
 }
+
+// loopsFor counts the loop devices backed by a path, which is what leaks when a
+// restarted node re-attaches a base image it is already holding.
+func loopsFor(t *testing.T, path string) int {
+	t.Helper()
+	out, err := exec.Command("losetup", "--noheadings", "--output", "NAME",
+		"--associated", path).Output()
+	if err != nil {
+		t.Skipf("losetup --associated unavailable: %v", err)
+	}
+	n := 0
+	for _, line := range strings.Split(string(out), "\n") {
+		if strings.TrimSpace(line) != "" {
+			n++
+		}
+	}
+	return n
+}
+
+// TestDevMapperAdoptsAnExistingBaseLoop is the restart case. The reference count
+// that decides when to detach a shared base lives in this process's memory, so a
+// new provider starts it at zero — and without looking for an existing device it
+// attaches the same file again, holding the old one for the life of the host.
+//
+// Measured on a real host before the fix: one leaked device per node restart,
+// each pinning a base image that could then never be reclaimed.
+func TestDevMapperAdoptsAnExistingBaseLoop(t *testing.T) {
+	p := newDevMapperProvider(t)
+	seedExt4Image(t, p, "adopted:1", 64)
+	ctx := context.Background()
+
+	// Derived with the same helper the provider uses, so the test does not
+	// encode the naming scheme a second time.
+	name, err := refToFilename("adopted:1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	base := filepath.Join(p.ImageDir, name+imageSuffix)
+	if _, err := os.Stat(base); err != nil {
+		t.Fatalf("base image absent at %s: %v", base, err)
+	}
+
+	first, err := p.Prepare(ctx, "sbx_adopt_a", "adopted:1", PrepareOptions{SizeMiB: 64})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer first.Release()
+
+	afterFirst := loopsFor(t, base)
+	if afterFirst != 1 {
+		t.Fatalf("one sandbox produced %d loop devices for the base, want 1", afterFirst)
+	}
+
+	// A second provider over the same directories stands in for a restarted
+	// node: same files on disk, no in-memory reference count.
+	restarted := NewDevMapperProvider(p.BaseDir, p.ImageDir, 64)
+	second, err := restarted.Prepare(ctx, "sbx_adopt_b", "adopted:1", PrepareOptions{SizeMiB: 64})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer second.Release()
+
+	if got := loopsFor(t, base); got != 1 {
+		t.Errorf("after a simulated restart the base has %d loop devices, want 1: "+
+			"each restart leaks one and pins the image forever", got)
+	}
+}
