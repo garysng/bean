@@ -183,5 +183,13 @@ func (r *Registrar) usage() *nodev1.NodeUsage {
 			mem += spec.MemoryMib
 		}
 	}
-	return &nodev1.NodeUsage{CpuCommitted: cpu, MemoryCommittedMib: mem}
+	// Disk is measured rather than summed. CPU and memory commitments are close
+	// enough to real usage to be worth summing, but a sandbox's disk request is
+	// nominal: the sparse layer behind a 20 GiB request holds kilobytes, so adding
+	// the requests up would overstate the node by orders of magnitude.
+	return &nodev1.NodeUsage{
+		CpuCommitted:       cpu,
+		MemoryCommittedMib: mem,
+		DiskUsedMib:        r.mgr.DiskUsedMiB(),
+	}
 }

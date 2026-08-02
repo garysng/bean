@@ -41,6 +41,17 @@ type NodeRecord struct {
 	DiskCommitMiB   int64   `json:"diskCommittedMiB"`
 	GPUCommitted    int32   `json:"gpuCommitted"`
 
+	// DiskUsedMiB is what the node measured on its own filesystem, as opposed to
+	// DiskCommitMiB which sums what sandboxes were promised. The two differ by
+	// orders of magnitude because a sandbox's disk request is nominal while its
+	// layer is sparse — a 20 GiB request costing 44 KiB.
+	//
+	// Reported, not used for admission. Placement stays on the commitment ledger,
+	// which cannot be oversold by a burst; this exists so the gap is visible before
+	// it becomes an incident, and because the node's own low-disk floor is the
+	// thing that actually protects it (see node.DiskGuard).
+	DiskUsedMiB int64 `json:"diskUsedMiB"`
+
 	// CreateInFlight bounds concurrent creates so a burst becomes a
 	// pipeline instead of a stampede.
 	CreateInFlight int `json:"createInFlight"`
@@ -127,7 +138,7 @@ SELECT id, region, labels, runtimes, cpu_alloc, mem_alloc, disk_alloc, gpu_count
        cpu_committed, mem_committed, disk_committed, gpu_committed,
        create_in_flight, max_creates, cached_images, nvme_cache, state,
        advertise_addr, last_heartbeat,
-       cpu_vendor, cpu_family, cpu_template
+       cpu_vendor, cpu_family, cpu_template, disk_used_mib
 FROM nodes ORDER BY id`)
 	if err != nil {
 		return nil, err
@@ -153,7 +164,7 @@ SELECT id, region, labels, runtimes, cpu_alloc, mem_alloc, disk_alloc, gpu_count
        cpu_committed, mem_committed, disk_committed, gpu_committed,
        create_in_flight, max_creates, cached_images, nvme_cache, state,
        advertise_addr, last_heartbeat,
-       cpu_vendor, cpu_family, cpu_template
+       cpu_vendor, cpu_family, cpu_template, disk_used_mib
 FROM nodes WHERE id=?`, id)
 	n, err := scanNode(row)
 	if err == sql.ErrNoRows {
@@ -175,7 +186,7 @@ func scanNode(sc rowScanner) (*NodeRecord, error) {
 		&n.CPUCommitted, &n.MemoryCommitMiB, &n.DiskCommitMiB, &n.GPUCommitted,
 		&n.CreateInFlight, &n.MaxCreates, &cached, &n.NVMeCache, &n.State,
 		&n.AdvertiseAddr, &hb,
-		&n.CPUVendor, &n.CPUFamily, &n.CPUTemplate); err != nil {
+		&n.CPUVendor, &n.CPUFamily, &n.CPUTemplate, &n.DiskUsedMiB); err != nil {
 		return nil, err
 	}
 	if err := unmarshalJSON(labels, &n.Labels); err != nil {
@@ -343,14 +354,17 @@ func (s *Store) SetNodeState(nodeID, state string) (bool, error) {
 }
 
 // TouchNode records a heartbeat and clears a non-terminal doubt state.
-func (s *Store) TouchNode(nodeID string, cachedImages map[string]int64) error {
+// diskUsedMiB is recorded from the same heartbeat, and a zero is written through
+// rather than skipped: a node that stops being able to measure itself should read
+// as "not reported" instead of holding its last known figure forever.
+func (s *Store) TouchNode(nodeID string, cachedImages map[string]int64, diskUsedMiB int64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	if cachedImages == nil {
 		_, err := s.db.Exec(`
-UPDATE nodes SET last_heartbeat=?,
+UPDATE nodes SET last_heartbeat=?, disk_used_mib=?,
   state = CASE WHEN state IN ('SUSPECT','LOST') THEN 'READY' ELSE state END
-WHERE id=?`, time.Now().UnixMilli(), nodeID)
+WHERE id=?`, time.Now().UnixMilli(), diskUsedMiB, nodeID)
 		return err
 	}
 	cached, err := marshalJSON(cachedImages)
@@ -358,9 +372,9 @@ WHERE id=?`, time.Now().UnixMilli(), nodeID)
 		return err
 	}
 	_, err = s.db.Exec(`
-UPDATE nodes SET last_heartbeat=?, cached_images=?,
+UPDATE nodes SET last_heartbeat=?, cached_images=?, disk_used_mib=?,
   state = CASE WHEN state IN ('SUSPECT','LOST') THEN 'READY' ELSE state END
-WHERE id=?`, time.Now().UnixMilli(), cached, nodeID)
+WHERE id=?`, time.Now().UnixMilli(), cached, diskUsedMiB, nodeID)
 	return err
 }
 

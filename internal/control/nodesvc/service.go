@@ -147,7 +147,8 @@ func (s *Service) Heartbeat(stream nodev1.NodeService_HeartbeatServer) error {
 		// The node's image cache is recorded from its own report, which is what
 		// makes the scheduler's image affinity and prewarm progress real rather
 		// than always empty.
-		if err := s.store.TouchNode(req.NodeId, req.CachedImages); err != nil {
+		if err := s.store.TouchNode(req.NodeId, req.CachedImages,
+			req.GetUsage().GetDiskUsedMib()); err != nil {
 			return status.Errorf(codes.Internal, "touch node: %v", err)
 		}
 		if err := stream.Send(&nodev1.HeartbeatResponse{LeaseOk: true}); err != nil {

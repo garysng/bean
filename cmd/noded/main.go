@@ -75,6 +75,14 @@ func main() {
 		"log guest writes so checkpoints can capture only what changed; must be on "+
 			"from boot, so a guest started without it can never produce an "+
 			"incremental snapshot (fc runtime)")
+	minFreeDiskMiB := flag.Int64("min-free-disk-mib", 0,
+		"refuse new sandboxes while the sandbox filesystem has less than this much "+
+			"free; 0 disables. A sandbox whose sparse layer cannot allocate gets EIO "+
+			"and its filesystem becomes unrecoverable while writes still appear to "+
+			"succeed, so refusing a create is much cheaper than admitting one")
+	minFreeDiskPct := flag.Float64("min-free-disk-percent", 0,
+		"same floor as --min-free-disk-mib but against total capacity; the larger of "+
+			"the two applies, so a percentage travels between differently sized nodes")
 	snapCacheHighMiB := flag.Int64("snapshot-cache-high-mib", 0,
 		"reclaim unpacked snapshots once the cache reaches this size; 0 leaves it "+
 			"unbounded, which grows by roughly one guest's memory per distinct "+
@@ -180,6 +188,27 @@ func main() {
 
 	mgr := node.NewManager(rt)
 	defer mgr.Close()
+
+	// The guard watches the base directory because that is where the sparse
+	// copy-on-write layers live, which is the space that actually runs out.
+	mgr.Disk = node.DiskGuard{
+		Path:           *baseDir,
+		MinFreeBytes:   *minFreeDiskMiB << 20,
+		MinFreePercent: *minFreeDiskPct,
+	}
+	if err := mgr.Disk.Validate(); err != nil {
+		log.Fatalf("--min-free-disk-*: %v", err)
+	}
+	if !mgr.Disk.Enabled() {
+		// Stated because the failure it guards against is unrecoverable and silent:
+		// a guest whose layer cannot allocate keeps reporting successful writes.
+		slog.Warn("no low-disk floor set; a full disk will destroy the " +
+			"copy-on-write layer of any sandbox that writes to it")
+	} else if stats, err := mgr.Disk.Stat(); err == nil {
+		slog.Info("low-disk admission floor set",
+			"minFreeMiB", *minFreeDiskMiB, "minFreePercent", *minFreeDiskPct,
+			"currentFreeBytes", stats.FreeBytes, "totalBytes", stats.TotalBytes)
+	}
 
 	lis, err := net.Listen("tcp", *listen)
 	if err != nil {

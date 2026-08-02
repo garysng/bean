@@ -48,6 +48,11 @@ func (s *Server) handleListNodes(w http.ResponseWriter, r *http.Request) {
 			"memoryCommittedMiB":   n.MemoryCommitMiB,
 			"diskAllocatableMiB":   n.DiskAllocateMiB,
 			"diskCommittedMiB":     n.DiskCommitMiB,
+			// What the node measured, beside what it promised. The two differ by
+			// orders of magnitude because a sandbox's disk request is nominal while
+			// its layer is sparse, and that gap is only diagnosable if both are
+			// shown: a node refusing work at 5% committed is otherwise inexplicable.
+			"diskUsedMiB": n.DiskUsedMiB,
 			"gpuCount":             n.GPUCount, "gpuCommitted": n.GPUCommitted,
 			"createInFlight": n.CreateInFlight, "maxCreates": n.MaxCreates,
 			"cachedImages":  len(n.CachedImages),

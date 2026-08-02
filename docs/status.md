@@ -195,6 +195,30 @@ alpine:3.20:
 **没有泄漏**:每轮压测后 dm 映射、firecracker 进程、持有已删除文件的
 loop device 全部归零 —— loop 泄漏的修复(#16)在并发下成立。
 
+### 磁盘:实际占用上报 + 低空间停止接单 ✅
+
+承诺量与真实占用的差距现在两边都可见 —— 实测同一节点
+`diskCommittedMiB: 0` 而 `diskUsedMiB: 76200`。**这个差距本身就是那个盲区**:
+承诺量说节点空着,而盘上已经用掉 76 GB(base 镜像、快照缓存、别的服务)。
+
+**不做超卖系数**:那是让运维猜一个倍数,而稀疏文件的名义大小本来就不该是记账依据。
+改为 `statfs` 测真实占用并上报(`bean_node_disk_{free,used}_bytes` +
+心跳 `disk_used_mib` + `/v1/nodes` 的 `diskUsedMiB`)。
+
+**放置仍然走承诺量账本**,没有改成按真实水位判断 —— 账本不会被突发写满超卖,
+而真实占用是滞后的。真正的防线放在节点侧:`--min-free-disk-mib` /
+`--min-free-disk-percent`(两者取大者,默认关)。
+
+理由是实测出来的失败模式(decisions §3.7):宿主盘满时 dm-snapshot 转 `Invalid`,
+**guest 侧的 `write()` 仍然返回成功但数据全丢**,remount 直接读不出 superblock。
+**盘满之后没有补救可做** —— 那时 sandbox 已不可恢复。好在共享 base 完好,
+爆炸半径是单个 sandbox,所以「宁可拒绝新建」这个取舍是明确划算的。
+
+真机验证:不可能满足的水位下 create 返回 **503 `NO_CAPACITY`**(不是 500),
+消息带上路径、当前空闲、地板值和后果;没有留下 VM、dm 映射或目录;
+`bean_node_creates_refused_total{reason="disk_pressure"}` 递增。
+换成现实水位(5 GiB / 5%)后 6 并发全部成功、无泄漏。
+
 ### 验证覆盖
 
 - **microVM 全链路**（真 KVM 机器,经 Manager 与 CLI 两层）：create → exec →

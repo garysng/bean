@@ -41,6 +41,11 @@ type Manager struct {
 	rt      runtime.Runtime
 	metrics *obs.Registry
 
+	// Disk refuses new sandboxes while free space is below a floor. The zero value
+	// admits everything. See diskguard.go for why this exists as well as the
+	// scheduler's disk commitment rather than instead of it.
+	Disk DiskGuard
+
 	mu        sync.Mutex
 	sandboxes map[string]*Sandbox
 
@@ -100,6 +105,18 @@ func (m *Manager) Create(ctx context.Context, spec *nodev1.SandboxSpec) (*Sandbo
 			attribute.String(obs.AttrImage, spec.GetImage()),
 		))
 	defer span.End()
+
+	// Checked before the slot is reserved, so a refused create leaves no trace to
+	// clean up. Refusing here rather than in the scheduler is deliberate: the node
+	// is the only party that can see its own filesystem, and the space at risk
+	// includes things the scheduler never accounted for — base images, the snapshot
+	// cache, anything else sharing the volume.
+	if err := m.Disk.Admit(); err != nil {
+		m.metrics.IncCounter("bean_node_creates_refused_total",
+			"Creates refused to protect running sandboxes.",
+			map[string]string{"reason": "disk_pressure"}, 1)
+		return nil, err
+	}
 
 	m.mu.Lock()
 	if _, exists := m.sandboxes[spec.SandboxId]; exists {
@@ -1023,4 +1040,36 @@ func (m *Manager) RefreshGauges() {
 				nil, float64(used))
 		}
 	}
+
+	// Actual occupancy, alongside the commitment the scheduler tracks. The two
+	// disagree by orders of magnitude — a 20 GiB sparse layer holding 44 KiB is
+	// counted as 20 GiB by the ledger — and the gap is only visible if both are
+	// published.
+	if m.Disk.Path != "" {
+		if stats, err := m.Disk.Stat(); err == nil {
+			m.metrics.SetGauge("bean_node_disk_free_bytes",
+				"Free space on the sandbox filesystem, excluding the root reserve.",
+				nil, float64(stats.FreeBytes))
+			m.metrics.SetGauge("bean_node_disk_used_bytes",
+				"Allocated blocks on the sandbox filesystem, which is what sparse "+
+					"layers actually cost.", nil, float64(stats.UsedBytes))
+		}
+	}
+}
+
+// DiskUsedMiB reports the sandbox filesystem's real occupancy for the heartbeat,
+// in MiB to match the commitment fields it sits beside.
+//
+// Zero when the guard has no path configured, which reads as "not reported"
+// rather than "empty": the control plane treats it as advisory, so a node that
+// cannot measure itself is not mistaken for one with an empty disk.
+func (m *Manager) DiskUsedMiB() int64 {
+	if m.Disk.Path == "" {
+		return 0
+	}
+	stats, err := m.Disk.Stat()
+	if err != nil {
+		return 0
+	}
+	return stats.UsedBytes >> 20
 }

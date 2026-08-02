@@ -351,7 +351,7 @@ func TestLivenessTransitions(t *testing.T) {
 	}
 
 	// A heartbeat brings it back.
-	if err := st.TouchNode("n1", nil); err != nil {
+	if err := st.TouchNode("n1", nil, 0); err != nil {
 		t.Fatal(err)
 	}
 	got, _ = st.GetNode("n1")

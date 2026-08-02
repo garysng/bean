@@ -482,19 +482,51 @@ CPUID leaf 0 的 vendor 字符串和 family 都无法掩,guest 内核要据此�
 所以「稀疏层 + 不精确记账」不是我们的疏漏,是这条路线的常态;
 区别在于我们把名义值当成了调度依据。
 
+### 宿主盘写满时会发生什么:已实测 ✅
+
+`hack/enospc-probe.sh`。在一个 64 MiB 的 loopback 文件系统上组 dm-snapshot
+(base 256M,CoW 落在这个小盘上),然后往 guest 侧写到宿主盘撑满:
+
+```
+RESULT: the write FAILED with exit 1
+  dd: error writing '...': Input/output error
+kernel: blk_update_request: I/O error, dev loop9, sector 116032 op 0x1:(WRITE)
+kernel: device-mapper: snapshots: Invalidating snapshot: Error reading/writing.
+dmsetup status: 0 524288 snapshot Invalid
+```
+
+**结论比 dm-thin 那两种模式都更硬:**
+
+| | 实测结果 |
+|---|---|
+| guest 是挂死还是报错 | **报错**(EIO),不是无限排队 —— 比 dm-thin 默认的 `queue_if_no_space` 好 |
+| 设备状态 | dm-snapshot 目标转 **`Invalid`**,不可恢复 |
+| 之后还能写吗 | `write()` **仍然返回成功** ← 危险的地方 |
+| 那次写活下来了吗 | **没有**。remount 直接 `can't read superblock` |
+| 共享 base 呢 | **完好**,只读 base 能干净挂上 —— 爆炸半径是单个 sandbox |
+
+**「`write()` 成功但数据没了」这一条决定了设计。** 设备已经 `Invalid` 之后,
+guest 侧的写调用照样返回 0,数据只落在 page cache;等到需要真正读设备时
+superblock 都读不回来。**这和 §3.0 那个静默损坏是同一类错误** ——
+上层看不到任何异常,直到 page cache 失效。
+
+所以**不能指望在盘写满之后做补救**:那时 sandbox 已经不可恢复,
+唯一正确的动作是销毁它。防线必须在写满之前。
+
+好消息是 base 完好,所以爆炸半径是一个 sandbox 而不是「该镜像上的所有 sandbox」——
+这让「宁可拒绝新建也不要写满」的取舍成立:代价是拒绝几个请求,
+而不是丢掉一批正在跑的 eval。
+
 ### 由此得出的决定
 
 **不做「磁盘超卖系数」。** 超卖系数是让运维猜一个倍数,而
 **稀疏文件的名义大小本来就不该是记账依据** —— 与其猜倍数,不如上报真实占用。
-所以:心跳报 `du` 语义的实际占用,调度器按真实水位判断。
+所以:心跳报实际占用,调度器按真实水位判断。
 
-**必须配套水位停止接单**,因为一旦按实际占用记账,超卖就是隐式无限的,
-盘写满的失败模式会变成真实风险。dm-thin 的先例说明这个失败模式很难看:
-`queue_if_no_space`(内核默认)下 IO **无限排队**,guest 表现为挂死而不是报错;
-`error_if_no_space` 才返回 EIO。而元数据耗尽更糟 —— 池转只读,
-需要离线 `thin_check`/`thin_repair`,**加数据空间也修不回来**。
-我们用的是 ext4 上的稀疏文件而非 dm-thin,但「写不进去时 guest 看到什么」
-同样没有实测过,这是接单水位必须先做的理由。
+**水位停止接单是必需的而不是可选的。** 一旦按实际占用记账,超卖就是隐式无限的,
+而上面实测的失败模式是不可恢复 + 静默。dm-thin 的先例同样难看:
+`queue_if_no_space`(内核默认)下 guest 挂死,元数据耗尽更是要离线
+`thin_check`/`thin_repair`,加数据空间也修不回来。
 
 抄 kubelet 的分层次序:**回收(缓存 LRU)的触发线要低于停止接单的线**,
 否则一进入压力就直接拒绝服务而没给回收留机会。

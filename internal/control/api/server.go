@@ -233,6 +233,11 @@ func grpcToHTTP(w http.ResponseWriter, err error) {
 		writeErr(w, http.StatusConflict, "SANDBOX_NOT_RUNNING", st.Message())
 	case codes.DeadlineExceeded:
 		writeErr(w, http.StatusGatewayTimeout, "TIMEOUT", st.Message())
+	case codes.ResourceExhausted:
+		// A node declining work for want of capacity is the same answer the
+		// scheduler gives when it can place nothing, so it gets the same code: 503
+		// tells a client to retry, where 500 tells it to report a bug.
+		writeErr(w, http.StatusServiceUnavailable, "NO_CAPACITY", st.Message())
 	default:
 		writeErr(w, http.StatusInternalServerError, "INTERNAL", st.Message())
 	}

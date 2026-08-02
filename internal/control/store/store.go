@@ -121,7 +121,12 @@ CREATE TABLE IF NOT EXISTS nodes (
   -- as permission.
   cpu_vendor TEXT NOT NULL DEFAULT '',
   cpu_family INTEGER NOT NULL DEFAULT 0,
-  cpu_template TEXT NOT NULL DEFAULT ''
+  cpu_template TEXT NOT NULL DEFAULT '',
+  -- What the node measured, as opposed to disk_committed which sums what
+  -- sandboxes were promised. A sandbox's disk request is nominal and its layer is
+  -- sparse, so the two differ by orders of magnitude. Advisory: placement stays on
+  -- the commitment ledger, and the node's own floor is what protects it.
+  disk_used_mib INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_nodes_region_state ON nodes(region, state);
 -- One reservation per sandbox: the primary key makes Reserve idempotent
@@ -177,6 +182,7 @@ func (s *Store) addMissingColumns() error {
 		`ALTER TABLE nodes ADD COLUMN cpu_family INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE nodes ADD COLUMN cpu_template TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE snapshots ADD COLUMN base_id TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE nodes ADD COLUMN disk_used_mib INTEGER NOT NULL DEFAULT 0`,
 	} {
 		if _, err := s.db.Exec(stmt); err != nil && !isDuplicateColumn(err) {
 			return fmt.Errorf("migrate: %q: %w", stmt, err)
