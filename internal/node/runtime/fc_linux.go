@@ -84,6 +84,9 @@ type fcVM struct {
 	client *fcClient
 	rootfs *image.Rootfs
 	paused bool
+	// uffd serves guest page faults for a VM restored from a snapshot. Nil for a
+	// cold boot, which has no memory image to fault against.
+	uffd *uffdHandler
 	// done closes when the VMM process exits, so waiters do not poll.
 	done chan struct{}
 }
@@ -94,10 +97,14 @@ type fcVM struct {
 const (
 	vsockName     = "vsock.sock"
 	agentDiskName = "agent.ext4"
+	uffdSockName  = "uffd.sock"
 )
 
 // vsockHostPath is where callers on the host find the socket.
 func (v *fcVM) vsockHostPath() string { return filepath.Join(v.dir, vsockName) }
+
+// uffdHostPath is where the page-fault handler listens for Firecracker.
+func (v *fcVM) uffdHostPath() string { return filepath.Join(v.dir, uffdSockName) }
 
 func NewFCRuntime(fcBin, kernel, agentDisk, baseDir string, images image.Provider) *FCRuntime {
 	return &FCRuntime{

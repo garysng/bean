@@ -13,9 +13,9 @@ import (
 	"os"
 	"path/filepath"
 	"syscall"
+	"time"
 
 	"golang.org/x/sys/unix"
-	"time"
 )
 
 // Pause freezes the guest's vCPUs. Memory stays resident, so resume is
@@ -99,6 +99,15 @@ func (r *FCRuntime) Destroy(ctx context.Context, id string, force bool) error {
 // following rootfs release is not fighting a process that still has the device
 // open.
 func (r *FCRuntime) killVMM(vm *fcVM) {
+	// The page-fault handler holds a mapping of the memory image and the
+	// userfault fd, neither of which the VMM's exit releases. This runs before
+	// the kill so the handler is gone either way: after the VMM exits nothing
+	// will fault again, and if the kill were to fail the handler would otherwise
+	// stay mapped for the life of the node.
+	if vm.uffd != nil {
+		_ = vm.uffd.Close()
+		vm.uffd = nil
+	}
 	if vm.cmd == nil || vm.cmd.Process == nil {
 		return
 	}
@@ -362,6 +371,16 @@ func (r *FCRuntime) loadSnapshot(ctx context.Context, vm *fcVM, src io.Reader) e
 		return errors.New("fc: snapshot bundle missing vmstate or memory")
 	}
 
+	// Guest memory is served on demand rather than read up front. With the File
+	// backend Firecracker faults the whole image in through the page cache
+	// before the guest runs, which costs time proportional to the guest's size
+	// no matter how little of it the guest touches.
+	handler, err := newUffdHandler(vm.uffdHostPath(), paths[snapshotMemFile])
+	if err != nil {
+		return err
+	}
+	vm.uffd = handler
+
 	// Nothing may be configured before loading: Firecracker rejects a load once
 	// boot-specific resources are set, because the snapshot carries the whole
 	// machine configuration including the vsock device.
@@ -369,14 +388,23 @@ func (r *FCRuntime) loadSnapshot(ctx context.Context, vm *fcVM, src io.Reader) e
 	// The snapshotted vsock UDS path therefore has to match this VM's path,
 	// which is why the path is derived from the sandbox directory the same way
 	// on both sides rather than recorded in the snapshot.
-	return vm.client.put(ctx, "/snapshot/load", fcSnapshotLoad{
+	if err := vm.client.put(ctx, "/snapshot/load", fcSnapshotLoad{
 		SnapshotPath: paths[snapshotStateFile],
 		MemBackend: fcMemBackend{
-			BackendPath: paths[snapshotMemFile],
-			BackendType: "File",
+			// Relative for the same reason the drives are: Firecracker records
+			// this path and resolves it again from its own working directory.
+			BackendPath: uffdSockName,
+			BackendType: "Uffd",
 		},
 		ResumeVM: true,
-	})
+	}); err != nil {
+		// A load that never happened leaves a handler waiting on a connection
+		// that will not come.
+		handler.Close()
+		vm.uffd = nil
+		return err
+	}
+	return nil
 }
 
 // readSnapshotBundle extracts a bundle. The rootfs is written straight over the
@@ -422,8 +450,6 @@ func readSnapshotBundle(src io.Reader, dir, rootfsDevice string) (map[string]str
 	}
 }
 
-// writeBundleMember writes one member. The rootfs is written in place, since
-// the device already exists at the right size; the others are created.
 // writeBundleMember extracts one member. sparse selects the extent-list format
 // the writable layer is stored in; the dense members are copied whole.
 func writeBundleMember(src io.Reader, dest string, sparse bool) error {

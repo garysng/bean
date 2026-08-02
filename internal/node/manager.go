@@ -599,7 +599,13 @@ func (m *Manager) RestoreSandbox(ctx context.Context, spec *nodev1.SandboxSpec,
 		m.observePhase("restore", time.Since(start))
 	}()
 
+	// Unpacking the bundle and loading it into a VMM are measured apart from
+	// waiting for the agent: the first scales with snapshot size and the second
+	// does not, so a single number for the whole restore cannot say which one to
+	// attack.
+	loadStart := time.Now()
 	handle, err := m.rt.Restore(ctx, specToRuntime(spec), src)
+	m.observePhase("restore_load", time.Since(loadStart))
 	if err != nil {
 		m.dropFailed(spec.SandboxId)
 		return nil, err
