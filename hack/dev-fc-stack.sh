@@ -8,7 +8,11 @@ set -euo pipefail
 
 RUN=${RUN:-/tmp/beanrun}
 ASSETS=${ASSETS:-/var/lib/bean/assets}
-KERNEL=${KERNEL:-$ASSETS/vmlinux-6.1.175}
+# Firecracker's own CI kernel, which is the one their guest_configs are tested
+# against and ships its .config alongside it. Measured ~90ms faster to a
+# reachable agent than the 6.1.175 build we started with, whose config was
+# unknown — see docs/decisions.md.
+KERNEL=${KERNEL:-$ASSETS/vmlinux-6.1.102}
 BIN=${BIN:-/tmp}
 
 # Ports are overridable and default off the common ranges, since a development

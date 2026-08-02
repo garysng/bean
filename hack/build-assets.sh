@@ -104,15 +104,48 @@ PY
   echo "base image: $out"
 }
 
+# fetch_kernel downloads the guest kernel Firecracker's own CI uses.
+#
+# Not built from source: the config is published beside the binary, so using the
+# prebuilt costs nothing in reproducibility while a build would need a kernel
+# toolchain on every node that prepares assets. e2b takes the same position for
+# the same reason — their fc-kernels repo holds a config and a build script, not
+# a kernel fork.
+#
+# The config is downloaded too, and is the thing worth keeping: it is what a
+# custom kernel would start from if boot time ever justifies building one.
+fetch_kernel() {
+  local version=${1:-6.1.102}
+  local base=https://s3.amazonaws.com/spec.ccfc.min/firecracker-ci/v1.11/x86_64
+  for f in "vmlinux-$version" "vmlinux-$version.config"; do
+    if [ -s "$ASSETS/$f" ]; then
+      echo "have $f"
+      continue
+    fi
+    echo "fetching $f"
+    # Downloads from this bucket have been seen to truncate, and a short kernel
+    # fails as a confusing boot hang rather than a download error.
+    curl -sSfL --max-time 600 -o "$ASSETS/$f.part" "$base/$f"
+    mv "$ASSETS/$f.part" "$ASSETS/$f"
+  done
+  if ! file "$ASSETS/vmlinux-$version" | grep -q ELF; then
+    echo "kernel is not an ELF image; the download was truncated" >&2
+    exit 1
+  fi
+  echo "kernel: $ASSETS/vmlinux-$version"
+}
+
 need_root
 mkdir -p "$ASSETS" "$IMAGES"
 
 case "${1:-all}" in
   agent) build_agent_disk ;;
+  kernel) fetch_kernel "${2:-6.1.102}" ;;
   image) build_base_image "${2:?usage: $0 image <ref> [size_mib]}" "${3:-512}" ;;
   all)
+    fetch_kernel
     build_agent_disk
     build_base_image "${2:-alpine:3.20}" "${3:-512}"
     ;;
-  *) echo "usage: $0 [agent|image <ref> [size]|all [ref] [size]]" >&2; exit 1 ;;
+  *) echo "usage: $0 [agent|kernel [version]|image <ref> [size]|all [ref] [size]]" >&2; exit 1 ;;
 esac

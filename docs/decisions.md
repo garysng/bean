@@ -48,16 +48,30 @@ gRPC 默认 `BaseDelay` 是 1s,失败后连接就在退避里躺满一秒,
 repo 里只放 config(3094 行)+ 一个 virtio_balloon patch。
 **e2b 的内核维护面 = 一个 config 文件,没有 rebase 负担。**
 
-**选择**:先用 `firecracker-ci/v1.11/x86_64/vmlinux-6.1.102`,同时把它的 `.config`
-入库当资产(CI 把 config 单独发布,所以「用 prebuilt」和「拿到自己的 config」不是二选一)。
+**选择**:用 `firecracker-ci/v1.11/x86_64/vmlinux-6.1.102`,`.config` 一起入库
+(CI 把 config 单独发布,所以「用 prebuilt」和「拿到自己的 config」不是二选一)。
+`hack/build-assets.sh kernel` 负责下载并校验是 ELF —— 那个 bucket 见过截断,
+而短了的内核表现为「boot 挂住」,不是下载报错。
 
 理由:容器编译要先付出成本(工具链 + 拉源码 + 编 20min)才拿到第一个数据点,
-而我们连「换内核有没有用」都还没测。先测,收益够再建编译流程 —— config 已在手上。
+而当时连「换内核有没有用」都还没测。先测,收益够再建编译流程 —— config 已在手上。
 
-**现状问题**:当前用的 `vmlinux-6.1.175` 来自 agentenv 的 R2 站,**config 未知**,
-这是没法解释启动耗时构成的原因之一。内核日志里能看到 iSCSI transport、bpfilter
-这些 microVM 里用不到的探测,还有 `IO read @ 0x87 failed: MissingAddressRange`
-—— 通用内核在 microVM 里做无用探测的直接证据。
+**实测**(quiet,VMM 启动到 agent 可连,各三次):
+```
+vmlinux-6.1.175   690 / 689 / 715 ms   (来源 agentenv R2 站,config 未知)
+vmlinux-6.1.102   603 / 613 / 601 ms   (Firecracker CI,config 已知)
+```
+快 ~90ms(13%)。全链路 create 从 1040ms → 952ms,snapshot/restore 正常。
+
+**但要注意收益的来源**:CI config 里 `CONFIG_SCSI_ISCSI_ATTRS`、`CONFIG_BPFILTER`、
+`CONFIG_SQUASHFS`、`CONFIG_XFS_FS`、`CONFIG_NFS_FS` **全都是 =y**。
+所以这 90ms 不是「裁掉了没用的驱动」——CI 内核也没裁。
+差异主要是镜像更小(40.8MB vs 44.5MB)和版本本身。
+
+**推论**:自己编一个精简 config 的收益上限比预期低。内核日志里那些
+iSCSI / bpfilter 探测在 CI 内核里同样存在,而它已经更快了。
+真要继续压启动时间,`quiet`(-493ms)和 gRPC 退避(-800ms)那种量级的收益
+不在内核裁剪里。**所以暂不建编译流程。**
 
 ## 2. snapshot restore:UFFD 而非缓存解包结果
 
