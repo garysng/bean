@@ -173,7 +173,7 @@ func (r *FCRuntime) Checkpoint(ctx context.Context, id string, w io.Writer, opts
 		// which members are present. That keeps the two kinds distinguishable
 		// from the bundle alone, so a checkpoint stays self-describing rather
 		// than depending on a database row that could disagree with it.
-		return writeSnapshotBundle(w, "", "", vm.rootfs.Writable)
+		return writeSnapshotBundle(w, "", "", vm.rootfs.Writable, false)
 	}
 
 	snapDir := filepath.Join(vm.dir, "snapshot")
@@ -182,17 +182,30 @@ func (r *FCRuntime) Checkpoint(ctx context.Context, id string, w io.Writer, opts
 	}
 	defer os.RemoveAll(snapDir)
 
+	// A diff needs KVM to have been logging writes since the guest started, which
+	// no checkpoint-time request can arrange. Refusing is the honest answer:
+	// silently writing a full snapshot would hand the caller a bundle that costs
+	// what it was trying to avoid, and the size alone would not explain why.
+	snapType := "Full"
+	if opts.Diff {
+		if !vm.dirtyPages {
+			return fmt.Errorf("fc: sandbox %s cannot produce a diff checkpoint: "+
+				"it booted without dirty-page tracking, which cannot be enabled after the fact", id)
+		}
+		snapType = "Diff"
+	}
+
 	statePath := filepath.Join(snapDir, snapshotStateFile)
 	memPath := filepath.Join(snapDir, snapshotMemFile)
 	if err := vm.client.put(ctx, "/snapshot/create", fcSnapshotCreate{
-		SnapshotType: "Full", SnapshotPath: statePath, MemFilePath: memPath,
+		SnapshotType: snapType, SnapshotPath: statePath, MemFilePath: memPath,
 	}); err != nil {
 		return err
 	}
 
 	// The rootfs travels with the snapshot: memory state referring to a
 	// filesystem that has moved on since would restore into corruption.
-	return writeSnapshotBundle(w, statePath, memPath, vm.rootfs.Writable)
+	return writeSnapshotBundle(w, statePath, memPath, vm.rootfs.Writable, opts.Diff)
 }
 
 // Snapshot bundle member names. Restore looks them up by name, so a bundle
@@ -201,6 +214,15 @@ const (
 	snapshotStateFile  = "vmstate"
 	snapshotMemFile    = "memory"
 	snapshotRootfsFile = "rootfs"
+	// snapshotMemDiffFile carries memory the guest dirtied since its base, as an
+	// extent list. It is a distinct member rather than a flag beside "memory"
+	// because the two must never be confused: layering a full image would erase
+	// the base's untouched pages, and loading a diff on its own would give the
+	// guest a memory map with holes where it expects its own state. A reader that
+	// dispatches on the name cannot make either mistake, and an older node
+	// encountering this member skips it and fails loudly for want of memory
+	// rather than restoring something wrong.
+	snapshotMemDiffFile = "memory.diff"
 )
 
 // writeSnapshotBundle streams the parts as a gzipped tar archive.
@@ -214,35 +236,46 @@ const (
 // provisioned. Guest memory is compressed, since most of a fresh VM's pages are
 // zero. Together these took a snapshot of a small sandbox from 1280 MiB to
 // around 20 MiB, which is the difference between snapshots being usable and not.
-func writeSnapshotBundle(w io.Writer, statePath, memPath, rootfsPath string) error {
+func writeSnapshotBundle(w io.Writer, statePath, memPath, rootfsPath string, diff bool) error {
 	// Speed over ratio: the remaining bulk is zeroed memory pages, which even
 	// the fastest setting removes, and the sandbox is paused throughout.
 	zw, err := gzip.NewWriterLevel(w, gzip.BestSpeed)
 	if err != nil {
 		return err
 	}
-	if err := writeBundleEntries(zw, statePath, memPath, rootfsPath); err != nil {
+	if err := writeBundleEntries(zw, statePath, memPath, rootfsPath, diff); err != nil {
 		return err
 	}
 	return zw.Close()
 }
 
-func writeBundleEntries(w io.Writer, statePath, memPath, rootfsPath string) error {
+func writeBundleEntries(w io.Writer, statePath, memPath, rootfsPath string, diff bool) error {
 	tw := tar.NewWriter(w)
 
-	// vmstate and the memory file are dense — Firecracker writes every byte —
-	// so they go in whole. An empty path omits the member, which is how a
-	// filesystem-only checkpoint is expressed: restore sees no memory member and
-	// boots a fresh guest instead of resuming one.
-	for _, m := range []struct{ name, path string }{
-		{snapshotStateFile, statePath},
-		{snapshotMemFile, memPath},
-	} {
-		if m.path == "" {
-			continue
+	// An empty state path omits the member, which is how a filesystem-only
+	// checkpoint is expressed: restore sees no memory member and boots a fresh
+	// guest instead of resuming one.
+	if statePath != "" {
+		if err := writeTarFile(tw, snapshotStateFile, statePath); err != nil {
+			return fmt.Errorf("fc: bundle %s: %w", snapshotStateFile, err)
 		}
-		if err := writeTarFile(tw, m.name, m.path); err != nil {
-			return fmt.Errorf("fc: bundle %s: %w", m.name, err)
+	}
+
+	if memPath != "" {
+		// A full memory image is dense — Firecracker writes every byte — so it
+		// goes in whole. A diff is sparse, holding only the pages the guest
+		// dirtied, and has to keep that shape: which pages are real is the
+		// information a later layering needs, and writing it densely would
+		// present untouched holes as zeroed pages that overwrite the base.
+		name, err := snapshotMemFile, error(nil)
+		if diff {
+			name = snapshotMemDiffFile
+			err = writeSparseTarFile(tw, name, memPath)
+		} else {
+			err = writeTarFile(tw, name, memPath)
+		}
+		if err != nil {
+			return fmt.Errorf("fc: bundle %s: %w", name, err)
 		}
 	}
 
@@ -417,6 +450,13 @@ func (r *FCRuntime) loadSnapshot(ctx context.Context, vm *fcVM, spec *Spec, stag
 	// The snapshotted vsock UDS path therefore has to match this VM's path,
 	// which is why the path is derived from the sandbox directory the same way
 	// on both sides rather than recorded in the snapshot.
+	// Dirty tracking has to be re-requested here. A snapshot does not carry the
+	// setting, so without this a restored guest could never produce a diff of its
+	// own — which is exactly the case that matters, since a sandbox restored from
+	// a prepared checkpoint is the one most likely to be checkpointed again.
+	//
+	// The load also resets the dirty bitmap, so the guest's first diff covers
+	// what it wrote after the restore rather than what its base wrote before.
 	if err := vm.client.put(ctx, "/snapshot/load", fcSnapshotLoad{
 		SnapshotPath: entry.StatePath,
 		MemBackend: fcMemBackend{
@@ -425,7 +465,8 @@ func (r *FCRuntime) loadSnapshot(ctx context.Context, vm *fcVM, spec *Spec, stag
 			BackendPath: uffdSockName,
 			BackendType: "Uffd",
 		},
-		ResumeVM: true,
+		EnableDiffSnaps: r.TrackDirtyPages,
+		ResumeVM:        true,
 	}); err != nil {
 		// A load that never happened leaves a handler waiting on a connection
 		// that will not come.
@@ -433,15 +474,16 @@ func (r *FCRuntime) loadSnapshot(ctx context.Context, vm *fcVM, spec *Spec, stag
 		vm.uffd = nil
 		return err
 	}
+	vm.dirtyPages = r.TrackDirtyPages
 	return nil
 }
 
 // snapshotState produces the machine state and memory image to restore from,
-// unpacking the bundle only if this node has not already done so for this
-// snapshot. The writable layer is always extracted, to rootfsDest, because it
-// cannot be shared: two sandboxes restored from one checkpoint diverge as soon
-// as either writes.
-func (r *FCRuntime) snapshotState(rootfsDest string, spec *Spec, src io.Reader) (snapEntry, error) {
+// merging the chain only if this node has not already done so for this snapshot.
+// The writable layer is always extracted, to rootfsDest, because it cannot be
+// shared: two sandboxes restored from one checkpoint diverge as soon as either
+// writes.
+func (r *FCRuntime) snapshotState(rootfsDest string, spec *Spec, layers []SnapshotLayer) (snapEntry, error) {
 	id := ""
 	if spec != nil {
 		id = spec.SnapshotID
@@ -449,31 +491,33 @@ func (r *FCRuntime) snapshotState(rootfsDest string, spec *Spec, src io.Reader) 
 
 	if id != "" {
 		if entry, ok := r.snapshots.Lookup(id); ok {
-			// The reusable parts are already on disk, but this sandbox still
-			// needs the snapshot's filesystem for its own device.
-			if _, err := readSnapshotBundle(src, "", rootfsDest); err != nil {
-				return snapEntry{}, err
+			// The merged image is already on disk, so the layers are read only for
+			// the leaf's filesystem. This is what makes a fan-out cheap: a chain is
+			// merged once per node and every later restore of the same leaf skips
+			// it, which matters more the longer the chain is.
+			//
+			// Every layer is still drained. The sender streams the whole chain
+			// without knowing what this node has cached, so an unread layer would
+			// leave it blocked.
+			for i, layer := range layers {
+				dest := ""
+				if i == len(layers)-1 {
+					dest = rootfsDest
+				}
+				if _, err := readSnapshotBundle(layer.Data, "", dest); err != nil {
+					return snapEntry{}, fmt.Errorf("fc: read layer %s: %w", layer.ID, err)
+				}
 			}
 			return entry, nil
 		}
-		return r.snapshots.Fill(id, src, func(dir string) (map[string]string, error) {
-			return readSnapshotBundle(src, dir, rootfsDest)
+		return r.snapshots.Fill(id, func(dir string) (snapEntry, error) {
+			return mergeChain(layers, dir, rootfsDest)
 		})
 	}
 
-	// Without an id there is nothing to key a cache on, so the reusable parts
-	// are unpacked alongside the writable layer and discarded with it.
-	paths, err := readSnapshotBundle(src, filepath.Dir(rootfsDest), rootfsDest)
-	if err != nil {
-		return snapEntry{}, err
-	}
-	if paths[snapshotStateFile] == "" || paths[snapshotMemFile] == "" {
-		return snapEntry{}, errors.New("fc: snapshot bundle missing vmstate or memory")
-	}
-	return snapEntry{
-		StatePath: paths[snapshotStateFile],
-		MemPath:   paths[snapshotMemFile],
-	}, nil
+	// Without an id there is nothing to key a cache on, so the merged image is
+	// written beside the writable layer and discarded with it.
+	return mergeChain(layers, filepath.Dir(rootfsDest), rootfsDest)
 }
 
 // readSnapshotBundle extracts a bundle to files, writing the writable layer's
@@ -505,7 +549,7 @@ func readSnapshotBundle(src io.Reader, dir, rootfsDest string) (map[string]strin
 
 		var dest string
 		switch hdr.Name {
-		case snapshotStateFile, snapshotMemFile:
+		case snapshotStateFile, snapshotMemFile, snapshotMemDiffFile:
 			if dir == "" {
 				continue
 			}

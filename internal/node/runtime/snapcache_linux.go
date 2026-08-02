@@ -5,7 +5,6 @@ package runtime
 import (
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 	"sync"
@@ -67,38 +66,56 @@ func (c *snapCache) Lookup(id string) (snapEntry, bool) {
 	return e, true
 }
 
-// Fill unpacks a bundle into the cache and returns the entry.
+// Fill produces the cache entry for a snapshot, calling unpack to build it.
 //
-// Concurrent restores of the same snapshot are common — a batch fans out from
-// one checkpoint — so only the first unpacks and the rest wait for it rather
-// than each writing the same bytes over the top of the others.
-func (c *snapCache) Fill(id string, src io.Reader, unpack func(dir string) (map[string]string, error)) (snapEntry, error) {
+// Concurrent restores of the same snapshot are common — a batch fans out from one
+// checkpoint — so only the first builds the shared entry and the rest wait for it
+// rather than each writing the same bytes over the top of the others.
+//
+// unpack is nevertheless called by every caller, with an empty dir when another
+// is already building the entry. That is not a redundant call: each restore has
+// its own stream to drain and its own writable layer to stage, neither of which
+// is shareable. A waiter that skipped unpack would leave its sender blocked on a
+// stream nobody reads, and would give its sandbox the base image in place of the
+// snapshot's filesystem — silently, since the guest would boot and simply not
+// have the files.
+func (c *snapCache) Fill(id string, unpack func(dir string) (snapEntry, error)) (snapEntry, error) {
 	if id == "" {
 		return snapEntry{}, errors.New("fc: snapshot cache needs an id")
 	}
 
 	for {
 		if e, ok := c.Lookup(id); ok {
+			// The shared entry exists, but this caller's own stream and writable
+			// layer still have to be dealt with.
+			if _, err := unpack(""); err != nil {
+				return snapEntry{}, err
+			}
 			return e, nil
 		}
 
 		c.mu.Lock()
 		if inflight, ok := c.pending[id]; ok {
 			c.mu.Unlock()
-			// Wait for the unpack already running, then take its result. Reading
-			// the outcome rather than re-checking the cache is what keeps a
-			// second unpack from starting: the entry becomes visible on disk
-			// slightly after the first caller finishes, and a waiter that raced
-			// that window would otherwise decide nothing was cached and unpack
-			// the same bytes again.
+			// This caller's per-restore work happens before the wait, not after:
+			// the sender is streaming into a pipe, and blocking on another
+			// restore's build while refusing to read would deadlock as soon as
+			// that pipe filled.
+			if _, err := unpack(""); err != nil {
+				return snapEntry{}, err
+			}
+			// Then wait for the shared entry. Reading the outcome rather than
+			// re-checking the cache is what keeps a second build from starting:
+			// the entry becomes visible on disk slightly after the first caller
+			// finishes, and a waiter that raced that window would otherwise
+			// decide nothing was cached and build the same bytes again.
 			<-inflight.done
 			if inflight.err == nil {
 				return inflight.entry, nil
 			}
-			// The unpack failed, so this caller has to try — but only after the
-			// failed attempt has been cleared, which the waker does before
-			// closing done.
-			continue
+			// The shared build failed. This caller cannot retry it: its own stream
+			// is already consumed, so there is nothing left to read.
+			return snapEntry{}, inflight.err
 		}
 		u := &snapUnpack{done: make(chan struct{})}
 		c.pending[id] = u
@@ -115,10 +132,10 @@ func (c *snapCache) Fill(id string, src io.Reader, unpack func(dir string) (map[
 	}
 }
 
-// unpackInto writes a bundle to a temporary directory and publishes it under the
-// snapshot's id only once it is complete, so a failed or interrupted unpack
-// cannot leave a partial entry that later restores would trust.
-func (c *snapCache) unpackInto(id string, unpack func(dir string) (map[string]string, error)) (snapEntry, error) {
+// unpackInto builds an entry in a temporary directory and publishes it under the
+// snapshot's id only once it is complete, so a failed or interrupted build cannot
+// leave a partial entry that later restores would trust.
+func (c *snapCache) unpackInto(id string, unpack func(dir string) (snapEntry, error)) (snapEntry, error) {
 	if err := os.MkdirAll(c.dir, 0o700); err != nil {
 		return snapEntry{}, fmt.Errorf("fc: create snapshot cache: %w", err)
 	}
@@ -128,26 +145,27 @@ func (c *snapCache) unpackInto(id string, unpack func(dir string) (map[string]st
 	}
 	defer os.RemoveAll(tmp)
 
-	paths, err := unpack(tmp)
+	entry, err := unpack(tmp)
 	if err != nil {
 		return snapEntry{}, err
 	}
 	// A filesystem-only checkpoint has neither member, and that is not a defect:
-	// there is nothing to cache, because the cache exists to avoid re-unpacking
+	// there is nothing to cache, because the cache exists to avoid rebuilding
 	// guest memory. An empty entry tells the caller to boot rather than load.
-	if paths[snapshotStateFile] == "" && paths[snapshotMemFile] == "" {
+	if entry.StatePath == "" && entry.MemPath == "" {
 		return snapEntry{}, nil
 	}
 	// One without the other is a defect: a load against a missing memory image
 	// leaves the guest faulting on nothing.
-	if paths[snapshotStateFile] == "" || paths[snapshotMemFile] == "" {
+	if entry.StatePath == "" || entry.MemPath == "" {
 		return snapEntry{}, errors.New("fc: snapshot bundle has vmstate or memory but not both")
 	}
 
 	final := filepath.Join(c.dir, id)
 	if err := os.Rename(tmp, final); err != nil {
-		// Another restore of the same snapshot may have published first, which
-		// is a success: the contents are identical by construction.
+		// Another restore of the same snapshot may have published first, which is
+		// a success: the contents are identical by construction. This caller's own
+		// stream is already consumed, so nothing more is owed to it.
 		if e, ok := c.Lookup(id); ok {
 			return e, nil
 		}

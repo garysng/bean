@@ -160,9 +160,11 @@ commands:
   events SBX | events -f [SBX] [--label k=v]    # -f follows the live stream
   build --tag REF [--file Dockerfile] [CONTEXT] # build an image on the platform
   commit SBX --tag REF                          # freeze the filesystem as an image
-  snapshot create SBX [--name N] [--no-keep-running] [--no-memory]
+  snapshot create SBX [--name N] [--no-keep-running] [--no-memory] [--base SNAP]
                                                 # --no-memory: filesystem only,
                                                 # restores on any CPU but reboots
+                                                # --base: store only what changed
+                                                # since SNAP (needs guest memory)
   snapshot ls [--label k=v] | snapshot rm SNAP
   run --snapshot SNAP                           # restore instead of image
   image ls | image status REF | image prewarm REF... [--replicas N]
@@ -593,7 +595,7 @@ func cmdSnapshot(c *Client, args []string, stdout io.Writer) error {
 	switch pos[0] {
 	case "create":
 		if len(pos) < 2 {
-			return usagef("usage: bean snapshot create SBX [--name N]")
+			return usagef("usage: bean snapshot create SBX [--name N] [--base SNAP]")
 		}
 		body := map[string]any{"name": flags["name"]}
 		// keepRunning defaults true; --no-keep-running stops the source once
@@ -608,6 +610,13 @@ func cmdSnapshot(c *Client, args []string, stdout io.Writer) error {
 		if flags["no-memory"] == "true" {
 			body["includeMemory"] = false
 		}
+		// --base captures only the memory written since that snapshot, which is
+		// what makes repeated checkpoints of one sandbox cheap. The server may
+		// answer with a full snapshot anyway once the chain is deep enough, which
+		// the reported base makes visible.
+		if base := flags["base"]; base != "" {
+			body["base"] = base
+		}
 		var out struct {
 			SnapshotID string `json:"snapshotId"`
 			Snapshot   struct {
@@ -617,7 +626,9 @@ func cmdSnapshot(c *Client, args []string, stdout io.Writer) error {
 				// is shown as unknown rather than as "no memory" — the latter
 				// would be a confident wrong answer about whether a restore
 				// resumes the guest.
-				IncludeMemory *bool `json:"includeMemory"`
+				IncludeMemory *bool  `json:"includeMemory"`
+				BaseID        string `json:"baseId"`
+				ChainDepth    int    `json:"chainDepth"`
 			} `json:"snapshot"`
 		}
 		if err := c.doJSON("POST", "/v1/sandboxes/"+pos[1]+"/snapshot", body, &out); err != nil {
@@ -630,13 +641,22 @@ func cmdSnapshot(c *Client, args []string, stdout io.Writer) error {
 				memory = "yes"
 			}
 		}
+		// A requested base that comes back empty means the chain hit its limit and
+		// this was taken in full. Reporting it is how a caller sees that without
+		// having to know the limit.
+		base := out.Snapshot.BaseID
+		if base == "" {
+			base = "-"
+		}
 		return newPrinter(stdout, flags).result(out.SnapshotID,
 			field{"state", out.Snapshot.State},
 			field{"sizeBytes", out.Snapshot.SizeBytes},
 			// Whether a restore resumes or reboots is the snapshot's most
 			// consequential property, so it is reported rather than inferred
 			// from the size.
-			field{"memory", memory})
+			field{"memory", memory},
+			field{"base", base},
+			field{"chainDepth", out.Snapshot.ChainDepth})
 
 	case "ls":
 		path := "/v1/snapshots"

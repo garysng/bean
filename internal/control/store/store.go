@@ -77,9 +77,13 @@ CREATE TABLE IF NOT EXISTS snapshots (
   state TEXT NOT NULL,
   sandbox_id TEXT NOT NULL,
   ref_count INTEGER NOT NULL DEFAULT 0,
+  base_id TEXT NOT NULL DEFAULT '',
   created_at INTEGER NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_snapshots_sandbox ON snapshots(sandbox_id);
+-- Deleting a snapshot has to find its descendants, since a diff cannot be
+-- restored once its base is gone.
+CREATE INDEX IF NOT EXISTS idx_snapshots_base ON snapshots(base_id);
 CREATE TABLE IF NOT EXISTS images (
   ref TEXT PRIMARY KEY,
   data TEXT NOT NULL,
@@ -172,6 +176,7 @@ func (s *Store) addMissingColumns() error {
 		`ALTER TABLE nodes ADD COLUMN cpu_vendor TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE nodes ADD COLUMN cpu_family INTEGER NOT NULL DEFAULT 0`,
 		`ALTER TABLE nodes ADD COLUMN cpu_template TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE snapshots ADD COLUMN base_id TEXT NOT NULL DEFAULT ''`,
 	} {
 		if _, err := s.db.Exec(stmt); err != nil && !isDuplicateColumn(err) {
 			return fmt.Errorf("migrate: %q: %w", stmt, err)
@@ -337,11 +342,14 @@ func (s *Store) PutSnapshot(snap *Snapshot) error {
 	if err != nil {
 		return err
 	}
+	// base_id is duplicated out of the JSON blob into its own column because
+	// deletion has to ask "does anything descend from this", which is a query
+	// over other rows rather than a field of the row being deleted.
 	_, err = s.db.Exec(
-		`INSERT INTO snapshots(id, data, state, sandbox_id, ref_count, created_at) VALUES(?,?,?,?,?,?)
-		 ON CONFLICT(id) DO UPDATE SET data=excluded.data, state=excluded.state`,
+		`INSERT INTO snapshots(id, data, state, sandbox_id, ref_count, base_id, created_at) VALUES(?,?,?,?,?,?,?)
+		 ON CONFLICT(id) DO UPDATE SET data=excluded.data, state=excluded.state, base_id=excluded.base_id`,
 		snap.ID, string(blob), string(snap.State), snap.SandboxID, snap.RefCount,
-		snap.CreatedAt.Unix())
+		snap.BaseID, snap.CreatedAt.Unix())
 	return err
 }
 
@@ -403,6 +411,50 @@ func (s *Store) ListSnapshots(labelKey, labelVal string, state SnapshotState) ([
 	return out, rows.Err()
 }
 
+// SnapshotChain returns the snapshots a restore needs, ordered base-first with
+// the requested snapshot last. A self-contained snapshot yields itself alone.
+//
+// Order is the caller's contract with the merge: a diff's pages overwrite its
+// base's, so replaying a chain out of order produces a coherent-looking memory
+// image assembled from stale pages. Nothing downstream can detect that, which is
+// why the ordering is established here, once, by walking base links.
+//
+// The ancestors need no reference of their own. A base cannot be deleted while
+// anything descends from it (see DeleteSnapshot), so the leaf's own reference
+// keeps the whole chain alive for as long as the restore holds it.
+func (s *Store) SnapshotChain(id string) ([]*Snapshot, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	var chain []*Snapshot
+	seen := map[string]bool{}
+	for next := id; next != ""; {
+		// A cycle cannot arise from the write path, which only ever points at an
+		// existing snapshot. Detecting one anyway keeps a corrupted row from
+		// hanging the restore instead of failing it.
+		if seen[next] {
+			return nil, fmt.Errorf("snapshot chain from %s cycles at %s", id, next)
+		}
+		seen[next] = true
+
+		snap, err := s.getSnapshotLocked(next)
+		if err != nil {
+			return nil, err
+		}
+		if snap == nil {
+			// Reached by a diff whose base is gone. DeleteSnapshot prevents this,
+			// so it means the records were damaged some other way; either way the
+			// guest cannot be reconstructed.
+			return nil, fmt.Errorf("%w: snapshot %s needs base %s, which is missing",
+				ErrNotFound, id, next)
+		}
+		// Prepended: the walk goes leaf to root, and the merge needs root to leaf.
+		chain = append([]*Snapshot{snap}, chain...)
+		next = snap.BaseID
+	}
+	return chain, nil
+}
+
 // AcquireSnapshot increments the reference count so an in-progress restore
 // cannot have its source deleted. Returns the snapshot for convenience.
 func (s *Store) AcquireSnapshot(id string) (*Snapshot, error) {
@@ -447,6 +499,22 @@ func (s *Store) DeleteSnapshot(id string) error {
 	}
 	if snap.RefCount > 0 {
 		return fmt.Errorf("%w: snapshot %s has %d active restore(s)", ErrInUse, id, snap.RefCount)
+	}
+	// A diff holds only what changed since its base, so deleting the base leaves
+	// its descendants unrestorable — they would fail at merge time, long after
+	// the deletion that caused it, on a different machine. Refusing here is the
+	// only point where the cause is still visible.
+	//
+	// This reuses ErrInUse rather than adding an error: to a caller both mean
+	// "something still needs this", and both map to the same 409.
+	var children int
+	if err := s.db.QueryRow(
+		`SELECT COUNT(*) FROM snapshots WHERE base_id=?`, id).Scan(&children); err != nil {
+		return fmt.Errorf("count snapshot descendants: %w", err)
+	}
+	if children > 0 {
+		return fmt.Errorf("%w: snapshot %s is the base of %d incremental snapshot(s)",
+			ErrInUse, id, children)
 	}
 	_, err = s.db.Exec(`DELETE FROM snapshots WHERE id=?`, id)
 	return err

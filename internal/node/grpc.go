@@ -3,6 +3,7 @@ package node
 import (
 	"context"
 	"errors"
+	"fmt"
 	"io"
 	"sync/atomic"
 
@@ -278,7 +279,10 @@ func (s *GRPCServer) SnapshotSandbox(req *nodev1.SnapshotSandboxRequest,
 		return status.Error(codes.InvalidArgument, "sandbox_id required")
 	}
 	w := &chunkWriter{stream: stream}
-	opts := runtime.CheckpointOptions{IncludeMemory: req.GetIncludeMemory()}
+	opts := runtime.CheckpointOptions{
+		IncludeMemory: req.GetIncludeMemory(),
+		Diff:          req.GetDiff(),
+	}
 	if err := s.mgr.Snapshot(stream.Context(), req.SandboxId, w, opts); err != nil {
 		if errors.Is(err, ErrSandboxNotFound) {
 			return status.Errorf(codes.NotFound, "%v", err)
@@ -319,35 +323,15 @@ func (s *GRPCServer) RestoreSandbox(stream nodev1.SandboxService_RestoreSandboxS
 		return status.Error(codes.InvalidArgument, "first frame must carry the spec")
 	}
 
-	pr, pw := io.Pipe()
-	var restored atomic.Int64
-	go func() {
-		for {
-			frame, rerr := stream.Recv()
-			if rerr == io.EOF {
-				pw.Close()
-				return
-			}
-			if rerr != nil {
-				pw.CloseWithError(rerr)
-				return
-			}
-			data := frame.GetData()
-			if len(data) == 0 {
-				continue
-			}
-			if _, werr := pw.Write(data); werr != nil {
-				pw.CloseWithError(werr)
-				return
-			}
-			restored.Add(int64(len(data)))
-		}
-	}()
+	layers, restored, closeLayers, err := recvLayers(stream, spec)
+	if err != nil {
+		return status.Errorf(codes.InvalidArgument, "%v", err)
+	}
 
-	sb, err := s.mgr.RestoreSandbox(stream.Context(), spec, pr)
-	// Draining matters: an early runtime failure would otherwise leave the
-	// sender blocked on a full pipe.
-	pr.CloseWithError(err)
+	sb, err := s.mgr.RestoreSandbox(stream.Context(), spec, layers)
+	// Closing matters: an early runtime failure would otherwise leave the sender
+	// blocked writing into a pipe nobody reads.
+	closeLayers(err)
 	if err != nil {
 		return status.Errorf(codes.Internal, "restore: %v", err)
 	}
@@ -358,4 +342,99 @@ func (s *GRPCServer) RestoreSandbox(stream nodev1.SandboxService_RestoreSandboxS
 		},
 		BytesRestored: restored.Load(),
 	})
+}
+
+// maxRestoreLayers bounds a chain so a malformed or hostile spec cannot make the
+// node allocate pipes without limit. It is well above the depth the control plane
+// allows, so reaching it means the spec is wrong rather than deep.
+const maxRestoreLayers = 64
+
+// recvLayers turns the frame stream into one reader per declared layer.
+//
+// Each layer needs its own reader: a layer is a gzip stream, and a reader handed
+// the concatenation of several would stop at the first one's end and leave the
+// rest unread. The spec declares the chain, so the readers exist before any
+// reading starts; layer_end frames say where one bundle stops and the next
+// begins.
+//
+// The pipes are unbuffered, so the sender's pace follows the node's consumption
+// and a slow merge never accumulates the chain in memory. That also means every
+// layer must be consumed — the returned close function unblocks the sender when
+// the restore ends early.
+func recvLayers(stream nodev1.SandboxService_RestoreSandboxServer, spec *nodev1.SandboxSpec) (
+	[]runtime.SnapshotLayer, *atomic.Int64, func(error), error) {
+
+	ids := spec.GetSnapshotChain()
+	if len(ids) == 0 {
+		// No chain declared: the stream is one self-contained bundle. Its id may
+		// also be empty, which means "do not cache" rather than "no layer".
+		ids = []string{spec.GetSnapshotId()}
+	}
+	if len(ids) > maxRestoreLayers {
+		return nil, nil, nil, fmt.Errorf("snapshot chain has %d layers, more than the %d supported",
+			len(ids), maxRestoreLayers)
+	}
+
+	layers := make([]runtime.SnapshotLayer, len(ids))
+	writers := make([]*io.PipeWriter, len(ids))
+	for i, id := range ids {
+		pr, pw := io.Pipe()
+		layers[i] = runtime.SnapshotLayer{ID: id, Data: pr}
+		writers[i] = pw
+	}
+
+	var restored atomic.Int64
+	closeAll := func(err error) {
+		for _, w := range writers {
+			if err != nil {
+				w.CloseWithError(err)
+				continue
+			}
+			w.Close()
+		}
+	}
+
+	go func() {
+		at := 0
+		for {
+			frame, err := stream.Recv()
+			if err == io.EOF {
+				// Closing every remaining writer, not just the current one: a
+				// truncated stream must surface as a short layer rather than
+				// leaving a later layer's reader blocked forever.
+				closeAll(nil)
+				return
+			}
+			if err != nil {
+				closeAll(err)
+				return
+			}
+			if frame.GetLayerEnd() {
+				// The boundary closes this layer so its reader sees a clean end of
+				// stream; without that the gzip reader would wait for more.
+				writers[at].Close()
+				at++
+				if at >= len(writers) {
+					// More boundaries than the spec declared layers. Folding the
+					// extra bytes into the last layer would merge two checkpoints,
+					// so this fails instead.
+					closeAll(fmt.Errorf("restore stream carries more layers than the %d declared",
+						len(writers)))
+					return
+				}
+				continue
+			}
+			data := frame.GetData()
+			if len(data) == 0 {
+				continue
+			}
+			if _, err := writers[at].Write(data); err != nil {
+				closeAll(err)
+				return
+			}
+			restored.Add(int64(len(data)))
+		}
+	}()
+
+	return layers, &restored, closeAll, nil
 }

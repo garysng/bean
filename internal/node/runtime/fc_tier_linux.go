@@ -49,6 +49,13 @@ func NewFCTier(cfg FCTierConfig) (Runtime, error) {
 		slog.Warn("guest serial console on", "costPerBoot", "~500ms")
 	}
 	rt.CPUTemplate = cfg.CPUTemplate
+	rt.TrackDirtyPages = cfg.TrackDirtyPages
+	if cfg.TrackDirtyPages {
+		// Stated at startup because every guest pays for it while only some
+		// sandboxes are ever checkpointed twice, and because a guest booted
+		// without it cannot be given the ability later.
+		slog.Info("dirty-page tracking on; guests can produce incremental snapshots")
+	}
 	if cfg.CPUTemplate == CPUTemplatePortable {
 		slog.Info("cpu template masks features for snapshot portability",
 			"masked", MaskedCPUFeatures(cfg.CPUTemplate),

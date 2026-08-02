@@ -596,7 +596,17 @@ type SandboxSpec struct {
 	// checkpoint unpacks to the same bytes, so a node caches the unpacked form
 	// under this id rather than repeating the work per restore. Empty means
 	// "unpack from the stream", which keeps a restore self-contained.
-	SnapshotId    string            `protobuf:"bytes,14,opt,name=snapshot_id,json=snapshotId,proto3" json:"snapshot_id,omitempty"`
+	SnapshotId string `protobuf:"bytes,14,opt,name=snapshot_id,json=snapshotId,proto3" json:"snapshot_id,omitempty"`
+	// snapshot_chain lists the checkpoints a restore must replay, ordered
+	// base-first with snapshot_id last. Empty means snapshot_id is self-contained.
+	//
+	// The chain is declared here rather than discovered from the stream because the
+	// node has to create one reader per layer before reading any of them: each
+	// layer is its own gzip stream, and a reader handed the concatenation would
+	// stop at the first layer's end. Knowing the count up front also means a
+	// restore fails on a chain the node cannot serve instead of part way through
+	// assembling one.
+	SnapshotChain []string          `protobuf:"bytes,15,rep,name=snapshot_chain,json=snapshotChain,proto3" json:"snapshot_chain,omitempty"`
 	SandboxId     string            `protobuf:"bytes,1,opt,name=sandbox_id,json=sandboxId,proto3" json:"sandbox_id,omitempty"`
 	Image         string            `protobuf:"bytes,2,opt,name=image,proto3" json:"image,omitempty"`
 	Cpu           float64           `protobuf:"fixed64,3,opt,name=cpu,proto3" json:"cpu,omitempty"`
@@ -649,6 +659,13 @@ func (x *SandboxSpec) GetSnapshotId() string {
 		return x.SnapshotId
 	}
 	return ""
+}
+
+func (x *SandboxSpec) GetSnapshotChain() []string {
+	if x != nil {
+		return x.SnapshotChain
+	}
+	return nil
 }
 
 func (x *SandboxSpec) GetSandboxId() string {
@@ -1315,6 +1332,16 @@ type SnapshotSandboxRequest struct {
 	// Defaulting to false would silently change what existing callers get, so the
 	// gateway sends this explicitly and treats absent as true.
 	IncludeMemory bool `protobuf:"varint,2,opt,name=include_memory,json=includeMemory,proto3" json:"include_memory,omitempty"`
+	// diff captures only the guest memory written since the sandbox started or was
+	// restored. The result is not restorable alone — it is layered onto the chain
+	// it descends from — so the caller must record which snapshot it was taken
+	// against.
+	//
+	// The node refuses rather than falling back to a full capture when the guest
+	// booted without dirty-page tracking, which cannot be turned on after the
+	// fact. A silent fallback would return a bundle costing exactly what the
+	// caller was trying to avoid.
+	Diff          bool `protobuf:"varint,3,opt,name=diff,proto3" json:"diff,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1359,6 +1386,13 @@ func (x *SnapshotSandboxRequest) GetSandboxId() string {
 func (x *SnapshotSandboxRequest) GetIncludeMemory() bool {
 	if x != nil {
 		return x.IncludeMemory
+	}
+	return false
+}
+
+func (x *SnapshotSandboxRequest) GetDiff() bool {
+	if x != nil {
+		return x.Diff
 	}
 	return false
 }
@@ -1413,6 +1447,7 @@ type RestoreSandboxFrame struct {
 	//
 	//	*RestoreSandboxFrame_Spec
 	//	*RestoreSandboxFrame_Data
+	//	*RestoreSandboxFrame_LayerEnd
 	Frame         isRestoreSandboxFrame_Frame `protobuf_oneof:"frame"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
@@ -1473,6 +1508,15 @@ func (x *RestoreSandboxFrame) GetData() []byte {
 	return nil
 }
 
+func (x *RestoreSandboxFrame) GetLayerEnd() bool {
+	if x != nil {
+		if x, ok := x.Frame.(*RestoreSandboxFrame_LayerEnd); ok {
+			return x.LayerEnd
+		}
+	}
+	return false
+}
+
 type isRestoreSandboxFrame_Frame interface {
 	isRestoreSandboxFrame_Frame()
 }
@@ -1482,12 +1526,25 @@ type RestoreSandboxFrame_Spec struct {
 }
 
 type RestoreSandboxFrame_Data struct {
+	// data carries the bundles back to back, in the order SandboxSpec's
+	// snapshot_chain declares. The node splits them at the boundaries the chain
+	// implies rather than at markers in the stream, so the sender does not have to
+	// know each bundle's size in advance — it is copying from object storage.
 	Data []byte `protobuf:"bytes,2,opt,name=data,proto3,oneof"`
+}
+
+type RestoreSandboxFrame_LayerEnd struct {
+	// layer_end closes the current bundle and moves to the next in the chain. It
+	// is a boundary marker rather than a length because the sender learns a
+	// bundle's size only by finishing it.
+	LayerEnd bool `protobuf:"varint,3,opt,name=layer_end,json=layerEnd,proto3,oneof"`
 }
 
 func (*RestoreSandboxFrame_Spec) isRestoreSandboxFrame_Frame() {}
 
 func (*RestoreSandboxFrame_Data) isRestoreSandboxFrame_Frame() {}
+
+func (*RestoreSandboxFrame_LayerEnd) isRestoreSandboxFrame_Frame() {}
 
 type RestoreSandboxResponse struct {
 	state         protoimpl.MessageState `protogen:"open.v1"`
@@ -1993,10 +2050,11 @@ const file_bean_node_v1_node_proto_rawDesc = "" +
 	"\n" +
 	"node_token\x18\x02 \x01(\tR\tnodeToken\"J\n" +
 	"\x11SyncStateResponse\x125\n" +
-	"\bexpected\x18\x01 \x03(\v2\x19.bean.node.v1.SandboxSpecR\bexpected\"\xe6\x04\n" +
+	"\bexpected\x18\x01 \x03(\v2\x19.bean.node.v1.SandboxSpecR\bexpected\"\x8d\x05\n" +
 	"\vSandboxSpec\x12\x1f\n" +
 	"\vsnapshot_id\x18\x0e \x01(\tR\n" +
-	"snapshotId\x12\x1d\n" +
+	"snapshotId\x12%\n" +
+	"\x0esnapshot_chain\x18\x0f \x03(\tR\rsnapshotChain\x12\x1d\n" +
 	"\n" +
 	"sandbox_id\x18\x01 \x01(\tR\tsandboxId\x12\x14\n" +
 	"\x05image\x18\x02 \x01(\tR\x05image\x12\x10\n" +
@@ -2052,16 +2110,18 @@ const file_bean_node_v1_node_proto_rawDesc = "" +
 	"\n" +
 	"sandbox_id\x18\x01 \x01(\tR\tsandboxId\"I\n" +
 	"\x12GetSandboxResponse\x123\n" +
-	"\x06status\x18\x01 \x01(\v2\x1b.bean.node.v1.SandboxStatusR\x06status\"^\n" +
+	"\x06status\x18\x01 \x01(\v2\x1b.bean.node.v1.SandboxStatusR\x06status\"r\n" +
 	"\x16SnapshotSandboxRequest\x12\x1d\n" +
 	"\n" +
 	"sandbox_id\x18\x01 \x01(\tR\tsandboxId\x12%\n" +
-	"\x0einclude_memory\x18\x02 \x01(\bR\rincludeMemory\"#\n" +
+	"\x0einclude_memory\x18\x02 \x01(\bR\rincludeMemory\x12\x12\n" +
+	"\x04diff\x18\x03 \x01(\bR\x04diff\"#\n" +
 	"\rSnapshotChunk\x12\x12\n" +
-	"\x04data\x18\x01 \x01(\fR\x04data\"e\n" +
+	"\x04data\x18\x01 \x01(\fR\x04data\"\x84\x01\n" +
 	"\x13RestoreSandboxFrame\x12/\n" +
 	"\x04spec\x18\x01 \x01(\v2\x19.bean.node.v1.SandboxSpecH\x00R\x04spec\x12\x14\n" +
-	"\x04data\x18\x02 \x01(\fH\x00R\x04dataB\a\n" +
+	"\x04data\x18\x02 \x01(\fH\x00R\x04data\x12\x1d\n" +
+	"\tlayer_end\x18\x03 \x01(\bH\x00R\blayerEndB\a\n" +
 	"\x05frame\"t\n" +
 	"\x16RestoreSandboxResponse\x123\n" +
 	"\x06status\x18\x01 \x01(\v2\x1b.bean.node.v1.SandboxStatusR\x06status\x12%\n" +
@@ -2265,6 +2325,7 @@ func file_bean_node_v1_node_proto_init() {
 	file_bean_node_v1_node_proto_msgTypes[24].OneofWrappers = []any{
 		(*RestoreSandboxFrame_Spec)(nil),
 		(*RestoreSandboxFrame_Data)(nil),
+		(*RestoreSandboxFrame_LayerEnd)(nil),
 	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{

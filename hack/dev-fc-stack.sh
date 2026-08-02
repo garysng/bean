@@ -22,6 +22,11 @@ NODE_GRPC_PORT=${NODE_GRPC_PORT:-17440}
 NODED_PORT=${NODED_PORT:-17443}
 NODE_METRICS_PORT=${NODE_METRICS_PORT:-17444}
 
+# Extra noded flags, e.g. NODED_FLAGS="--track-dirty-pages" to allow incremental
+# snapshots. Dirty tracking has to be on from boot, so it cannot be turned on for
+# a sandbox that is already running.
+NODED_FLAGS=${NODED_FLAGS:-}
+
 API_KEY=${API_KEY:-devkey}
 NODE_TOKEN=${NODE_TOKEN:-ntok}
 BOOTSTRAP_TOKEN=${BOOTSTRAP_TOKEN:-btok}
@@ -82,6 +87,7 @@ nohup "$BIN/noded" \
   --labels tier=fc \
   --metrics "127.0.0.1:$NODE_METRICS_PORT" \
   --buildkit-addr "${BUILDKIT_ADDR:-unix:///run/bean/buildkitd.sock}" \
+  ${NODED_FLAGS:-} \
   >"$RUN/noded.log" 2>&1 &
 
 # Registration is what makes the node placeable, so waiting for it here means a

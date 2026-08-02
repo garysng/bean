@@ -31,7 +31,7 @@ func TestBundleOmitsMemoryWhenNotIncluded(t *testing.T) {
 	rootfs := writeFile(t, src, "rootfs.img", "filesystem bytes")
 
 	var buf bytes.Buffer
-	if err := writeSnapshotBundle(&buf, "", "", rootfs); err != nil {
+	if err := writeSnapshotBundle(&buf, "", "", rootfs, false); err != nil {
 		t.Fatalf("write memoryless bundle: %v", err)
 	}
 
@@ -81,7 +81,7 @@ func TestBundleWithMemoryCarriesAllMembers(t *testing.T) {
 	rootfs := writeFile(t, src, "rootfs.img", "filesystem bytes")
 
 	var buf bytes.Buffer
-	if err := writeSnapshotBundle(&buf, state, mem, rootfs); err != nil {
+	if err := writeSnapshotBundle(&buf, state, mem, rootfs, false); err != nil {
 		t.Fatalf("write full bundle: %v", err)
 	}
 
@@ -113,10 +113,10 @@ func TestMemorylessBundleIsSmaller(t *testing.T) {
 	rootfs := writeFile(t, src, "rootfs.img", "small")
 
 	var full, memoryless bytes.Buffer
-	if err := writeSnapshotBundle(&full, state, mem, rootfs); err != nil {
+	if err := writeSnapshotBundle(&full, state, mem, rootfs, false); err != nil {
 		t.Fatal(err)
 	}
-	if err := writeSnapshotBundle(&memoryless, "", "", rootfs); err != nil {
+	if err := writeSnapshotBundle(&memoryless, "", "", rootfs, false); err != nil {
 		t.Fatal(err)
 	}
 	if memoryless.Len() >= full.Len() {

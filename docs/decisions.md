@@ -238,6 +238,62 @@ CoW 在文件系统层。Firecracker 上游文档则直接把磁盘状态甩给�
 **由此得到一条通用规则**:状态同时存在于内存和磁盘时,只读内存的测试是假的。
 任何「恢复后数据还在」的断言,必须先 `drop_caches`。这条同样适用于后面的 diff snapshot。
 
+### 3.0.1 diff snapshot:恢复时物化,不在缺页路径分层
+
+Firecracker 的 diff 内存文件**不自包含** —— 是稀疏文件,必须叠到 base 上。
+所以真正的设计问题不在「怎么产出 diff」,在「什么时候、在哪里合并」。
+
+**竞品选了相反的两条路,都在生产跑:**
+
+- **E2B**:fault 时分层查找。UFFD handler 经 `block.Slicer` 走 base + 各层,
+  K 次 pause/resume 后一次读要「chase K different BuildId references」。
+  不设链深上限,只有 `NormalizeMappings` 合并相邻同 build 段。
+  公开分析明确指出 **cross-build fragmentation 随时间增长**,读放大与深度成正比。
+- **Cognition blockdiff**:链只作血缘,运行前 flatten 成 raw。
+  `apply` 是纯元数据操作(XFS reflink),128 GB `cp --reflink=always` 测得
+  0.008s vs 24.5s。他们的 flatten 几乎免费,所以文章完全不谈读放大 ——
+  **运行时没有链可走**。
+- **Firecracker 上游**:`snapshot-editor edit-memory rebase` 就是 flatten,
+  要求按创建顺序逐层叠加。
+
+**我们选 flatten,理由不止「跟多数」:**
+
+我们有 E2B 没有的结构优势 —— `snapCache` 已按 snapshot id 缓存解包结果。
+E2B 每次 resume 自己走链;我们只在**某个 leaf 首次在某节点恢复时**付一次合并,
+之后该节点所有 restore 复用。fan-out 正是「同一 leaf 恢复很多次」,合并被完全摊掉。
+
+更重要的是 **UFFD 缺页路径零改动**。`fill()` 是全系统最热、出错最隐蔽的代码 ——
+一个 bug 就是一页错内存,而且不会有任何错误信号。full snapshot 走的是同一条码路。
+
+**链深超 8 自动转 full**。E2B 不设限并且确实吃到了 fragmentation 增长,
+这是支持设限的证据。自动转让恢复成本有上界、祖先可回收,且调用方永远不用关心链深 ——
+请求 diff 永远成功,只是偶尔更贵。
+
+**三个不能静默的地方:**
+
+1. `track_dirty_pages` 必须 boot 前设好且不存进快照。没开的 guest 请求 diff
+   **明确报错**,不降级成 full —— 调用方以为省了空间,实际没省,而尺寸本身不解释原因。
+2. diff 内存用**独立成员名** `memory.diff`,不是给 `memory` 加标志位。
+   混淆的后果不对称且都很糟:full 当 diff 叠加会擦掉 base 未触碰的页;
+   diff 当 full 加载会给 guest 一份带空洞的内存。按成员名分派两种错误都不可能。
+3. 删 base 会让整条链失效,所以有子代时拒绝删除(复用 `ErrInUse` → 409)。
+   否则失败在时间和空间上都很远:现在删成功,以后在另一台机器上恢复失败。
+
+**顺序是 caller 的契约,数据里恢复不出来** —— 后层的页合法地覆盖前层,
+所以反序会产出「结构完好但由旧页拼成」的镜像,下游无法检测。
+因此 `store.SnapshotChain()` 一次性定序,链在 spec 里声明而不是从流里发现
+(节点必须先为每层建 reader 才能开始读:每层是独立 gzip 流)。
+
+**实测(Zen 2 / 6.1.102,drop_caches 后):**
+
+```
+base(full)     15,586,720 B   depth 0
+diff #1           298,778 B   depth 1   ← 52×
+diff #2           241,917 B   depth 2
+```
+
+深度 2 的链恢复后 a/b/c 三个文件全在,`uptime 57` 说明是 resume 而非重启。
+
 ### 3.1 overlaybd lazy-pull:已在 tcmu 后端实测跑通
 
 **实测**(2026-08-02,Ubuntu 20.04 / 内核 5.15 / tcmu 后端 / alpine 3.20):
@@ -399,8 +455,10 @@ CPUID leaf 0 的 vendor 字符串和 family 都无法掩,guest 内核要据此�
 - **同 family 跨 model 的 restore 未实测**:只有一台 fc 机器,
   无法验证 template 是否真的让快照跨型号可用 —— 这正是它存在的理由。
   逻辑上正确(掩掉了型号差异的来源),但没有实证。
-- **diff snapshot(增量)**:tensorlake 的核心差异化点,我们没有。
-  Firecracker 原生支持,接口不用改。
+- **`--track-dirty-pages` 的开销未实测**:diff snapshot 已实装(§3.0.1)但该开关
+  默认关,因为 KVM 脏页记账的代价没量过。需要同镜像同内核、开/关各跑 N 次,
+  对比 boot-to-agent 与一个 CPU-bound + 一个 memory-bound 的 exec 吞吐。
+  回归 < 2% 就改默认开。
 - **日志与 CLI 输出标准化**:日志全是 `log.Printf`(71 处),无结构化、
   无级别、不带 request_id。CLI exit code 只有 0 和 125,无 `--json`。
 

@@ -281,7 +281,7 @@ func (f *failingRuntime) Destroy(context.Context, string, bool) error { return n
 func (f *failingRuntime) Checkpoint(context.Context, string, io.Writer, runtime.CheckpointOptions) error {
 	return errors.New("synthetic checkpoint failure")
 }
-func (f *failingRuntime) Restore(context.Context, *runtime.Spec, io.Reader) (*runtime.Handle, error) {
+func (f *failingRuntime) Restore(context.Context, *runtime.Spec, []runtime.SnapshotLayer) (*runtime.Handle, error) {
 	return nil, errors.New("synthetic restore failure")
 }
 func (f *failingRuntime) Pause(context.Context, string) error    { return nil }
@@ -424,7 +424,7 @@ func TestSnapshotAndRestoreRoundTrip(t *testing.T) {
 	}
 
 	// Restore into a new sandbox and verify the file came along.
-	restored, err := m.RestoreSandbox(ctx, spec("dst"), &buf)
+	restored, err := m.RestoreSandbox(ctx, spec("dst"), []runtime.SnapshotLayer{{ID: "snap_test", Data: &buf}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -505,7 +505,7 @@ func TestRestoreDuplicateRejected(t *testing.T) {
 	if _, err := m.Create(ctx, spec("dup")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := m.RestoreSandbox(ctx, spec("dup"), bytes.NewReader(nil)); err == nil {
+	if _, err := m.RestoreSandbox(ctx, spec("dup"), []runtime.SnapshotLayer{{ID: "snap_test", Data: bytes.NewReader(nil)}}); err == nil {
 		t.Error("expected duplicate rejection")
 	}
 }
@@ -513,7 +513,7 @@ func TestRestoreDuplicateRejected(t *testing.T) {
 func TestRestoreCorruptCheckpointFails(t *testing.T) {
 	m := newTestManager(t)
 	_, err := m.RestoreSandbox(context.Background(), spec("bad"),
-		bytes.NewReader([]byte("not a checkpoint")))
+		[]runtime.SnapshotLayer{{ID: "snap_bad", Data: bytes.NewReader([]byte("not a checkpoint"))}})
 	if err == nil {
 		t.Fatal("expected restore failure")
 	}

@@ -305,6 +305,21 @@ type Snapshot struct {
 	CPUFamily   int32  `json:"cpuFamily,omitempty"`
 	CPUTemplate string `json:"cpuTemplate,omitempty"`
 
+	// BaseID names the checkpoint this one was taken against, empty for a
+	// self-contained one. A snapshot with a base holds only the guest memory
+	// written since it, so restoring means replaying the whole chain from the
+	// root — which is why the link is stored rather than derived: the ancestors
+	// have to be locatable long after the sandbox that produced them is gone.
+	BaseID string `json:"baseId,omitempty"`
+	// ChainDepth counts ancestors, so 0 is a full checkpoint and 1 is a diff
+	// against a full one.
+	//
+	// It is stored rather than walked because it gates whether the next
+	// checkpoint may be a diff at all, and that decision is made on the write
+	// path where walking a chain of database reads to answer it would put the
+	// cost on every snapshot.
+	ChainDepth int `json:"chainDepth,omitempty"`
+
 	// IncludeMemory reports whether the checkpoint carries guest memory.
 	//
 	// It is what makes the CPU fields above meaningful: a filesystem-only

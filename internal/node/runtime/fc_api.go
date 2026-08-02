@@ -104,6 +104,14 @@ type fcDrive struct {
 type fcMachineConfig struct {
 	VCPUCount  int64 `json:"vcpu_count"`
 	MemSizeMiB int64 `json:"mem_size_mib"`
+	// TrackDirtyPages asks KVM to log which guest pages are written, which is
+	// what lets a later checkpoint capture only those pages.
+	//
+	// It has to be set before the VM starts and is not carried in a snapshot, so
+	// a VM booted without it can never produce a diff — the decision is made at
+	// create time, not at checkpoint time. The cost is KVM's own accounting for
+	// every guest write.
+	TrackDirtyPages bool `json:"track_dirty_pages,omitempty"`
 	// SMT and CPU templates are left at their defaults: the platform does not
 	// expose them, and enabling SMT would weaken the isolation guarantee.
 }

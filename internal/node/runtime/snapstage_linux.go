@@ -4,7 +4,6 @@ package runtime
 
 import (
 	"fmt"
-	"io"
 	"os"
 	"path/filepath"
 )
@@ -33,14 +32,14 @@ type snapshotStage struct {
 	dir    string
 }
 
-// stageSnapshot unpacks a bundle into dir without touching any device.
-func (r *FCRuntime) stageSnapshot(dir string, spec *Spec, src io.Reader) (*snapshotStage, error) {
+// stageSnapshot unpacks a chain into dir without touching any device.
+func (r *FCRuntime) stageSnapshot(dir string, spec *Spec, layers []SnapshotLayer) (*snapshotStage, error) {
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("fc: create snapshot staging dir: %w", err)
 	}
 	stage := &snapshotStage{dir: dir, rootfs: filepath.Join(dir, snapshotRootfsFile)}
 
-	entry, err := r.snapshotState(stage.rootfs, spec, src)
+	entry, err := r.snapshotState(stage.rootfs, spec, layers)
 	if err != nil {
 		stage.Close()
 		return nil, err

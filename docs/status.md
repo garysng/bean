@@ -109,6 +109,13 @@ restore ~950ms(同一快照首次 1617ms,要付 unpack 代价);
 `--no-memory` 只存文件系统:实测 bundle **6109 字节**对全量 15.5 MB(2550×),
 restore 重新 boot 但保留文件(`uptime 0` 且 marker 在),可落任意 CPU。
 
+`--base SNAP` 走增量:只存自 base 以来 guest 写过的内存页。实测 298 KB 对
+15.5 MB(52×)。恢复时按链从根到叶物化成平坦镜像再交给现有 UFFD handler ——
+不在缺页路径上分层,因为那是全系统最热、出错最隐蔽的代码。合并结果按 leaf id
+进 snapCache,所以 fan-out 场景每节点只付一次。链深超 8 自动转 full。
+需要节点带 `--track-dirty-pages` 启动(默认关);没开的 guest 请求 diff 明确报错
+而不降级,详见 `docs/decisions.md` §3.0.1。
+
 **restore 曾经会静默损坏文件系统**,已修:dm-snapshot 在设备激活时就把
 exception table 读进内核,而 restore 是在那之后才把 extents 写进 `cow.img` ——
 内核不认,设备继续供 base image。full snapshot 上这不可见,因为读命中的是
@@ -143,7 +150,7 @@ exception table 读进内核,而 restore 是在那之后才把 extents 写进 `c
 |---|---|
 | build image：声明式 steps（Modal 风格链式 API） | ⛔ 未开始;Dockerfile 路径已通,steps 只是另一个前端编译到同一个 plan（`docs/image-build.md` §3.2、§5） |
 | overlaybd lazy-pull | ⚠️ **能力已实测跑通,尚未接入代码**。当前生产路径是「拉全量 + 转换 + CoW 共享」（每 sandbox 8 KiB）。overlaybd 侧已在验证机上验证:挂载 7ms、只传 19.6% 的层字节就能挂载并读文件、8 个 HTTP 206、可写上层实占 40 KiB（`docs/decisions.md` §3.1）。剩下的是写 `OverlaybdProvider` 接进 `image.Provider` |
-| diff snapshot（增量） | ⚠️ 当前 full snapshot;Firecracker 支持 diff,接口无需改。**这是与 tensorlake 的主要差距**——他们把「磁盘快照成本 O(changed bytes)」当核心卖点 |
+| diff snapshot（增量） | ✅ `--base SNAP` 只存自 base 以来改动的 guest 内存。实测 base 15.5 MB → diff 298 KB(52×);深度 2 的链恢复后文件全在且 `uptime 57`(resume 非重启)。合并在 restore 时物化成平坦镜像,**UFFD 缺页路径零改动**;链深超 8 自动转 full;删 base 有子代时返回 409。需 `--track-dirty-pages`(默认关,boot 前生效) |
 | fork / shared-fs 卷 / proxy 端口暴露 | ⛔ P3–P4 范围,未开始 |
 | OTel trace | ✅ **已实装并实测**。一次 create/exec 是一棵跨进程 span 树(下方「可观测」段有实测树)。`--otlp-endpoint` 为空则装 no-op provider,埋点无需条件判断。**限制**:beand 在 guest 内无出网路径,只采纳 trace id 写进自己的日志、不导出 span;而 guest 的 stderr 只在 `--debug-console` 下经串口出来,所以默认配置看不到那条日志 |
 | Postgres | ⚠️ 接口已抽象,当前 SQLite |
@@ -189,7 +196,11 @@ multipathd 会把多个 overlaybd 设备合并成一条 multipath,
 4. **restore 剩下的 ~950ms**：命中 unpack 缓存后,仍要把整个 bundle 从
    gateway 传过来并解 gzip,只为取出 rootfs 那一个 member。
    要么命中时让节点告诉控制面「别发了」,要么把 rootfs 拆成独立对象。
-5. **diff snapshot**:当前 full snapshot。这是与 tensorlake 的主要差距。
+5. **`--track-dirty-pages` 的开销未实测**:diff snapshot 需要它,但它默认关,
+   因为 KVM 记账的代价没量过。Firecracker 文档只说「CPU cycles」外加
+   「negates most of the benefits of huge pages」(我们没用 huge pages,不适用)。
+   E2B 常开是先例,但先例不等于在我们的负载上可忽略 —— 要对比开/关的
+   boot-to-agent 与 exec 吞吐才能决定要不要改成默认开。
 6. **AVX-512 掩码与跨型号 restore 未实测**:验证机是 Zen 2,
    没有 AVX-512,也只有一台 fc 机器 —— 所以 CPU template 的
    「跨型号可移植」这个核心目的没有实证,只有逻辑推导。

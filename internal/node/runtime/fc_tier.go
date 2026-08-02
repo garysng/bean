@@ -29,4 +29,9 @@ type FCTierConfig struct {
 	// CPUTemplate masks CPU features from guests so memory snapshots survive a
 	// move between CPU generations. Empty means none.
 	CPUTemplate CPUTemplate
+	// TrackDirtyPages has KVM log guest writes so a checkpoint can capture only
+	// the memory that changed. It must be on before a guest starts and is not
+	// carried in a snapshot, so this is node configuration: a guest booted without
+	// it can never produce an incremental checkpoint.
+	TrackDirtyPages bool
 }

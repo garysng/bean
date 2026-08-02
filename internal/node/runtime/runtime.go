@@ -63,10 +63,28 @@ type Runtime interface {
 	// tiers, which is why a snapshot records the runtime that produced it.
 	Checkpoint(ctx context.Context, id string, w io.Writer, opts CheckpointOptions) error
 
-	// Restore creates a sandbox from a checkpoint previously written by the
-	// same runtime. The spec supplies identity and resources; the
-	// checkpoint supplies the filesystem (and, for microVMs, memory).
-	Restore(ctx context.Context, spec *Spec, r io.Reader) (*Handle, error)
+	// Restore creates a sandbox from checkpoints previously written by the same
+	// runtime. The spec supplies identity and resources; the checkpoints supply
+	// the filesystem (and, for microVMs, memory).
+	//
+	// Layers are ordered base-first and read in order. A self-contained
+	// checkpoint is a single layer; an incremental one is its whole chain, since
+	// a diff holds only what changed since its base and cannot be restored alone.
+	Restore(ctx context.Context, spec *Spec, layers []SnapshotLayer) (*Handle, error)
+}
+
+// SnapshotLayer is one checkpoint in a restore chain.
+//
+// Order is the caller's contract and cannot be recovered from the data: a diff's
+// pages legitimately overwrite its base's, so a chain replayed out of order
+// yields a coherent-looking result assembled from stale pages, which nothing
+// downstream can detect.
+type SnapshotLayer struct {
+	// ID identifies the checkpoint, so a failure names which layer of a chain was
+	// bad rather than only that one was.
+	ID string
+	// Data is the layer's bundle. Layers are consumed in order, exactly once.
+	Data io.Reader
 }
 
 // CheckpointOptions selects what a checkpoint captures.
@@ -84,6 +102,20 @@ type CheckpointOptions struct {
 	// The two are genuinely different operations rather than a size trade-off,
 	// which is why this is a caller's choice and not a heuristic.
 	IncludeMemory bool
+
+	// Diff captures only the guest memory written since the sandbox started or
+	// was restored, rather than all of it. The result is not restorable on its
+	// own: it has to be layered onto the checkpoint it descends from.
+	//
+	// This only makes sense with IncludeMemory — the filesystem layer is already
+	// proportional to what changed, because it is stored as an extent list over a
+	// copy-on-write device.
+	//
+	// It requires the guest to have booted with dirty-page tracking on. A
+	// runtime that cannot honour this returns an error rather than falling back
+	// to a full capture: the caller asked for a cheap checkpoint and needs to
+	// know it did not get one.
+	Diff bool
 }
 
 // ImageWarmer is implemented by runtimes that can make an image ready before a

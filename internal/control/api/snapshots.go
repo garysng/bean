@@ -3,6 +3,7 @@ package api
 import (
 	"encoding/json"
 	"errors"
+	"fmt"
 	"io"
 	"log/slog"
 	"net/http"
@@ -33,7 +34,23 @@ type snapshotRequest struct {
 	// A pointer distinguishes "absent" from "false" so the default cannot be
 	// mistaken for a caller's choice.
 	IncludeMemory *bool `json:"includeMemory"`
+	// Base names a checkpoint to capture against, so the new one holds only the
+	// guest memory written since. It cuts what a snapshot costs to what actually
+	// changed, which is the point of taking many of them.
+	//
+	// The result is not independent: restoring it replays the whole chain, and its
+	// ancestors cannot be deleted while it exists.
+	Base string `json:"base"`
 }
+
+// maxDiffChain bounds how many diffs may stack before a checkpoint is taken in
+// full instead.
+//
+// Every link is another bundle a restore has to fetch and replay, so an unbounded
+// chain makes restores steadily slower and pins every ancestor forever. Cutting a
+// fresh full snapshot resets both, and callers never have to think about depth:
+// asking for a diff always succeeds, it just occasionally costs more.
+const maxDiffChain = 8
 
 func (s *Server) handleCreateSnapshot(w http.ResponseWriter, r *http.Request) {
 	if s.snapshots == nil {
@@ -61,6 +78,46 @@ func (s *Server) handleCreateSnapshot(w http.ResponseWriter, r *http.Request) {
 		includeMemory = *req.IncludeMemory
 	}
 
+	// A base is resolved before anything is captured, so an unusable one is
+	// reported instead of leaving a failed snapshot record behind.
+	baseID, chainDepth := "", 0
+	if req.Base != "" {
+		if !includeMemory {
+			// Only guest memory can be captured incrementally. The filesystem
+			// layer is already proportional to what changed, so a diff of a
+			// memoryless checkpoint would save nothing and would still pin its
+			// ancestors.
+			writeErr(w, http.StatusBadRequest, "INVALID_ARGUMENT",
+				"base requires includeMemory: a filesystem-only checkpoint is already incremental")
+			return
+		}
+		base, err := s.store.GetSnapshot(req.Base)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "INTERNAL", err.Error())
+			return
+		}
+		if base == nil {
+			writeErr(w, http.StatusNotFound, "SNAPSHOT_NOT_FOUND", "base snapshot not found")
+			return
+		}
+		if base.State != store.SnapshotReady {
+			writeErr(w, http.StatusConflict, "SNAPSHOT_NOT_READY",
+				fmt.Sprintf("base snapshot %s is %s", base.ID, base.State))
+			return
+		}
+		if !base.HasMemory() {
+			writeErr(w, http.StatusBadRequest, "INVALID_ARGUMENT",
+				"base snapshot carries no guest memory, so there is nothing to capture a difference against")
+			return
+		}
+		// Past the limit the checkpoint is taken in full and becomes a new root.
+		// Refusing instead would make callers manage depth, and silently
+		// continuing would let restores get slower without bound.
+		if base.ChainDepth+1 <= maxDiffChain {
+			baseID, chainDepth = base.ID, base.ChainDepth+1
+		}
+	}
+
 	nodeClient, err := s.nodeClientFor(rec)
 	if err != nil {
 		writeErr(w, http.StatusServiceUnavailable, "NODE_UNREACHABLE", err.Error())
@@ -73,6 +130,7 @@ func (s *Server) handleCreateSnapshot(w http.ResponseWriter, r *http.Request) {
 		SandboxID: rec.ID, Image: rec.Image, Runtime: rec.Runtime,
 		NodeID: rec.NodeID, Labels: req.Labels, CreatedAt: time.Now(),
 		IncludeMemory: &includeMemory,
+		BaseID:        baseID, ChainDepth: chainDepth,
 	}
 	// The CPU is recorded only when guest memory travels with the snapshot.
 	// A filesystem-only checkpoint restores on any CPU, so recording a
@@ -98,7 +156,13 @@ func (s *Server) handleCreateSnapshot(w http.ResponseWriter, r *http.Request) {
 	}
 
 	stream, err := nodeClient.SnapshotSandbox(r.Context(),
-		&nodev1.SnapshotSandboxRequest{SandboxId: rec.ID, IncludeMemory: includeMemory})
+		&nodev1.SnapshotSandboxRequest{
+			SandboxId: rec.ID, IncludeMemory: includeMemory,
+			// Diff follows baseID rather than the request: a request that asked for
+			// one past the depth limit is answered with a full checkpoint, and the
+			// node has to write what the record claims.
+			Diff: baseID != "",
+		})
 	if err != nil {
 		snapshot.AbortWrite(s.snapshots, snapID, blobW)
 		s.failSnapshot(snap, err)
@@ -293,17 +357,27 @@ func (s *Server) createFromSnapshot(w http.ResponseWriter, r *http.Request,
 		return
 	}
 
-	blobR, err := s.snapshots.Reader(snap.ID)
+	// The whole chain travels, base first: a diff holds only what changed since
+	// its base, so the node cannot reconstruct the guest from the leaf alone.
+	// Ancestors need no reference of their own — a base cannot be deleted while
+	// anything descends from it, so the leaf's reference holds the chain.
+	chain, err := s.store.SnapshotChain(snap.ID)
 	if err != nil {
 		s.failCreate(rec, err)
-		if errors.Is(err, snapshot.ErrBlobNotFound) {
-			writeErr(w, http.StatusNotFound, "SNAPSHOT_DATA_MISSING", err.Error())
+		if errors.Is(err, store.ErrNotFound) {
+			writeErr(w, http.StatusNotFound, "SNAPSHOT_BASE_MISSING", err.Error())
 			return
 		}
 		writeErr(w, http.StatusInternalServerError, "INTERNAL", err.Error())
 		return
 	}
-	defer blobR.Close()
+	// Declared on the spec rather than discovered from the stream: the node has to
+	// create one reader per layer before reading any of them, since each layer is
+	// its own gzip stream.
+	spec.SnapshotChain = make([]string, len(chain))
+	for i, link := range chain {
+		spec.SnapshotChain[i] = link.ID
+	}
 
 	stream, err := nodeClient.RestoreSandbox(r.Context())
 	if err != nil {
@@ -320,23 +394,25 @@ func (s *Server) createFromSnapshot(w http.ResponseWriter, r *http.Request,
 	}
 
 	buf := make([]byte, 1<<20)
-	for {
-		n, rerr := blobR.Read(buf)
-		if n > 0 {
+	for i, link := range chain {
+		if i > 0 {
+			// Closes the previous layer so its reader on the node sees a clean end
+			// of stream; without it the gzip reader would wait for more.
 			if serr := stream.Send(&nodev1.RestoreSandboxFrame{
-				Frame: &nodev1.RestoreSandboxFrame_Data{Data: buf[:n]},
+				Frame: &nodev1.RestoreSandboxFrame_LayerEnd{LayerEnd: true},
 			}); serr != nil {
 				s.failCreate(rec, serr)
 				grpcToHTTP(w, serr)
 				return
 			}
 		}
-		if rerr == io.EOF {
-			break
-		}
-		if rerr != nil {
-			s.failCreate(rec, rerr)
-			writeErr(w, http.StatusInternalServerError, "INTERNAL", rerr.Error())
+		if err := s.sendSnapshotBlob(stream, link.ID, buf); err != nil {
+			s.failCreate(rec, err)
+			if errors.Is(err, snapshot.ErrBlobNotFound) {
+				writeErr(w, http.StatusNotFound, "SNAPSHOT_DATA_MISSING", err.Error())
+				return
+			}
+			grpcToHTTP(w, err)
 			return
 		}
 	}
@@ -353,4 +429,31 @@ func (s *Server) createFromSnapshot(w http.ResponseWriter, r *http.Request,
 	_ = s.store.PutSandbox(rec)
 	s.emit(rec.ID, "sandbox.lifecycle.running", nil)
 	writeJSON(w, http.StatusCreated, map[string]any{"sandbox": rec})
+}
+
+// sendSnapshotBlob streams one layer's bundle into an open restore stream.
+func (s *Server) sendSnapshotBlob(stream nodev1.SandboxService_RestoreSandboxClient,
+	id string, buf []byte) error {
+	blobR, err := s.snapshots.Reader(id)
+	if err != nil {
+		return err
+	}
+	defer blobR.Close()
+
+	for {
+		n, rerr := blobR.Read(buf)
+		if n > 0 {
+			if serr := stream.Send(&nodev1.RestoreSandboxFrame{
+				Frame: &nodev1.RestoreSandboxFrame_Data{Data: buf[:n]},
+			}); serr != nil {
+				return serr
+			}
+		}
+		if rerr == io.EOF {
+			return nil
+		}
+		if rerr != nil {
+			return fmt.Errorf("read snapshot %s: %w", id, rerr)
+		}
+	}
 }

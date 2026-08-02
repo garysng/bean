@@ -62,6 +62,10 @@ func main() {
 	cpuTemplate := flag.String("cpu-template", "none",
 		"mask guest CPU features so memory snapshots survive a move between CPU "+
 			"generations: none|portable (fc runtime)")
+	trackDirtyPages := flag.Bool("track-dirty-pages", false,
+		"log guest writes so checkpoints can capture only what changed; must be on "+
+			"from boot, so a guest started without it can never produce an "+
+			"incremental snapshot (fc runtime)")
 	logFormat := flag.String("log-format", "text", "log format: text|json")
 	logLevel := flag.String("log-level", "info", "log level: debug|info|warn|error")
 	otlpEndpoint := flag.String("otlp-endpoint", os.Getenv("BEAN_OTLP_ENDPOINT"),
@@ -112,16 +116,17 @@ func main() {
 		rt = runtime.NewLocalRuntime(*agentBin, *baseDir)
 	case "fc":
 		fcRT, err := runtime.NewFCTier(runtime.FCTierConfig{
-			FirecrackerBin: *fcBin,
-			KernelPath:     *fcKernel,
-			AgentDiskPath:  *fcAgentDisk,
-			BaseDir:        *baseDir,
-			ImageDir:       *imageDir,
-			DefaultDiskMiB: *defaultDiskMiB,
-			BuildkitAddr:   *buildkitAddr,
-			BuildctlBin:    *buildctlBin,
-			DebugConsole:   *debugConsole,
-			CPUTemplate:    tmpl,
+			FirecrackerBin:  *fcBin,
+			KernelPath:      *fcKernel,
+			AgentDiskPath:   *fcAgentDisk,
+			BaseDir:         *baseDir,
+			ImageDir:        *imageDir,
+			DefaultDiskMiB:  *defaultDiskMiB,
+			BuildkitAddr:    *buildkitAddr,
+			BuildctlBin:     *buildctlBin,
+			DebugConsole:    *debugConsole,
+			CPUTemplate:     tmpl,
+			TrackDirtyPages: *trackDirtyPages,
 		})
 		if err != nil {
 			log.Fatalf("fc runtime: %v", err)

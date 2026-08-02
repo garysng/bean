@@ -708,8 +708,11 @@ func (m *Manager) redialAgent(ctx context.Context, id string) error {
 // RestoreSandbox creates a sandbox from a checkpoint. It mirrors Create,
 // including agent health-checking, so a restored sandbox is immediately
 // usable through the same data-plane paths.
+// RestoreSandbox recreates a sandbox from a checkpoint chain, ordered base-first.
+// A self-contained checkpoint is one layer; an incremental one is its whole
+// chain, since a diff holds only what changed since its base.
 func (m *Manager) RestoreSandbox(ctx context.Context, spec *nodev1.SandboxSpec,
-	src io.Reader) (*Sandbox, error) {
+	layers []runtime.SnapshotLayer) (*Sandbox, error) {
 	if spec.GetSandboxId() == "" {
 		return nil, fmt.Errorf("sandbox_id required")
 	}
@@ -746,7 +749,7 @@ func (m *Manager) RestoreSandbox(ctx context.Context, spec *nodev1.SandboxSpec,
 	rCtx, rSpan := obs.Tracer("noded").Start(ctx, "runtime.Restore",
 		trace.WithAttributes(obs.Phase("restore_load"),
 			attribute.String(obs.AttrSnapshot, spec.GetSnapshotId())))
-	handle, err := m.rt.Restore(rCtx, specToRuntime(spec), src)
+	handle, err := m.rt.Restore(rCtx, specToRuntime(spec), layers)
 	obs.Fail(rCtx, err)
 	rSpan.End()
 	m.observePhase(ctx, "restore_load", time.Since(loadStart))

@@ -11,19 +11,31 @@ import (
 	"testing"
 )
 
-// writeEntry stands in for unpacking a bundle: it drops the two reusable members
+// writeEntry stands in for merging a chain: it drops the two reusable members
 // into the directory the cache offers.
-func writeEntry(t *testing.T, dir string) (map[string]string, error) {
+//
+// An empty dir is how the cache tells a caller that another restore is already
+// building the shared entry, so this returns nothing to publish — matching the
+// real callback, which in that case only drains its own stream.
+func writeEntry(t *testing.T, dir string) (snapEntry, error) {
 	t.Helper()
-	paths := map[string]string{}
+	if dir == "" {
+		return snapEntry{}, nil
+	}
+	var entry snapEntry
 	for _, name := range []string{snapshotStateFile, snapshotMemFile} {
 		p := filepath.Join(dir, name)
 		if err := os.WriteFile(p, []byte(name+" contents"), 0o600); err != nil {
-			return nil, err
+			return snapEntry{}, err
 		}
-		paths[name] = p
+		switch name {
+		case snapshotStateFile:
+			entry.StatePath = p
+		case snapshotMemFile:
+			entry.MemPath = p
+		}
 	}
-	return paths, nil
+	return entry, nil
 }
 
 func TestSnapCacheFillThenLookup(t *testing.T) {
@@ -33,7 +45,7 @@ func TestSnapCacheFillThenLookup(t *testing.T) {
 		t.Fatal("reported a hit before anything was cached")
 	}
 
-	entry, err := c.Fill("snap_1", nil, func(dir string) (map[string]string, error) {
+	entry, err := c.Fill("snap_1", func(dir string) (snapEntry, error) {
 		return writeEntry(t, dir)
 	})
 	if err != nil {
@@ -62,7 +74,11 @@ func TestSnapCacheFillIsDoneOnceUnderConcurrency(t *testing.T) {
 	c := newSnapCache(filepath.Join(t.TempDir(), "snapshots"))
 
 	var mu sync.Mutex
-	unpacks := 0
+	// Counts real builds, not callback calls. Every caller's callback runs — each
+	// has its own stream to drain — but only one is offered a directory to build
+	// the shared entry in.
+	builds := 0
+	calls := 0
 
 	var wg sync.WaitGroup
 	entries := make([]snapEntry, 8)
@@ -71,13 +87,15 @@ func TestSnapCacheFillIsDoneOnceUnderConcurrency(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			entries[i], errs[i] = c.Fill("snap_hot", nil,
-				func(dir string) (map[string]string, error) {
-					mu.Lock()
-					unpacks++
-					mu.Unlock()
-					return writeEntry(t, dir)
-				})
+			entries[i], errs[i] = c.Fill("snap_hot", func(dir string) (snapEntry, error) {
+				mu.Lock()
+				calls++
+				if dir != "" {
+					builds++
+				}
+				mu.Unlock()
+				return writeEntry(t, dir)
+			})
 		}(i)
 	}
 	wg.Wait()
@@ -87,8 +105,12 @@ func TestSnapCacheFillIsDoneOnceUnderConcurrency(t *testing.T) {
 			t.Fatalf("restore %d: %v", i, err)
 		}
 	}
-	if unpacks != 1 {
-		t.Errorf("unpacked %d times, want 1", unpacks)
+	if builds != 1 {
+		t.Errorf("built the shared entry %d times, want 1", builds)
+	}
+	if calls != len(entries) {
+		t.Errorf("callback ran %d times for %d restores; each restore has its own "+
+			"stream to drain, so every one must be called", calls, len(entries))
 	}
 	for i, e := range entries {
 		if e != entries[0] {
@@ -104,14 +126,14 @@ func TestSnapCacheDoesNotPublishAFailedUnpack(t *testing.T) {
 	c := newSnapCache(filepath.Join(t.TempDir(), "snapshots"))
 
 	want := errors.New("bundle truncated")
-	if _, err := c.Fill("snap_bad", nil, func(dir string) (map[string]string, error) {
+	if _, err := c.Fill("snap_bad", func(dir string) (snapEntry, error) {
 		// Write one member, then fail: this is what an interrupted transfer
 		// looks like.
 		if err := os.WriteFile(filepath.Join(dir, snapshotStateFile),
 			[]byte("partial"), 0o600); err != nil {
-			return nil, err
+			return snapEntry{}, err
 		}
-		return nil, want
+		return snapEntry{}, want
 	}); !errors.Is(err, want) {
 		t.Fatalf("Fill error = %v, want %v", err, want)
 	}
@@ -129,12 +151,12 @@ func TestSnapCacheDoesNotPublishAFailedUnpack(t *testing.T) {
 // but produced only one of the two members.
 func TestSnapCacheRejectsAnIncompleteUnpack(t *testing.T) {
 	c := newSnapCache(filepath.Join(t.TempDir(), "snapshots"))
-	_, err := c.Fill("snap_partial", nil, func(dir string) (map[string]string, error) {
+	_, err := c.Fill("snap_partial", func(dir string) (snapEntry, error) {
 		p := filepath.Join(dir, snapshotStateFile)
 		if err := os.WriteFile(p, []byte("state"), 0o600); err != nil {
-			return nil, err
+			return snapEntry{}, err
 		}
-		return map[string]string{snapshotStateFile: p}, nil
+		return snapEntry{StatePath: p}, nil
 	})
 	if err == nil {
 		t.Fatal("accepted a bundle with no memory image")
@@ -172,28 +194,50 @@ func TestSnapCacheRequiresAnID(t *testing.T) {
 	if _, ok := c.Lookup(""); ok {
 		t.Error("an empty id reported a hit")
 	}
-	if _, err := c.Fill("", nil, func(string) (map[string]string, error) {
+	if _, err := c.Fill("", func(string) (snapEntry, error) {
 		t.Error("unpacked despite having no cache key")
-		return nil, nil
+		return snapEntry{}, nil
 	}); err == nil {
 		t.Error("Fill accepted an empty id")
 	}
 }
 
-// TestSnapCacheReusesAnEntryWithoutUnpacking is the payoff: the second restore
-// of a snapshot must not run the unpack function at all.
-func TestSnapCacheReusesAnEntryWithoutUnpacking(t *testing.T) {
+// TestSnapCacheReusesAnEntryWithoutRebuilding is the payoff: a second restore of
+// the same snapshot reuses the shared entry instead of rebuilding it.
+//
+// The callback still runs, with an empty dir. That is not a wasted call — each
+// restore has its own stream to drain and its own writable layer to stage, and a
+// caller that skipped it would leave its sender blocked on a stream nobody reads
+// and hand its sandbox the base image instead of the snapshot's filesystem.
+// So the assertion is "was told not to rebuild", not "was not called".
+func TestSnapCacheReusesAnEntryWithoutRebuilding(t *testing.T) {
 	c := newSnapCache(filepath.Join(t.TempDir(), "snapshots"))
-	if _, err := c.Fill("snap_reuse", nil, func(dir string) (map[string]string, error) {
+	if _, err := c.Fill("snap_reuse", func(dir string) (snapEntry, error) {
+		if dir == "" {
+			t.Error("first Fill was told not to build, but nothing was cached yet")
+		}
 		return writeEntry(t, dir)
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := c.Fill("snap_reuse", nil, func(string) (map[string]string, error) {
-		t.Error("unpacked again for a snapshot already in the cache")
-		return nil, errors.New("should not be called")
-	}); err != nil {
+
+	called := false
+	entry, err := c.Fill("snap_reuse", func(dir string) (snapEntry, error) {
+		called = true
+		if dir != "" {
+			t.Errorf("second Fill offered dir %q; the entry is already cached", dir)
+		}
+		return snapEntry{}, nil
+	})
+	if err != nil {
 		t.Fatalf("second Fill: %v", err)
+	}
+	if !called {
+		t.Error("second Fill skipped the callback; its stream would never be drained")
+	}
+	// The cached entry is what comes back, not the callback's empty one.
+	if entry.MemPath == "" || entry.StatePath == "" {
+		t.Errorf("second Fill returned %+v, want the cached entry", entry)
 	}
 }
 
@@ -204,11 +248,11 @@ func TestSnapCacheReusesAnEntryWithoutUnpacking(t *testing.T) {
 // snapshots unrestorable.
 func TestFillTreatsMemorylessBundleAsUncacheable(t *testing.T) {
 	c := newSnapCache(t.TempDir())
-	entry, err := c.Fill("snap-nomem", strings.NewReader(""),
-		func(dir string) (map[string]string, error) {
+	entry, err := c.Fill("snap-nomem",
+		func(dir string) (snapEntry, error) {
 			// Only a rootfs member, which lands on the sandbox's own device and
 			// so is not reported as a cached path.
-			return map[string]string{snapshotRootfsFile: "/dev/whatever"}, nil
+			return snapEntry{}, nil
 		})
 	if err != nil {
 		t.Fatalf("memoryless bundle rejected: %v", err)
@@ -223,13 +267,13 @@ func TestFillTreatsMemorylessBundleAsUncacheable(t *testing.T) {
 // loading it would leave the guest faulting on nothing.
 func TestFillRejectsHalfBundle(t *testing.T) {
 	c := newSnapCache(t.TempDir())
-	_, err := c.Fill("snap-half", strings.NewReader(""),
-		func(dir string) (map[string]string, error) {
+	_, err := c.Fill("snap-half",
+		func(dir string) (snapEntry, error) {
 			path := filepath.Join(dir, snapshotStateFile)
 			if err := os.WriteFile(path, []byte("state"), 0o600); err != nil {
-				return nil, err
+				return snapEntry{}, err
 			}
-			return map[string]string{snapshotStateFile: path}, nil
+			return snapEntry{StatePath: path}, nil
 		})
 	if err == nil {
 		t.Error("a bundle with vmstate but no memory was accepted")

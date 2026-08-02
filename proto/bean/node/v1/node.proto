@@ -127,6 +127,17 @@ message SandboxSpec {
   // "unpack from the stream", which keeps a restore self-contained.
   string snapshot_id = 14;
 
+  // snapshot_chain lists the checkpoints a restore must replay, ordered
+  // base-first with snapshot_id last. Empty means snapshot_id is self-contained.
+  //
+  // The chain is declared here rather than discovered from the stream because the
+  // node has to create one reader per layer before reading any of them: each
+  // layer is its own gzip stream, and a reader handed the concatenation would
+  // stop at the first layer's end. Knowing the count up front also means a
+  // restore fails on a chain the node cannot serve instead of part way through
+  // assembling one.
+  repeated string snapshot_chain = 15;
+
   string sandbox_id = 1;
   string image = 2;
   double cpu = 3;
@@ -203,6 +214,17 @@ message SnapshotSandboxRequest {
   // Defaulting to false would silently change what existing callers get, so the
   // gateway sends this explicitly and treats absent as true.
   bool include_memory = 2;
+
+  // diff captures only the guest memory written since the sandbox started or was
+  // restored. The result is not restorable alone — it is layered onto the chain
+  // it descends from — so the caller must record which snapshot it was taken
+  // against.
+  //
+  // The node refuses rather than falling back to a full capture when the guest
+  // booted without dirty-page tracking, which cannot be turned on after the
+  // fact. A silent fallback would return a bundle costing exactly what the
+  // caller was trying to avoid.
+  bool diff = 3;
 }
 
 message SnapshotChunk {
@@ -212,7 +234,15 @@ message SnapshotChunk {
 message RestoreSandboxFrame {
   oneof frame {
     SandboxSpec spec = 1;
+    // data carries the bundles back to back, in the order SandboxSpec's
+    // snapshot_chain declares. The node splits them at the boundaries the chain
+    // implies rather than at markers in the stream, so the sender does not have to
+    // know each bundle's size in advance — it is copying from object storage.
     bytes data = 2;
+    // layer_end closes the current bundle and moves to the next in the chain. It
+    // is a boundary marker rather than a length because the sender learns a
+    // bundle's size only by finishing it.
+    bool layer_end = 3;
   }
 }
 

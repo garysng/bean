@@ -6,7 +6,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -77,6 +76,19 @@ type FCRuntime struct {
 	// choice.
 	CPUTemplate CPUTemplate
 
+	// TrackDirtyPages lets guests on this node produce diff checkpoints, which
+	// capture only the memory written since their base.
+	//
+	// Like CPUTemplate this is node configuration rather than a per-checkpoint
+	// choice, for a harder reason: KVM has to be logging writes from the moment
+	// the guest starts, and a snapshot does not carry the setting. A guest booted
+	// without it can never produce a diff, however the checkpoint is requested.
+	//
+	// Off by default until the cost of that logging is measured on real
+	// workloads. Every guest pays it, while only some sandboxes are ever
+	// checkpointed more than once.
+	TrackDirtyPages bool
+
 	// snapshots holds unpacked snapshot state, so restoring the same checkpoint
 	// twice does not unpack it twice.
 	snapshots *snapCache
@@ -97,6 +109,10 @@ type fcVM struct {
 	// uffd serves guest page faults for a VM restored from a snapshot. Nil for a
 	// cold boot, which has no memory image to fault against.
 	uffd *uffdHandler
+	// dirtyPages reports whether KVM is logging this guest's writes, which is
+	// what a diff checkpoint needs. It is set when the VM starts and cannot
+	// change afterwards, so it is the authority on whether a diff is possible.
+	dirtyPages bool
 	// done closes when the VMM process exits, so waiters do not poll.
 	done chan struct{}
 }
@@ -190,11 +206,18 @@ func (r *FCRuntime) Create(ctx context.Context, spec *Spec) (*Handle, error) {
 // Restore boots a VM from a Firecracker snapshot. The guest resumes with its
 // memory intact, so a restored sandbox keeps running processes and open files —
 // the property that makes resume cheap compared to a cold start.
-func (r *FCRuntime) Restore(ctx context.Context, spec *Spec, src io.Reader) (*Handle, error) {
-	return r.create(ctx, spec, src)
+//
+// Layers are the checkpoint's chain, base first. One layer is the common case;
+// more than one means the leaf is incremental and its memory has to be
+// reassembled from its ancestors before the guest can run.
+func (r *FCRuntime) Restore(ctx context.Context, spec *Spec, layers []SnapshotLayer) (*Handle, error) {
+	if len(layers) == 0 {
+		return nil, errors.New("fc: restore needs at least one snapshot layer")
+	}
+	return r.create(ctx, spec, layers)
 }
 
-func (r *FCRuntime) create(ctx context.Context, spec *Spec, restoreFrom io.Reader) (handle *Handle, err error) {
+func (r *FCRuntime) create(ctx context.Context, spec *Spec, layers []SnapshotLayer) (handle *Handle, err error) {
 	if err := r.validate(); err != nil {
 		return nil, err
 	}
@@ -232,8 +255,8 @@ func (r *FCRuntime) create(ctx context.Context, spec *Spec, restoreFrom io.Reade
 	// writable layer can be seeded while the provider is still assembling it.
 	// See snapstage_linux.go for why the order is load-bearing.
 	var stage *snapshotStage
-	if restoreFrom != nil {
-		stage, err = r.stageSnapshot(filepath.Join(dir, "stage"), spec, restoreFrom)
+	if len(layers) > 0 {
+		stage, err = r.stageSnapshot(filepath.Join(dir, "stage"), spec, layers)
 		if err != nil {
 			return nil, err
 		}
@@ -371,9 +394,15 @@ func (r *FCRuntime) configureAndBoot(ctx context.Context, vm *fcVM, spec *Spec) 
 
 	if err := vm.client.put(ctx, "/machine-config", fcMachineConfig{
 		VCPUCount: vcpus, MemSizeMiB: mem,
+		TrackDirtyPages: r.TrackDirtyPages,
 	}); err != nil {
 		return err
 	}
+	// Recorded on the VM because a checkpoint cannot recover it later: the
+	// setting lives in KVM, not in anything the VM reports. A diff requested
+	// against a guest booted without it has to fail rather than quietly produce a
+	// full snapshot, which would look like a saving that did not happen.
+	vm.dirtyPages = r.TrackDirtyPages
 
 	// Masking has to happen before InstanceStart. A guest reads CPUID once
 	// during early boot and caches what it found — glibc picks its string

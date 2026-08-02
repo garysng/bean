@@ -2,6 +2,7 @@ package runtime
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"io"
 	"os"
@@ -61,8 +62,22 @@ func (r *LocalRuntime) Checkpoint(ctx context.Context, id string, w io.Writer, _
 }
 
 // Restore recreates a sandbox and unpacks a checkpoint over its rootfs.
-func (r *LocalRuntime) Restore(ctx context.Context, spec *Spec, src io.Reader) (*Handle, error) {
-	return r.create(ctx, spec, src)
+// Restore recreates a sandbox from a checkpoint.
+//
+// This tier has no memory state, so a chain has nothing to layer: each layer is a
+// tar of the whole filesystem, and the leaf already holds everything its
+// ancestors did. Earlier layers are drained and discarded, which keeps the sender
+// from blocking on a stream nobody reads.
+func (r *LocalRuntime) Restore(ctx context.Context, spec *Spec, layers []SnapshotLayer) (*Handle, error) {
+	if len(layers) == 0 {
+		return nil, errors.New("local: restore needs at least one snapshot layer")
+	}
+	for _, layer := range layers[:len(layers)-1] {
+		if _, err := io.Copy(io.Discard, layer.Data); err != nil {
+			return nil, fmt.Errorf("local: drain layer %s: %w", layer.ID, err)
+		}
+	}
+	return r.create(ctx, spec, layers[len(layers)-1].Data)
 }
 
 // create starts a sandbox, optionally seeding its rootfs from a checkpoint
