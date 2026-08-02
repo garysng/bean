@@ -195,6 +195,7 @@ made networking and jailer look shipped. Convention in
 | [image-build.md](docs/image-build.md) | build and commit |
 | [security-and-startup.md](docs/security-and-startup.md) | threat model, hardening, cold-start budget |
 | [sdk-cli-design.md](docs/sdk-cli-design.md) | SDK and CLI |
+| [network.md](docs/network.md) | 📐 the netns-per-sandbox design, and why a restored snapshot keeps its address |
 | [competitive-analysis.md](docs/competitive-analysis.md) | e2b / Modal / Daytona / Morph / AgentENV |
 | [roadmap.md](docs/roadmap.md) | phases, with actual progress noted |
 
