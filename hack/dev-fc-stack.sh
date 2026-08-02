@@ -27,6 +27,10 @@ NODE_METRICS_PORT=${NODE_METRICS_PORT:-17444}
 # a sandbox that is already running.
 NODED_FLAGS=${NODED_FLAGS:-}
 
+# Extra gateway flags, e.g. API_FLAGS="--create-wait 60s" to queue a burst larger
+# than a node's create concurrency instead of rejecting the overflow.
+API_FLAGS=${API_FLAGS:-}
+
 # Node capacity. Defaults suit a small development host; a stress run on a large
 # machine overrides them. These are what the node reports as allocatable, before
 # any overcommit factor.
@@ -73,6 +77,7 @@ nohup "$BIN/bean-api" \
   --bootstrap-token "$BOOTSTRAP_TOKEN" \
   --runtime-tier fc \
   --region local \
+  ${API_FLAGS:-} \
   >"$RUN/api.log" 2>&1 &
 
 # The node registers outbound, so the gateway has to be listening first.

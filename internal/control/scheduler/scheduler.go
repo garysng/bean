@@ -136,10 +136,16 @@ func (s *Scheduler) Schedule(req *Request) (string, error) {
 				return "", fmt.Errorf("%w: cannot restore %s: %s",
 					ErrIncompatibleCPU, req.SandboxID, why)
 			}
+			// Naming the resource that ran out, because several can each be the
+			// binding one and they are indistinguishable from the outside: the same
+			// burst was capped at 5, 8 and 16 by disk, CPU and create concurrency in
+			// turn, reporting the same error each time. Raising the wrong limit is
+			// the natural response to an unattributed capacity error.
 			return "", fmt.Errorf("%w: no node in region %s fits %s "+
-				"(cpu=%.1f mem=%dMiB disk=%dMiB gpu=%d runtime=%s)",
+				"(cpu=%.1f mem=%dMiB disk=%dMiB gpu=%d runtime=%s): %s",
 				ErrNoCapacity, req.Region, req.SandboxID,
-				req.CPU, req.MemoryMiB, req.DiskMiB, req.GPU, req.Runtime)
+				req.CPU, req.MemoryMiB, req.DiskMiB, req.GPU, req.Runtime,
+				explainRejection(nodes, req))
 		}
 
 		// Try candidates best-first. A node that just filled up is skipped

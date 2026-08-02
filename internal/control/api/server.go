@@ -5,6 +5,7 @@ import (
 	"context"
 	"crypto/subtle"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"log/slog"
@@ -48,6 +49,18 @@ type Placer interface {
 	Drain(nodeID string) error
 }
 
+// QueueingPlacer is implemented by placers that can wait for transient capacity
+// rather than rejecting immediately.
+//
+// Optional so a placer that only knows how to answer now still satisfies Placer.
+// The distinction it enables is between capacity that frees itself in seconds
+// (create concurrency) and capacity held for a sandbox's lifetime (CPU, memory,
+// disk) — waiting helps with the first and is pure added latency on the second.
+type QueueingPlacer interface {
+	ScheduleWait(ctx context.Context, req *scheduler.Request,
+		opts scheduler.WaitOptions) (string, error)
+}
+
 // Server is the REST gateway. It holds no placement state of its own: node
 // capacity and reservations live in the store, so replicas are
 // interchangeable and a restart loses nothing.
@@ -66,6 +79,9 @@ type Server struct {
 	bus         *eventBus
 	metrics     *obs.Registry
 	mux         *http.ServeMux
+	// createWait is how long a create may wait for create concurrency to drain
+	// before being refused. Zero refuses immediately.
+	createWait time.Duration
 }
 
 // Options configures the gateway.
@@ -82,6 +98,15 @@ type Options struct {
 	Secrets *secret.Box
 	// Snapshots stores checkpoint blobs; nil disables snapshot endpoints.
 	Snapshots snapshot.Blobs
+	// CreateWait is how long a create waits for create concurrency to drain
+	// before being refused. Zero refuses immediately, which is the historical
+	// behaviour.
+	//
+	// It applies only to create concurrency, which frees itself in seconds. A
+	// request that does not fit on CPU, memory or disk is refused without waiting:
+	// those commitments are held for a sandbox's lifetime, so waiting would return
+	// the same answer later and hold a client meanwhile.
+	CreateWait time.Duration
 }
 
 // New builds a gateway. A placer is required: every sandbox is placed by
@@ -98,7 +123,8 @@ func New(st *store.Store, router Router, placer Placer, opts Options) *Server {
 	s := &Server{store: st, router: router, placer: placer, region: region,
 		runtimeTier: tier, apiKey: opts.APIKey, images: opts.Images,
 		secrets: opts.Secrets, snapshots: opts.Snapshots,
-		bus: newEventBus(), metrics: obs.NewRegistry(), mux: http.NewServeMux()}
+		bus: newEventBus(), metrics: obs.NewRegistry(), mux: http.NewServeMux(),
+		createWait: opts.CreateWait}
 	s.routes()
 	return s
 }
@@ -220,6 +246,22 @@ func writeJSON(w http.ResponseWriter, code int, v any) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(code)
 	_ = json.NewEncoder(w).Encode(v)
+}
+
+// place schedules a request, waiting for transient capacity when the placer
+// supports it and a wait is configured.
+//
+// The context is the request's own, so a client that hangs up stops the wait
+// rather than leaving the gateway holding a slot for nobody.
+func (s *Server) place(ctx context.Context, req *scheduler.Request) (string, error) {
+	if s.createWait <= 0 {
+		return s.placer.Schedule(req)
+	}
+	q, ok := s.placer.(QueueingPlacer)
+	if !ok {
+		return s.placer.Schedule(req)
+	}
+	return q.ScheduleWait(ctx, req, scheduler.WaitOptions{Timeout: s.createWait})
 }
 
 func grpcToHTTP(w http.ResponseWriter, err error) {
@@ -362,10 +404,21 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	// Placement reserves capacity durably before anything is persisted, so a
 	// capacity failure never leaves a record pointing at a node that cannot
 	// host it, and a crash here leaks nothing the sweep cannot reclaim.
-	nodeID, err := s.placer.Schedule(s.placementFor(rec))
+	nodeID, err := s.place(r.Context(), s.placementFor(rec))
 	if err != nil {
 		outcome = "no_capacity"
-		writeErr(w, http.StatusServiceUnavailable, "NO_CAPACITY", err.Error())
+		code := http.StatusServiceUnavailable
+		if errors.Is(err, scheduler.ErrQueueTimeout) {
+			// The request was admissible and the node was merely busy for longer
+			// than the wait allowed, so this is a timeout rather than a statement
+			// about capacity. 504 tells a caller to retry with more patience; 503
+			// would suggest the cluster is too small.
+			outcome = "queue_timeout"
+			code = http.StatusGatewayTimeout
+			writeErr(w, code, "QUEUE_TIMEOUT", err.Error())
+			return
+		}
+		writeErr(w, code, "NO_CAPACITY", err.Error())
 		return
 	}
 	rec.NodeID = nodeID

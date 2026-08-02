@@ -49,6 +49,14 @@ func main() {
 		"token nodes must present to register")
 	runtimeTier := flag.String("runtime-tier", "fc",
 		"node capability required for placement (fc|local|runc|runsc)")
+	createWait := flag.Duration("create-wait", 0,
+		"how long a create waits for a node's create concurrency to drain before "+
+			"being refused; 0 refuses immediately. An evaluation batch arrives as a "+
+			"burst by construction and a rejected caller retries as another burst, so "+
+			"waiting turns a retry storm into a predictable queue. It does not raise "+
+			"throughput — that is bounded by boot cost, roughly cores/5 creates per "+
+			"second. Only create concurrency is waited on: CPU, memory and disk are "+
+			"held for a sandbox's lifetime and will not free themselves")
 	secretKey := flag.String("secret-key", os.Getenv("BEAN_SECRET_KEY"),
 		"master key encrypting persisted credentials (empty disables registry credentials)")
 	snapshotDir := flag.String("snapshot-dir", "",
@@ -177,6 +185,7 @@ func main() {
 	srv := api.New(st, router, sched, api.Options{
 		Region: *region, APIKey: *apiKey, RuntimeTier: *runtimeTier,
 		Images: images, Secrets: secrets, Snapshots: blobs,
+		CreateWait: *createWait,
 	})
 
 	httpSrv := &http.Server{

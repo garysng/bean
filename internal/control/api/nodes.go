@@ -53,7 +53,7 @@ func (s *Server) handleListNodes(w http.ResponseWriter, r *http.Request) {
 			// its layer is sparse, and that gap is only diagnosable if both are
 			// shown: a node refusing work at 5% committed is otherwise inexplicable.
 			"diskUsedMiB": n.DiskUsedMiB,
-			"gpuCount":             n.GPUCount, "gpuCommitted": n.GPUCommitted,
+			"gpuCount":    n.GPUCount, "gpuCommitted": n.GPUCommitted,
 			"createInFlight": n.CreateInFlight, "maxCreates": n.MaxCreates,
 			"cachedImages":  len(n.CachedImages),
 			"lastHeartbeat": n.LastHeartbeat,
