@@ -9,32 +9,57 @@ sandbox 内运行的是 **AI 生成的不可信代码**（eval 任务、agent ro
 | 威胁 | 后果 | 防线 |
 |---|---|---|
 | 内核逃逸 | 接管节点 | FC microVM / gVisor 隔离档（A2） |
-| 横向移动 | 访问其他 sandbox / 内网服务 | 网络隔离（A4） |
+| 横向移动 | 访问其他 sandbox / 内网服务 | 📐 网络栈未实现,当前 sandbox 无网络（A4） |
 | 凭证窃取 | 拿到 S3/控制面凭证 | 零长期凭证（A5） |
-| 资源滥用 | 挖矿、fork 炸弹、磁盘写满 | cgroup 硬限制（A3） |
-| 出网滥用 | 作为跳板攻击外部、DDoS | egress 策略 + 带宽限速（A4） |
+| 资源滥用 | 挖矿、fork 炸弹、磁盘写满 | ⚠️ 当前靠 guest 内核自限与 CoW 盘大小;宿主 cgroup 未实现（A3） |
+| 出网滥用 | 作为跳板攻击外部、DDoS | 📐 同上,未实现（A4） |
 | 恶意镜像 | 供应链投毒 | 镜像来源控制（A6） |
 | agent 攻击面 | 从容器内攻击 agent → noded | 最小 API + socket 权限（A7） |
 
-### A2. 隔离档位（内部机制，不对外暴露;分档规则见 architecture.md D3）
+### A2. 隔离档位 ⚠️（内部机制，不对外暴露;分档规则见 architecture.md D3）
+
+**当前只有 `fc` 和 `local` 两档存在。** `local` 是进程级 sandbox,仅供开发与
+CI 使用,**没有任何隔离**,不在下表里也不该用于不可信代码。容器档(runc/runsc)
+未实现。
 
 | 实际档 | 运行时 | 逃逸防线 | 何时使用 |
 |---|---|---|---|
-| `fc`（默认主档） | Firecracker microVM | 硬件虚拟化边界，宿主暴露面最小（FC 设备模型极简 + jailer + seccomp） | KVM 节点——常规 eval/rollout |
-| `runsc` | gVisor | 用户态内核拦截 syscall，宿主内核面≈70 个 syscall | 无 KVM 节点的降级档 |
-| `runc` | runc | 仅 namespace/seccomp/caps | 内部可信任务 + GPU（内部预留，不对外开放） |
+| `fc`（默认主档） | Firecracker microVM | 硬件虚拟化边界,宿主暴露面最小（FC 设备模型极简 + 内置 seccomp）。**jailer 尚未接入**,见 A3 | KVM 节点——常规 eval/rollout |
+| `runsc` 📐 | gVisor | 用户态内核拦截 syscall，宿主内核面≈70 个 syscall | 无 KVM 节点的降级档。**未实现** |
+| `runc` 📐 | runc | 仅 namespace/seccomp/caps | 内部可信任务 + GPU（内部预留）。**未实现** |
 
 - fc 档 guest 是真内核，无 gVisor 的 syscall 兼容性问题
 - runc 承载 GPU 意味着 **GPU eval 的隔离弱于默认档**——GPU 节点独立节点池 +
   镜像白名单收紧作为补偿控制;gVisor GPU 支持（nvproxy）作为 P5 演进项
 - runsc 降级档兼容性回归集随容器档 P5 引入，不兼容镜像显式豁免，不静默降级
 
-### A3. 加固基线
+### A3. 加固基线 ⚠️
 
-**fc 档（主档,P2 交付）**：jailer（chroot+独立 uid/gid+设备白名单）、FC 内置
-seccomp、宿主 cgroup 包裹、可写层盘大小硬限、guest 资源自限。详见下方 fc 段。
+**当前真实状态,先说清楚:**
 
-**容器档**（runc/runsc,随 P5 引入）：
+| 加固项 | 状态 | 说明 |
+|---|---|---|
+| 硬件虚拟化边界 | ✅ | 真 Firecracker microVM,这是主防线 |
+| FC 进程自身 seccomp | ✅ | Firecracker 内置严格 profile,不传 `--no-seccomp` 即生效 |
+| 可写层盘大小硬限 | ✅ | 宿主组装 CoW 文件,大小天然是上限 |
+| guest 内资源自限 | ✅ | guest 内核自管,能耗尽的只有自己 VM 的资源 |
+| **jailer(chroot + 独立 uid/gid + 设备白名单)** | 📐 | **未实现**。noded 直接 exec firecracker 二进制,`grep -rn jailer` 全仓库为 0 |
+| **宿主侧 cgroup 包裹 FC 进程** | 📐 | **未实现**。cpu/mem 的双保险目前只有调度器的承诺量记账,没有内核强制 |
+
+之前这一节把 jailer 和 cgroup 写成「P2 交付」,是错的 —— 它们从未实现。
+这类错误在安全文档里代价最高:读者会据此判断可以跑什么代码。
+
+**缺 jailer 的实际含义**:FC 进程以 root 跑在宿主的 mount namespace 里,
+没有 chroot、没有降权、没有设备白名单。一个 FC 或 KVM 的漏洞,其后果是
+「拿到宿主 root」而不是「拿到一个被 chroot 的低权用户」。硬件虚拟化边界还在,
+但纵深防御少了一层 —— 而 Firecracker 官方把 jailer 列为生产部署的建议做法。
+
+**缺 cgroup 包裹的实际含义**:承诺量只是调度器的账本。一个 guest 无法超过
+自己 VM 的内存配置(FC 强制),但 **FC 进程本身**在宿主上没有 cgroup 限制,
+所以宿主内存压力下没有内核层面的公平性保证。这在超卖场景下更要紧
+(见 architecture.md D12)。
+
+**容器档**（runc/runsc,📐 未实现,随 P5 引入）：
 
 - cgroup v2 硬限制：cpu.max、memory.max（+ memory.swap.max=0）、pids.max（默认 4096，防 fork 炸弹）、io 权重
 - 磁盘写入上限：rootfs 可写层 XFS project quota（默认 20 GiB，可配）
@@ -45,15 +70,23 @@ seccomp、宿主 cgroup 包裹、可写层盘大小硬限、guest 资源自限�
 
 **fc 档**（guest 内 agent 即 root init，容器加固项不适用，防线在宿主侧）：
 
-- jailer：chroot + 独立 uid/gid + cgroup + 设备白名单
-- FC 进程自身 seccomp（Firecracker 内置严格 profile）
-- 宿主侧 cgroup 包裹 FC 进程（cpu/mem 双保险）
-- guest 磁盘写入上限 = 可写层文件大小（宿主组装，天然硬限）
-- pids/fork 炸弹：guest 内核自限（能耗尽的只有自己 VM 的资源）
+- ✅ FC 进程自身 seccomp（Firecracker 内置严格 profile,默认生效）
+- ✅ guest 磁盘写入上限 = 可写层文件大小（宿主组装，天然硬限）
+- ✅ pids/fork 炸弹：guest 内核自限（能耗尽的只有自己 VM 的资源）
+- 📐 jailer：chroot + 独立 uid/gid + 设备白名单 —— **未实现**
+- 📐 宿主侧 cgroup 包裹 FC 进程（cpu/mem 双保险）—— **未实现**
 
-### A4. 网络安全
+### A4. 网络安全 📐
 
-见 noded-design.md §5，安全语义汇总：
+**整节未实现。** `grep -rn 'nftables\|netns\|veth\|bean0'` 全仓库为 0 ——
+没有网络模块,sandbox 目前没有任何网络能力(fc 档只有 vsock 到 agent,
+那是控制通道不是数据网络)。
+
+这意味着下面每一条都是**计划**,不是当前的安全承诺。特别是「默认 egress-only」——
+当前既没有 egress 也没有隔离规则,因为根本没有网络栈。**不要**把这一节当成
+「sandbox 已被限制在这些规则内」来读。
+
+见 noded-design.md §5(同样未实现)。计划中的安全语义:
 
 - 默认 `egress-only`：可出公网（拉依赖是 eval 刚需），**禁止**：sandbox 间互访、节点内网段（RFC1918）、云元数据（169.254.169.254 / fd00:ec2::254）
 - 出网带宽 per-sandbox 限速（tc，默认 100 Mbps）+ conntrack 连接数上限（防端口扫描/DDoS 放大）
@@ -63,7 +96,12 @@ seccomp、宿主 cgroup 包裹、可写层盘大小硬限、guest 资源自限�
 - DNS 走节点转发器，可记录审计日志
 - 入站零暴露：无 DNAT，唯一入口是 proxy → noded → agent 的应用层链路
 
-### A5. 凭证与信任链
+### A5. 凭证与信任链 ⚠️
+
+已实现:bootstrap token 注册 + node token 鉴权、registry 凭证 AES-256-GCM 加密
+落库、S3 长期凭证仅控制面持有、fc 档 vsock(host 侧 FC API socket 仅 noded 可达)。
+未实现:presigned URL 注入 sandbox、STS 只读角色轮换、sandbox JWT、TLS 终结层。
+
 
 ```
 S3 长期凭证：仅 control plane 持有
@@ -79,20 +117,20 @@ noded ↔ agent：容器档 unix socket（0700，host 侧仅 noded 用户可达;
 sandbox token（JWT）：签名密钥控制面持有，绑定 sandbox-id + 过期时间
 ```
 
-### A6. 镜像来源
+### A6. 镜像来源 ⚠️
 
 - 首期：仅允许配置白名单内的 registry / S3 blob 源
 - 镜像 digest 固定：调度与缓存全部按 digest（tag 仅入口解析一次），保证 eval 可复现
 - 预留：镜像签名校验（cosign）接入点在 image-service 解析层
 
-### A7. agent 攻击面控制
+### A7. agent 攻击面控制 ✅
 
 - agent 对 sandbox 内进程暴露的唯一接口是 unix socket（容器档）/ vsock（fc 档），均 root-only（A5）
 - agent 以 root 跑（需 setuid 到镜像 USER），但其 API 只允许来自 noded 侧 socket 的指令——容器内即使 root 也只能调用与自己权限等价的操作，无提权增益
 - agent 二进制只读挂载，容器内不可替换
 - noded 侧对 agent 响应做长度/速率限制，防被攻陷的 agent 反打 noded
 
-### A8. 平台面
+### A8. 平台面 📐
 
 - API 全写操作审计（who/what/when，Postgres + S3 归档）
 - 节点最小化：专用 OS 镜像、无多余服务、noded 非 root 化评估（P3;containerd 如启用,P5）
@@ -102,9 +140,19 @@ sandbox token（JWT）：签名密钥控制面持有，绑定 sandbox-id + 过�
 
 ## Part B — 快速启动
 
-### B1. 冷启动预算
+### B1. 冷启动预算 ⚠️
 
-目标：**缓存命中 P50 < 2s；冷镜像（overlaybd lazy-pull）P50 < 10s**。分解（fc 档为例，容器档少 VM 启动项更快）：
+**实测(真 KVM 机器,alpine,命中缓存)**:create 全链路 **952ms**,
+其中 `runtime_create` 234ms + `agent_ready` 770ms(重叠)。达成了「命中 P50 < 2s」。
+
+冷镜像目标未达成也未走 lazy-pull:当前是「拉全量 + 转换 + CoW 共享」,
+实测 busybox 5-10s、alpine 在网络不稳时 **2m45s** —— 所以 prewarm 是必需的
+而不是优化。overlaybd lazy-pull 能力已实测(B2),但尚未接进 `image.Provider`。
+
+**这些数字都是单个 sandbox 手工测的。** 并发下如何退化没有测过 ——
+见 `docs/status.md` 的压测待办。
+
+原目标:**缓存命中 P50 < 2s；冷镜像（overlaybd lazy-pull）P50 < 10s**。分解（fc 档为例，容器档少 VM 启动项更快）：
 
 | 阶段 | 缓存命中目标 | 冷路径目标 | 手段 |
 |---|---|---|---|
@@ -129,7 +177,15 @@ sandbox token（JWT）：签名密钥控制面持有，绑定 sandbox-id + 过�
 restore 路径:950ms(首次 1617ms)。guest 内存靠 userfaultfd 按需供页,
 FC `/snapshot/load` 只占 7ms。
 
-### B2. overlaybd lazy-pull from S3
+### B2. overlaybd lazy-pull from S3 ⚠️
+
+**能力已在验证机实测跑通,但尚未接入代码**。当前生产路径是 dm-snapshot:
+拉全量 + 转换 + 共享只读 base + 每 sandbox CoW(实测每 sandbox 8 KiB)。
+overlaybd 侧实测:挂载 7ms、只传 19.6% 的层字节就能挂载并读文件、8 个 HTTP 206、
+可写上层实占 40 KiB(`docs/decisions.md` §3.1)。剩下的是写 `OverlaybdProvider`
+接进 `image.Provider`。
+
+下面描述的是那个目标形态,不是当前形态。
 
 ```
 镜像发布链路（image-service，离线一次）：
@@ -157,7 +213,7 @@ CreateSandbox → overlaybd/ublk 组装块设备（元数据数 MiB）→ 立即
     会合并不同镜像的设备并返回错误数据（静默,不报错）
   - 运行中 S3 不可达 → 块读失败重试 + sandbox 级 IO 错误上报（区别于任务自身失败）
 
-### B3. 缓存与预热策略
+### B3. 缓存与预热策略 ⚠️
 
 1. **节点缓存**（noded-design §4.2）：镜像粒度 LRU + chunk LRU，S3 为 source of truth
 2. **prewarm API**：eval 批次开始前，编排层按「批次镜像清单 × 目标并发」计算
@@ -168,11 +224,14 @@ CreateSandbox → overlaybd/ublk 组装块设备（元数据数 MiB）→ 立即
 5. **IO trace 记录**：首次运行 `record-trace` 采集块访问序列存 S3 元数据，
    后续 prewarm/启动按 trace 预取（overlaybd 原生能力）
 
-### B4. 批量拉起（eval 风暴）
+### B4. 批量拉起（eval 风暴）⚠️
 
 2000 sandbox 同时创建的路径保护：
 
 - gateway `batchCreate` → 调度器批量决策（单次锁内完成 bin-packing，避免 2000 次抢锁）
-- per-node 并发创建上限（默认 16），超出排队——瞬时风暴变节点内流水线
+- per-node 并发创建上限（默认 16）。⚠️ **当前是硬过滤而非排队**:in-flight 满了
+  该节点直接判为不可用,单节点集群会返回 `NO_CAPACITY`。对批量场景这可能是错的
+  语义(调用方看到失败而非变慢),且 16 这个值没有实测依据 —— 见 `docs/status.md`
+  待办与压测任务
 - S3 天然抗并发读；registry 不在热路径（blob 全在 S3）
 - 复用连接：noded 的 S3 client 连接池 + HTTP/2

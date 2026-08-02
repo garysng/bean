@@ -1,16 +1,40 @@
 # SDK 与 CLI 设计
 
-## 1. 总体策略
+> 状态标注约定见 [architecture.md](architecture.md) §0。
 
-- **REST 为客户端唯一协议**（含 WebSocket 流式），不向外暴露 gRPC——降低鉴权/网络要求，浏览器可用
-- **代码生成**：`proto → OpenAPI spec →` 各语言底层 client 自动生成；顶层手写符合语言习惯的门面 API（生成层不对用户暴露）
-- 版本策略：SDK 版本与 API `v1` 解耦，语义化版本;server 返回 `X-Bean-Api-Version`
+## 1. 总体策略 ⚠️
 
-## 2. Python SDK（主 SDK，eval/rollout 侧）
+- **REST 为客户端唯一协议** ✅（不向外暴露 gRPC）。WebSocket 流式 📐 未实现
+- **代码生成** 📐 **未实现**:`proto → OpenAPI spec → 各语言 client` 这条管线不存在,
+  也没有发布 OpenAPI spec。Python SDK 是**手写 httpx**,CLI 是手写 Go。
+  这不一定要改 —— 手写的门面 API 目前比生成层更贴合用法 —— 但不该写成既成事实
+- 版本策略 📐:SDK 未发版,server 也不返回 `X-Bean-Api-Version`
 
-包名：`bean-sdk`（import `bean`）。依赖最小化：`httpx`（sync+async 双栈）、`websockets`。
+## 2. Python SDK（主 SDK，eval/rollout 侧）⚠️
 
-### 2.1 核心接口
+**当前真实覆盖面**(`sdk/python/bean/__init__.py`,单文件手写):
+
+```
+✅ BeanClient / sandboxes.create|get|list / snapshots.list|get|delete
+✅ Sandbox.exec / write_file / read_file / ls / pause / resume / kill
+✅ Sandbox.snapshot(name, labels, keep_running, include_memory, base)
+✅ Sandbox.commit(tag) / events() / refresh() / context manager
+✅ Snapshot.resumes_guest / base_id / chain_depth
+✅ images.list|status|prewarm|prewarm_status
+✅ 错误分层:BeanAPIError / BeanConnectionError
+
+📐 未实现:pty、exec_stream、ports.expose、volumes、fork、start、
+   set_lifecycle、files.upload_dir/download_dir、bean.aio(异步栈)、
+   bean.batch.run_batch
+```
+
+下面若出现上面「未实现」清单里的 API,那是**设计意图**而非当前能力 ——
+特别是 §2.3 把 `run_batch` 说成「SWE-bench 场景的一等入口」,它不存在。
+
+包名:`bean-sdk`（import `bean`）。依赖:`httpx`。
+(原计划的 sync+async 双栈与 `websockets` 尚未引入)
+
+### 2.1 核心接口 ⚠️
 
 ```python
 from bean import Sandbox, BeanClient
@@ -79,11 +103,14 @@ sbx2 = client.sandboxes.create(snapshot=snap.id)           # 从持久快照重�
 children = sbx.fork(count=8)                               # 独立 API：瞬时 CoW 克隆 fan-out
 ```
 
-### 2.2 async 双形态
+### 2.2 async 双形态 📐
 
 `bean.aio` 镜像同构接口（`AsyncBeanClient` / `AsyncSandbox`），共享生成层与模型定义。rollout 高并发场景的主形态。
 
-### 2.3 eval 批量 helper
+### 2.3 eval 批量 helper 📐
+
+> `bean.batch.run_batch` **不存在**。下面是设计意图。
+
 
 ```python
 from bean.batch import run_batch
@@ -101,7 +128,7 @@ results = run_batch(
 封装内容：batchCreate 分批（默认注入 lifecycle=("0s","kill") 用完即走）、并发信号量、
 事件驱动回收（WS 订阅替代轮询）、LOST 重建、产物直收 S3 URL。SWE-bench 场景的一等入口。
 
-### 2.4 行为约定
+### 2.4 行为约定 ⚠️
 
 - 连接复用：单 client 内 httpx 连接池;WS 每会话一条
 - 重试：幂等 GET/DELETE 自动重试（指数退避 + jitter）;create 用 Idempotency-Key 安全重试
@@ -109,7 +136,11 @@ results = run_batch(
 - 错误映射:`BeanAPIError` 基类,按 code 派生 `SandboxNotFound`、`QuotaExceeded`、`NoCapacity`…
 - `Sandbox` 支持 context manager:`with client.sandboxes.create(...) as sbx:` 退出即销毁
 
-## 3. TypeScript SDK
+## 3. TypeScript SDK 📐
+
+> **不存在**。`sdk/` 下只有 `python/`。
+
+原设计:
 
 包名:`@bean/sdk`(npm org scope,避开被占的裸名)。运行时:Node 18+ / 浏览器（浏览器仅 sandbox token 模式，不放 API key）。
 
@@ -131,11 +162,26 @@ await sbx.kill();
 - 与 Python 语义一一对应（方法名 camelCase 化），文档共享示例矩阵
 - WS 用原生 WebSocket（浏览器）/ `ws`（Node），PTY 前端可直接对接 xterm.js
 
-## 4. CLI（`bean`，Go）
+## 4. CLI（`bean`，Go）✅
 
 与 noded 同 repo 同发版；cobra 框架;配置 `~/.config/bean/config.yaml`（多 profile：endpoint + key）。
 
-### 4.1 命令面
+### 4.1 命令面 ⚠️
+
+实际已实现(`bean --help`):
+
+```
+run --image IMG | --snapshot SNAP     ls    exec SBX -- CMD...
+kill SBX [--force]    pause SBX | resume SBX    logs SBX [--tail N]
+cp LOCAL sbx:SBX:/path | 反向        events SBX | events -f
+build --tag REF [--file Dockerfile] [CONTEXT]
+commit SBX --tag REF
+snapshot create SBX [--name N] [--no-keep-running] [--no-memory] [--base SNAP]
+snapshot ls [--label k=v] | snapshot rm SNAP
+image ls | image status REF | image prewarm REF... [--replicas N]
+输出:--json / --quiet    退出码:0 / 64 / 69 / 70 / 125
+```
+
 
 **已实装**（`cli/cli.go`,与代码一致）：
 
@@ -166,7 +212,7 @@ e2b / Modal / Daytona 都不向用户暴露「我的 sandbox 落在哪台机器�
 `/v1/nodes` 与 drain 保留为**运维 API,不进 CLI**。
 同理 `prewarm` 的参数是 `--replicas`(副本数)而不是 `--nodes`(机器数)。
 
-### 4.2 输出约定
+### 4.2 输出约定 ✅
 
 - 默认人类可读 table(`tabwriter` 对齐);`--json` 输出结构化 JSON;
   `--quiet` 只输出标识符(脚本取 id 用)
@@ -179,13 +225,13 @@ e2b / Modal / Daytona 都不向用户暴露「我的 sandbox 落在哪台机器�
 
 **未实装**：TTY 自动着色、长操作 spinner 与阶段展示、`--no-wait`。
 
-### 4.3 交互模式
+### 4.3 交互模式 📐
 
 `bean run -it IMAGE -- bash` / `bean exec -it SBX -- bash`：
 
 - 本地终端 raw mode + WS PTY 帧对接，SIGWINCH → resize 帧，Ctrl-P Ctrl-Q detach（会话保留 60s 可 `bean attach SBX` 重连）
 
-## 5. 文档与示例
+## 5. 文档与示例 📐
 
 - OpenAPI spec 发布 + 托管 API reference
 - Quickstart 三件套：CLI 五分钟、Python eval 批量示例（SWE-bench 迷你复现）、TS Web demo（xterm.js 终端）

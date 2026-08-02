@@ -2,6 +2,25 @@
 
 > 从 architecture.md §8 细化。每个 Phase 以可演示的端到端里程碑收口。
 
+## 当前实际进度(2026-08-02)
+
+**Phase 划分已被实际路径打乱**,所以按能力读比按 Phase 读更准 ——
+权威记录是 `docs/status.md`。要点:
+
+- ✅ **已超出 P0/P1**:fc 直启(952ms)、多节点调度与承诺量落库、S3 快照 blob、
+  OCI 拉取转换、commit、BuildKit 构建、OTel trace 全链路
+- ✅ **已提前做完 P3/P4 的快照部分**:pause/resume、full / `--no-memory` /
+  `--base` 增量三种快照、UFFD 按需供页、CPU template 与调度器 CPU 过滤
+- ⚠️ **P0 里说的 overlaybd ublk 直驱没做**:走的是 dm-snapshot(每 sandbox 8 KiB)。
+  overlaybd 能力已实测但未接入 —— 它变成了优化项而非基础
+- ⚠️ **P0 里说的 jailer 没做**:noded 直接 exec firecracker
+- 📐 **P0/P1 里说的网络完全没做**:无 tap/bridge/NAT,sandbox 没有网络。
+  这是当前最大的能力空白,而不是「跨节点不互通」这种边界问题
+- 📐 **未做**:容器档(runc/runsc)、volume、bean-proxy 端口暴露、fork、
+  Postgres、TypeScript SDK、构建日志与取消
+
+一句话:**纵向(快照/启动优化)走得比路线图深,横向(网络/多档位/卷)几乎没动。**
+
 ## P0 — 单节点端到端骨架（fc 直启,无 containerd）
 
 参考实现：本地 /Users/mac/project/agentenv（AgentENV 源码——uvm-ublk 直驱

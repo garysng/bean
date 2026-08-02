@@ -1,6 +1,7 @@
 # Image Build 设计
 
 > 用户可以在平台侧构建镜像，而不只是引用已有的 OCI 镜像。
+> 状态标注约定见 [architecture.md](architecture.md) §0。
 > 术语沿用 [api-design.md](api-design.md) §3.5：`ref` 是用户唯一接触的标识。
 
 ## 1. 为什么需要
@@ -13,7 +14,7 @@ template build。但完全没有构建能力留下两个真实缺口：
 - **「装好环境再复用」只能靠 snapshot**：snapshot 绑定 runtime 档、不可跨档，
   而镜像是通用的（见 §4 的区分）
 
-## 2. 镜像的两种来源
+## 2. 镜像的两种来源 ⚠️
 
 `store.Image.Source` 区分它们，因为转换代价完全不同：
 
@@ -27,7 +28,7 @@ template build。但完全没有构建能力留下两个真实缺口：
 | 构建路径 | 产物格式 | 转换 |
 |---|---|---|
 | **BuildKit**（Dockerfile / steps） | 标准 OCI layer | **仍需一次转换** |
-| **commit**（提取运行中 sandbox 的可写层） | overlaybd 可写层本就是 LSMT 增量 | **零转换**：`overlaybd-commit` seal 成不可变 layer 即可 |
+| **commit**（提取运行中 sandbox 的可写层） | ⚠️ 当前是 **dm-snapshot 的 CoW 层**,不是 overlaybd LSMT | 把 `/dev/mapper` 上的合成设备读成一个新的 base ext4 镜像。overlaybd 接入后可改成 `overlaybd-commit` seal,届时才是真正的零转换 |
 
 即便 BuildKit 路径要转换，相对 e2b 仍是改进：转换发生在 **build 时**（一次、
 可缓存、不在用户等待路径上），而 e2b 是 build 完再花 5–15 分钟转 VM rootfs。
@@ -36,7 +37,7 @@ template build。但完全没有构建能力留下两个真实缺口：
 
 底层统一：**在容器里按序执行步骤，然后把结果 commit 成层**。差别只在如何描述步骤。
 
-### 3.1 Dockerfile（完整语义）
+### 3.1 Dockerfile（完整语义）✅
 
 用 **BuildKit** 而非自研 parser。COPY/ADD 语义、multi-stage、ARG 插值、
 构建缓存、`.dockerignore`、heredoc 这些加起来是数月工作量且注定不完整；
@@ -49,7 +50,7 @@ bean build -f Dockerfile -t myteam/eval-base:v1 .
 CLI 打包 build context（受 `.dockerignore` 约束）上传，**平台侧执行构建**——
 用户无需本地装 Docker，且构建缓存在平台侧共享。
 
-### 3.2 声明式 steps（Modal 风格）
+### 3.2 声明式 steps（Modal 风格）📐
 
 eval 编排方本来就在写 Python，链式声明比维护 Dockerfile 更顺手，且每步天然
 是一个缓存键：
@@ -66,7 +67,7 @@ img = (client.images.build("myteam/eval-base:v1")
 
 SDK 把链式调用编译成 §5 的 build plan；服务端不区分它来自 Dockerfile 还是 steps。
 
-### 3.3 commit（快照当前 sandbox 为镜像）
+### 3.3 commit（快照当前 sandbox 为镜像）✅
 
 「先交互式装环境，再固化成镜像」——探索性工作流的最短路径，且零转换：
 
@@ -74,7 +75,7 @@ SDK 把链式调用编译成 §5 的 build plan；服务端不区分它来自 Do
 bean commit sbx_abc -t myteam/explored:v1
 ```
 
-## 4. build image 与 snapshot 的区别
+## 4. build image 与 snapshot 的区别 ✅
 
 两者共用「提取 sandbox 可写层」的机制，但**不是同一种东西**，混淆会让数据模型
 和用户心智都乱掉：
@@ -87,7 +88,12 @@ bean commit sbx_abc -t myteam/explored:v1
 | 标识 | `snap_...`，引用计数 + TTL 回收 | `ref` + digest，像镜像一样被引用 |
 | 典型场景 | 「装好环境 → fan-out N 个实验」 | 「团队共用的 eval 基础镜像」 |
 
-## 5. Build Plan：统一中间表示
+## 5. Build Plan：统一中间表示 ⚠️
+
+> `store.BuildPlan` / `BuildStep` 类型已定义 ✅,但只有 `dockerfile` 与 `commit`
+> 两种 kind 走通;`steps` kind 的编译器未实现。per-step cacheKey 字段存在但
+> 未被使用。
+
 
 三种形式都编译成同一个 plan，服务端只认 plan。这样加新前端（如 Bazel、
 Nix）不动执行器，换执行器（BuildKit → 自研）不动 API。
@@ -115,7 +121,11 @@ type BuildStep struct {
 }
 ```
 
-## 6. API
+## 6. API ⚠️
+
+> 构建的**日志流与取消**未实现 —— 这是当前最明显的缺口:一个跑了几分钟的构建
+> 既看不到进度也停不下来。
+
 
 ```
 POST /v1/images/build      Dockerfile 或 steps → 202 { buildId }
@@ -131,7 +141,7 @@ POST /v1/sandboxes/{id}/commit  { "tag": "..." } → 202 { imageRef }
 Build 状态机：`PENDING → RUNNING → CONVERTING → READY | FAILED | CANCELLED`
 （commit 路径跳过 CONVERTING）。日志按 build 落存储，可流式查看。
 
-## 7. 执行位置
+## 7. 执行位置 ⚠️
 
 构建跑在**节点上**（与 sandbox 同池，或标记 `pool=builder` 的专用节点），
 理由：
@@ -140,7 +150,10 @@ Build 状态机：`PENDING → RUNNING → CONVERTING → READY | FAILED | CANCE
 - 构建缓存与镜像块缓存共享本地盘，同一批 eval 的重复构建命中率高
 - 调度器已有的 labels/nodeSelector 机制直接复用，无需新的编排层
 
-`noded` 增加 `BuildImage` RPC；构建产物 push 到平台 S3（overlaybd blob），
+`noded` 的 `BuildImage` RPC ✅ 已实装(BuildKit,`--buildkit-addr` 为空则该节点
+不接构建)。⚠️ 构建产物当前落**节点本地 ImageDir** 作为 base ext4,
+未 push 到 S3 blob —— 所以构建出的镜像目前只在构建它的那个节点可用。
+原计划:push 到平台 S3（overlaybd blob），
 元数据回写控制面。
 
 ## 8. 不做（明确边界）
@@ -158,7 +171,7 @@ Build 状态机：`PENDING → RUNNING → CONVERTING → READY | FAILED | CANCE
 | e2b | Dockerfile | BuildKit → 转 VM rootfs | template（5–15 分钟/个） |
 | Daytona | Dockerfile / Declarative Builder | BuildKit | snapshot |
 | Modal | Python 链式调用 | 自研构建器（要求镜像内有 Python） | 内容寻址层 |
-| **bean** | **Dockerfile + 声明式 steps + commit** | **BuildKit（平台侧）/ overlaybd commit** | **overlaybd layer on S3** |
+| **bean** | Dockerfile ✅ / 声明式 steps 📐 / commit ✅ | BuildKit（平台侧）✅ / dm-snapshot CoW 读出 ⚠️ | ⚠️ 当前落节点本地 ext4;overlaybd layer on S3 是目标 |
 
 bean 的差异：三种形式统一到一个 plan;commit 路径零转换;产物直接是 fc 档可用的
 块设备格式，不需要再转一次。

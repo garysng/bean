@@ -1,7 +1,15 @@
-# 竞品分析（2026-07）
+# 竞品分析（2026-07,快照部分 2026-08 补充）
 
 > 视角：bean 的目标场景 = AI evaluation / agent rollout，特点是**大量异构 Docker 镜像**
 > （SWE-bench 类 2000+ 镜像）、批量拉起、短生命周期、自主可控部署。
+
+> **增量快照的选型对照**(2026-08 调研,已落地)见 `docs/decisions.md` §3.0.1。
+> 结论摘要:E2B 在 UFFD 缺页时分层查找 base + N 层 diff,公开分析指出
+> cross-build fragmentation 随深度增长;Cognition blockdiff 把链只当血缘、
+> 运行前 flatten 成 raw(靠 XFS reflink 使 flatten 近乎免费);
+> Firecracker 上游 `snapshot-editor rebase` 也是 flatten。
+> bean 选 flatten,额外理由是 snapCache 让 fan-out 场景每节点只付一次合并,
+> 且缺页路径零改动。
 
 ## 1. 逐家分析
 

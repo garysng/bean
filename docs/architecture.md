@@ -2,6 +2,28 @@
 
 > Container-native sandbox platform for AI evaluation workloads.
 
+## 0. 阅读约定:交付状态标注
+
+这批设计文档同时承载两件事 —— **已经建成的**和**打算建成的**。两者写法一样时
+读者无法分辨,而这已经造成过实际误判:网络栈和 jailer 隔离都曾被当成已交付能力。
+
+所以每个描述具体机制的章节标题后带一个状态标记:
+
+| 标记 | 含义 | 判据 |
+|---|---|---|
+| ✅ | **已实现** | 代码在仓库里,且有测试或实测数据 |
+| ⚠️ | **部分实现** | 主路径通了但有明确缺口,章节内说明缺什么 |
+| 📐 | **仅设计** | **没有代码**。这是意图,不是能力 |
+| ❌ | **已放弃** | 曾经的设计,现在明确不做,保留是为了记住为什么 |
+
+没有标记的章节是背景、动机、术语这类不描述机制的内容。
+
+**权威性顺序**:代码 > `docs/status.md`(做到哪一步)> `docs/decisions.md`
+(为什么这么选)> 本批设计文档。冲突时以前者为准,并且**改文档**。
+
+一个自我约束:📐 章节里不写「我们的做法是」,写「计划是」。前者读起来像既成事实,
+而这正是之前出问题的地方。
+
 ## 1. 背景与目标
 
 ### 1.1 问题
@@ -29,10 +51,15 @@ AI evaluation / agent rollout 场景（如 SWE-bench 类任务）的特点：
 ### 1.3 非目标（首期 P0–P2）
 
 - 跨节点 sandbox 网络互通
-- pause/resume / snapshot（P3–P4 交付，设计已就位，见 snapshot-resume.md）
 - 多租户计费
 
-## 2. 总体架构
+**已交付、不再是非目标**:pause/resume 与 snapshot 都已实装并在真 KVM 机器实测
+(full / `--no-memory` / `--base` 增量三种,见 snapshot-resume.md)。
+
+**当前真正的空白**是网络:sandbox 没有任何网络能力,连出网都没有 ——
+不是「跨节点不互通」,是「完全没有网络栈」(noded-design §5 全节未实现)。
+
+## 2. 总体架构 ⚠️
 
 ```
                         ┌──────────────────────────────────────┐
@@ -41,7 +68,7 @@ AI evaluation / agent rollout 场景（如 SWE-bench 类任务）的特点：
                         │  │                 配额、端口反代     │
                         │  ├── scheduler     节点选择：镜像亲和  │
                         │  │                 + bin-packing     │
-                        │  ├── state store   Postgres：sandbox │
+                        │  ├── state store   SQLite：sandbox   │
                         │  │                 元数据、节点租约    │
                         │  └── image-service 镜像元数据、       │
                         │                    prewarm 编排、GC   │
@@ -68,14 +95,14 @@ AI evaluation / agent rollout 场景（如 SWE-bench 类任务）的特点：
         S3 ◀── 镜像 blob（source of truth）/ eval 产物 / snapshot / 卷后端
 ```
 
-### 2.1 组件职责
+### 2.1 组件职责 ⚠️
 
 | 组件 | 语言 | 职责 |
 |---|---|---|
-| `api-gateway` | Go | REST + gRPC API、鉴权、配额（端口反代由 bean-proxy 承担,可合部） |
-| `scheduler` | Go | 节点选择（镜像亲和 + 资源 bin-packing）、租约管理——**control plane 逻辑模块**（`internal/control/scheduler`,与 bean-api 同进程:调度决策与 Postgres 事务扣量、指令下发需原子完成;成为瓶颈或需选主时再拆） |
+| `api-gateway` | Go | ✅ REST + gRPC API、鉴权、配额（端口反代由 bean-proxy 承担,可合部） |
+| `scheduler` | Go | 节点选择（镜像亲和 + 资源 bin-packing）、租约管理——**control plane 逻辑模块**（`internal/control/scheduler`,与 bean-api 同进程:调度决策与事务扣量、指令下发需原子完成;成为瓶颈或需选主时再拆） |
 | `image-service` | Go | 镜像元数据索引、格式转换编排、prewarm、S3 blob GC（control plane 逻辑模块，P0–P2 内嵌 bean-api） |
-| `bean-proxy` | Go | 端口暴露反向代理：通配域名 TLS、路由到 noded → agent |
+| `bean-proxy` | Go | 📐 **未实现**,`cmd/` 下没有这个二进制。端口暴露反向代理:通配域名 TLS、路由到 noded → agent。依赖网络栈,而网络栈也未实现 |
 | `noded` | Go | 节点 daemon：sandbox 生命周期、网络、镜像缓存、卷挂载、健康上报 |
 | `beand` | Go（静态编译） | sandbox 内 PID1：exec、PTY、文件读写、端口转发 |
 | `sdk-python` | Python | evaluation/rollout 侧主 SDK |
@@ -84,13 +111,17 @@ AI evaluation / agent rollout 场景（如 SWE-bench 类任务）的特点：
 
 ## 3. 核心设计决策
 
-### D1. 镜像零转换，容器与 microVM 双形态
+### D1. 镜像零转换，容器与 microVM 双形态 ⚠️
 
 任意 OCI 镜像直接作为 sandbox 环境，消除 e2b 式 template 转换。镜像经 overlaybd
 组装为块设备（见 D4），既能给容器档做 overlayfs rootfs，也能 virtio-blk 直挂
 microVM（见 D9）——两种形态共享同一条镜像链路，用户无感。
 
-### D2. overlaybd 直驱,无 containerd 热路径
+### D2. overlaybd 直驱,无 containerd 热路径 ⚠️
+
+> **「无 containerd」已达成,「overlaybd 直驱」未达成。** 当前后端是 dm-snapshot:
+> 拉全量 + 转换 + 共享只读 base + 每 sandbox CoW(实测 8 KiB/sandbox)。
+> overlaybd 能力已在 tcmu 后端实测跑通但未接入 `image.Provider`。
 
 fc 主路径**不引入 containerd**（AgentENV 同款,其源码已在本地 /Users/mac/project/agentenv
 可参考）：noded 直接驱动 overlaybd 的 ublk daemon 组装块设备（S3 backing + 本地
@@ -105,7 +136,7 @@ fc 主路径**不引入 containerd**（AgentENV 同款,其源码已在本地 /Us
 容器档（GPU/无 KVM 降级）保留 containerd——runc 生命周期与 overlayfs 组装
 不值得自研;纯 fc 节点可完全不装 containerd。runtime 抽象接口见 noded-design §3。
 
-### D3. 隔离分档 + 节点能力探测
+### D3. 隔离分档 + 节点能力探测 ⚠️
 
 noded 启动时探测节点能力并上报：
 
@@ -134,7 +165,7 @@ API 请求不含 isolation 字段（内部 proto 保留枚举，便于运维强�
 sandbox 详情返回实际档位（`runtime: fc|runsc|runc`）供排障。
 scheduler 按节点能力匹配。
 
-### D9. Firecracker 主档：容器 rootfs 直挂 microVM
+### D9. Firecracker 主档：容器 rootfs 直挂 microVM ✅
 
 FC 档**不是**嵌套容器（Kata 式 guest 内再跑 containerd），而是 rootfs 直挂：
 
@@ -160,7 +191,7 @@ disk-diff 直接取宿主 overlaybd 可写层、guest 内零 union 复杂度。
 - 该路线已被 AgentENV（Kimi K3 训练基础设施）在生产验证；实现参考其
   overlaybd+ublk 集成与 snapshot 设计
 
-### D4. S3 为统一存储 backend
+### D4. S3 为统一存储 backend ⚠️
 
 | 数据 | 方案 |
 |---|---|
@@ -173,9 +204,11 @@ disk-diff 直接取宿主 overlaybd 可写层、guest 内零 union 复杂度。
 
 选 overlaybd（块级，DADI/阿里，AgentENV 已在 FC 场景验证）而非 Nydus（文件级）的关键原因：**块设备链路同时服务容器档（overlaybd-snapshotter → overlayfs）与 microVM 档（virtio-blk 直挂 guest），一条镜像链路通吃全部 runtime 档位**；Nydus 的文件系统语义进不了 microVM，FC 档需另走 virtiofs（FC 支持弱）。Nydus 保留为容器档备选。
 
-热状态（sandbox 元数据、租约、调度状态）用 Postgres，不进 S3。
+热状态（sandbox 元数据、租约、调度状态）落关系库,不进 S3。⚠️ **当前是 SQLite**
+(`modernc.org/sqlite`,纯 Go 无 cgo,`SetMaxOpenConns(1)` 单写)。接口已抽象,
+Postgres 尚未实现 —— 多副本控制面需要它,单机部署不需要。
 
-### D5. Agent 注入：init/PID1 override（不进用户镜像）
+### D5. Agent 注入：init/PID1 override（不进用户镜像）✅
 
 eval 镜像任意、不可假设内含工具链。注入方式按档位：
 
@@ -188,7 +221,9 @@ eval 镜像任意、不可假设内含工具链。注入方式按档位：
 由 agent 按 Docker 语义托管拉起（详见 noded-design.md §3.1/§6）。
 不走 CRI streaming exec：性能差、无文件 API、依赖长链路。
 
-### D6. 网络：节点内 NAT，取裸金属/云 VM 最大公约数
+### D6. 网络：节点内 NAT，取裸金属/云 VM 最大公约数 📐
+
+> **未实现**。sandbox 当前没有网络栈,见 noded-design §5。
 
 ```
 sandbox netns ←veth→ 节点 bridge → SNAT 出网
@@ -199,7 +234,7 @@ sandbox netns ←veth→ 节点 bridge → SNAT 出网
 - 端口暴露：`{sbxId}-{port}.{region}.sandbox.<domain>` → regional proxy → noded sbxproxy → 直连 sandbox IP（agent ForwardPort 仅兜底）,绕开云厂商 MAC/IP 白名单限制
 - 不依赖 underlay/BGP，两种节点行为完全一致
 
-### D7. 调度：镜像亲和优先的 bin-packing
+### D7. 调度：镜像亲和优先的 bin-packing ✅
 
 evaluation 调度足够简单，自研反而能做 K8s 做不了的精细优化。
 
@@ -231,26 +266,26 @@ cap:   [runc, runsc, fc] × 每节点并发创建余量（默认 16）
    w3·缓存盘类型：冷镜像 → NVMe 大缓存节点加分
    w4·打散：同 label（同一 eval run）适度反亲和，避免单节点故障吞掉整批
 
-3. 提交:Postgres 事务扣承诺量 + 写指令记录 → push 直连 noded.CreateSandbox（见 api-design §5.1）
+3. 提交:事务内扣承诺量 + 写指令记录 → push 直连 noded.CreateSandbox（见 api-design §5.1）
 4. 失败回退:节点报 FAILED（如 ENOSPC 竞态）→ 释放承诺量,重调度(≤3 次,
    排除失败节点),仍失败 → NO_CAPACITY 返回调用方
 ```
 
-**记账一致性**：承诺量以 Postgres 为准（调度器重启可重建内存态）;节点心跳
+**记账一致性**：承诺量以数据库为准（调度器重启可重建内存态）;节点心跳
 实际用量仅用于告警与 balloon 决策，不参与准入——避免「实际水位准入」在
 突发负载下超卖爆炸。
 
 **抢占**：不做。eval 任务同质、短生命周期，排队（NO_CAPACITY + 客户端重试/
 排队池）比抢占简单且足够。
 
-### D8. 故障模型：租约 + 无状态重建
+### D8. 故障模型：租约 + 无状态重建 ✅
 
 - noded 定期心跳续约；租约超时 → 节点标记失联 → 其上 sandbox 标记 `lost`
 - eval 任务无状态，上层（SDK/调用方）收到 `lost` 后重建即可
 - noded 重启后 reconcile：对账本地实际状态（存活 FC 进程 ∪ containerd task,如启用）vs control plane 期望状态（SyncState）
 - GC：idle 回收（lifecycle.onIdle 驱动）、镜像块 LRU 淘汰、孤儿 tap/netns/挂载清理
 
-### D10. Volume：独立于镜像的一等数据资源
+### D10. Volume：独立于镜像的一等数据资源 📐
 
 镜像=环境（不可变，随 sandbox 生灭），卷=数据（独立生命周期，跨 sandbox 留存，
 可多挂）。两种类型：
@@ -265,12 +300,12 @@ shared-fs 走宿主 NFS 而非 guest 内跑分布式 FS 客户端的原因：gue
 宿主客户端缓存全 sandbox 共享（eval 同批读同数据时命中率高）、后端可换。
 详见 noded-design.md §3.3。
 
-### D11. 多区域（Region/Cell）与 BYOC
+### D11. 多区域（Region/Cell）与 BYOC 📐
 
 **控制面全局一份，数据面按 region 自治。** Region = 故障域 + 数据域 + 转发域：
 
 ```
-Global Control Plane（bean-api / scheduler / Postgres,镜像元数据全局 digest 索引）
+Global Control Plane（bean-api / scheduler / 关系库,镜像元数据全局 digest 索引）
    │ 托管 gRPC 接入层(TLS)+node token,noded/proxy 出向连接
    ├── Region A：noded 节点池 + regional proxy ×N + region S3 backend
    └── Region B（BYOC）：客户节点 + 客户 S3,数据不出客户环境
@@ -298,9 +333,9 @@ Global Control Plane（bean-api / scheduler / Postgres,镜像元数据全局 dig
   全局控制面单点首期接受（控制面故障不影响存量 sandbox 数据面,仅停新建）,
   控制面多活为 P5 储备
 
-## 4. API 设计
+## 4. API 设计 ⚠️
 
-### 4.1 REST API（对外）
+### 4.1 REST API（对外）⚠️
 
 ```
 # Sandbox 生命周期
@@ -337,14 +372,14 @@ GET    /v1/sandboxes/{id}/events + WS /v1/events   # 生命周期事件
 GET    /v1/sandboxes/{id}/logs
 ```
 
-### 4.2 内部 gRPC
+### 4.2 内部 gRPC ✅
 
 - `control ↔ noded`：`NodeService`（Register/Heartbeat/SyncState）+ `SandboxService`（noded 实现，control 直连调用：Create/Destroy/Pause/Snapshot/Exec 转发/…）
 - `noded ↔ agent`：`AgentService`（Exec/StreamExec/ReadFile/WriteFile/ListDir/ForwardPort/…;容器档 unix socket、fc 档 vsock）
 
 proto 定义统一放 `proto/`，生成代码进各语言 SDK。
 
-### 4.3 Sandbox 状态机
+### 4.3 Sandbox 状态机 ✅
 
 ```
 PENDING → SCHEDULED → PULLING → STARTING → RUNNING → STOPPING → STOPPED
@@ -363,7 +398,7 @@ snapshot 对象独立状态机：CREATING → READY → DELETING（RESTORING 引
 
 详见 [snapshot-resume.md](snapshot-resume.md)。
 
-## 5. 冷启动路径优化
+## 5. 冷启动路径优化 ⚠️
 
 目标：P50 < 2s（镜像已缓存）/ P50 < 10s（lazy-pull 冷镜像）。
 
@@ -373,36 +408,44 @@ snapshot 对象独立状态机：CREATING → READY → DELETING（RESTORING 引
 4. **镜像亲和调度**：天然提升缓存命中
 5. **agent 常驻热路径**：agent 静态二进制（容器档 bind mount / fc 档 agent 盘），无镜像内安装步骤
 
-## 6. 安全模型
+## 6. 安全模型 ⚠️
 
 - 默认 fc（Firecracker microVM，硬件虚拟化边界）运行不可信代码;无 KVM 节点降级 runsc
-- 容器档降权：no-new-privileges、seccomp 默认 profile、caps 最小集、cgroup 硬限制;fc 档宿主侧 jailer + FC seccomp
-- 网络默认拒内网、拒元数据服务
-- 节点不持长期 S3 凭证，全部走 control plane 签发的 presigned URL / STS
+- ⚠️ fc 档目前只有 FC 内置 seccomp;**jailer 与宿主 cgroup 包裹未实现**(security §A3)。
+  容器档整体未实现
+- 📐 网络策略未实现 —— 当前 sandbox 没有网络栈
+- ⚠️ 节点当前经环境变量拿 S3 凭证;presigned URL / STS 轮换未实现
 - API 鉴权：API key（调用方识别+配额;不做用户/租户体系——集群内部服务）
 
-## 7. Repo 结构
+## 7. Repo 结构 ⚠️
 
 ```
 bean/
-├── proto/                  # gRPC 定义（single source of truth）
+├── proto/                  ✅ gRPC 定义（single source of truth）
 ├── cmd/
-│   ├── bean-api/           # api-gateway 入口（内嵌 scheduler / image-service 模块）
-│   ├── bean-proxy/         # 端口暴露反向代理
-│   ├── noded/              # node daemon
-│   └── beand/         # sandbox 内 agent（静态编译）
+│   ├── bean/               ✅ CLI 入口
+│   ├── bean-api/           ✅ gateway（内嵌 scheduler / image / snapshot 模块）
+│   ├── noded/              ✅ node daemon
+│   ├── beand/              ✅ sandbox 内 agent
+│   └── bean-proxy/         📐 未实现
 ├── internal/
-│   ├── control/            # api / scheduler / image / store 实现
-│   ├── node/               # noded: runtime 抽象、网络、镜像缓存、reconcile
-│   ├── beand/             # sandbox 内 daemon 实现
-│   └── store/              # Postgres / S3 访问层
+│   ├── control/            ✅ api / scheduler / store / snapshot / s3
+│   ├── node/               ✅ manager / runtime / image / vsock（无网络模块）
+│   ├── beand/              ✅ sandbox 内 daemon 实现
+│   ├── obs/                ✅ OTel tracing + gRPC 拦截器
+│   ├── logging/            ✅ slog 结构化日志
+│   └── gen/                ✅ protoc 产物
+├── cli/                    ✅ CLI 实现
 ├── sdk/
-│   ├── python/
-│   └── typescript/
-├── cli/                    # bean CLI
-├── deploy/                 # 节点 bootstrap 脚本、systemd unit、S3/DB 初始化
+│   ├── python/             ⚠️ 手写 httpx,非 codegen;覆盖面见 sdk-cli-design §2
+│   └── typescript/         📐 未实现,目录不存在
+├── hack/                   ✅ build-assets / dev-fc-stack / cpu-template-probe / tracedump
+├── tests/e2e/              ⚠️ 6 个功能测试,跑 local 档;无规模压测
+├── deploy/                 📐 不存在
 └── docs/
 ```
+
+注:`internal/store/` 不存在,store 在 `internal/control/store/`。
 
 ## 8. 实施路线
 

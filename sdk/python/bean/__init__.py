@@ -54,6 +54,16 @@ class Snapshot:
     name: str = ""
     size_bytes: int = 0
     labels: Dict[str, str] = field(default_factory=dict)
+    # None means the server did not report it, which is how a snapshot taken
+    # before the field existed reads. Those all carried memory, so None is
+    # closer to True than to False — but it is kept distinct so callers can tell
+    # "unknown" from "confirmed no memory".
+    include_memory: Optional[bool] = None
+    # base_id is what the snapshot was actually captured against, which is not
+    # always what was asked for: a chain past its depth limit is answered with a
+    # full snapshot and an empty base_id.
+    base_id: str = ""
+    chain_depth: int = 0
     _client: "BeanClient" = field(default=None, repr=False, compare=False)
 
     @classmethod
@@ -62,8 +72,21 @@ class Snapshot:
             id=obj.get("id", ""), state=obj.get("state", ""),
             sandbox_id=obj.get("sandboxId", ""), image=obj.get("image", ""),
             name=obj.get("name", ""), size_bytes=obj.get("sizeBytes", 0),
-            labels=obj.get("labels") or {}, _client=client,
+            labels=obj.get("labels") or {},
+            include_memory=obj.get("includeMemory"),
+            base_id=obj.get("baseId", ""), chain_depth=obj.get("chainDepth", 0),
+            _client=client,
         )
+
+    @property
+    def resumes_guest(self) -> bool:
+        """Whether restoring this snapshot resumes the guest or boots it fresh.
+
+        An unreported include_memory reads as True: every snapshot from before
+        that field existed captured memory, and treating those as memoryless
+        would claim a restore reboots when it actually resumes.
+        """
+        return self.include_memory is None or self.include_memory
 
     def delete(self) -> None:
         self._client._request("DELETE", f"/v1/snapshots/{self.id}")
@@ -145,12 +168,32 @@ class Sandbox:
         name: str = "",
         labels: Optional[Dict[str, str]] = None,
         keep_running: bool = True,
+        include_memory: bool = True,
+        base: str = "",
     ) -> Snapshot:
         """Capture this sandbox so it can be restored later.
 
         The sandbox keeps running unless keep_running is False.
+
+        include_memory=False captures only the filesystem. The restore boots a
+        fresh guest instead of resuming this one, but it can land on any CPU:
+        guest memory records what the CPU it booted on offered, and a snapshot
+        carrying it can only be restored on a compatible vendor and family.
+
+        base names an earlier snapshot to capture against, so this one holds
+        only the memory written since. It needs include_memory, and the node
+        must have been started with dirty-page tracking on. The returned
+        snapshot's base_id says what was actually produced: a chain past its
+        depth limit is answered with a full snapshot and an empty base_id.
         """
-        body = {"name": name, "labels": labels or {}, "keepRunning": keep_running}
+        body = {
+            "name": name,
+            "labels": labels or {},
+            "keepRunning": keep_running,
+            "includeMemory": include_memory,
+        }
+        if base:
+            body["base"] = base
         data = self._client._request("POST", f"/v1/sandboxes/{self.id}/snapshot", body)
         if not keep_running:
             self.state = "STOPPED"

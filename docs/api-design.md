@@ -1,6 +1,7 @@
 # API 与 Proxy 服务设计
 
-> 对应组件：`bean-api`（api-gateway）、`bean-proxy`（端口反代）。
+> 对应组件:`bean-api`（api-gateway,✅）、`bean-proxy`（端口反代,📐 未实现）。
+> 状态标注约定见 [architecture.md](architecture.md) §0。
 > 术语与状态机见 [architecture.md](architecture.md)。
 
 ## 1. 设计原则
@@ -12,20 +13,20 @@
 
 ## 2. 鉴权
 
-### 2.1 API Key
+### 2.1 API Key ✅
 
 - `Authorization: Bearer bk_<keyid>_<secret>`
 - key 哈希存 Postgres；附带配额（并发 sandbox 数、CPU/mem 总量、卷容量、prewarm 权限）
 - **不做用户/租户体系**——bean 是集群内部服务,key 仅用于调用方识别、配额与
   审计归属;安全重心在集群内可靠性（托管 TLS + node token、凭证分层、隔离档）而非多租户
 
-### 2.2 Sandbox 级短时凭证
+### 2.2 Sandbox 级短时凭证 📐
 
 - 创建 sandbox 时 gateway 签发 **sandbox token**（JWT，绑定 sandbox-id，TTL 固定 24h,
   可经 API 续签;sandbox 销毁即失效）
 - 用途：proxy 访问受保护端口、WebSocket exec 重连，避免长期 API key 下发到浏览器/弱环境
 
-### 2.3 S3 Presigned URL
+### 2.3 S3 Presigned URL 📐
 
 - 由 control plane 统一签发（唯一持有 S3 长期凭证的位置）
 - 场景：文件上传/下载、eval 产物上报、snapshot 读写
@@ -43,12 +44,12 @@ Base: `https://api.<domain>/v1`。错误响应统一：
 |---|---|
 | 400 | INVALID_ARGUMENT, IMAGE_REF_INVALID |
 | 401/403 | UNAUTHENTICATED, PERMISSION_DENIED, QUOTA_EXCEEDED |
-| 404 | SANDBOX_NOT_FOUND, SNAPSHOT_NOT_FOUND |
-| 409 | SANDBOX_NOT_RUNNING, IDEMPOTENCY_CONFLICT |
+| 404 | SANDBOX_NOT_FOUND, SNAPSHOT_NOT_FOUND, SNAPSHOT_DATA_MISSING, SNAPSHOT_BASE_MISSING |
+| 409 | SANDBOX_NOT_RUNNING, IDEMPOTENCY_CONFLICT, SNAPSHOT_IN_USE, SNAPSHOT_NOT_READY, INCOMPATIBLE_CPU |
 | 429 | RATE_LIMITED |
 | 500/503 | INTERNAL, NO_CAPACITY, NODE_LOST |
 
-### 3.1 Sandboxes
+### 3.1 Sandboxes ✅
 
 ```
 POST /sandboxes
@@ -102,7 +103,10 @@ POST /sandboxes:batchCreate   { "requests": [ ... ≤100 ... ] }
 DELETE /sandboxes?label=eval-run%3Dswebench-0731    → 批量销毁，202 + 任务计数
 ```
 
-### 3.2 Exec
+### 3.2 Exec ⚠️
+
+> 同步 exec 与流式 exec 已实装;**PTY 未实现**。
+
 
 ```
 POST /sandboxes/{id}/exec          // 同步，适合 eval 单条命令
@@ -132,7 +136,7 @@ S→C: {"type":"exit","exitCode":0}
 
 链路：client → gateway（升级）→ noded gRPC stream → agent。gateway 只做帧透传与鉴权。
 
-### 3.3 Files
+### 3.3 Files ✅
 
 ```
 PUT  /sandboxes/{id}/files?path=/workspace/patch.diff     // body ≤4MiB 直传
@@ -148,7 +152,10 @@ POST /sandboxes/{id}/files:downloadUrl {"path": "..."}
 DELETE /sandboxes/{id}/files?path=...
 ```
 
-### 3.4 Ports
+### 3.4 Ports 📐
+
+> 未实现,依赖网络栈与 bean-proxy。
+
 
 ```
 POST /sandboxes/{id}/ports    { "port": 8888, "auth": "token" }   // token|public
@@ -157,7 +164,7 @@ GET    /sandboxes/{id}/ports
 DELETE /sandboxes/{id}/ports/{port}
 ```
 
-### 3.5 Images
+### 3.5 Images ✅
 
 **术语（必须区分清楚）**：
 
@@ -202,7 +209,7 @@ DELETE /registries/{host}
 - host 归一化:`https://r.io/` 与 `r.io` 视为同一个;无 host 的 ref 默认
   Docker Hub（与容器运行时同规则）
 
-### 3.6 Volumes
+### 3.6 Volumes 📐
 
 镜像与卷为两种正交资源（镜像=环境，卷=数据，独立生命周期）。数据面见 noded-design.md §3.3。
 
@@ -225,18 +232,33 @@ POST /sandboxes { ..., "volumes": [
 - volume 状态机：`CREATING → READY → DELETING`
 - 配额：空间/inode 由后端执行（JuiceFS 目录配额）;per-key 卷总容量配额见 §7
 
-### 3.7 Snapshots
+### 3.7 Snapshots ✅
 
 ```
 POST   /sandboxes/{id}/snapshot  { "name": "after-setup", "labels": {},
-                                   "keepRunning": true }
-       → 202 { snapshotId, snapshot: {state, sizeBytes, ...} }
+                                   "keepRunning": true,
+                                   "includeMemory": true,
+                                   "base": "snap_..." }
+       → 202 { snapshotId, snapshot: {state, sizeBytes, includeMemory,
+                                      baseId, chainDepth, cpuVendor, ...} }
 GET    /snapshots?label=k%3Dv&state=READY   → 列表
 GET    /snapshots/{id}
-DELETE /snapshots/{id}                       // RefCount>0 → 409 SNAPSHOT_IN_USE
+DELETE /snapshots/{id}      // RefCount>0 或有子代 → 409 SNAPSHOT_IN_USE
 POST   /sandboxes    { "snapshot": "snap_..." }   // 从 snapshot 创建
                                                   // image 与 snapshot 互斥
+                     // CPU 不兼容 → 409 INCOMPATIBLE_CPU
 ```
+
+- `includeMemory` 默认 **true**,即快照一直以来的含义(restore 会 resume guest)。
+  设成 false 只抓文件系统:restore 重新 boot,但**可以落在任意 CPU 上** ——
+  guest 内存把快照钉死在兼容的 vendor+family 上。实测 6109 B 对全量 15.5 MB。
+  **用指针类型**(`*bool`)区分「缺省」与「显式 false」:老快照没有这个字段,
+  plain bool 会解成 false 从而绕过 CPU 约束 —— 恰好是最需要约束的那批。
+- `base` 只存自该快照以来改动的 guest 内存。实测 298 KB 对 15.5 MB。
+  要求 `includeMemory`(文件系统层本来就是 O(changed))。
+  链深超 8 时**自动产出 full 并把 baseId 留空** —— 响应里的 baseId 是
+  调用方判断实际拿到什么的依据,不必知道上限是多少。
+  节点必须带 `--track-dirty-pages` 启动,否则明确报错而不静默降级。
 
 - `keepRunning` 默认 **true**：snapshot 不应打扰正在工作的 sandbox;
   为一致性会短暂冻结,完成后恢复原状态（RUNNING 或 PAUSED 均保持）
@@ -245,10 +267,13 @@ POST   /sandboxes    { "snapshot": "snap_..." }   // 从 snapshot 创建
 - **引用计数**：restore 期间持有引用,期间删除返回 409;restore 结束自动释放
 - restore 继承 snapshot 的 image（rootfs 基底必须与 checkpoint 匹配）
 - checkpoint 格式**按 runtime 档区分**,不可互换,故 snapshot 记录产出它的 runtime
-- blob 存储走 `snapshot.Blobs` 接口：当前本地目录（原子写:临时文件 + rename,
-  失败不留可读的半成品）,S3 后续替换实现即可
+- blob 存储走 `snapshot.Blobs` 接口:**S3 已实装**(SigV4 自实现、分片上传、
+  range 读),本地目录是 dev 默认。两者都是原子写(临时文件 + rename / 分片提交),
+  失败不留可读的半成品
+- **INCOMPATIBLE_CPU 用 409 而不是 503**:等待不会让它变可行,而客户端在 503 上
+  重试会一直循环到自己超时
 
-### 3.8 Events
+### 3.8 Events ✅
 
 ```
 事件类型：sandbox.lifecycle.{created,running,paused,resumed,stopped,failed,lost,oom}
@@ -269,7 +294,7 @@ GET /events?sandbox=<id>&label=k%3Dv       // 实时订阅（SSE:text/event-stre
 慢订阅者按 64 事件缓冲后丢弃并计数（一个卡住的客户端不能拖住 API）。
 webhook 推送为 P5 储备项。
 
-### 3.9 Logs / 可观测
+### 3.9 Logs / 可观测 ⚠️
 
 ```
 GET /sandboxes/{id}/logs?follow=false&tailLines=1000    // agent 环形缓冲 + S3 归档
@@ -298,7 +323,7 @@ GET /metrics                                            // Prometheus 格式（�
 - **sandbox 内应用 OTLP 透传（可选开启）**：agent 在 sandbox 内 listen
   localhost:4317,应用 trace 经 vsock/socket 转发出去并打 sandbox 标签
 
-## 4. 内部 gRPC proto 草案
+## 4. 内部 gRPC proto 草案 ✅
 
 ```protobuf
 // proto/bean/node/v1/node.proto —— control plane ↔ noded
@@ -363,7 +388,7 @@ service AgentService {
 
 ## 5. 控制流细节
 
-### 5.1 指令下发模型：push 直连
+### 5.1 指令下发模型：push 直连 ✅
 
 控制面直接 gRPC 调用 noded 的 `SandboxService`（noded 是 gRPC server,同 region 内网直连,node token 校验）——与 e2b/AgentENV/CubeSandbox 的业界一致做法相同，调度路径最短：
 
@@ -391,7 +416,7 @@ scheduler 决策（内存态 + Postgres 事务扣承诺量、写指令记录）
 proto 见 §4（NodeService.SyncState 承担重启对账;SandboxService 由 noded 实现、
 control plane 作为 client 直连调用）。
 
-### 5.2 Lifecycle 自动化语义
+### 5.2 Lifecycle 自动化语义 ⚠️
 
 **默认一直运行**——无硬 timeout。回收由 idle 机制驱动：
 
@@ -413,7 +438,7 @@ control plane 作为 client 直连调用）。
 - 业界对齐:CubeSandbox v0.5(on_timeout: pause/kill + 数据面透明唤醒)、
   e2b auto-pause/auto-resume 同构;我们以 null 表达「永不」,避开 -1/0 魔数重载
 
-### 5.3 Exec 路由
+### 5.3 Exec 路由 ✅
 
 ```
 client → gateway：Bearer key / sandbox token
@@ -425,17 +450,21 @@ noded → agent：vsock（fc 主路径;容器档 unix socket,P5）
 状态语义：PAUSED → 触发透明唤醒,请求阻塞至 resume（超过唤醒时限,默认 10s,
 才回 502 + Retry-After）;PULLING/STOPPING 等不可唤醒态 → 409 SANDBOX_NOT_RUNNING。
 
-## 6. bean-proxy（端口反代服务）
+## 6. bean-proxy（端口反代服务）📐
+
+> **整节未实现**,`cmd/bean-proxy` 不存在。它依赖 sandbox 有网络地址,
+> 而网络栈也未实现(noded-design §5)。下面是设计意图。
+
 
 独立无状态服务，可与 gateway 合部或水平扩展。
 
-### 6.1 域名与 TLS
+### 6.1 域名与 TLS 📐
 
 - 每 region 通配证书 `*.{region}.sandbox.<domain>`（ACME DNS-01 自动续期）
 - Host 规则：`{sandboxId}-{port}.{region}.sandbox.<domain>`，sandboxId 用短 ID（如 `sbx-` 去前缀后的 base32）
 - HTTP + WebSocket 透传；非 HTTP 协议暂不支持（预留 TCP over TLS SNI 方案）
 
-### 6.2 路由与数据面（对齐 e2b：反代直连 sandbox IP）
+### 6.2 路由与数据面（对齐 e2b：反代直连 sandbox IP）📐
 
 ```
 浏览器 → {sbxId}-{port}.{region}.sandbox.<domain>（DNS 直达该 region 的 proxy）
@@ -453,19 +482,19 @@ noded → agent：vsock（fc 主路径;容器档 unix socket,P5）
   并发/带宽限制;proxy 侧连接活跃度喂 idle 判定（lifecycle）
 - noded 侧 sandbox-proxy 亦做 nftables 之外的第二层校验（仅放行已暴露端口）
 
-### 6.3 端口鉴权
+### 6.3 端口鉴权 📐
 
 - `auth=public`：任何持有 URL 者可访问（内部演示用）
 - `auth=token`（默认）：要求 `?bean_token=<sandbox JWT>` 或 Cookie；proxy 校验 JWT
   签名与 sandbox-id 匹配后种 Cookie（1h），后续请求免 query
 - proxy 注入 `X-Bean-Sandbox-Id` 头，剥离入站的同名头
 
-### 6.4 生命周期联动
+### 6.4 生命周期联动 📐
 
 - sandbox 销毁（含 onIdle=kill）→ gateway 撤销端口记录 → proxy 缓存失效推送 → 后续请求 404
 - PAUSED → 触发透明唤醒并阻塞透传;唤醒超时（默认 10s）才回 502 + Retry-After
 
-## 7. 配额与限流
+## 7. 配额与限流 ⚠️
 
 | 层 | 机制 |
 |---|---|
@@ -474,7 +503,7 @@ noded → agent：vsock（fc 主路径;容器档 unix socket,P5）
 | Exec 输出 | maxOutputBytes 截断；WS 流带宽 per-connection 限速 |
 | proxy | per-sandbox 并发连接数、带宽限速（防滥用做穿透代理） |
 
-## 8. 可观测
+## 8. 可观测 ⚠️
 
 - **平台指标**（Prometheus）：创建延迟分位、各状态 sandbox 数、节点容量水位、
   镜像缓存命中率、exec QPS、proxy 连接数

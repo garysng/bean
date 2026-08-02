@@ -4,56 +4,84 @@
 > **beand**：sandbox 内的 init/PID1（二进制 `beand`），exec/文件/端口的执行末端。
 > 命名约定：**noded 在宿主上，beand 在 sandbox 内**。
 
-## 1. noded 总体结构
+> 状态标注约定见 [architecture.md](architecture.md) §0。
+
+## 1. noded 总体结构 ⚠️
+
+**实际的包结构**(`internal/node/`):
 
 ```
-noded
-├── server/          gRPC server（NodeService client 侧 + 数据面 SandboxService 实现）
-├── runtime/         Runtime 接口 + fc/runc/runsc 实现
-├── image/           ublk 设备/overlaybd 配置管理、S3 blob 缓存、prewarm
-├── network/         netns/veth/bridge/nftables/tc 编排
-├── volume/          shared-fs 宿主挂载 + NFS 导出、dataset 块设备 attach
-├── sbxproxy/        节点侧端口反代：regional proxy → 直连 sandbox IP:port
-├── agentmgr/        agent 注入（bind mount / agent 盘）、socket/vsock 管理、健康探测
-├── reconcile/       期望状态 vs 本地实际状态（containerd ∪ FC 进程）对账
-├── gc/              超时回收、孤儿资源清理、缓存 LRU
-└── report/          能力探测、心跳、资源水位、缓存清单摘要
+internal/node/
+├── manager.go       ✅ Manager:生命周期编排(创建/销毁/pause/resume/snapshot/
+│                       restore、透明唤醒、idle 回收、in-flight 保护)
+├── grpc.go          ✅ SandboxService 实现 + 数据面透传到 agent
+├── register.go      ✅ 出向注册、心跳、SyncState 对账
+├── auth.go / dial.go ✅ node token 鉴权、agent 连接
+├── runtime/         ✅ Runtime 接口 + fc(真 microVM)与 local(进程级,仅开发)
+│                       含 UFFD 供页、快照 bundle、CPU template、diff 合并
+├── image/           ✅ image.Provider:DevMapperProvider(共享 base + CoW)、
+│                       FileProvider、PullingProvider;OCI 拉取转换、commit、build
+├── vsock/           ✅ AF_VSOCK 拨号
+├── agentmgr/        📐 空目录
+└── lifecycle/       📐 空目录
 ```
 
-单二进制 `noded`，systemd 管理，配置文件 `/etc/bean/noded.yaml`：
+**之前这里列的 `network/`、`volume/`、`sbxproxy/`、`reconcile/`、`gc/`、`report/`
+都不存在**,而写法和已交付模块完全一样。这是本批文档最误导的一处:读者会认为
+网络隔离已经在跑。其中 `reconcile` 与 `report` 的职责实际落在 `register.go`,
+`gc` 的部分落在 `manager.go`(idle 回收),其余三个没有任何代码。
+
+**配置方式:flag,不是 YAML。** 全仓库 `grep -rn yaml --include='*.go'` 为空,
+不存在 `/etc/bean/noded.yaml`。实际参数(`cmd/noded/main.go`):
+
+```
+--listen / --control-plane / --node-token / --bootstrap-token / --region
+--runtime fc|local          # 档位,不自动探测
+--firecracker-bin / --kernel / --agent-disk
+--base-dir / --image-dir    # sandbox 状态与基础镜像
+--cpu / --memory-mib        # 可分配量,直接给数不是探测
+--labels / --metrics
+--cpu-template none|portable    # 掩 CPU 特征让内存快照可跨型号
+--track-dirty-pages             # 允许增量快照,须 boot 前生效
+--buildkit-addr                 # 空则本节点不接构建
+--otlp-endpoint                 # 空则装 no-op tracer
+--log-format / --log-level
+```
+
+下面这份 YAML 是**计划形态**(📐),保留是因为它记录了配置项的意图 ——
+`overcommit` 一节现已实装(见 §3.2),其余尚未:
 
 ```yaml
-nodeId: auto            # 默认机器指纹生成
-region: ap-east-1       # 一级字段（数据域/故障域）,Register 时控制面校验:
-                        #   region 必须已注册（S3/proxy 组已配置）,否则拒绝加入;
-                        #   节点生命周期内不可变（迁 region = 退出重注册）
-labels:                 # 自由标签,调度 nodeSelector 过滤/打分用（可运维更新）
+nodeId: auto            # 📐 当前无此概念,节点 id 由控制面注册时分配
+region: ap-east-1       # ✅ 有,是 --region
+labels:                 # ✅ 有,是 --labels
   pool: gpu-a100
-  disk: nvme
-bootstrapToken: <region bootstrap token>        # 首次注册用,见 §7.0
-controlPlane: grpcs://<hosted-gateway>:443
-                        # 云上托管 gRPC 接入层（nexus 同款模式,示例:
-                        # grpc-bean.internal....:443）,TLS 由托管网关终结;
-                        # noded 出向长连,指令经 CommandChannel 多路复用下发
+bootstrapToken: <...>   # ✅ 有,是 --bootstrap-token
+controlPlane: grpcs://<hosted-gateway>:443   # ⚠️ 有 --control-plane,但无 TLS
 s3:
-  endpoint: https://s3.ap-east-1.example.com    # 本 region S3 backend
-containerd: null        # 可选:仅容器档节点配置（GPU/无 KVM,P5）;纯 fc 节点不装
-cidr: 10.100.0.0/24     # 本节点 sandbox 网段（节点间可复用同段——跨节点 sandbox 互通是非目标）
+  endpoint: https://...  # ⚠️ 走环境变量而非配置(凭证不进命令行)
+containerd: null        # 📐 容器档未实现
+cidr: 10.100.0.0/24     # 📐 无网络栈
 cache:
   dir: /var/lib/bean/cache
-  maxBytes: 800Gi        # 裸金属 NVMe 大盘 / 云 VM 小盘只差这个数
-runtimes: auto           # 或显式列表覆盖探测结果
-overcommit:              # 见 §3.2，节点级覆盖调度器全局默认
+  maxBytes: 800Gi        # 📐 无缓存 LRU;当前基础镜像不自动回收
+runtimes: auto           # 📐 不探测,靠 --runtime 显式指定
+overcommit:              # ✅ 已实装,见 §3.2
   cpu: 3.0
   memory: 1.0
-network:
-  egressRateMbps: 100    # per-sandbox tc 限速
-  dnsUpstream: []        # 默认节点转发器,上游可配
+network:                 # 📐 无网络栈
+  egressRateMbps: 100
 ```
 
-（示例为节选,完整 schema 见 deploy/）
+## 2. 能力探测（启动时）📐
 
-## 2. 能力探测（启动时）
+**当前不探测。** 档位靠 `--runtime fc|local` 显式指定,可分配量靠 `--cpu`/`--memory-mib`
+直接给数。唯一的运行时检查是 `DevMapperProvider.Available()`(查 dmsetup/losetup
+存在且 `dmsetup targets` 里有 snapshot 目标),不上报也不影响档位选择 ——
+缺了就是启动失败而非降级。
+
+下表是计划:
+
 
 | 探测项 | 方法 | 影响 |
 |---|---|---|
@@ -67,48 +95,69 @@ network:
 
 探测结果 → `Register` 上报，之后仅在变化时重报。
 
-## 3. Runtime 抽象
+## 3. Runtime 抽象 ✅
+
+实际接口(`internal/node/runtime/runtime.go`):
 
 ```go
 type Runtime interface {
-    Create(ctx context.Context, spec *SandboxSpec, rootfs RootfsMount) (Handle, error)
+    Name() string
+    Create(ctx context.Context, spec *Spec) (*Handle, error)
     Destroy(ctx context.Context, id string, force bool) error
     Pause(ctx context.Context, id string) error
     Resume(ctx context.Context, id string) error
-    Checkpoint(ctx context.Context, id string, w io.Writer) error   // → S3
-    Restore(ctx context.Context, spec *SandboxSpec, rootfs RootfsMount, r io.Reader) (Handle, error)
-    Stats(ctx context.Context, id string) (*Stats, error)
+    Checkpoint(ctx context.Context, id string, w io.Writer, opts CheckpointOptions) error
+    Restore(ctx context.Context, spec *Spec, layers []SnapshotLayer) (*Handle, error)
 }
 ```
 
-| 实现 | 底层 | 职责边界 |
-|---|---|---|
-| `fcRuntime`（主档,P0 起点） | 自研：noded 直接管 firecracker 进程 + jailer;**无 containerd** | overlaybd ublk 块设备 virtio-blk 直挂;vsock 通 agent;memory snapshot/fork 原生（见 §3.1） |
-| `runcRuntime`（P5 按需,GPU/可信） | containerd task API + runc shim | Checkpoint 用 CRIU;需节点装 containerd |
-| `runscRuntime`（P5,无 KVM 降级） | containerd + runsc shim | Checkpoint 用 gVisor save/restore |
+与早先设计的三处差异,都是实现过程中发现原设计不对:
+
+- **`Create` 不收 rootfs**。image provider 是 runtime 的字段而非参数 ——
+  因为 rootfs 的组装时机与 runtime 内部状态耦合:restore 必须在**设备组装之前**
+  把 CoW 填好(否则 dm-snapshot 的 exception table 已进内核,静默损坏文件系统,
+  见 `docs/decisions.md` §3.0)。参数式接口无法表达这个顺序。
+- **`Restore` 收 `[]SnapshotLayer` 而不是单个 reader**。增量快照要replay 整条链,
+  每层是独立 gzip 流,一个 reader 读到第一层结束就停了。
+- **没有 `Stats`**。没有实现,也没有调用方 —— 资源水位目前从心跳的承诺量记账走。
+
+另有三个**可选**接口,runtime 按能力实现,调用方类型断言:
+`ImageWarmer`(prewarm)、`ImageLister`(缓存清单)、`ImageBuilder`(构建)、
+`SandboxCommitter`(封装成镜像)。分开而非塞进 `Runtime` 的理由:
+local 档跑宿主进程,没有「缓存镜像」这个概念,让它 stub 掉四个方法
+比让调用方判断能力说明的信息更少。
+
+| 实现 | 状态 | 底层 | 职责边界 |
+|---|---|---|---|
+| `FCRuntime`（主档） | ✅ | noded 直接 exec firecracker 进程,**无 jailer**(见 security §A3)、无 containerd | dm-snapshot 块设备 virtio-blk 直挂;vsock 通 agent;full/diff/memoryless 快照 |
+| `LocalRuntime`（开发/CI） | ✅ | 宿主进程 | **无隔离**,不可用于不可信代码 |
+| `runcRuntime` | 📐 | containerd + runc shim | 未实现 |
+| `runscRuntime` | 📐 | containerd + runsc shim | 未实现 |
 
 要点：
 
-- **fc 热路径零 containerd**：image 模块直驱 overlaybd ublk daemon（AgentENV
-  的 uvm-ublk/uvm-ublk-daemon 同款,本地源码 /Users/mac/project/agentenv 可参考）;
-  containerd 是容器档的可选依赖,纯 fc 节点不装
-- `RootfsMount` 由 image 模块产出（见 §4）,与 Runtime 解耦：fcRuntime 拿块设备
-  路径,容器档拿 overlayfs 挂载点——同一条镜像链路
-- VM spec / OCI spec 生成集中在一处,runtime 实现只做增量修改
+- **fc 热路径零 containerd** ✅:image 模块自己管块设备,纯 fc 节点不装 containerd。
+  但当前后端是 **dm-snapshot 而非 overlaybd ublk** —— overlaybd 能力已实测跑通
+  (挂载 7ms、只传 19.6% 层字节)但尚未接进 `image.Provider`
+  (`docs/decisions.md` §3.1)。
+- `image.Rootfs` 由 image 模块产出(见 §4),带 `Device`(VM 挂的路径)与
+  `Writable`(快照要抓的 CoW 层)两个字段。**`Writable` 是关键**:
+  快照捕获它,而 restore 通过 `PrepareOptions.SeedWritable` 在设备组装前回填。
 
-### 3.1 fcRuntime 细节
+### 3.1 fcRuntime 细节 ⚠️
 
 **启动链路**
 
 ```
-1. image 模块产出 rootfs 块设备：overlaybd base 层（lazy-pull S3）+ overlaybd
-   可写层在宿主合成【单一块设备】（拍板：host 侧组装,e2b/AgentENV 同款;
-   配额=可写层文件大小,snapshot disk-diff 直接取宿主层）
-2. noded 起 jailer→firecracker：
-   virtio-blk: rootfs 盘 + agent 盘(只读 erofs,含 beand 与工具) 
-               + N 个 dataset 卷盘（如有）
-   vsock、tap 网卡、virtio-balloon;guest 内核（平台统一打包,见 §3.4）
-   kernel cmdline: init=/run/beand（agent 盘由内核挂载后执行）
+1. image 模块产出 rootfs 块设备:**dm-snapshot** —— 共享只读 base(loop 挂载)
+   + 每 sandbox 稀疏 CoW 文件,合成单一 `/dev/mapper/bean-<id>`。
+   配额 = CoW 文件大小;快照抓的就是这个 CoW 层。
+   (overlaybd lazy-pull 是目标形态,能力已实测但未接入)
+2. noded 直接 exec firecracker(**无 jailer**,见 security §A3):
+   virtio-blk: **agent 盘为 root device**(`agent.ext4`,含 beand)
+               + 用户镜像为第二盘(guest 内 `/dev/vdb`)
+   vsock;**无网卡、无 balloon**(网络栈未实现,balloon 未接)
+   kernel cmdline: `init=/bean/beand -- --listen vsock:1024 --pivot ...`
 3. guest 内 beand 作为 init：
    a. 挂载矩阵：/proc /sys /dev /dev/shm /dev/pts /dev/mqueue /tmp
       （按 OCI runtime spec 默认 mounts 复刻）
@@ -131,7 +180,7 @@ type Runtime interface {
 | 镜像架构 | ❗ | 必须匹配节点 arch，无模拟（容器档同） |
 | GPU | ❌ | FC 无 passthrough → auto 解析自动落容器档 |
 
-## 3.2 资源模型（cpu / mem 配置）
+## 3.2 资源模型（cpu / mem 配置）⚠️
 
 **API 层**：`resources: {cpu, memoryMiB, gpu}` 创建时声明、**不可变**（FC 不支持热调整,
 容器档为保持语义一致同样不开放热调整）。
@@ -175,7 +224,7 @@ API 层增加 `resources.diskMiB`（可写层上限，默认 20 GiB）：
   fc 档 guest 内 ENOSPC，均不影响宿主
 - tmpfs：`/dev/shm` 默认 64 MiB 计入内存配额，可配
 
-## 3.3 Volume（独立的一等资源）
+## 3.3 Volume（独立的一等资源）📐
 
 **资源模型**：镜像与卷是两种正交资源——镜像定义环境（rootfs，不可变，随 sandbox
 销毁），卷承载数据（独立生命周期，先于 sandbox 存在、后于 sandbox 留存，可被
@@ -236,7 +285,7 @@ guest/容器内 agent 执行: mount -t nfs -o fg,hard <宿主网关IP>:/<volumeN
 
 **调度联动**：shared-fs 无节点亲和（后端全节点可达）。
 
-## 3.4 Guest 内核与 agent 盘的构建发布
+## 3.4 Guest 内核与 agent 盘的构建发布 ✅
 
 fc 档两个平台工件,均由 CI 构建、S3 分发、noded 启动时按版本拉取到本地：
 
@@ -249,9 +298,9 @@ fc 档两个平台工件,均由 CI 构建、S3 分发、noded 启动时按版本
 - noded 配置声明版本（默认跟随 noded 发布版），本地缓存 `/var/lib/bean/artifacts/`
 - 容器档的 agent 直接用 agent 盘内同一个二进制 bind mount，两档单一构建产物
 
-## 4. 镜像模块
+## 4. 镜像模块 ⚠️
 
-### 4.1 overlaybd 直驱主路线
+### 4.1 overlaybd 直驱主路线 📐
 
 image 模块直接管理 overlaybd ublk daemon（不经 containerd snapshotter）：
 按镜像元数据（控制面下发的层清单 + S3 blob 引用）生成 overlaybd config →
@@ -270,7 +319,7 @@ ublk 设备就绪 → 交给 runtime。实证细节参考本地 AgentENV 源码
   提示先 prewarm,同时后台触发转换（容器档标准拉取兜底,P5）
 - 可写层：容器档 overlayfs upper（XFS quota）;fc 档独立稀疏 overlay 盘（见 §3.2）
 
-### 4.2 缓存管理
+### 4.2 缓存管理 📐
 
 ```
 /var/lib/bean/
@@ -286,14 +335,14 @@ ublk 设备就绪 → 交给 runtime。实证细节参考本地 AgentENV 源码
   sandboxes 池余量是调度硬约束
 - 缓存清单摘要：心跳携带本地镜像 ref 集合的增量 + 布隆过滤器 + 字节占比（调度器镜像亲和用）
 
-### 4.3 Prewarm
+### 4.3 Prewarm ✅
 
 - 收到 PrewarmImage 指令后按 priority 入队，受专用带宽/并发限制（不与在线 PULLING 抢）
 - overlaybd prewarm = 拉元数据 + 预取热块（有 access trace 时按 trace,否则全量）
 - overlaybd 原生支持记录启动 IO trace（`record-trace`）,首次运行采集、
   后续按 trace 精准预取——对固定 eval 镜像集效果显著
 
-### 4.4 image-service 部署形态
+### 4.4 image-service 部署形态 ⚠️
 
 image-service 是 **control plane 的逻辑模块**（`internal/control/image`），非独立
 部署服务;P0–P2 内嵌 bean-api 进程。职责需要全局视角所以不能下放节点：
@@ -304,9 +353,14 @@ image-service 是 **control plane 的逻辑模块**（`internal/control/image`�
 
 转换任务 CPU 重,量大后可拆独立 worker 池水平扩展（接口已按模块边界隔离）。
 
-## 5. 网络模块
+## 5. 网络模块 📐
 
-### 5.1 数据面
+> **整节没有任何代码。** `grep -rn 'nftables\|netns\|veth\|bean0'` 全仓库为 0。
+> sandbox 当前**没有网络** —— fc 档只有 vsock 通到 agent,那是控制通道。
+> 下面是设计意图,不是当前行为;安全语义见 security-and-startup.md §A4。
+
+
+### 5.1 数据面 📐
 
 ```
 创建：
@@ -317,7 +371,7 @@ image-service 是 **control plane 的逻辑模块**（`internal/control/image`�
 5. /etc/hosts 注入 sandbox hostname
 ```
 
-### 5.2 nftables 规则（每节点一套 + per-sandbox 链）
+### 5.2 nftables 规则（每节点一套 + per-sandbox 链）📐
 
 ```
 table inet bean {
@@ -345,13 +399,16 @@ table inet bean {
 - 端口暴露不开入站 DNAT——regional proxy → noded sbxproxy → 直连 sandbox IP
   （见 api-design.md §6.2）;节点防火墙入站仅对 control plane/proxy 开放
 
-### 5.3 fcRuntime 兼容
+### 5.3 fcRuntime 兼容 📐
+
+当前 FC 不配 tap 网卡,`fcMachineConfig` 里没有网络设备。
+
 
 FC microVM 用 tap 设备替代 veth 的 netns 端，同样挂 bean0 桥，nftables 规则不变。
 
-## 6. beand
+## 6. beand ✅
 
-### 6.1 注入与启动
+### 6.1 注入与启动 ✅
 
 > 本节描述**容器档注入**（bind mount + entrypoint override,随 P5 引入）;
 > fc 主路径的 agent 盘注入见 §3.1/§3.4。
@@ -370,39 +427,39 @@ FC microVM 用 tap 设备替代 veth 的 netns 端，同样挂 bean0 桥，nftab
 
 路径冲突：`/.bean` 若与镜像内容冲突（极罕见），创建失败并明确报错，可配置备用挂载点。
 
-### 6.2 PID1 职责
+### 6.2 PID1 职责 ✅
 
 - **僵尸回收**：`SIGCHLD` reap 所有孤儿
 - **信号转发**：SIGTERM → 用户进程组，graceful 超时后 SIGKILL
 - **进程管理**：exec 会话表（id → 进程组），支持 signal/kill 单会话
 
-### 6.3 Exec / PTY
+### 6.3 Exec / PTY ⚠️
 
 - 普通 exec：`os/exec` + pipe，stdout/stderr 分流，输出限额截断
 - PTY：`creack/pty`，resize 帧调 `TIOCSWINSZ`；会话绑定 WS 连接，
   连接断开保留会话 60s 可重连（reconnect token）
 - 并发 exec 无全局锁，per-sandbox 上限（默认 32 会话）
 
-### 6.4 文件操作
+### 6.4 文件操作 ✅
 
 - 流式 gRPC chunk（1 MiB/帧），保留 mode/uid/gid；目录树操作提供 `tar` 模式
   （上传 tar 自动解包、下载目录打 tar）——eval 批量注入 repo 快照的主路径
 - 大文件产物直推 S3：agent 收到含 presigned URL 的指令后在容器内直接
   PUT（走 sandbox 出网路径），不占 noded 带宽
 
-### 6.5 日志
+### 6.5 日志 ✅
 
 - 用户进程 stdout/stderr → 环形缓冲（8 MiB）+ 可选实时流
 - 销毁前 noded 触发 agent 将全量日志经 presigned URL 归档 S3
 
-### 6.6 传输层抽象
+### 6.6 传输层抽象 ✅
 
 agent 的 gRPC listener 抽象为 `Transport`（unix socket 实现 / vsock 实现），
 fc 档 agent 代码零改动，只换 transport（vsock）与注入载体（agent 盘，拍板见 §3.1/§3.4）。
 
-## 7. 注册、心跳、租约与 reconcile
+## 7. 注册、心跳、租约与 reconcile ✅
 
-### 7.0 节点注册与凭证分层
+### 7.0 节点注册与凭证分层 ✅
 
 ```
 管理员：控制面注册 region（S3 endpoint、proxy 组、BYOC token 服务地址）
@@ -431,7 +488,7 @@ fc 档 agent 代码零改动，只换 transport（vsock）与注入载体（agen
 
 BYOC：客户节点出向连托管接入层即可（443,零证书配置）,身份全在应用层 token。
 
-### 7.1 心跳
+### 7.1 心跳 ✅
 
 - 双向流，间隔 3s;携带:资源水位、各 sandbox {id, state, 资源用量摘要}、
   镜像缓存增量、正在执行的 command ids
@@ -439,7 +496,14 @@ BYOC：客户节点出向连托管接入层即可（443,零证书配置）,身�
   其上 RUNNING sandbox 标 LOST、调度停止派发
 - 网络闪断恢复：流重建后全量状态上报一次;控制面在此期间的直连指令失败会重试,超过阈值触发重调度
 
-### 7.2 noded 重启 reconcile
+### 7.2 noded 重启 reconcile ⚠️
+
+已实现的是**控制面侧**对账:`SyncState` 拉期望列表,销毁本地不该有的 sandbox
+(`register.go`)。**未实现的是宿主资源对账** —— 重启后不扫 `losetup -a` /
+`dmsetup ls`,所以上一代进程留下的 loop device 与 dm 映射不会被回收。
+这已经造成实测到的泄漏:noded 重启一次,共享 base image 就多一个 loop device
+(见 `docs/status.md` 待办)。
+
 
 ```
 1. 枚举本地实际状态：存活 firecracker 进程（jailer 目录 /run/bean/fc/<id>/ +
@@ -454,7 +518,7 @@ BYOC：客户节点出向连托管接入层即可（443,零证书配置）,身�
 
 netns/veth/nftables 链均带 `bean-<id>` 命名规约，孤儿扫描按前缀比对存活 sandbox 集合。
 
-### 7.3 GC 触发器
+### 7.3 GC 触发器 ⚠️
 
 | 对象 | 策略 |
 |---|---|
@@ -465,7 +529,7 @@ netns/veth/nftables 链均带 `bean-<id>` 命名规约，孤儿扫描按前缀�
 | 临时文件（S3 暂存下载） | S3 lifecycle 规则 1 天 |
 | Postgres 终态 sandbox 记录 | 控制面归档任务，30 天转冷 |
 
-## 8. noded 自身可观测
+## 8. noded 自身可观测 ✅
 
 - Prometheus 端点 `--metrics <addr>` → `GET /metrics`（免鉴权,本地采集）;OTLP 导出后续包同一 registry：
   - `bean_node_create_phase_seconds{phase,runtime}` 创建各阶段耗时直方图
