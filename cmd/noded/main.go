@@ -54,6 +54,8 @@ func main() {
 	buildkitAddr := flag.String("buildkit-addr", "",
 		"buildkitd address enabling image builds on this node, e.g. unix:///run/bean/buildkitd.sock")
 	buildctlBin := flag.String("buildctl-bin", "buildctl", "BuildKit client binary")
+	debugConsole := flag.Bool("debug-console", false,
+		"attach guests to the serial console; costs ~500ms per boot (fc runtime)")
 	flag.Parse()
 
 	if *nodeToken == "" && !isLoopback(*listen) {
@@ -74,6 +76,7 @@ func main() {
 			DefaultDiskMiB: *defaultDiskMiB,
 			BuildkitAddr:   *buildkitAddr,
 			BuildctlBin:    *buildctlBin,
+			DebugConsole:   *debugConsole,
 		})
 		if err != nil {
 			log.Fatalf("fc runtime: %v", err)

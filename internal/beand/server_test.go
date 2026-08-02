@@ -417,6 +417,33 @@ func TestExecEnvIsAllowlisted(t *testing.T) {
 	}
 }
 
+// TestExecResolvesBareCommandWithoutHostPath covers the agent running as PID 1,
+// which the kernel starts with an empty environment. Resolving a bare command
+// name uses the agent's own PATH rather than the environment built for the
+// child, so a microVM sandbox could not run "echo" while the same code worked
+// in every test and dev environment — those inherit a PATH from the shell.
+func TestExecResolvesBareCommandWithoutHostPath(t *testing.T) {
+	t.Setenv("PATH", "")
+	if err := os.Unsetenv("PATH"); err != nil {
+		t.Fatal(err)
+	}
+	EnsurePath()
+
+	c := startTestAgent(t, t.TempDir())
+	resp, err := c.Exec(context.Background(), &commonv1.ExecRequest{
+		Cmd: []string{"echo", "hello"},
+	})
+	if err != nil {
+		t.Fatalf("bare command with no inherited PATH: %v", err)
+	}
+	if resp.ExitCode != 0 {
+		t.Fatalf("exit %d, stderr=%q", resp.ExitCode, resp.Stderr)
+	}
+	if !strings.Contains(string(resp.Stdout), "hello") {
+		t.Errorf("stdout = %q", resp.Stdout)
+	}
+}
+
 func TestExecTimeoutWithOrphanGrandchild(t *testing.T) {
 	c := startTestAgent(t, t.TempDir())
 	start := time.Now()

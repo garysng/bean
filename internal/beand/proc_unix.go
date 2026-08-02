@@ -29,6 +29,21 @@ func killGroup(cmd *exec.Cmd) error {
 // user processes. Everything else (potential platform secrets) is dropped.
 var baseEnvAllowlist = []string{"PATH", "HOME", "TERM", "LANG", "LC_ALL", "TZ"}
 
+// DefaultPath is the search path for user commands.
+const DefaultPath = "/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin"
+
+// EnsurePath gives the agent a search path when it started without one.
+//
+// The kernel hands PID 1 an empty environment, so in a microVM the agent has no
+// PATH at all. That breaks resolving a bare command name like "echo": the lookup
+// runs in the agent's own environment, not the one assembled for the child, so
+// setting PATH only for children is not enough.
+func EnsurePath() {
+	if _, ok := os.LookupEnv("PATH"); !ok {
+		_ = os.Setenv("PATH", DefaultPath)
+	}
+}
+
 // buildEnv assembles the child environment: an allowlisted subset of the
 // host env plus the caller-provided variables (which win on conflict).
 func buildEnv(extra map[string]string) []string {
@@ -39,11 +54,6 @@ func buildEnv(extra map[string]string) []string {
 		}
 		if v, ok := os.LookupEnv(k); ok {
 			env = append(env, k+"="+v)
-		}
-	}
-	if _, ok := extra["PATH"]; !ok {
-		if _, hostHasPath := os.LookupEnv("PATH"); !hostHasPath {
-			env = append(env, "PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin")
 		}
 	}
 	for k, v := range extra {

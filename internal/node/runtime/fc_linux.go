@@ -61,6 +61,15 @@ type FCRuntime struct {
 	// which is the right default: building needs BuildKit, and a cluster may
 	// prefer dedicated builder nodes over the dependency everywhere.
 	Builder *image.Builder
+	// DebugConsole attaches the guest kernel to the serial port. It is off by
+	// default because the 8250 UART is synchronous: the guest blocks on every
+	// log line it emits. Measured on a 6.1 guest, dropping the console took the
+	// time from VMM start to a reachable agent from 1193ms to 700ms.
+	//
+	// The kernel still has the driver, so turning this on needs no new kernel —
+	// which is the point: a boot that fails leaves no other evidence, and this
+	// is how that evidence is recovered.
+	DebugConsole bool
 
 	mu   sync.Mutex
 	vms  map[string]*fcVM
@@ -337,12 +346,19 @@ func (r *FCRuntime) configureAndBoot(ctx context.Context, vm *fcVM, spec *Spec) 
 	// to embed beand or an init system: the agent pivots to the user rootfs
 	// once it is running.
 	//
-	// Serial console output is kept, since a boot failure leaves no other
-	// evidence. Panic reboots are disabled so a crashed guest stays
-	// inspectable rather than looping.
+	// Panic reboots are disabled so a crashed guest stays inspectable rather
+	// than looping.
+	//
+	// "quiet" rather than a serial console: writing to the 8250 UART is
+	// synchronous, so every log line the kernel emits stalls the boot. See
+	// DebugConsole for recovering the output when a guest will not start.
+	console := "quiet"
+	if r.DebugConsole {
+		console = "console=ttyS0"
+	}
 	bootArgs := fmt.Sprintf(
-		"console=ttyS0 reboot=k panic=-1 pci=off init=/bean/beand -- --listen vsock:%d --pivot %s",
-		agentVsockPort, guestRootfsDevice)
+		"%s reboot=k panic=-1 pci=off init=/bean/beand -- --listen vsock:%d --pivot %s",
+		console, agentVsockPort, guestRootfsDevice)
 	if err := vm.client.put(ctx, "/boot-source", fcBootSource{
 		KernelImagePath: r.KernelPath, BootArgs: bootArgs,
 	}); err != nil {

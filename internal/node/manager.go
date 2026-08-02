@@ -11,6 +11,7 @@ import (
 	"time"
 
 	"google.golang.org/grpc"
+	"google.golang.org/grpc/backoff"
 	"google.golang.org/grpc/credentials/insecure"
 
 	agentv1 "github.com/garysng/bean/internal/gen/bean/agent/v1"
@@ -154,7 +155,7 @@ func waitHealthy(ctx context.Context, conn *grpc.ClientConn, timeout time.Durati
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
-		case <-time.After(50 * time.Millisecond):
+		case <-time.After(10 * time.Millisecond):
 		}
 	}
 }
@@ -644,7 +645,22 @@ func (m *Manager) connectAgent(ctx context.Context, handle *runtime.Handle) (*gr
 		// A microVM agent is reachable over vsock rather than a socket path,
 		// so the transport depends on the runtime tier while everything above
 		// this line does not.
-		grpc.WithContextDialer(dialAgentAddr))
+		grpc.WithContextDialer(dialAgentAddr),
+		// The agent does not listen until the guest has booted, so the first
+		// dial always fails. gRPC's default backoff then waits a second before
+		// retrying, which put a floor under create latency far above the boot
+		// itself: the guest was ready at ~700ms but the connection stayed parked
+		// until the backoff expired. The retry interval has to be on the
+		// timescale of a boot, not of a remote service outage.
+		grpc.WithConnectParams(grpc.ConnectParams{
+			Backoff: backoff.Config{
+				BaseDelay:  20 * time.Millisecond,
+				Multiplier: 1.6,
+				Jitter:     0.2,
+				MaxDelay:   time.Second,
+			},
+			MinConnectTimeout: 2 * time.Second,
+		}))
 	if err != nil {
 		return nil, fmt.Errorf("agent dial: %w", err)
 	}

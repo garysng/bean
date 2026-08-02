@@ -23,4 +23,7 @@ type FCTierConfig struct {
 	BuildkitAddr string
 	// BuildctlBin is the BuildKit client binary.
 	BuildctlBin string
+	// DebugConsole attaches guests to the serial console. It costs roughly
+	// 500ms per boot, so it is a debugging aid rather than a default.
+	DebugConsole bool
 }

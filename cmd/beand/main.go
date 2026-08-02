@@ -31,6 +31,10 @@ func main() {
 		}
 	}
 
+	// PID 1 starts with an empty environment, which leaves no PATH to resolve a
+	// bare command name against.
+	beand.EnsurePath()
+
 	lis, err := beand.Listen(*listenAddr)
 	if err != nil {
 		log.Fatalf("listen %s: %v", *listenAddr, err)

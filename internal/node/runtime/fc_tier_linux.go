@@ -43,6 +43,10 @@ func NewFCTier(cfg FCTierConfig) (Runtime, error) {
 
 	rt := NewFCRuntime(cfg.FirecrackerBin, cfg.KernelPath, cfg.AgentDiskPath,
 		cfg.BaseDir, selectProvider(cfg))
+	rt.DebugConsole = cfg.DebugConsole
+	if cfg.DebugConsole {
+		log.Print("fc tier: guest serial console on, which costs ~500ms per boot")
+	}
 	// Committed images land beside pulled ones, because a committed image is a
 	// base image like any other — that is the point of committing rather than
 	// snapshotting.
