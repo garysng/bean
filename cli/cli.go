@@ -57,7 +57,13 @@ func (c *Client) do(method, path string, body any) (*http.Response, error) {
 	if body != nil {
 		req.Header.Set("Content-Type", "application/json")
 	}
-	return c.HTTP.Do(req)
+	resp, err := c.HTTP.Do(req)
+	if err != nil {
+		// A request that never got an answer is worth retrying, unlike one the
+		// platform rejected. Wrapping it here is what lets the exit code say so.
+		return nil, &transportError{err: err}
+	}
+	return resp, nil
 }
 
 func (c *Client) doJSON(method, path string, body any, out any) error {
@@ -78,9 +84,11 @@ func (c *Client) doJSON(method, path string, body any, out any) error {
 			} `json:"error"`
 		}
 		if json.Unmarshal(data, &e) == nil && e.Error.Code != "" {
-			return fmt.Errorf("%s: %s", e.Error.Code, e.Error.Message)
+			return &apiError{Code: e.Error.Code, Message: e.Error.Message,
+				Status: resp.StatusCode}
 		}
-		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))
+		return &apiError{Message: strings.TrimSpace(string(data)),
+			Status: resp.StatusCode}
 	}
 	if out != nil && len(data) > 0 {
 		return json.Unmarshal(data, out)
@@ -92,7 +100,7 @@ func (c *Client) doJSON(method, path string, body any, out any) error {
 func Run(args []string, stdout, stderr io.Writer) int {
 	if len(args) < 1 {
 		fmt.Fprintln(stderr, usage)
-		return 125
+		return ExitUsage
 	}
 	baseURL := envOr("BEAN_BASE_URL", "http://127.0.0.1:8080")
 	apiKey := os.Getenv("BEAN_API_KEY")
@@ -131,13 +139,13 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stdout, "bean CLI (dev)")
 	default:
 		fmt.Fprintln(stderr, usage)
-		return 125
+		return ExitUsage
 	}
 	if err != nil {
 		fmt.Fprintln(stderr, "error:", err)
-		return 125
+		return exitCodeFor(err)
 	}
-	return 0
+	return ExitOK
 }
 
 const usage = `usage: bean <command> [args]
@@ -156,7 +164,11 @@ commands:
   snapshot ls [--label k=v] | snapshot rm SNAP
   run --snapshot SNAP                           # restore instead of image
   image ls | image status REF | image prewarm REF... [--replicas N]
-env: BEAN_BASE_URL (default http://127.0.0.1:8080), BEAN_API_KEY`
+
+output: --json for machine-readable output, --quiet for identifiers only
+exit:   0 ok, 64 not found, 69 unavailable (retry may help), 70 failed,
+        125 usage error
+env:    BEAN_BASE_URL (default http://127.0.0.1:8080), BEAN_API_KEY`
 
 func envOr(k, def string) string {
 	if v := os.Getenv(k); v != "" {
@@ -202,7 +214,7 @@ func cmdRun(c *Client, args []string, stdout io.Writer) error {
 	flags, _ := parseFlags(args)
 	image, snap := flags["image"], flags["snapshot"]
 	if (image == "") == (snap == "") {
-		return fmt.Errorf("provide exactly one of --image or --snapshot")
+		return usagef("provide exactly one of --image or --snapshot")
 	}
 	body := map[string]any{}
 	if image != "" {
@@ -227,13 +239,16 @@ func cmdRun(c *Client, args []string, stdout io.Writer) error {
 		Sandbox struct {
 			ID    string `json:"id"`
 			State string `json:"state"`
+			Image string `json:"image"`
 		} `json:"sandbox"`
 	}
 	if err := c.doJSON("POST", "/v1/sandboxes", body, &out); err != nil {
 		return err
 	}
-	fmt.Fprintf(stdout, "%s\t%s\n", out.Sandbox.ID, out.Sandbox.State)
-	return nil
+	// One line, id first: the existing shape, which scripts already cut on.
+	return newPrinter(stdout, flags).result(out.Sandbox.ID,
+		field{"state", out.Sandbox.State},
+		field{"image", out.Sandbox.Image})
 }
 
 func cmdLs(c *Client, args []string, stdout io.Writer) error {
@@ -254,25 +269,34 @@ func cmdLs(c *Client, args []string, stdout io.Writer) error {
 	if err := c.doJSON("GET", path, nil, &out); err != nil {
 		return err
 	}
-	tw := tabwriter.NewWriter(stdout, 2, 4, 2, ' ', 0)
-	fmt.Fprintln(tw, "ID\tIMAGE\tSTATE\tAGE\tLABELS")
+	p := newPrinter(stdout, flags)
+	rows := make([]row, 0, len(out.Sandboxes))
 	for _, sb := range out.Sandboxes {
-		var lbls []string
-		for k, v := range sb.Labels {
-			lbls = append(lbls, k+"="+v)
+		r := newRow("id", sb.ID).
+			with("image", sb.Image).
+			with("state", sb.State)
+		// A person reads an age; a script wants a timestamp it can compare.
+		if p.json {
+			r = r.with("createdAt", sb.CreatedAt.UTC().Format(time.RFC3339))
+		} else {
+			r = r.with("age", time.Since(sb.CreatedAt).Truncate(time.Second))
 		}
-		sort.Strings(lbls)
-		fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\n", sb.ID, sb.Image, sb.State,
-			time.Since(sb.CreatedAt).Truncate(time.Second), strings.Join(lbls, ","))
+		// A script wants the map it can index; a person wants one column.
+		if p.json {
+			r = r.with("labels", orEmptyMap(sb.Labels))
+		} else {
+			r = r.with("labels", sortedLabels(sb.Labels))
+		}
+		rows = append(rows, r)
 	}
-	return tw.Flush()
+	return p.table("sandboxes", rows)
 }
 
 func cmdExec(c *Client, args []string, stdout, stderr io.Writer) int {
 	_, pos := parseFlags(args)
 	if len(pos) < 2 {
 		fmt.Fprintln(stderr, "usage: bean exec SBX -- CMD...")
-		return 125
+		return ExitUsage
 	}
 	id, cmd := pos[0], pos[1:]
 	var out struct {
@@ -283,7 +307,7 @@ func cmdExec(c *Client, args []string, stdout, stderr io.Writer) int {
 	}
 	if err := c.doJSON("POST", "/v1/sandboxes/"+id+"/exec", map[string]any{"cmd": cmd}, &out); err != nil {
 		fmt.Fprintln(stderr, "error:", err)
-		return 125
+		return exitCodeFor(err)
 	}
 	io.WriteString(stdout, out.Stdout)
 	io.WriteString(stderr, out.Stderr)
@@ -296,7 +320,7 @@ func cmdExec(c *Client, args []string, stdout, stderr io.Writer) int {
 func cmdKill(c *Client, args []string, stdout io.Writer) error {
 	flags, pos := parseFlags(args)
 	if len(pos) < 1 {
-		return fmt.Errorf("usage: bean kill SBX")
+		return usagef("usage: bean kill SBX")
 	}
 	path := "/v1/sandboxes/" + pos[0]
 	if flags["force"] == "true" {
@@ -305,14 +329,13 @@ func cmdKill(c *Client, args []string, stdout io.Writer) error {
 	if err := c.doJSON("DELETE", path, nil, nil); err != nil {
 		return err
 	}
-	fmt.Fprintln(stdout, pos[0], "killed")
-	return nil
+	return newPrinter(stdout, flags).result(pos[0], field{"state", "killed"})
 }
 
 func cmdSimplePost(c *Client, args []string, action string) error {
 	_, pos := parseFlags(args)
 	if len(pos) < 1 {
-		return fmt.Errorf("usage: bean %s SBX", action)
+		return usagef("usage: bean %s SBX", action)
 	}
 	return c.doJSON("POST", "/v1/sandboxes/"+pos[0]+"/"+action, nil, nil)
 }
@@ -320,7 +343,7 @@ func cmdSimplePost(c *Client, args []string, action string) error {
 func cmdLogs(c *Client, args []string, stdout io.Writer) error {
 	flags, pos := parseFlags(args)
 	if len(pos) < 1 {
-		return fmt.Errorf("usage: bean logs SBX")
+		return usagef("usage: bean logs SBX")
 	}
 	path := "/v1/sandboxes/" + pos[0] + "/logs"
 	if t := flags["tail"]; t != "" {
@@ -339,7 +362,6 @@ func cmdLogs(c *Client, args []string, stdout io.Writer) error {
 	return err
 }
 
-// cmdSnapshot handles snapshot create/ls/rm.
 // cmdBuild builds an image from a Dockerfile on the platform.
 //
 // The build context is packed and uploaded, so the user needs no local Docker
@@ -349,9 +371,10 @@ func cmdBuild(c *Client, args []string, stdout io.Writer) error {
 	// Long flags only: the shared parser treats short flags as boolean, which
 	// `events -f` depends on, so `-t REF` would silently lose its value.
 	flags, pos := parseFlags(args)
+	p := newPrinter(stdout, flags)
 	tag := flags["tag"]
 	if tag == "" {
-		return fmt.Errorf("usage: bean build --tag REF [--file Dockerfile] [CONTEXT_DIR]")
+		return usagef("usage: bean build --tag REF [--file Dockerfile] [CONTEXT_DIR]")
 	}
 
 	dockerfile := flags["file"]
@@ -378,7 +401,7 @@ func cmdBuild(c *Client, args []string, stdout io.Writer) error {
 			return err
 		}
 		body["contextTar"] = base64.StdEncoding.EncodeToString(tarball)
-		fmt.Fprintf(stdout, "uploading %d KiB of build context\n", len(tarball)>>10)
+		p.note("uploading %d KiB of build context", len(tarball)>>10)
 	}
 
 	if bargs := parseBuildArgs(flags["build-arg"]); len(bargs) > 0 {
@@ -392,8 +415,12 @@ func cmdBuild(c *Client, args []string, stdout io.Writer) error {
 	if err := c.doJSON("POST", "/v1/images/build", body, &out); err != nil {
 		return err
 	}
-	fmt.Fprintf(stdout, "%s\t%s\n", out.ImageRef, out.State)
-	fmt.Fprintf(stdout, "follow with: bean image status %s\n", out.ImageRef)
+	if err := p.result(out.ImageRef, field{"state", out.State}); err != nil {
+		return err
+	}
+	// A build takes minutes, so the next step is worth naming — but only for a
+	// person: a script already knows what it is going to poll.
+	p.note("follow with: bean image status %s", out.ImageRef)
 	return nil
 }
 
@@ -542,7 +569,7 @@ func loadDockerignore(dir string) (func(string) bool, error) {
 func cmdCommit(c *Client, args []string, stdout io.Writer) error {
 	flags, pos := parseFlags(args)
 	if len(pos) == 0 || flags["tag"] == "" {
-		return fmt.Errorf("usage: bean commit SBX --tag REF")
+		return usagef("usage: bean commit SBX --tag REF")
 	}
 	var out struct {
 		ImageRef string `json:"imageRef"`
@@ -551,19 +578,20 @@ func cmdCommit(c *Client, args []string, stdout io.Writer) error {
 		map[string]any{"tag": flags["tag"]}, &out); err != nil {
 		return err
 	}
-	fmt.Fprintf(stdout, "committed %s -> %s\n", pos[0], out.ImageRef)
-	return nil
+	return newPrinter(stdout, flags).result(out.ImageRef,
+		field{"sandboxId", pos[0]})
 }
 
+// cmdSnapshot handles snapshot create/ls/rm.
 func cmdSnapshot(c *Client, args []string, stdout io.Writer) error {
 	flags, pos := parseFlags(args)
 	if len(pos) == 0 {
-		return fmt.Errorf("usage: bean snapshot create SBX | ls | rm SNAP")
+		return usagef("usage: bean snapshot create SBX | ls | rm SNAP")
 	}
 	switch pos[0] {
 	case "create":
 		if len(pos) < 2 {
-			return fmt.Errorf("usage: bean snapshot create SBX [--name N]")
+			return usagef("usage: bean snapshot create SBX [--name N]")
 		}
 		body := map[string]any{"name": flags["name"]}
 		// keepRunning defaults true; --no-keep-running stops the source once
@@ -581,9 +609,9 @@ func cmdSnapshot(c *Client, args []string, stdout io.Writer) error {
 		if err := c.doJSON("POST", "/v1/sandboxes/"+pos[1]+"/snapshot", body, &out); err != nil {
 			return err
 		}
-		fmt.Fprintf(stdout, "%s\t%s\t%d bytes\n",
-			out.SnapshotID, out.Snapshot.State, out.Snapshot.SizeBytes)
-		return nil
+		return newPrinter(stdout, flags).result(out.SnapshotID,
+			field{"state", out.Snapshot.State},
+			field{"sizeBytes", out.Snapshot.SizeBytes})
 
 	case "ls":
 		path := "/v1/snapshots"
@@ -604,27 +632,35 @@ func cmdSnapshot(c *Client, args []string, stdout io.Writer) error {
 		if err := c.doJSON("GET", path, nil, &out); err != nil {
 			return err
 		}
-		tw := tabwriter.NewWriter(stdout, 2, 4, 2, ' ', 0)
-		fmt.Fprintln(tw, "ID\tNAME\tSTATE\tSANDBOX\tIMAGE\tSIZE\tAGE")
+		p := newPrinter(stdout, flags)
+		rows := make([]row, 0, len(out.Snapshots))
 		for _, s := range out.Snapshots {
-			fmt.Fprintf(tw, "%s\t%s\t%s\t%s\t%s\t%d\t%s\n",
-				s.ID, s.Name, s.State, s.SandboxID, s.Image, s.SizeBytes,
-				time.Since(s.CreatedAt).Truncate(time.Second))
+			r := newRow("id", s.ID).
+				with("name", s.Name).
+				with("state", s.State).
+				with("sandboxId", s.SandboxID).
+				with("image", s.Image).
+				with("sizeBytes", s.SizeBytes)
+			if p.json {
+				r = r.with("createdAt", s.CreatedAt.UTC().Format(time.RFC3339))
+			} else {
+				r = r.with("age", time.Since(s.CreatedAt).Truncate(time.Second))
+			}
+			rows = append(rows, r)
 		}
-		return tw.Flush()
+		return p.table("snapshots", rows)
 
 	case "rm":
 		if len(pos) < 2 {
-			return fmt.Errorf("usage: bean snapshot rm SNAP")
+			return usagef("usage: bean snapshot rm SNAP")
 		}
 		if err := c.doJSON("DELETE", "/v1/snapshots/"+pos[1], nil, nil); err != nil {
 			return err
 		}
-		fmt.Fprintln(stdout, pos[1], "deleted")
-		return nil
+		return newPrinter(stdout, flags).result(pos[1], field{"state", "deleted"})
 
 	default:
-		return fmt.Errorf("unknown snapshot subcommand %q", pos[0])
+		return usagef("unknown snapshot subcommand %q", pos[0])
 	}
 }
 
@@ -632,7 +668,7 @@ func cmdSnapshot(c *Client, args []string, stdout io.Writer) error {
 func cmdImage(c *Client, args []string, stdout io.Writer) error {
 	flags, pos := parseFlags(args)
 	if len(pos) == 0 {
-		return fmt.Errorf("usage: bean image ls | status REF | prewarm REF...")
+		return usagef("usage: bean image ls | status REF | prewarm REF...")
 	}
 	switch pos[0] {
 	case "ls":
@@ -646,32 +682,33 @@ func cmdImage(c *Client, args []string, stdout io.Writer) error {
 		if err := c.doJSON("GET", "/v1/images", nil, &out); err != nil {
 			return err
 		}
-		tw := tabwriter.NewWriter(stdout, 2, 4, 2, ' ', 0)
-		fmt.Fprintln(tw, "REF\tSTATE\tSIZE")
+		rows := make([]row, 0, len(out.Images))
 		for _, i := range out.Images {
-			fmt.Fprintf(tw, "%s\t%s\t%d\n", i.Ref, i.State, i.SizeBytes)
+			rows = append(rows, newRow("ref", i.Ref).
+				with("state", i.State).
+				with("sizeBytes", i.SizeBytes))
 		}
-		return tw.Flush()
+		return newPrinter(stdout, flags).table("images", rows)
 
 	case "status":
 		if len(pos) < 2 {
-			return fmt.Errorf("usage: bean image status REF")
+			return usagef("usage: bean image status REF")
 		}
 		var out map[string]any
 		if err := c.doJSON("GET", "/v1/images/status?ref="+url.QueryEscape(pos[1]), nil, &out); err != nil {
 			return err
 		}
-		tw := tabwriter.NewWriter(stdout, 2, 4, 2, ' ', 0)
-		for _, k := range []string{"ref", "digest", "state", "format", "sizeBytes"} {
+		r := newRow("ref", fmt.Sprint(out["ref"]))
+		for _, k := range []string{"digest", "state", "format", "sizeBytes"} {
 			if v, ok := out[k]; ok {
-				fmt.Fprintf(tw, "%s:\t%v\n", k, v)
+				r = r.with(k, v)
 			}
 		}
-		return tw.Flush()
+		return newPrinter(stdout, flags).record(r)
 
 	case "prewarm":
 		if len(pos) < 2 {
-			return fmt.Errorf("usage: bean image prewarm REF... [--replicas N]")
+			return usagef("usage: bean image prewarm REF... [--replicas N]")
 		}
 		body := map[string]any{"refs": pos[1:]}
 		// How widely to warm an image is a capacity decision a caller can act
@@ -680,7 +717,7 @@ func cmdImage(c *Client, args []string, stdout io.Writer) error {
 		if n := flags["replicas"]; n != "" {
 			parsed, err := strconv.Atoi(n)
 			if err != nil {
-				return fmt.Errorf("--replicas %q: not a number", n)
+				return usagef("--replicas %q: not a number", n)
 			}
 			body["targetNodes"] = parsed
 		}
@@ -691,20 +728,32 @@ func cmdImage(c *Client, args []string, stdout io.Writer) error {
 		if err := c.doJSON("POST", "/v1/images/prewarm", body, &out); err != nil {
 			return err
 		}
-		fmt.Fprintf(stdout, "%s\n", out.JobID)
-		// Whether an image is ready is the user's concern; how many machines
-		// hold it is not something they can act on.
-		for ref, n := range out.Ready {
-			state := "warming"
-			if n > 0 {
-				state = "ready"
+		p := newPrinter(stdout, flags)
+		if p.json {
+			// Readiness per image, and the job to poll. Whether an image is
+			// ready is the caller's concern; how many machines hold it is not
+			// something they can act on.
+			refs := make(map[string]string, len(out.Ready))
+			for ref, n := range out.Ready {
+				refs[ref] = readyState(n)
 			}
-			fmt.Fprintf(stdout, "  %s: %s\n", ref, state)
+			return p.encode(map[string]any{"jobId": out.JobID, "images": refs})
+		}
+		if err := p.result(out.JobID); err != nil {
+			return err
+		}
+		names := make([]string, 0, len(out.Ready))
+		for ref := range out.Ready {
+			names = append(names, ref)
+		}
+		sort.Strings(names)
+		for _, ref := range names {
+			p.note("  %s: %s", ref, readyState(out.Ready[ref]))
 		}
 		return nil
 
 	default:
-		return fmt.Errorf("unknown image subcommand %q", pos[0])
+		return usagef("unknown image subcommand %q", pos[0])
 	}
 }
 
@@ -765,9 +814,9 @@ func streamEvents(c *Client, sandbox, label string, stdout io.Writer) error {
 
 // cmdCp copies LOCAL -> sbx:ID:/path or sbx:ID:/path -> LOCAL.
 func cmdCp(c *Client, args []string, stdout io.Writer) error {
-	_, pos := parseFlags(args)
+	flags, pos := parseFlags(args)
 	if len(pos) != 2 {
-		return fmt.Errorf("usage: bean cp SRC DST")
+		return usagef("usage: bean cp SRC DST")
 	}
 	src, dst := pos[0], pos[1]
 	switch {
@@ -796,7 +845,7 @@ func cmdCp(c *Client, args []string, stdout io.Writer) error {
 			body, _ := io.ReadAll(resp.Body)
 			return fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 		}
-		fmt.Fprintf(stdout, "copied %s -> %s:%s\n", src, id, remote)
+		newPrinter(stdout, flags).note("copied %s -> %s:%s", src, id, remote)
 		return nil
 	case strings.HasPrefix(src, "sbx:"):
 		id, remote, err := splitSbxPath(src)
@@ -820,7 +869,7 @@ func cmdCp(c *Client, args []string, stdout io.Writer) error {
 		if _, err := io.Copy(f, resp.Body); err != nil {
 			return err
 		}
-		fmt.Fprintf(stdout, "copied %s:%s -> %s\n", id, remote, dst)
+		newPrinter(stdout, flags).note("copied %s:%s -> %s", id, remote, dst)
 		return nil
 	default:
 		return fmt.Errorf("one side must be sbx:ID:/path")
@@ -847,7 +896,7 @@ func cmdEvents(c *Client, args []string, stdout io.Writer) error {
 		return streamEvents(c, sandbox, flags["label"], stdout)
 	}
 	if len(pos) < 1 {
-		return fmt.Errorf("usage: bean events SBX [-f] [--label k=v]")
+		return usagef("usage: bean events SBX [-f] [--label k=v]")
 	}
 	var out struct {
 		Events []struct {
