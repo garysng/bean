@@ -96,6 +96,16 @@ func main() {
 		log.Fatalf("--cpu-template: %v", err)
 	}
 
+	// The CPU identity is reported so the control plane can refuse to restore a
+	// memory snapshot onto a CPU its guest cannot run on. A node that cannot
+	// read it still starts: the effect is that it will not be chosen for
+	// restores, which is the safe direction to fail in.
+	cpuVendor, cpuFamily, err := runtime.HostCPUIdentity()
+	if err != nil {
+		slog.Warn("cannot read host CPU identity; this node will not be "+
+			"eligible for snapshot restores", logging.KeyError, err)
+	}
+
 	var rt runtime.Runtime
 	switch *rtName {
 	case "local":
@@ -189,6 +199,9 @@ func main() {
 				CpuAllocatable:       *cpuAlloc,
 				MemoryAllocatableMib: *memAlloc,
 				DiskSandboxesMib:     *diskAlloc,
+				CpuVendor:            cpuVendor,
+				CpuFamily:            cpuFamily,
+				CpuTemplate:          string(tmpl),
 			})
 		reg.Advertise = adv
 		ctx, cancel := context.WithCancel(context.Background())

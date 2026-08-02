@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"time"
 
+	"github.com/garysng/bean/internal/control/scheduler"
 	"github.com/garysng/bean/internal/control/snapshot"
 	"github.com/garysng/bean/internal/control/store"
 	nodev1 "github.com/garysng/bean/internal/gen/bean/node/v1"
@@ -59,6 +60,12 @@ func (s *Server) handleCreateSnapshot(w http.ResponseWriter, r *http.Request) {
 		ID: snapID, Name: req.Name, State: store.SnapshotCreating,
 		SandboxID: rec.ID, Image: rec.Image, Runtime: rec.Runtime,
 		NodeID: rec.NodeID, Labels: req.Labels, CreatedAt: time.Now(),
+	}
+	// The CPU the guest's memory was captured on is copied onto the snapshot
+	// rather than looked up from NodeID later: by restore time the node may be
+	// gone, or restarted under a different template.
+	if n := s.nodeRecord(rec.NodeID); n != nil {
+		snap.CPUVendor, snap.CPUFamily, snap.CPUTemplate = n.CPUVendor, n.CPUFamily, n.CPUTemplate
 	}
 	if err := s.store.PutSnapshot(snap); err != nil {
 		writeErr(w, http.StatusInternalServerError, "INTERNAL", err.Error())
@@ -228,8 +235,21 @@ func (s *Server) createFromSnapshot(w http.ResponseWriter, r *http.Request,
 	// prepared environment — unpacks it once.
 	spec.SnapshotId = snap.ID
 
-	nodeID, err := s.placer.Schedule(s.placementFor(rec))
+	// Guest memory carries the CPU it was captured on, so placement is restricted
+	// to nodes that memory can actually run on. Without this the restore succeeds
+	// and the sandbox then misbehaves for reasons nothing reports.
+	place := s.placementFor(rec)
+	place.CPUConstraint = scheduler.CPUConstraint{
+		Vendor: snap.CPUVendor, Family: snap.CPUFamily, Template: snap.CPUTemplate,
+	}
+	nodeID, err := s.placer.Schedule(place)
 	if err != nil {
+		if errors.Is(err, scheduler.ErrIncompatibleCPU) {
+			// 409, not 503: waiting will not help, and a client retrying on
+			// 503 would loop until its own deadline.
+			writeErr(w, http.StatusConflict, "INCOMPATIBLE_CPU", err.Error())
+			return
+		}
 		writeErr(w, http.StatusServiceUnavailable, "NO_CAPACITY", err.Error())
 		return
 	}

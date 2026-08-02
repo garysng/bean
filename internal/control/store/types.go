@@ -293,6 +293,18 @@ type Snapshot struct {
 	NodeID    string `json:"nodeId"`
 	SizeBytes int64  `json:"sizeBytes"`
 
+	// CPUVendor, CPUFamily and CPUTemplate record the CPU the guest's memory was
+	// captured on. They are copied here rather than looked up from NodeID at
+	// restore time: the node may be gone, or may have been restarted with a
+	// different template, and either way the constraint belongs to the snapshot.
+	//
+	// Empty means the snapshot predates this and its portability is unknown, so
+	// restore treats it as unconstrained — refusing old snapshots outright would
+	// break them for no gain, since nothing worse can happen than before.
+	CPUVendor   string `json:"cpuVendor,omitempty"`
+	CPUFamily   int32  `json:"cpuFamily,omitempty"`
+	CPUTemplate string `json:"cpuTemplate,omitempty"`
+
 	Labels map[string]string `json:"labels,omitempty"`
 	// RefCount counts in-progress restores; a snapshot with refs cannot be
 	// deleted out from under them.

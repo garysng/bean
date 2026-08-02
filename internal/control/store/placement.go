@@ -50,6 +50,15 @@ type NodeRecord struct {
 	CachedImages map[string]int64 `json:"cachedImages,omitempty"`
 	NVMeCache    bool             `json:"nvmeCache"`
 
+	// CPUVendor, CPUFamily and CPUTemplate decide where a memory snapshot may be
+	// restored. A guest kernel branches on vendor and family, and no template can
+	// hide either, so restoring across them corrupts the guest instead of failing
+	// cleanly. The model is not recorded on purpose: masking instruction-set
+	// features is what buys portability across models.
+	CPUVendor   string `json:"cpuVendor,omitempty"`
+	CPUFamily   int32  `json:"cpuFamily,omitempty"`
+	CPUTemplate string `json:"cpuTemplate,omitempty"`
+
 	State         string    `json:"state"`
 	AdvertiseAddr string    `json:"advertiseAddr,omitempty"`
 	LastHeartbeat time.Time `json:"lastHeartbeat"`
@@ -89,18 +98,22 @@ func (s *Store) UpsertNode(n *NodeRecord) error {
 	}
 	_, err = s.db.Exec(`
 INSERT INTO nodes(id, region, labels, runtimes, cpu_alloc, mem_alloc, disk_alloc, gpu_count,
-                  max_creates, cached_images, nvme_cache, state, advertise_addr, last_heartbeat)
-VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?)
+                  max_creates, cached_images, nvme_cache, state, advertise_addr, last_heartbeat,
+                  cpu_vendor, cpu_family, cpu_template)
+VALUES(?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)
 ON CONFLICT(id) DO UPDATE SET
   region=excluded.region, labels=excluded.labels, runtimes=excluded.runtimes,
   cpu_alloc=excluded.cpu_alloc, mem_alloc=excluded.mem_alloc,
   disk_alloc=excluded.disk_alloc, gpu_count=excluded.gpu_count,
   max_creates=excluded.max_creates, cached_images=excluded.cached_images,
   nvme_cache=excluded.nvme_cache, state=excluded.state,
-  advertise_addr=excluded.advertise_addr, last_heartbeat=excluded.last_heartbeat`,
+  advertise_addr=excluded.advertise_addr, last_heartbeat=excluded.last_heartbeat,
+  cpu_vendor=excluded.cpu_vendor, cpu_family=excluded.cpu_family,
+  cpu_template=excluded.cpu_template`,
 		n.ID, n.Region, labels, runtimes, n.CPUAllocatable, n.MemoryAllocateMiB,
 		n.DiskAllocateMiB, n.GPUCount, n.MaxCreates, cached, n.NVMeCache,
-		n.State, n.AdvertiseAddr, n.LastHeartbeat.UnixMilli())
+		n.State, n.AdvertiseAddr, n.LastHeartbeat.UnixMilli(),
+		n.CPUVendor, n.CPUFamily, n.CPUTemplate)
 	return err
 }
 
@@ -113,7 +126,8 @@ func (s *Store) LoadNodes() ([]*NodeRecord, error) {
 SELECT id, region, labels, runtimes, cpu_alloc, mem_alloc, disk_alloc, gpu_count,
        cpu_committed, mem_committed, disk_committed, gpu_committed,
        create_in_flight, max_creates, cached_images, nvme_cache, state,
-       advertise_addr, last_heartbeat
+       advertise_addr, last_heartbeat,
+       cpu_vendor, cpu_family, cpu_template
 FROM nodes ORDER BY id`)
 	if err != nil {
 		return nil, err
@@ -138,7 +152,8 @@ func (s *Store) GetNode(id string) (*NodeRecord, error) {
 SELECT id, region, labels, runtimes, cpu_alloc, mem_alloc, disk_alloc, gpu_count,
        cpu_committed, mem_committed, disk_committed, gpu_committed,
        create_in_flight, max_creates, cached_images, nvme_cache, state,
-       advertise_addr, last_heartbeat
+       advertise_addr, last_heartbeat,
+       cpu_vendor, cpu_family, cpu_template
 FROM nodes WHERE id=?`, id)
 	n, err := scanNode(row)
 	if err == sql.ErrNoRows {
@@ -159,7 +174,8 @@ func scanNode(sc rowScanner) (*NodeRecord, error) {
 		&n.CPUAllocatable, &n.MemoryAllocateMiB, &n.DiskAllocateMiB, &n.GPUCount,
 		&n.CPUCommitted, &n.MemoryCommitMiB, &n.DiskCommitMiB, &n.GPUCommitted,
 		&n.CreateInFlight, &n.MaxCreates, &cached, &n.NVMeCache, &n.State,
-		&n.AdvertiseAddr, &hb); err != nil {
+		&n.AdvertiseAddr, &hb,
+		&n.CPUVendor, &n.CPUFamily, &n.CPUTemplate); err != nil {
 		return nil, err
 	}
 	if err := unmarshalJSON(labels, &n.Labels); err != nil {

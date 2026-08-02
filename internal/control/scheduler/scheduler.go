@@ -24,6 +24,15 @@ import (
 // ErrNoCapacity reports that no node can host the request.
 var ErrNoCapacity = errors.New("no capacity")
 
+// ErrIncompatibleCPU reports that a restore was refused because no node has a
+// CPU the snapshot's guest memory can run on.
+//
+// It is distinct from ErrNoCapacity because the remedies have nothing in common:
+// capacity comes back on its own, while this needs either a node of the right
+// kind or a snapshot taken differently. Collapsing them would send the reader to
+// look at resource limits.
+var ErrIncompatibleCPU = errors.New("incompatible cpu")
+
 // Node liveness states. A node is only a placement candidate while READY.
 const (
 	NodeReady    = "READY"
@@ -48,6 +57,10 @@ type Request struct {
 	// SpreadKey groups related sandboxes (an eval run, say) so one node
 	// failure cannot swallow the whole group.
 	SpreadKey string
+	// CPU restricts placement to nodes that can restore a memory snapshot. It
+	// is set only for restores; a fresh sandbox has no guest memory to carry
+	// and so is unconstrained.
+	CPUConstraint CPUConstraint
 }
 
 // Weights tune scoring. They are configurable so the balance can be tuned
@@ -116,6 +129,13 @@ func (s *Scheduler) Schedule(req *Request) (string, error) {
 
 		ranked := s.rank(nodes, spread, req)
 		if len(ranked) == 0 {
+			// A CPU mismatch would otherwise be reported as missing capacity,
+			// which sends the reader looking at resource limits for a problem
+			// that no amount of free capacity can fix.
+			if why := s.cpuRejection(nodes, req); why != "" {
+				return "", fmt.Errorf("%w: cannot restore %s: %s",
+					ErrIncompatibleCPU, req.SandboxID, why)
+			}
 			return "", fmt.Errorf("%w: no node in region %s fits %s "+
 				"(cpu=%.1f mem=%dMiB disk=%dMiB gpu=%d runtime=%s)",
 				ErrNoCapacity, req.Region, req.SandboxID,
@@ -214,10 +234,39 @@ func (s *Scheduler) feasible(n *store.NodeRecord, req *Request) bool {
 	if n.MaxCreates > 0 && n.CreateInFlight >= n.MaxCreates {
 		return false
 	}
+	// Restoring guest memory onto an incompatible CPU produces a sandbox that
+	// resumes and then misbehaves, so this belongs in the hard filter rather
+	// than in scoring.
+	if req.CPUConstraint.CheckCPU(n.CPUVendor, n.CPUFamily) != nil {
+		return false
+	}
 	return n.CPUCommitted+req.CPU <= n.CPUAllocatable &&
 		n.MemoryCommitMiB+req.MemoryMiB <= n.MemoryAllocateMiB &&
 		n.DiskCommitMiB+req.DiskMiB <= n.DiskAllocateMiB &&
 		n.GPUCommitted+req.GPU <= n.GPUCount
+}
+
+// cpuRejection explains a CPU mismatch when that is why nothing was feasible.
+//
+// It returns "" unless the CPU constraint is the deciding factor: a node that
+// was also out of capacity would be rejected either way, and blaming the CPU for
+// it would be misleading. So this only speaks up when some node in the region
+// would have fit apart from its CPU.
+func (s *Scheduler) cpuRejection(nodes []*store.NodeRecord, req *Request) string {
+	if !req.CPUConstraint.Constrained() {
+		return ""
+	}
+	probe := *req
+	probe.CPUConstraint = CPUConstraint{}
+	for _, n := range nodes {
+		if !s.feasible(n, &probe) {
+			continue
+		}
+		if err := req.CPUConstraint.CheckCPU(n.CPUVendor, n.CPUFamily); err != nil {
+			return err.Error()
+		}
+	}
+	return ""
 }
 
 // score ranks a feasible node; higher is better.

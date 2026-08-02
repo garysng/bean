@@ -2,11 +2,35 @@ package api
 
 import (
 	"net/http"
+
+	"github.com/garysng/bean/internal/control/store"
 )
 
 // Node endpoints are the operational view of the cluster: what capacity
 // exists, how much is promised, and which nodes are healthy enough to
 // receive work.
+
+// nodeRecord returns one node's record, or nil if it is unknown.
+//
+// Callers use this for facts about a node that need copying elsewhere, such as
+// the CPU a snapshot was taken on. A missing node yields nil rather than an
+// error: the operations that need this are not worth failing over a node that
+// has since been removed, and each decides for itself what to do without it.
+func (s *Server) nodeRecord(nodeID string) *store.NodeRecord {
+	if nodeID == "" {
+		return nil
+	}
+	nodes, err := s.placer.Nodes()
+	if err != nil {
+		return nil
+	}
+	for _, n := range nodes {
+		if n.ID == nodeID {
+			return n
+		}
+	}
+	return nil
+}
 
 func (s *Server) handleListNodes(w http.ResponseWriter, r *http.Request) {
 	nodes, err := s.placer.Nodes()
@@ -28,6 +52,11 @@ func (s *Server) handleListNodes(w http.ResponseWriter, r *http.Request) {
 			"createInFlight": n.CreateInFlight, "maxCreates": n.MaxCreates,
 			"cachedImages":  len(n.CachedImages),
 			"lastHeartbeat": n.LastHeartbeat,
+			// The CPU decides which memory snapshots can be restored here, so
+			// it belongs in the operational view: without it, a refused restore
+			// cannot be explained from the API alone.
+			"cpuVendor": n.CPUVendor, "cpuFamily": n.CPUFamily,
+			"cpuTemplate": n.CPUTemplate,
 		})
 	}
 	writeJSON(w, http.StatusOK, map[string]any{"nodes": out})

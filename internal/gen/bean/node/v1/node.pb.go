@@ -208,8 +208,19 @@ type NodeResources struct {
 	MemoryAllocatableMib int64                  `protobuf:"varint,2,opt,name=memory_allocatable_mib,json=memoryAllocatableMib,proto3" json:"memory_allocatable_mib,omitempty"`
 	DiskSandboxesMib     int64                  `protobuf:"varint,3,opt,name=disk_sandboxes_mib,json=diskSandboxesMib,proto3" json:"disk_sandboxes_mib,omitempty"`
 	GpuCount             int32                  `protobuf:"varint,4,opt,name=gpu_count,json=gpuCount,proto3" json:"gpu_count,omitempty"`
-	unknownFields        protoimpl.UnknownFields
-	sizeCache            protoimpl.SizeCache
+	// cpu_vendor and cpu_family constrain where a memory snapshot taken on this
+	// node can be restored: a guest kernel branches on both for errata handling
+	// and MSR access, and no CPU template can hide them. The model is
+	// deliberately absent — masking instruction-set features is what makes a
+	// snapshot portable across models, so matching on model would defeat it.
+	CpuVendor string `protobuf:"bytes,5,opt,name=cpu_vendor,json=cpuVendor,proto3" json:"cpu_vendor,omitempty"`
+	CpuFamily int32  `protobuf:"varint,6,opt,name=cpu_family,json=cpuFamily,proto3" json:"cpu_family,omitempty"`
+	// cpu_template is the masking policy this node boots guests under ("none" or
+	// "portable"). A memory snapshot is only portable across CPU generations if
+	// it was taken under a template, so restore has to know which one produced it.
+	CpuTemplate   string `protobuf:"bytes,7,opt,name=cpu_template,json=cpuTemplate,proto3" json:"cpu_template,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
 func (x *NodeResources) Reset() {
@@ -268,6 +279,27 @@ func (x *NodeResources) GetGpuCount() int32 {
 		return x.GpuCount
 	}
 	return 0
+}
+
+func (x *NodeResources) GetCpuVendor() string {
+	if x != nil {
+		return x.CpuVendor
+	}
+	return ""
+}
+
+func (x *NodeResources) GetCpuFamily() int32 {
+	if x != nil {
+		return x.CpuFamily
+	}
+	return 0
+}
+
+func (x *NodeResources) GetCpuTemplate() string {
+	if x != nil {
+		return x.CpuTemplate
+	}
+	return ""
 }
 
 type HeartbeatRequest struct {
@@ -1912,12 +1944,17 @@ const file_bean_node_v1_node_proto_rawDesc = "" +
 	"node_token\x18\x01 \x01(\tR\tnodeToken\x12<\n" +
 	"\x1aheartbeat_interval_seconds\x18\x02 \x01(\x03R\x18heartbeatIntervalSeconds\".\n" +
 	"\x10NodeCapabilities\x12\x1a\n" +
-	"\bruntimes\x18\x01 \x03(\tR\bruntimes\"\xb9\x01\n" +
+	"\bruntimes\x18\x01 \x03(\tR\bruntimes\"\x9a\x02\n" +
 	"\rNodeResources\x12'\n" +
 	"\x0fcpu_allocatable\x18\x01 \x01(\x01R\x0ecpuAllocatable\x124\n" +
 	"\x16memory_allocatable_mib\x18\x02 \x01(\x03R\x14memoryAllocatableMib\x12,\n" +
 	"\x12disk_sandboxes_mib\x18\x03 \x01(\x03R\x10diskSandboxesMib\x12\x1b\n" +
-	"\tgpu_count\x18\x04 \x01(\x05R\bgpuCount\"\xcc\x02\n" +
+	"\tgpu_count\x18\x04 \x01(\x05R\bgpuCount\x12\x1d\n" +
+	"\n" +
+	"cpu_vendor\x18\x05 \x01(\tR\tcpuVendor\x12\x1d\n" +
+	"\n" +
+	"cpu_family\x18\x06 \x01(\x05R\tcpuFamily\x12!\n" +
+	"\fcpu_template\x18\a \x01(\tR\vcpuTemplate\"\xcc\x02\n" +
 	"\x10HeartbeatRequest\x12\x17\n" +
 	"\anode_id\x18\x01 \x01(\tR\x06nodeId\x12\x1d\n" +
 	"\n" +

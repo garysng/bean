@@ -75,6 +75,17 @@ message NodeResources {
   int64 memory_allocatable_mib = 2;
   int64 disk_sandboxes_mib = 3;
   int32 gpu_count = 4;
+  // cpu_vendor and cpu_family constrain where a memory snapshot taken on this
+  // node can be restored: a guest kernel branches on both for errata handling
+  // and MSR access, and no CPU template can hide them. The model is
+  // deliberately absent — masking instruction-set features is what makes a
+  // snapshot portable across models, so matching on model would defeat it.
+  string cpu_vendor = 5;
+  int32 cpu_family = 6;
+  // cpu_template is the masking policy this node boots guests under ("none" or
+  // "portable"). A memory snapshot is only portable across CPU generations if
+  // it was taken under a template, so restore has to know which one produced it.
+  string cpu_template = 7;
 }
 
 message HeartbeatRequest {

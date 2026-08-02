@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -109,7 +110,14 @@ CREATE TABLE IF NOT EXISTS nodes (
   nvme_cache INTEGER NOT NULL DEFAULT 0,
   state TEXT NOT NULL DEFAULT 'READY',
   advertise_addr TEXT NOT NULL DEFAULT '',
-  last_heartbeat INTEGER NOT NULL DEFAULT 0
+  last_heartbeat INTEGER NOT NULL DEFAULT 0,
+  -- The CPU a node's guests run on, which decides whether a memory snapshot
+  -- taken elsewhere can be restored here. Empty means the node has not reported
+  -- it, and a restore treats that as "cannot confirm compatible" rather than
+  -- as permission.
+  cpu_vendor TEXT NOT NULL DEFAULT '',
+  cpu_family INTEGER NOT NULL DEFAULT 0,
+  cpu_template TEXT NOT NULL DEFAULT ''
 );
 CREATE INDEX IF NOT EXISTS idx_nodes_region_state ON nodes(region, state);
 -- One reservation per sandbox: the primary key makes Reserve idempotent
@@ -142,7 +150,39 @@ CREATE TABLE IF NOT EXISTS registry_credentials (
   updated_at INTEGER NOT NULL
 );
 `)
-	return err
+	if err != nil {
+		return err
+	}
+	return s.addMissingColumns()
+}
+
+// addMissingColumns brings an existing database up to the current schema.
+//
+// CREATE TABLE IF NOT EXISTS does nothing to a table that already exists, so a
+// column added to the schema above would be missing from every database created
+// before it — and the failure is a scan error at runtime, not at startup.
+//
+// Records stored as JSON blobs do not need this; only the columns promoted for
+// querying do.
+func (s *Store) addMissingColumns() error {
+	// ALTER TABLE ADD COLUMN fails when the column is already there, and SQLite
+	// has no IF NOT EXISTS for it, so a duplicate-column error is the expected
+	// outcome on an up-to-date database rather than a problem.
+	for _, stmt := range []string{
+		`ALTER TABLE nodes ADD COLUMN cpu_vendor TEXT NOT NULL DEFAULT ''`,
+		`ALTER TABLE nodes ADD COLUMN cpu_family INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE nodes ADD COLUMN cpu_template TEXT NOT NULL DEFAULT ''`,
+	} {
+		if _, err := s.db.Exec(stmt); err != nil && !isDuplicateColumn(err) {
+			return fmt.Errorf("migrate: %q: %w", stmt, err)
+		}
+	}
+	return nil
+}
+
+// isDuplicateColumn reports SQLite's complaint about an already-present column.
+func isDuplicateColumn(err error) bool {
+	return strings.Contains(err.Error(), "duplicate column name")
 }
 
 // marshalJSON encodes a value for a JSON column, using an empty object or
