@@ -130,14 +130,18 @@ func (r *FCRuntime) killVMM(vm *fcVM) {
 	}
 }
 
-// Checkpoint writes a full Firecracker snapshot: guest memory, device state and
-// the writable rootfs, bundled as a tar stream.
+// Checkpoint writes a Firecracker snapshot: the writable rootfs, and — unless
+// the caller opted out — guest memory and device state, bundled as a tar stream.
 //
 // The VM must be paused for the snapshot to be consistent, and Firecracker
 // requires it. A caller that asked to keep the sandbox running gets it resumed
 // afterwards; that decision belongs to the control plane, so the previous state
 // is restored rather than assumed.
-func (r *FCRuntime) Checkpoint(ctx context.Context, id string, w io.Writer) error {
+//
+// Pausing happens for both kinds. Without memory the pause is still what makes
+// the filesystem coherent: a guest writing while its device is read would put
+// a torn write into the checkpoint.
+func (r *FCRuntime) Checkpoint(ctx context.Context, id string, w io.Writer, opts CheckpointOptions) error {
 	vm, err := r.get(id)
 	if err != nil {
 		return err
@@ -158,6 +162,18 @@ func (r *FCRuntime) Checkpoint(ctx context.Context, id string, w io.Writer) erro
 				fmt.Fprintf(os.Stderr, "fc: resume %s after snapshot: %v\n", id, err)
 			}
 		}()
+	}
+
+	if !opts.IncludeMemory {
+		// Only the filesystem. Restore boots a fresh guest from it, so nothing
+		// ties the result to this host's CPU — which is the entire reason to
+		// choose this over a full snapshot.
+		//
+		// The bundle carries just the rootfs member, and restore dispatches on
+		// which members are present. That keeps the two kinds distinguishable
+		// from the bundle alone, so a checkpoint stays self-describing rather
+		// than depending on a database row that could disagree with it.
+		return writeSnapshotBundle(w, "", "", vm.rootfs.Writable)
 	}
 
 	snapDir := filepath.Join(vm.dir, "snapshot")
@@ -215,11 +231,16 @@ func writeBundleEntries(w io.Writer, statePath, memPath, rootfsPath string) erro
 	tw := tar.NewWriter(w)
 
 	// vmstate and the memory file are dense — Firecracker writes every byte —
-	// so they go in whole.
+	// so they go in whole. An empty path omits the member, which is how a
+	// filesystem-only checkpoint is expressed: restore sees no memory member and
+	// boots a fresh guest instead of resuming one.
 	for _, m := range []struct{ name, path string }{
 		{snapshotStateFile, statePath},
 		{snapshotMemFile, memPath},
 	} {
+		if m.path == "" {
+			continue
+		}
 		if err := writeTarFile(tw, m.name, m.path); err != nil {
 			return fmt.Errorf("fc: bundle %s: %w", m.name, err)
 		}
@@ -367,10 +388,16 @@ func writeZeros(dst io.Writer, n int64) (int64, error) {
 // soon as either writes, so its extents are replayed onto this sandbox's own
 // device. Those extents are small (a fresh sandbox has written almost nothing),
 // which is what makes the split worth having.
-func (r *FCRuntime) loadSnapshot(ctx context.Context, vm *fcVM, spec *Spec, src io.Reader) error {
-	entry, err := r.snapshotState(vm, spec, src)
-	if err != nil {
-		return err
+func (r *FCRuntime) loadSnapshot(ctx context.Context, vm *fcVM, spec *Spec, stage *snapshotStage) error {
+	entry := stage.entry
+
+	// A checkpoint taken without memory has no machine state to load, so the
+	// guest is booted onto the restored filesystem instead. Dispatching on the
+	// bundle's contents rather than on a flag from the caller keeps a checkpoint
+	// self-describing: the alternative is a database row that can disagree with
+	// the bytes, and the disagreement would surface as a failed load.
+	if entry.MemPath == "" {
+		return r.configureAndBoot(ctx, vm, spec)
 	}
 
 	// Guest memory is served on demand rather than read up front. With the File
@@ -411,9 +438,10 @@ func (r *FCRuntime) loadSnapshot(ctx context.Context, vm *fcVM, spec *Spec, src 
 
 // snapshotState produces the machine state and memory image to restore from,
 // unpacking the bundle only if this node has not already done so for this
-// snapshot. The writable rootfs is replayed onto this sandbox's device either
-// way, since it cannot be shared.
-func (r *FCRuntime) snapshotState(vm *fcVM, spec *Spec, src io.Reader) (snapEntry, error) {
+// snapshot. The writable layer is always extracted, to rootfsDest, because it
+// cannot be shared: two sandboxes restored from one checkpoint diverge as soon
+// as either writes.
+func (r *FCRuntime) snapshotState(rootfsDest string, spec *Spec, src io.Reader) (snapEntry, error) {
 	id := ""
 	if spec != nil {
 		id = spec.SnapshotID
@@ -422,24 +450,20 @@ func (r *FCRuntime) snapshotState(vm *fcVM, spec *Spec, src io.Reader) (snapEntr
 	if id != "" {
 		if entry, ok := r.snapshots.Lookup(id); ok {
 			// The reusable parts are already on disk, but this sandbox still
-			// needs the snapshot's filesystem on its own device.
-			if _, err := readSnapshotBundle(src, "", vm.rootfs.Writable); err != nil {
+			// needs the snapshot's filesystem for its own device.
+			if _, err := readSnapshotBundle(src, "", rootfsDest); err != nil {
 				return snapEntry{}, err
 			}
 			return entry, nil
 		}
 		return r.snapshots.Fill(id, src, func(dir string) (map[string]string, error) {
-			return readSnapshotBundle(src, dir, vm.rootfs.Writable)
+			return readSnapshotBundle(src, dir, rootfsDest)
 		})
 	}
 
-	// Without an id there is nothing to key a cache on, so the bundle is
-	// unpacked into this sandbox's own directory.
-	restoreDir := filepath.Join(vm.dir, "restore")
-	if err := os.MkdirAll(restoreDir, 0o700); err != nil {
-		return snapEntry{}, fmt.Errorf("fc: create restore dir: %w", err)
-	}
-	paths, err := readSnapshotBundle(src, restoreDir, vm.rootfs.Writable)
+	// Without an id there is nothing to key a cache on, so the reusable parts
+	// are unpacked alongside the writable layer and discarded with it.
+	paths, err := readSnapshotBundle(src, filepath.Dir(rootfsDest), rootfsDest)
 	if err != nil {
 		return snapEntry{}, err
 	}
@@ -452,16 +476,16 @@ func (r *FCRuntime) snapshotState(vm *fcVM, spec *Spec, src io.Reader) (snapEntr
 	}, nil
 }
 
-// readSnapshotBundle extracts a bundle. The rootfs is written straight over the
-// device the provider prepared, so the restored guest sees the filesystem it
-// was snapshotted with rather than a fresh copy of the base image.
+// readSnapshotBundle extracts a bundle to files, writing the writable layer's
+// extent stream to rootfsDest. It does not touch any block device: the layer is
+// applied to one later, while the provider is assembling it.
 //
 // An empty dir skips the machine state and memory image, which is what a restore
 // wants when the node already holds them unpacked: the stream still has to be
 // read to reach the rootfs member, but writing 512 MiB of memory image again is
-// the cost the cache exists to avoid. An empty rootfsDevice likewise skips the
+// the cost the cache exists to avoid. An empty rootfsDest likewise skips the
 // filesystem.
-func readSnapshotBundle(src io.Reader, dir, rootfsDevice string) (map[string]string, error) {
+func readSnapshotBundle(src io.Reader, dir, rootfsDest string) (map[string]string, error) {
 	zr, err := gzip.NewReader(src)
 	if err != nil {
 		return nil, fmt.Errorf("fc: open snapshot bundle: %w", err)
@@ -487,42 +511,38 @@ func readSnapshotBundle(src io.Reader, dir, rootfsDevice string) (map[string]str
 			}
 			dest = filepath.Join(dir, hdr.Name)
 		case snapshotRootfsFile:
-			if rootfsDevice == "" {
+			if rootfsDest == "" {
 				continue
 			}
-			dest = rootfsDevice
+			dest = rootfsDest
 		default:
 			// An unknown member is skipped rather than rejected, so a bundle
 			// gaining parts stays loadable by an older node.
 			continue
 		}
 
-		if err := writeBundleMember(tr, dest, hdr.Name == snapshotRootfsFile); err != nil {
+		if err := writeBundleMember(tr, dest); err != nil {
 			return nil, fmt.Errorf("fc: extract %s: %w", hdr.Name, err)
 		}
 		paths[hdr.Name] = dest
 	}
 }
 
-// writeBundleMember extracts one member. sparse selects the extent-list format
-// the writable layer is stored in; the dense members are copied whole.
-func writeBundleMember(src io.Reader, dest string, sparse bool) error {
-	flags := os.O_CREATE | os.O_WRONLY | os.O_TRUNC
-	if sparse {
-		// The destination is the layer the provider already created at the
-		// right size. Truncating it would discard that, so it is written in
-		// place.
-		flags = os.O_WRONLY
-	}
-	f, err := os.OpenFile(dest, flags, 0o600)
+// writeBundleMember copies one member to a staging file, verbatim.
+//
+// The writable layer stays in its extent-list form here rather than being
+// expanded: it is decoded once, onto the device, while the provider assembles
+// it. Expanding it now and copying the result later would decode it twice, and
+// writing it onto a device at this point is what corrupted a restore — a
+// device-mapper snapshot has already read its exception table by then, so the
+// bytes land in a store the kernel is no longer consulting.
+func writeBundleMember(src io.Reader, dest string) error {
+	f, err := os.OpenFile(dest, os.O_CREATE|os.O_WRONLY|os.O_TRUNC, 0o600)
 	if err != nil {
 		return err
 	}
 	defer f.Close()
 
-	if sparse {
-		return readSparse(src, f)
-	}
 	if _, err := io.Copy(f, src); err != nil {
 		return err
 	}

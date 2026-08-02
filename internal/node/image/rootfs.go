@@ -48,15 +48,33 @@ func (r *Rootfs) Release() error {
 	return release()
 }
 
+// PrepareOptions carries what a provider needs beyond the image reference.
+type PrepareOptions struct {
+	// SizeMiB bounds the writable layer; zero means the provider's default.
+	SizeMiB int64
+
+	// SeedWritable, when set, populates the writable layer from a checkpoint. It
+	// is called with the layer's path once it exists at its final size and
+	// before the device is assembled from it.
+	//
+	// The ordering is the whole reason this is a provider concern rather than
+	// something the runtime does after Prepare returns. A device-mapper
+	// snapshot reads its exception table into kernel memory when the device is
+	// activated and never re-reads it, so bytes written to the copy-on-write
+	// store afterwards are invisible: the device keeps serving the base image.
+	// That failure is silent — the guest's own metadata still describes the
+	// files, so they appear with the right size and read back as zeroes.
+	SeedWritable func(dest string) error
+}
+
 // Provider turns an image reference into a rootfs. Implementations differ in
 // how the bytes arrive — lazily from object storage, or copied up front — but
 // not in what the runtime receives.
 type Provider interface {
 	// Name identifies the provider in logs and node capabilities.
 	Name() string
-	// Prepare returns a writable rootfs for one sandbox. sizeMiB bounds the
-	// writable layer; zero means the provider's default.
-	Prepare(ctx context.Context, sandboxID, imageRef string, sizeMiB int64) (*Rootfs, error)
+	// Prepare returns a writable rootfs for one sandbox.
+	Prepare(ctx context.Context, sandboxID, imageRef string, opts PrepareOptions) (*Rootfs, error)
 	// Prewarm materialises an image's read-only layers without creating a
 	// sandbox, so a later Prepare is fast. It is the node side of the
 	// control plane's prewarm job.
@@ -87,10 +105,11 @@ type FileProvider struct {
 
 func (p *FileProvider) Name() string { return "file" }
 
-func (p *FileProvider) Prepare(ctx context.Context, sandboxID, imageRef string, sizeMiB int64) (*Rootfs, error) {
+func (p *FileProvider) Prepare(ctx context.Context, sandboxID, imageRef string, opts PrepareOptions) (*Rootfs, error) {
 	if sandboxID == "" {
 		return nil, errors.New("image: sandbox id required")
 	}
+	sizeMiB := opts.SizeMiB
 	if sizeMiB <= 0 {
 		sizeMiB = p.DefaultSizeMiB
 	}
@@ -112,6 +131,16 @@ func (p *FileProvider) Prepare(ctx context.Context, sandboxID, imageRef string, 
 	if err := cloneSparse(base, path, sizeMiB); err != nil {
 		os.RemoveAll(dir)
 		return nil, err
+	}
+
+	// This provider has no device to assemble, so seeding is just a write. It is
+	// still done here rather than left to the caller so that every provider
+	// establishes the writable layer at the same point in the sequence.
+	if opts.SeedWritable != nil {
+		if err := opts.SeedWritable(path); err != nil {
+			os.RemoveAll(dir)
+			return nil, fmt.Errorf("image: seed writable layer: %w", err)
+		}
 	}
 
 	return &Rootfs{

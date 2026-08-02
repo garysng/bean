@@ -106,6 +106,16 @@ restore ~950ms(同一快照首次 1617ms,要付 unpack 代价);
 其中 FC `/snapshot/load` 只占 7ms —— guest 内存按需供页(UFFD),
 不再把整个内存镜像读进来。剩下的成本是解 bundle。
 
+`--no-memory` 只存文件系统:实测 bundle **6109 字节**对全量 15.5 MB(2550×),
+restore 重新 boot 但保留文件(`uptime 0` 且 marker 在),可落任意 CPU。
+
+**restore 曾经会静默损坏文件系统**,已修:dm-snapshot 在设备激活时就把
+exception table 读进内核,而 restore 是在那之后才把 extents 写进 `cow.img` ——
+内核不认,设备继续供 base image。full snapshot 上这不可见,因为读命中的是
+内存快照带回的 page cache;`drop_caches` 之后同一个文件读出 9 个 `\0`,
+而 `ls` 仍显示 size=9、无 EIO、无 dmesg。现在 CoW 在组装设备**之前**恢复,
+两条路径都实测过 drop_caches 后仍正确。详见 `docs/decisions.md` §3.0。
+
 **内存快照绑 CPU**,所以 restore 是受约束的:节点上报 vendor/family/template,
 快照记下产出它的那三项,调度器按此硬过滤,不兼容返回 409 `INCOMPATIBLE_CPU`
 而不是放置后让 guest 崩。`--cpu-template portable` 掩掉宽向量特征

@@ -197,6 +197,47 @@ dm-snapshot 只要 `dm_snapshot` 模块。
 agentenv 的 `uffd-core/src/overlaybd.rs` 表明这两件事可以合并:
 UFFD 缺页直接从 overlaybd 镜像读。这是比我们现在更远的一步。
 
+### 3.0 restore 必须在设备组装**之前**恢复 CoW
+
+dm-snapshot 在 `dmsetup create` 那一刻把 exception table 读进内核内存,之后不再回读。
+往一个**已激活**设备的 CoW 后端补写,内核不认这些 chunk —— 设备继续供 base image。
+
+原来的 restore 正是这么做的:`Prepare()` 组好设备,再把快照 extents 写进 `cow.img`。
+
+**这个 bug 在 full snapshot 上是静默的**,实测(Zen 2 / 6.1.102):
+
+```
+恢复后立即读:  cat /root/marker  →  survives      ← 命中内存快照带回的 page cache
+drop_caches 后: cat /root/marker  →  (9 个 \0)     ← 真去读块设备
+                ls -la            →  size = 9      ← 元数据在内存里,是对的
+                dmesg             →  无任何错误
+```
+
+文件系统没有任何异常信号:size 对、无 EIO、无 dmesg。只有内容是零。
+元数据活在内存镜像里,数据活在块设备上,两边不一致而 ext4 没有理由怀疑。
+memoryless 快照没有 page cache 可依赖,所以**立刻**暴露成「文件不见了」——
+是它把这个一直存在的缺陷翻出来的。
+
+**修法**:`PrepareOptions.SeedWritable` 回调,provider 在「CoW 建好」与
+「组装设备」之间调用它。restore 因此改成先把 bundle 落到 staging 目录,
+再交给 `Prepare`,extent 流原样暂存、只在写进设备时解码一次。
+
+竞品对照:**没人往已激活设备的 CoW 里补写**。firecracker-containerd 的
+devmapper snapshotter 是 thin-pool 先派生再 activate,顺序天生正确;
+Lambda SnapStart 用 chunk 化的惰性加载块设备供给;E2B 的 rootfs 就是宿主文件,
+CoW 在文件系统层。Firecracker 上游文档则直接把磁盘状态甩给调用方保证 ——
+我们踩的是它警告过的那一类。
+
+**测试为什么之前没抓到**:三层验证全在错误的抽象层。单测测 tar 进出(数据确实写进了
+文件,bug 在文件之下);e2e 读的是 guest 里的文件(命中 page cache);
+`dmsetup status` 看的是快照**源**的设备。没有一层去读**恢复后的块设备本身**。
+
+现在 `TestDevMapperSeedIsVisibleThroughDevice` 挂载 `/dev/mapper/...` 读回,
+不经过 guest。已验证把 seed 挪回 `dmsetup create` 之后该测试立刻失败。
+
+**由此得到一条通用规则**:状态同时存在于内存和磁盘时,只读内存的测试是假的。
+任何「恢复后数据还在」的断言,必须先 `drop_caches`。这条同样适用于后面的 diff snapshot。
+
 ### 3.1 overlaybd lazy-pull:已在 tcmu 后端实测跑通
 
 **实测**(2026-08-02,Ubuntu 20.04 / 内核 5.15 / tcmu 后端 / alpine 3.20):

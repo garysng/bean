@@ -61,12 +61,29 @@ type Runtime interface {
 	// Checkpoint writes a restorable representation of the sandbox to w.
 	// The format is runtime-specific and not interchangeable between
 	// tiers, which is why a snapshot records the runtime that produced it.
-	Checkpoint(ctx context.Context, id string, w io.Writer) error
+	Checkpoint(ctx context.Context, id string, w io.Writer, opts CheckpointOptions) error
 
 	// Restore creates a sandbox from a checkpoint previously written by the
 	// same runtime. The spec supplies identity and resources; the
 	// checkpoint supplies the filesystem (and, for microVMs, memory).
 	Restore(ctx context.Context, spec *Spec, r io.Reader) (*Handle, error)
+}
+
+// CheckpointOptions selects what a checkpoint captures.
+type CheckpointOptions struct {
+	// IncludeMemory captures guest memory and device state, so a restore
+	// resumes the running guest — its process tree, open files and in-memory
+	// state survive.
+	//
+	// The cost is portability. Guest memory records decisions the guest made
+	// from the CPU it booted on, and its vendor and family cannot be masked
+	// (see cpu_template.go), so such a checkpoint can only be restored on a
+	// compatible CPU. Without memory the checkpoint is just a filesystem and
+	// restores anywhere, but the guest boots fresh rather than resuming.
+	//
+	// The two are genuinely different operations rather than a size trade-off,
+	// which is why this is a caller's choice and not a heuristic.
+	IncludeMemory bool
 }
 
 // ImageWarmer is implemented by runtimes that can make an image ready before a

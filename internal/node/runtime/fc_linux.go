@@ -228,7 +228,22 @@ func (r *FCRuntime) create(ctx context.Context, spec *Spec, restoreFrom io.Reade
 	}()
 	cleanup = append(cleanup, func() { os.RemoveAll(dir) })
 
-	rootfs, err := r.Images.Prepare(ctx, spec.SandboxID, spec.Image, spec.DiskMiB)
+	// A restore's bundle is unpacked before the rootfs is prepared, so the
+	// writable layer can be seeded while the provider is still assembling it.
+	// See snapstage_linux.go for why the order is load-bearing.
+	var stage *snapshotStage
+	if restoreFrom != nil {
+		stage, err = r.stageSnapshot(filepath.Join(dir, "stage"), spec, restoreFrom)
+		if err != nil {
+			return nil, err
+		}
+		defer stage.Close()
+	}
+
+	rootfs, err := r.Images.Prepare(ctx, spec.SandboxID, spec.Image, image.PrepareOptions{
+		SizeMiB:      spec.DiskMiB,
+		SeedWritable: stage.SeedWritable,
+	})
 	if err != nil {
 		return nil, fmt.Errorf("fc: prepare rootfs: %w", err)
 	}
@@ -266,8 +281,8 @@ func (r *FCRuntime) create(ctx context.Context, spec *Spec, restoreFrom io.Reade
 		return nil, fmt.Errorf("fc: api socket: %w", err)
 	}
 
-	if restoreFrom != nil {
-		if err = r.loadSnapshot(ctx, vm, spec, restoreFrom); err != nil {
+	if stage != nil {
+		if err = r.loadSnapshot(ctx, vm, spec, stage); err != nil {
 			return nil, err
 		}
 	} else {

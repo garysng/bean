@@ -49,15 +49,15 @@ func (p *PullingProvider) Name() string { return p.Inner.Name() + "+pull" }
 // Cached defers to the inner provider, which owns the image directory.
 func (p *PullingProvider) Cached() (map[string]int64, error) { return p.Inner.Cached() }
 
-func (p *PullingProvider) Prepare(ctx context.Context, sandboxID, imageRef string, sizeMiB int64) (*Rootfs, error) {
-	rootfs, err := p.Inner.Prepare(ctx, sandboxID, imageRef, sizeMiB)
+func (p *PullingProvider) Prepare(ctx context.Context, sandboxID, imageRef string, opts PrepareOptions) (*Rootfs, error) {
+	rootfs, err := p.Inner.Prepare(ctx, sandboxID, imageRef, opts)
 	if !errors.Is(err, ErrNotCached) {
 		return rootfs, err
 	}
 	if err := p.ensure(ctx, imageRef); err != nil {
 		return nil, err
 	}
-	return p.Inner.Prepare(ctx, sandboxID, imageRef, sizeMiB)
+	return p.Inner.Prepare(ctx, sandboxID, imageRef, opts)
 }
 
 // Prewarm converts an image without creating a sandbox, which is the node side

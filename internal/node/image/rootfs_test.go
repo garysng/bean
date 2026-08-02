@@ -42,12 +42,12 @@ func TestPrepareGivesEachSandboxAnIndependentRootfs(t *testing.T) {
 	seedImage(t, p, "alpine:3.20", "base-image-bytes")
 	ctx := context.Background()
 
-	first, err := p.Prepare(ctx, "sbx_a", "alpine:3.20", 8)
+	first, err := p.Prepare(ctx, "sbx_a", "alpine:3.20", PrepareOptions{SizeMiB: 8})
 	if err != nil {
 		t.Fatalf("prepare first: %v", err)
 	}
 	defer first.Release()
-	second, err := p.Prepare(ctx, "sbx_b", "alpine:3.20", 8)
+	second, err := p.Prepare(ctx, "sbx_b", "alpine:3.20", PrepareOptions{SizeMiB: 8})
 	if err != nil {
 		t.Fatalf("prepare second: %v", err)
 	}
@@ -79,7 +79,7 @@ func TestPrepareSizesTheRootfs(t *testing.T) {
 	seedImage(t, p, "img", "small")
 	ctx := context.Background()
 
-	rootfs, err := p.Prepare(ctx, "sbx_sized", "img", 16)
+	rootfs, err := p.Prepare(ctx, "sbx_sized", "img", PrepareOptions{SizeMiB: 16})
 	if err != nil {
 		t.Fatalf("prepare: %v", err)
 	}
@@ -103,7 +103,7 @@ func TestPrepareUsesDefaultSizeWhenUnbounded(t *testing.T) {
 	p := newFileProvider(t)
 	seedImage(t, p, "img", "x")
 
-	rootfs, err := p.Prepare(context.Background(), "sbx_default", "img", 0)
+	rootfs, err := p.Prepare(context.Background(), "sbx_default", "img", PrepareOptions{SizeMiB: 0})
 	if err != nil {
 		t.Fatalf("prepare: %v", err)
 	}
@@ -125,7 +125,7 @@ func TestPrepareRejectsUndersizedRequest(t *testing.T) {
 	p := newFileProvider(t)
 	seedImage(t, p, "big", strings.Repeat("x", 3<<20))
 
-	if _, err := p.Prepare(context.Background(), "sbx_small", "big", 1); err == nil {
+	if _, err := p.Prepare(context.Background(), "sbx_small", "big", PrepareOptions{SizeMiB: 1}); err == nil {
 		t.Error("prepare accepted a size smaller than the base image")
 	}
 	// The failed attempt must leave nothing behind.
@@ -137,7 +137,7 @@ func TestPrepareRejectsUndersizedRequest(t *testing.T) {
 func TestPrepareReportsUncachedImage(t *testing.T) {
 	p := newFileProvider(t)
 
-	_, err := p.Prepare(context.Background(), "sbx_missing", "never-pulled:latest", 8)
+	_, err := p.Prepare(context.Background(), "sbx_missing", "never-pulled:latest", PrepareOptions{SizeMiB: 8})
 	if !errors.Is(err, ErrNotCached) {
 		t.Errorf("prepare = %v, want ErrNotCached", err)
 	}
@@ -149,7 +149,7 @@ func TestPrepareReportsUncachedImage(t *testing.T) {
 func TestPrepareRequiresSandboxID(t *testing.T) {
 	p := newFileProvider(t)
 	seedImage(t, p, "img", "x")
-	if _, err := p.Prepare(context.Background(), "", "img", 8); err == nil {
+	if _, err := p.Prepare(context.Background(), "", "img", PrepareOptions{SizeMiB: 8}); err == nil {
 		t.Error("prepare accepted an empty sandbox id")
 	}
 }
@@ -168,7 +168,7 @@ func TestReleaseIsIdempotent(t *testing.T) {
 	p := newFileProvider(t)
 	seedImage(t, p, "img", "x")
 
-	rootfs, err := p.Prepare(context.Background(), "sbx_release", "img", 8)
+	rootfs, err := p.Prepare(context.Background(), "sbx_release", "img", PrepareOptions{SizeMiB: 8})
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -1304,8 +1304,17 @@ func (x *GetSandboxResponse) GetStatus() *SandboxStatus {
 }
 
 type SnapshotSandboxRequest struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	SandboxId     string                 `protobuf:"bytes,1,opt,name=sandbox_id,json=sandboxId,proto3" json:"sandbox_id,omitempty"`
+	state     protoimpl.MessageState `protogen:"open.v1"`
+	SandboxId string                 `protobuf:"bytes,1,opt,name=sandbox_id,json=sandboxId,proto3" json:"sandbox_id,omitempty"`
+	// include_memory captures guest memory so a restore resumes the running
+	// guest. It costs portability: guest memory records what the CPU it booted on
+	// offered, and vendor/family cannot be masked away, so such a snapshot only
+	// restores on a compatible CPU. Without memory the snapshot is a filesystem
+	// and restores anywhere, but the guest boots fresh.
+	//
+	// Defaulting to false would silently change what existing callers get, so the
+	// gateway sends this explicitly and treats absent as true.
+	IncludeMemory bool `protobuf:"varint,2,opt,name=include_memory,json=includeMemory,proto3" json:"include_memory,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -1345,6 +1354,13 @@ func (x *SnapshotSandboxRequest) GetSandboxId() string {
 		return x.SandboxId
 	}
 	return ""
+}
+
+func (x *SnapshotSandboxRequest) GetIncludeMemory() bool {
+	if x != nil {
+		return x.IncludeMemory
+	}
+	return false
 }
 
 type SnapshotChunk struct {
@@ -2036,10 +2052,11 @@ const file_bean_node_v1_node_proto_rawDesc = "" +
 	"\n" +
 	"sandbox_id\x18\x01 \x01(\tR\tsandboxId\"I\n" +
 	"\x12GetSandboxResponse\x123\n" +
-	"\x06status\x18\x01 \x01(\v2\x1b.bean.node.v1.SandboxStatusR\x06status\"7\n" +
+	"\x06status\x18\x01 \x01(\v2\x1b.bean.node.v1.SandboxStatusR\x06status\"^\n" +
 	"\x16SnapshotSandboxRequest\x12\x1d\n" +
 	"\n" +
-	"sandbox_id\x18\x01 \x01(\tR\tsandboxId\"#\n" +
+	"sandbox_id\x18\x01 \x01(\tR\tsandboxId\x12%\n" +
+	"\x0einclude_memory\x18\x02 \x01(\bR\rincludeMemory\"#\n" +
 	"\rSnapshotChunk\x12\x12\n" +
 	"\x04data\x18\x01 \x01(\fR\x04data\"e\n" +
 	"\x13RestoreSandboxFrame\x12/\n" +

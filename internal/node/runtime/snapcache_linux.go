@@ -132,8 +132,16 @@ func (c *snapCache) unpackInto(id string, unpack func(dir string) (map[string]st
 	if err != nil {
 		return snapEntry{}, err
 	}
+	// A filesystem-only checkpoint has neither member, and that is not a defect:
+	// there is nothing to cache, because the cache exists to avoid re-unpacking
+	// guest memory. An empty entry tells the caller to boot rather than load.
+	if paths[snapshotStateFile] == "" && paths[snapshotMemFile] == "" {
+		return snapEntry{}, nil
+	}
+	// One without the other is a defect: a load against a missing memory image
+	// leaves the guest faulting on nothing.
 	if paths[snapshotStateFile] == "" || paths[snapshotMemFile] == "" {
-		return snapEntry{}, errors.New("fc: snapshot bundle missing vmstate or memory")
+		return snapEntry{}, errors.New("fc: snapshot bundle has vmstate or memory but not both")
 	}
 
 	final := filepath.Join(c.dir, id)

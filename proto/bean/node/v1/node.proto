@@ -194,6 +194,15 @@ message GetSandboxResponse {
 
 message SnapshotSandboxRequest {
   string sandbox_id = 1;
+  // include_memory captures guest memory so a restore resumes the running
+  // guest. It costs portability: guest memory records what the CPU it booted on
+  // offered, and vendor/family cannot be masked away, so such a snapshot only
+  // restores on a compatible CPU. Without memory the snapshot is a filesystem
+  // and restores anywhere, but the guest boots fresh.
+  //
+  // Defaulting to false would silently change what existing callers get, so the
+  // gateway sends this explicitly and treats absent as true.
+  bool include_memory = 2;
 }
 
 message SnapshotChunk {

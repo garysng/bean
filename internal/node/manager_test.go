@@ -278,7 +278,7 @@ func (f *failingRuntime) Create(context.Context, *runtime.Spec) (*runtime.Handle
 	return nil, errors.New("synthetic create failure")
 }
 func (f *failingRuntime) Destroy(context.Context, string, bool) error { return nil }
-func (f *failingRuntime) Checkpoint(context.Context, string, io.Writer) error {
+func (f *failingRuntime) Checkpoint(context.Context, string, io.Writer, runtime.CheckpointOptions) error {
 	return errors.New("synthetic checkpoint failure")
 }
 func (f *failingRuntime) Restore(context.Context, *runtime.Spec, io.Reader) (*runtime.Handle, error) {
@@ -407,7 +407,7 @@ func TestSnapshotAndRestoreRoundTrip(t *testing.T) {
 	release()
 
 	var buf bytes.Buffer
-	if err := m.Snapshot(ctx, "src", &buf); err != nil {
+	if err := m.Snapshot(ctx, "src", &buf, runtime.CheckpointOptions{IncludeMemory: true}); err != nil {
 		t.Fatal(err)
 	}
 	if buf.Len() == 0 {
@@ -464,7 +464,7 @@ func TestSnapshotOfPausedSandboxStaysPaused(t *testing.T) {
 		t.Fatal(err)
 	}
 	var buf bytes.Buffer
-	if err := m.Snapshot(ctx, "p", &buf); err != nil {
+	if err := m.Snapshot(ctx, "p", &buf, runtime.CheckpointOptions{IncludeMemory: true}); err != nil {
 		t.Fatal(err)
 	}
 	if got := m.StateOf("p"); got != runtime.StatePaused {
@@ -475,7 +475,8 @@ func TestSnapshotOfPausedSandboxStaysPaused(t *testing.T) {
 func TestSnapshotRejectsBadStates(t *testing.T) {
 	m := newTestManager(t)
 	var buf bytes.Buffer
-	if err := m.Snapshot(context.Background(), "ghost", &buf); !errors.Is(err, ErrSandboxNotFound) {
+	opts := runtime.CheckpointOptions{IncludeMemory: true}
+	if err := m.Snapshot(context.Background(), "ghost", &buf, opts); !errors.Is(err, ErrSandboxNotFound) {
 		t.Errorf("err = %v, want ErrSandboxNotFound", err)
 	}
 }
@@ -490,7 +491,7 @@ func TestSnapshotFailureLeavesSandboxRunning(t *testing.T) {
 		t.Fatal(err)
 	}
 	var buf bytes.Buffer
-	if err := m.Snapshot(ctx, "s", &buf); err == nil {
+	if err := m.Snapshot(ctx, "s", &buf, runtime.CheckpointOptions{IncludeMemory: true}); err == nil {
 		t.Fatal("expected checkpoint failure")
 	}
 	if got := m.StateOf("s"); got != runtime.StateRunning {
@@ -527,7 +528,7 @@ type failingCheckpointRuntime struct {
 	*runtime.LocalRuntime
 }
 
-func (f *failingCheckpointRuntime) Checkpoint(context.Context, string, io.Writer) error {
+func (f *failingCheckpointRuntime) Checkpoint(context.Context, string, io.Writer, runtime.CheckpointOptions) error {
 	return errors.New("synthetic checkpoint failure")
 }
 

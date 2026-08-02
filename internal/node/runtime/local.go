@@ -45,7 +45,14 @@ func (r *LocalRuntime) Create(ctx context.Context, spec *Spec) (*Handle, error) 
 // Checkpoint archives the sandbox rootfs. Process state is not captured:
 // LocalRuntime exists for development and CI, where filesystem fidelity is
 // what the control-plane paths under test actually depend on.
-func (r *LocalRuntime) Checkpoint(ctx context.Context, id string, w io.Writer) error {
+// Checkpoint archives the sandbox's filesystem.
+//
+// The options are ignored because this tier has no guest memory to capture: a
+// local sandbox is a process on the host, and its checkpoint is a directory
+// either way. So a restore here always starts the process fresh, which is what
+// IncludeMemory=false means on the microVM tier — the difference the option
+// describes does not exist here rather than being unimplemented.
+func (r *LocalRuntime) Checkpoint(ctx context.Context, id string, w io.Writer, _ CheckpointOptions) error {
 	sb, err := r.get(id)
 	if err != nil {
 		return err

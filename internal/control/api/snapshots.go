@@ -25,6 +25,14 @@ type snapshotRequest struct {
 	// KeepRunning defaults to true: taking a snapshot should not disturb a
 	// working sandbox unless the caller asks for it.
 	KeepRunning *bool `json:"keepRunning"`
+	// IncludeMemory defaults to true, which is what a snapshot has always meant
+	// here — a restore resumes the guest. Setting it false captures only the
+	// filesystem: the restore boots fresh, but it can land on any CPU, whereas
+	// guest memory pins a snapshot to a compatible vendor and family.
+	//
+	// A pointer distinguishes "absent" from "false" so the default cannot be
+	// mistaken for a caller's choice.
+	IncludeMemory *bool `json:"includeMemory"`
 }
 
 func (s *Server) handleCreateSnapshot(w http.ResponseWriter, r *http.Request) {
@@ -48,6 +56,10 @@ func (s *Server) handleCreateSnapshot(w http.ResponseWriter, r *http.Request) {
 	if req.KeepRunning != nil {
 		keepRunning = *req.KeepRunning
 	}
+	includeMemory := true
+	if req.IncludeMemory != nil {
+		includeMemory = *req.IncludeMemory
+	}
 
 	nodeClient, err := s.nodeClientFor(rec)
 	if err != nil {
@@ -60,12 +72,18 @@ func (s *Server) handleCreateSnapshot(w http.ResponseWriter, r *http.Request) {
 		ID: snapID, Name: req.Name, State: store.SnapshotCreating,
 		SandboxID: rec.ID, Image: rec.Image, Runtime: rec.Runtime,
 		NodeID: rec.NodeID, Labels: req.Labels, CreatedAt: time.Now(),
+		IncludeMemory: &includeMemory,
 	}
-	// The CPU the guest's memory was captured on is copied onto the snapshot
-	// rather than looked up from NodeID later: by restore time the node may be
-	// gone, or restarted under a different template.
-	if n := s.nodeRecord(rec.NodeID); n != nil {
-		snap.CPUVendor, snap.CPUFamily, snap.CPUTemplate = n.CPUVendor, n.CPUFamily, n.CPUTemplate
+	// The CPU is recorded only when guest memory travels with the snapshot.
+	// A filesystem-only checkpoint restores on any CPU, so recording a
+	// constraint it does not have would fragment placement for nothing.
+	//
+	// It is copied onto the snapshot rather than looked up from NodeID at restore
+	// time: by then the node may be gone, or restarted under a different template.
+	if includeMemory {
+		if n := s.nodeRecord(rec.NodeID); n != nil {
+			snap.CPUVendor, snap.CPUFamily, snap.CPUTemplate = n.CPUVendor, n.CPUFamily, n.CPUTemplate
+		}
 	}
 	if err := s.store.PutSnapshot(snap); err != nil {
 		writeErr(w, http.StatusInternalServerError, "INTERNAL", err.Error())
@@ -80,7 +98,7 @@ func (s *Server) handleCreateSnapshot(w http.ResponseWriter, r *http.Request) {
 	}
 
 	stream, err := nodeClient.SnapshotSandbox(r.Context(),
-		&nodev1.SnapshotSandboxRequest{SandboxId: rec.ID})
+		&nodev1.SnapshotSandboxRequest{SandboxId: rec.ID, IncludeMemory: includeMemory})
 	if err != nil {
 		snapshot.AbortWrite(s.snapshots, snapID, blobW)
 		s.failSnapshot(snap, err)
@@ -239,8 +257,14 @@ func (s *Server) createFromSnapshot(w http.ResponseWriter, r *http.Request,
 	// to nodes that memory can actually run on. Without this the restore succeeds
 	// and the sandbox then misbehaves for reasons nothing reports.
 	place := s.placementFor(rec)
-	place.CPUConstraint = scheduler.CPUConstraint{
-		Vendor: snap.CPUVendor, Family: snap.CPUFamily, Template: snap.CPUTemplate,
+	// Only guest memory carries a CPU, so a filesystem-only snapshot places
+	// anywhere. The branch is explicit rather than relying on the CPU fields
+	// happening to be empty for such snapshots — that coupling would break
+	// quietly if anything ever populated them.
+	if snap.HasMemory() {
+		place.CPUConstraint = scheduler.CPUConstraint{
+			Vendor: snap.CPUVendor, Family: snap.CPUFamily, Template: snap.CPUTemplate,
+		}
 	}
 	nodeID, err := s.placer.Schedule(place)
 	if err != nil {

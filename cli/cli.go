@@ -160,7 +160,9 @@ commands:
   events SBX | events -f [SBX] [--label k=v]    # -f follows the live stream
   build --tag REF [--file Dockerfile] [CONTEXT] # build an image on the platform
   commit SBX --tag REF                          # freeze the filesystem as an image
-  snapshot create SBX [--name N] [--no-keep-running]
+  snapshot create SBX [--name N] [--no-keep-running] [--no-memory]
+                                                # --no-memory: filesystem only,
+                                                # restores on any CPU but reboots
   snapshot ls [--label k=v] | snapshot rm SNAP
   run --snapshot SNAP                           # restore instead of image
   image ls | image status REF | image prewarm REF... [--replicas N]
@@ -599,19 +601,42 @@ func cmdSnapshot(c *Client, args []string, stdout io.Writer) error {
 		if flags["no-keep-running"] == "true" {
 			body["keepRunning"] = false
 		}
+		// Guest memory is included by default, so a restore resumes the guest.
+		// --no-memory captures only the filesystem: the restore boots fresh but
+		// can land on any CPU, where guest memory pins a snapshot to a
+		// compatible vendor and family.
+		if flags["no-memory"] == "true" {
+			body["includeMemory"] = false
+		}
 		var out struct {
 			SnapshotID string `json:"snapshotId"`
 			Snapshot   struct {
 				State     string `json:"state"`
 				SizeBytes int64  `json:"sizeBytes"`
+				// A pointer so a snapshot taken before the server reported this
+				// is shown as unknown rather than as "no memory" — the latter
+				// would be a confident wrong answer about whether a restore
+				// resumes the guest.
+				IncludeMemory *bool `json:"includeMemory"`
 			} `json:"snapshot"`
 		}
 		if err := c.doJSON("POST", "/v1/sandboxes/"+pos[1]+"/snapshot", body, &out); err != nil {
 			return err
 		}
+		memory := "unknown"
+		if out.Snapshot.IncludeMemory != nil {
+			memory = "no"
+			if *out.Snapshot.IncludeMemory {
+				memory = "yes"
+			}
+		}
 		return newPrinter(stdout, flags).result(out.SnapshotID,
 			field{"state", out.Snapshot.State},
-			field{"sizeBytes", out.Snapshot.SizeBytes})
+			field{"sizeBytes", out.Snapshot.SizeBytes},
+			// Whether a restore resumes or reboots is the snapshot's most
+			// consequential property, so it is reported rather than inferred
+			// from the size.
+			field{"memory", memory})
 
 	case "ls":
 		path := "/v1/snapshots"

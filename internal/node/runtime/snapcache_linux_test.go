@@ -196,3 +196,42 @@ func TestSnapCacheReusesAnEntryWithoutUnpacking(t *testing.T) {
 		t.Fatalf("second Fill: %v", err)
 	}
 }
+
+// TestFillTreatsMemorylessBundleAsUncacheable covers the checkpoint that has no
+// guest memory. The cache exists to avoid unpacking a memory image twice, so a
+// bundle without one has nothing to cache — and an earlier version of this code
+// rejected it as a corrupt bundle, which would have made filesystem-only
+// snapshots unrestorable.
+func TestFillTreatsMemorylessBundleAsUncacheable(t *testing.T) {
+	c := newSnapCache(t.TempDir())
+	entry, err := c.Fill("snap-nomem", strings.NewReader(""),
+		func(dir string) (map[string]string, error) {
+			// Only a rootfs member, which lands on the sandbox's own device and
+			// so is not reported as a cached path.
+			return map[string]string{snapshotRootfsFile: "/dev/whatever"}, nil
+		})
+	if err != nil {
+		t.Fatalf("memoryless bundle rejected: %v", err)
+	}
+	if entry.MemPath != "" || entry.StatePath != "" {
+		t.Errorf("entry = %+v, want empty so the caller boots instead of loading", entry)
+	}
+}
+
+// TestFillRejectsHalfBundle keeps the tolerance above from swallowing a real
+// defect: one of vmstate and memory without the other is corruption, and
+// loading it would leave the guest faulting on nothing.
+func TestFillRejectsHalfBundle(t *testing.T) {
+	c := newSnapCache(t.TempDir())
+	_, err := c.Fill("snap-half", strings.NewReader(""),
+		func(dir string) (map[string]string, error) {
+			path := filepath.Join(dir, snapshotStateFile)
+			if err := os.WriteFile(path, []byte("state"), 0o600); err != nil {
+				return nil, err
+			}
+			return map[string]string{snapshotStateFile: path}, nil
+		})
+	if err == nil {
+		t.Error("a bundle with vmstate but no memory was accepted")
+	}
+}

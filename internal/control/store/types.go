@@ -305,11 +305,35 @@ type Snapshot struct {
 	CPUFamily   int32  `json:"cpuFamily,omitempty"`
 	CPUTemplate string `json:"cpuTemplate,omitempty"`
 
+	// IncludeMemory reports whether the checkpoint carries guest memory.
+	//
+	// It is what makes the CPU fields above meaningful: a filesystem-only
+	// snapshot restores on any CPU, so recording a constraint it does not have
+	// would fragment placement for nothing. It is also the honest answer to
+	// "will my process tree survive this", which is not derivable from the size.
+	//
+	// A pointer because snapshots taken before this field existed have no value
+	// for it, and a plain bool would decode those as false — claiming they carry
+	// no memory when they do, which would drop the CPU constraint that keeps
+	// them from being restored onto an incompatible host. Absent therefore means
+	// "assume memory", the behaviour those snapshots were created under.
+	IncludeMemory *bool `json:"includeMemory,omitempty"`
+
 	Labels map[string]string `json:"labels,omitempty"`
 	// RefCount counts in-progress restores; a snapshot with refs cannot be
 	// deleted out from under them.
 	RefCount  int       `json:"-"`
 	CreatedAt time.Time `json:"createdAt"`
+}
+
+// HasMemory reports whether the checkpoint carries guest memory.
+//
+// An unset IncludeMemory means the snapshot predates the field, and every
+// snapshot from that time captured memory — so absent reads as true. Deciding
+// this at each use site invites the opposite reading, which would silently drop
+// the CPU constraint on exactly the snapshots that need it.
+func (s *Snapshot) HasMemory() bool {
+	return s.IncludeMemory == nil || *s.IncludeMemory
 }
 
 // Image is platform-side metadata for a native OCI reference. Callers

@@ -5,6 +5,7 @@ package image
 import (
 	"context"
 	"errors"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -80,12 +81,12 @@ func TestDevMapperClonesShareBaseWithoutCopying(t *testing.T) {
 	seedExt4Image(t, p, "shared:1", 64)
 	ctx := context.Background()
 
-	first, err := p.Prepare(ctx, "sbx_dm_a", "shared:1", 64)
+	first, err := p.Prepare(ctx, "sbx_dm_a", "shared:1", PrepareOptions{SizeMiB: 64})
 	if err != nil {
 		t.Fatalf("prepare first: %v", err)
 	}
 	defer first.Release()
-	second, err := p.Prepare(ctx, "sbx_dm_b", "shared:1", 64)
+	second, err := p.Prepare(ctx, "sbx_dm_b", "shared:1", PrepareOptions{SizeMiB: 64})
 	if err != nil {
 		t.Fatalf("prepare second: %v", err)
 	}
@@ -124,7 +125,7 @@ func TestDevMapperWriteCostsOnlyWhatChanged(t *testing.T) {
 	p := newDevMapperProvider(t)
 	seedExt4Image(t, p, "cheap:1", 64)
 
-	rootfs, err := p.Prepare(context.Background(), "sbx_dm_cost", "cheap:1", 64)
+	rootfs, err := p.Prepare(context.Background(), "sbx_dm_cost", "cheap:1", PrepareOptions{SizeMiB: 64})
 	if err != nil {
 		t.Fatalf("prepare: %v", err)
 	}
@@ -159,7 +160,7 @@ func TestDevMapperBaseStaysPristine(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	rootfs, err := p.Prepare(context.Background(), "sbx_dm_pristine", "pristine:1", 64)
+	rootfs, err := p.Prepare(context.Background(), "sbx_dm_pristine", "pristine:1", PrepareOptions{SizeMiB: 64})
 	if err != nil {
 		t.Fatalf("prepare: %v", err)
 	}
@@ -187,7 +188,7 @@ func TestDevMapperReleaseRemovesEverything(t *testing.T) {
 	p := newDevMapperProvider(t)
 	seedExt4Image(t, p, "cleanup:1", 64)
 
-	rootfs, err := p.Prepare(context.Background(), "sbx_dm_clean", "cleanup:1", 64)
+	rootfs, err := p.Prepare(context.Background(), "sbx_dm_clean", "cleanup:1", PrepareOptions{SizeMiB: 64})
 	if err != nil {
 		t.Fatalf("prepare: %v", err)
 	}
@@ -224,7 +225,7 @@ func TestDevMapperSharesOneLoopDeviceAcrossClones(t *testing.T) {
 
 	var made []*Rootfs
 	for _, id := range []string{"sbx_dm_1", "sbx_dm_2", "sbx_dm_3"} {
-		r, err := p.Prepare(ctx, id, "onedev:1", 64)
+		r, err := p.Prepare(ctx, id, "onedev:1", PrepareOptions{SizeMiB: 64})
 		if err != nil {
 			t.Fatalf("prepare %s: %v", id, err)
 		}
@@ -254,7 +255,7 @@ func TestDevMapperSharesOneLoopDeviceAcrossClones(t *testing.T) {
 
 func TestDevMapperReportsUncachedImage(t *testing.T) {
 	p := newDevMapperProvider(t)
-	_, err := p.Prepare(context.Background(), "sbx_dm_missing", "never-pulled:1", 64)
+	_, err := p.Prepare(context.Background(), "sbx_dm_missing", "never-pulled:1", PrepareOptions{SizeMiB: 64})
 	if !errors.Is(err, ErrNotCached) {
 		t.Errorf("prepare = %v, want ErrNotCached", err)
 	}
@@ -263,7 +264,117 @@ func TestDevMapperReportsUncachedImage(t *testing.T) {
 func TestDevMapperRequiresSandboxID(t *testing.T) {
 	p := newDevMapperProvider(t)
 	seedExt4Image(t, p, "needsid:1", 64)
-	if _, err := p.Prepare(context.Background(), "", "needsid:1", 64); err == nil {
+	if _, err := p.Prepare(context.Background(), "", "needsid:1", PrepareOptions{SizeMiB: 64}); err == nil {
 		t.Error("prepare accepted an empty sandbox id")
 	}
+}
+
+// TestDevMapperSeedIsVisibleThroughDevice is the property a restore depends on
+// and the one that was missing when a restored sandbox silently lost its files.
+//
+// A device-mapper snapshot reads its exception table at activation and never
+// re-reads it, so a copy-on-write store written after the device exists is
+// ignored: the device serves the base image while the file holds data. Reading
+// the base through the mapping is the only way to see that, which is why this
+// mounts the device instead of inspecting cow.img — every file-level assertion
+// passes against the broken ordering.
+func TestDevMapperSeedIsVisibleThroughDevice(t *testing.T) {
+	p := newDevMapperProvider(t)
+	seedExt4Image(t, p, "seeded:1", 64)
+	ctx := context.Background()
+
+	// A first sandbox writes a file, which lands in its copy-on-write store.
+	// That store is what a checkpoint carries, so it stands in for one here.
+	source, err := p.Prepare(ctx, "sbx_seed_src", "seeded:1", PrepareOptions{SizeMiB: 64})
+	if err != nil {
+		t.Fatal(err)
+	}
+	mountAndRun(t, source.Device, func(mnt string) {
+		if err := os.WriteFile(filepath.Join(mnt, "marker"), []byte("survives"), 0o600); err != nil {
+			t.Fatal(err)
+		}
+	})
+	captured := filepath.Join(t.TempDir(), "captured.img")
+	if err := copyFileContents(source.Writable, captured); err != nil {
+		t.Fatal(err)
+	}
+	if err := source.Release(); err != nil {
+		t.Fatal(err)
+	}
+
+	// A second sandbox is prepared with that store as its seed, which is what a
+	// restore does.
+	restored, err := p.Prepare(ctx, "sbx_seed_dst", "seeded:1", PrepareOptions{
+		SizeMiB:      64,
+		SeedWritable: func(dest string) error { return copyFileContents(captured, dest) },
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer restored.Release()
+
+	mountAndRun(t, restored.Device, func(mnt string) {
+		content, err := os.ReadFile(filepath.Join(mnt, "marker"))
+		if err != nil {
+			t.Fatalf("seeded file is not readable through the device: %v", err)
+		}
+		if string(content) != "survives" {
+			t.Errorf("seeded file reads %q through the device, want %q — the "+
+				"exception table does not describe the seeded store",
+				content, "survives")
+		}
+	})
+}
+
+// TestDevMapperSeedFailureLeavesNothing keeps a failed restore from being
+// mistaken for a fresh sandbox: the seed runs mid-Prepare, after the store
+// exists, so its error has to unwind the same way the later steps do.
+func TestDevMapperSeedFailureLeavesNothing(t *testing.T) {
+	p := newDevMapperProvider(t)
+	seedExt4Image(t, p, "seedfail:1", 64)
+
+	_, err := p.Prepare(context.Background(), "sbx_seed_fail", "seedfail:1", PrepareOptions{
+		SizeMiB:      64,
+		SeedWritable: func(string) error { return errors.New("bundle truncated") },
+	})
+	if err == nil {
+		t.Fatal("Prepare succeeded despite a failed seed")
+	}
+	if !strings.Contains(err.Error(), "bundle truncated") {
+		t.Errorf("error %q does not name the seed failure", err)
+	}
+	if _, err := os.Stat(filepath.Join(p.BaseDir, "sbx_seed_fail")); !os.IsNotExist(err) {
+		t.Errorf("sandbox directory survived a failed seed: %v", err)
+	}
+	if out, _ := exec.Command("dmsetup", "info", dmName("sbx_seed_fail")).CombinedOutput(); !strings.Contains(string(out), "does not exist") {
+		t.Errorf("mapping survived a failed seed: %s", out)
+	}
+}
+
+// copyFileContents copies a file's bytes, preserving holes so a sparse store
+// stays sparse.
+func copyFileContents(src, dest string) error {
+	in, err := os.Open(src)
+	if err != nil {
+		return err
+	}
+	defer in.Close()
+	// O_CREATE so this serves both a fresh capture file and a store the provider
+	// already created at its provisioned size.
+	out, err := os.OpenFile(dest, os.O_WRONLY|os.O_CREATE, 0o600)
+	if err != nil {
+		return err
+	}
+	defer out.Close()
+	st, err := in.Stat()
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(out, in); err != nil {
+		return err
+	}
+	if err := out.Truncate(st.Size()); err != nil {
+		return err
+	}
+	return out.Sync()
 }

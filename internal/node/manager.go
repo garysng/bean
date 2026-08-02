@@ -374,7 +374,11 @@ func (m *Manager) Pause(ctx context.Context, id string) error {
 // for the duration so the checkpoint is internally consistent, then
 // returned to its previous state — a snapshot is not supposed to disturb a
 // running workload.
-func (m *Manager) Snapshot(ctx context.Context, id string, w io.Writer) error {
+//
+// opts decides whether guest memory travels with it, which is the difference
+// between resuming the guest and rebooting onto its filesystem.
+func (m *Manager) Snapshot(ctx context.Context, id string, w io.Writer,
+	opts runtime.CheckpointOptions) error {
 	// Claim the transition under lock, remembering where to go back to.
 	m.mu.Lock()
 	sb, ok := m.sandboxes[id]
@@ -398,6 +402,33 @@ func (m *Manager) Snapshot(ctx context.Context, id string, w io.Writer) error {
 		m.mu.Unlock()
 	}
 
+	// A checkpoint without guest memory has to flush the guest first, and it has
+	// to happen before the pause while the agent can still run.
+	//
+	// Pausing stops the vCPUs but leaves the guest's page cache dirty, so reading
+	// the block device from the host misses whatever the sandbox wrote most
+	// recently. With memory that does not matter — the dirty pages travel inside
+	// the memory image and the guest flushes them after it resumes. Without
+	// memory they are simply lost: measured as a snapshot whose rootfs extents
+	// were empty and a restore that could not find a file written seconds before.
+	//
+	// This is the same reason CommitSandbox syncs, and for the same tier.
+	if !opts.IncludeMemory && prev == runtime.StateRunning {
+		// Not syncGuest: that goes through AgentConn, which refuses a sandbox
+		// whose state is no longer RUNNING — and by this point the state is
+		// SNAPSHOTTING, claimed a few lines above. The first version of this
+		// used it and the sync silently failed every time, leaving the data
+		// loss it was meant to prevent.
+		if err := m.syncViaAgent(ctx, id); err != nil {
+			// Reported rather than fatal: the checkpoint is still usable, just
+			// possibly missing the most recent writes, and failing the snapshot
+			// outright would be a worse outcome than an incomplete one the
+			// caller is told about.
+			logging.From(ctx).Warn("guest sync before memoryless snapshot failed",
+				logging.KeySandbox, id, logging.KeyError, err)
+		}
+	}
+
 	// Freeze a running sandbox so the filesystem is not moving underneath
 	// the checkpoint; an already-paused one needs no extra work.
 	if prev == runtime.StateRunning {
@@ -408,7 +439,7 @@ func (m *Manager) Snapshot(ctx context.Context, id string, w io.Writer) error {
 	}
 
 	start := time.Now()
-	err := m.rt.Checkpoint(ctx, id, w)
+	err := m.rt.Checkpoint(ctx, id, w, opts)
 	m.observePhase(ctx, "checkpoint", time.Since(start))
 	m.metrics.IncCounter("bean_node_snapshots_total",
 		"Snapshots taken on this node.",
@@ -536,29 +567,44 @@ func (m *Manager) syncGuest(ctx context.Context, id string) error {
 
 // flushBeforeDestroy asks a running sandbox to flush its filesystem.
 //
-// It deliberately does not go through AgentConn: that path resumes a PAUSED
-// sandbox, and booting a sandbox back up in order to destroy it would cost more
-// than the flush saves. A paused guest has also not written anything since it
-// was paused, so there is nothing new to flush.
+// A paused sandbox is skipped: it has written nothing since it was paused, and
+// waking one in order to tear it down would cost more than the flush saves.
 func (m *Manager) flushBeforeDestroy(ctx context.Context, id string) error {
 	m.mu.Lock()
-	sb, ok := m.sandboxes[id]
-	var conn *grpc.ClientConn
-	if ok {
-		conn = sb.conn
-		if sb.State != runtime.StateRunning {
-			ok = false
-		}
+	running := false
+	if sb, ok := m.sandboxes[id]; ok {
+		running = sb.State == runtime.StateRunning
 	}
 	m.mu.Unlock()
-	if !ok || conn == nil {
+	if !running {
 		return nil
 	}
+	return m.syncViaAgent(ctx, id)
+}
 
-	// The bound is short on purpose. This is best-effort durability on a
-	// teardown path, so a guest that cannot answer quickly must not turn
-	// destroy back into the multi-second wait this replaced.
-	syncCtx, cancel := context.WithTimeout(ctx, flushBeforeDestroyTimeout)
+// syncViaAgent tells the guest to flush its page cache, so what the host reads
+// from the block device includes everything the sandbox wrote.
+//
+// It takes the connection directly instead of going through AgentConn, which
+// both refuses a sandbox that is no longer RUNNING and transparently resumes a
+// paused one. Neither behaviour suits a caller that has already claimed a state
+// transition — the snapshot path is SNAPSHOTTING by the time it needs this, and
+// went unsynced for exactly that reason before.
+func (m *Manager) syncViaAgent(ctx context.Context, id string) error {
+	m.mu.Lock()
+	var conn *grpc.ClientConn
+	if sb, ok := m.sandboxes[id]; ok {
+		conn = sb.conn
+	}
+	m.mu.Unlock()
+	if conn == nil {
+		return fmt.Errorf("sandbox %s has no agent connection", id)
+	}
+
+	// The bound is short on purpose: this is best-effort durability, and a guest
+	// that cannot answer promptly must not reintroduce a multi-second stall on
+	// either the teardown or the snapshot path.
+	syncCtx, cancel := context.WithTimeout(ctx, guestSyncTimeout)
 	defer cancel()
 	res, err := agentv1.NewAgentServiceClient(conn).Exec(syncCtx, &commonv1.ExecRequest{
 		SandboxId: id,
@@ -799,11 +845,13 @@ func (m *Manager) connectAgent(ctx context.Context, handle *runtime.Handle) (*gr
 // broken sandbox ties up a create.
 const agentReadyTimeout = 20 * time.Second
 
-// flushBeforeDestroyTimeout bounds the sync on the teardown path. A sync of a
-// sandbox's own writable layer is milliseconds; this is short because the whole
-// point of the change was to stop destroy from waiting seconds on a guest that
-// may not answer at all.
-const flushBeforeDestroyTimeout = 2 * time.Second
+// guestSyncTimeout bounds a flush of the guest's page cache.
+//
+// A sync of a sandbox's own writable layer is milliseconds. The bound is short
+// because both callers sit on paths whose whole point was to stop waiting
+// seconds on a guest that may never answer: teardown, and a snapshot taken
+// without memory.
+const guestSyncTimeout = 2 * time.Second
 
 // specToRuntime projects the proto spec onto the runtime's view.
 func specToRuntime(spec *nodev1.SandboxSpec) *runtime.Spec {

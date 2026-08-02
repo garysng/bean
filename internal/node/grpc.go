@@ -278,7 +278,8 @@ func (s *GRPCServer) SnapshotSandbox(req *nodev1.SnapshotSandboxRequest,
 		return status.Error(codes.InvalidArgument, "sandbox_id required")
 	}
 	w := &chunkWriter{stream: stream}
-	if err := s.mgr.Snapshot(stream.Context(), req.SandboxId, w); err != nil {
+	opts := runtime.CheckpointOptions{IncludeMemory: req.GetIncludeMemory()}
+	if err := s.mgr.Snapshot(stream.Context(), req.SandboxId, w, opts); err != nil {
 		if errors.Is(err, ErrSandboxNotFound) {
 			return status.Errorf(codes.NotFound, "%v", err)
 		}
