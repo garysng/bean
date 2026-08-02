@@ -16,6 +16,8 @@ import (
 	"time"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/garysng/bean/internal/obs"
 )
 
 // Pause freezes the guest's vCPUs. Memory stays resident, so resume is
@@ -69,29 +71,30 @@ func (r *FCRuntime) Destroy(ctx context.Context, id string, force bool) error {
 		return fmt.Errorf("fc: sandbox %s not found", id)
 	}
 
-	if !force {
-		// SendCtrlAltDel lets the guest shut down cleanly, flushing its
-		// filesystem. A guest with no ACPI handler ignores it, hence the
-		// bounded wait before killing.
-		shutdownCtx, cancel := context.WithTimeout(ctx, 3*time.Second)
-		err := vm.client.put(shutdownCtx, "/actions", fcAction{ActionType: "SendCtrlAltDel"})
-		cancel()
-		if err == nil {
-			select {
-			case <-vm.done:
-			case <-time.After(5 * time.Second):
-			}
-		}
-	}
-
+	tracer := obs.Tracer("fc")
+	// There is no graceful-shutdown step. Asking the guest to power off over
+	// ACPI and waiting for it cost 5001ms of a measured 5335ms destroy and could
+	// never succeed: the guest kernel is built without CONFIG_ACPI_BUTTON, so
+	// nothing receives the event, and the agent is PID 1 with no signal handler.
+	// Flushing is done by the manager over the agent connection before it gets
+	// here, which confirms the write-out instead of waiting on a guess.
+	_, kSpan := tracer.Start(ctx, "fc.killVMM")
 	r.killVMM(vm)
+	kSpan.End()
+
 	var errs []error
+	rCtx, rSpan := tracer.Start(ctx, "fc.releaseRootfs")
 	if err := vm.rootfs.Release(); err != nil {
 		errs = append(errs, fmt.Errorf("release rootfs: %w", err))
 	}
+	obs.Fail(rCtx, errors.Join(errs...))
+	rSpan.End()
+
+	_, dSpan := tracer.Start(ctx, "fc.removeStateDir")
 	if err := os.RemoveAll(vm.dir); err != nil {
 		errs = append(errs, fmt.Errorf("remove state dir: %w", err))
 	}
+	dSpan.End()
 	return errors.Join(errs...)
 }
 

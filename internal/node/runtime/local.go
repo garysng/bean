@@ -147,6 +147,18 @@ func (r *LocalRuntime) Destroy(ctx context.Context, id string, force bool) error
 	if err != nil {
 		return nil // idempotent
 	}
+	// A paused sandbox is stopped with SIGSTOP, and a stopped process does not
+	// act on SIGTERM — it stays queued until the process runs again. Without the
+	// SIGCONT first, destroying a paused sandbox always waited out the full
+	// grace period and then killed it, which is the same blind wait that made
+	// destroy slow on the microVM tier.
+	r.mu.Lock()
+	paused := sb.paused
+	r.mu.Unlock()
+	if paused {
+		_ = signalGroup(sb.cmd.Process.Pid, syscall.SIGCONT)
+	}
+
 	sig := syscall.SIGTERM
 	if force {
 		sig = syscall.SIGKILL

@@ -285,6 +285,26 @@ func (m *Manager) AgentConn(ctx context.Context, id string) (*grpc.ClientConn, f
 }
 
 func (m *Manager) Destroy(ctx context.Context, id string, force bool) error {
+	// Flushing happens here, while the agent is still reachable, and replaces
+	// waiting for the guest to shut itself down.
+	//
+	// The runtime used to ask the guest to power off over ACPI and wait up to
+	// five seconds for it. That wait could never succeed: the guest kernel is
+	// built without CONFIG_ACPI_BUTTON, so nothing in the guest receives the
+	// event, and the agent is PID 1 with no signal handler. Every destroy paid
+	// the full timeout — measured at 5001ms of a 5335ms destroy — to accomplish
+	// nothing. Asking the agent to sync achieves the actual goal (the writable
+	// layer on the host matches what the sandbox wrote) and confirms it rather
+	// than assuming it happened.
+	if !force {
+		if err := m.flushBeforeDestroy(ctx, id); err != nil {
+			// A sandbox being destroyed cannot be kept alive because its
+			// filesystem would not flush, so this is reported and not fatal.
+			logging.From(ctx).Warn("flush before destroy failed",
+				logging.KeySandbox, id, logging.KeyError, err)
+		}
+	}
+
 	m.mu.Lock()
 	sb, ok := m.sandboxes[id]
 	if !ok {
@@ -500,6 +520,45 @@ func (m *Manager) syncGuest(ctx context.Context, id string) error {
 	defer release()
 
 	syncCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	defer cancel()
+	res, err := agentv1.NewAgentServiceClient(conn).Exec(syncCtx, &commonv1.ExecRequest{
+		SandboxId: id,
+		Cmd:       []string{"/bin/sh", "-c", "sync"},
+	})
+	if err != nil {
+		return err
+	}
+	if res.ExitCode != 0 {
+		return fmt.Errorf("sync exited %d: %s", res.ExitCode, res.Stderr)
+	}
+	return nil
+}
+
+// flushBeforeDestroy asks a running sandbox to flush its filesystem.
+//
+// It deliberately does not go through AgentConn: that path resumes a PAUSED
+// sandbox, and booting a sandbox back up in order to destroy it would cost more
+// than the flush saves. A paused guest has also not written anything since it
+// was paused, so there is nothing new to flush.
+func (m *Manager) flushBeforeDestroy(ctx context.Context, id string) error {
+	m.mu.Lock()
+	sb, ok := m.sandboxes[id]
+	var conn *grpc.ClientConn
+	if ok {
+		conn = sb.conn
+		if sb.State != runtime.StateRunning {
+			ok = false
+		}
+	}
+	m.mu.Unlock()
+	if !ok || conn == nil {
+		return nil
+	}
+
+	// The bound is short on purpose. This is best-effort durability on a
+	// teardown path, so a guest that cannot answer quickly must not turn
+	// destroy back into the multi-second wait this replaced.
+	syncCtx, cancel := context.WithTimeout(ctx, flushBeforeDestroyTimeout)
 	defer cancel()
 	res, err := agentv1.NewAgentServiceClient(conn).Exec(syncCtx, &commonv1.ExecRequest{
 		SandboxId: id,
@@ -739,6 +798,12 @@ func (m *Manager) connectAgent(ctx context.Context, handle *runtime.Handle) (*gr
 // leaves room for a loaded node without waiting so long that a genuinely
 // broken sandbox ties up a create.
 const agentReadyTimeout = 20 * time.Second
+
+// flushBeforeDestroyTimeout bounds the sync on the teardown path. A sync of a
+// sandbox's own writable layer is milliseconds; this is short because the whole
+// point of the change was to stop destroy from waiting seconds on a guest that
+// may not answer at all.
+const flushBeforeDestroyTimeout = 2 * time.Second
 
 // specToRuntime projects the proto spec onto the runtime's view.
 func specToRuntime(spec *nodev1.SandboxSpec) *runtime.Spec {

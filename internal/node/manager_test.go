@@ -530,3 +530,71 @@ type failingCheckpointRuntime struct {
 func (f *failingCheckpointRuntime) Checkpoint(context.Context, string, io.Writer) error {
 	return errors.New("synthetic checkpoint failure")
 }
+
+// TestDestroyDoesNotWaitOnGuestShutdown pins the fix for a destroy that took
+// 5.2s while the create it tore down took 1.0s.
+//
+// The runtime used to ask the guest to power off over ACPI and wait up to five
+// seconds for it to exit. That wait could not succeed — the guest kernel has no
+// CONFIG_ACPI_BUTTON and the agent is PID 1 without a signal handler — so every
+// destroy paid the full timeout. A latency assertion is the only kind that
+// catches a reintroduced blind wait: the old code was correct in every respect
+// except that it was waiting for something that would never happen.
+func TestDestroyDoesNotWaitOnGuestShutdown(t *testing.T) {
+	m := newTestManager(t)
+	ctx := context.Background()
+
+	if _, err := m.Create(ctx, spec("sbx-destroy-fast")); err != nil {
+		t.Fatal(err)
+	}
+
+	start := time.Now()
+	if err := m.Destroy(ctx, "sbx-destroy-fast", false); err != nil {
+		t.Fatal(err)
+	}
+	elapsed := time.Since(start)
+
+	// The removed wait was 5s, and the flush that replaced it is bounded at 2s.
+	// 3s therefore fails if the blind wait returns and passes on a slow machine.
+	if elapsed > 3*time.Second {
+		t.Errorf("graceful destroy took %s; a blind wait on guest shutdown is back", elapsed)
+	}
+	if m.Get("sbx-destroy-fast") != nil {
+		t.Error("destroy left an entry behind")
+	}
+}
+
+// TestDestroyPausedSandboxIsFast covers two ways destroying a paused sandbox
+// used to stall, both of them a wait for something that could not happen.
+//
+// The pre-destroy flush must skip a paused sandbox: flushing goes through the
+// agent, and the convenience path for reaching one transparently resumes it, so
+// tearing down a paused sandbox would first boot it back up. A paused guest has
+// also written nothing since it was paused.
+//
+// Separately, a paused process is stopped with SIGSTOP and does not act on
+// SIGTERM — it stays queued until the process runs again — so the runtime's
+// grace period always expired before the kill. That made destroying a paused
+// sandbox slower than destroying a running one.
+func TestDestroyPausedSandboxIsFast(t *testing.T) {
+	m := newTestManager(t)
+	ctx := context.Background()
+
+	if _, err := m.Create(ctx, spec("sbx-destroy-paused")); err != nil {
+		t.Fatal(err)
+	}
+	if err := m.Pause(ctx, "sbx-destroy-paused"); err != nil {
+		t.Fatal(err)
+	}
+
+	start := time.Now()
+	if err := m.Destroy(ctx, "sbx-destroy-paused", false); err != nil {
+		t.Fatal(err)
+	}
+	// Both removed waits were multi-second. A paused sandbox should tear down
+	// about as fast as a running one, so this is well under either.
+	if elapsed := time.Since(start); elapsed > 2*time.Second {
+		t.Errorf("destroying a paused sandbox took %s: either the flush resumed it "+
+			"or the SIGTERM was delivered to a stopped process", elapsed)
+	}
+}
