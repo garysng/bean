@@ -222,6 +222,10 @@ func (s *Server) createFromSnapshot(w http.ResponseWriter, r *http.Request,
 	rec.Image = snap.Image
 	rec.SnapshotID = snap.ID
 	spec.Image = snap.Image
+	// The node reuses whatever it has already unpacked for this checkpoint, so
+	// restoring the same snapshot repeatedly — a batch fanning out from one
+	// prepared environment — unpacks it once.
+	spec.SnapshotId = snap.ID
 
 	nodeID, err := s.placer.Schedule(s.placementFor(rec))
 	if err != nil {

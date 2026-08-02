@@ -559,20 +559,25 @@ func (x *SyncStateResponse) GetExpected() []*SandboxSpec {
 }
 
 type SandboxSpec struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	SandboxId     string                 `protobuf:"bytes,1,opt,name=sandbox_id,json=sandboxId,proto3" json:"sandbox_id,omitempty"`
-	Image         string                 `protobuf:"bytes,2,opt,name=image,proto3" json:"image,omitempty"`
-	Cpu           float64                `protobuf:"fixed64,3,opt,name=cpu,proto3" json:"cpu,omitempty"`
-	MemoryMib     int64                  `protobuf:"varint,4,opt,name=memory_mib,json=memoryMib,proto3" json:"memory_mib,omitempty"`
-	DiskMib       int64                  `protobuf:"varint,5,opt,name=disk_mib,json=diskMib,proto3" json:"disk_mib,omitempty"`
-	Env           map[string]string      `protobuf:"bytes,6,rep,name=env,proto3" json:"env,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
-	Cmd           []string               `protobuf:"bytes,7,rep,name=cmd,proto3" json:"cmd,omitempty"` // override image CMD; empty = keep image config
-	AutoStartCmd  bool                   `protobuf:"varint,8,opt,name=auto_start_cmd,json=autoStartCmd,proto3" json:"auto_start_cmd,omitempty"`
-	Lifecycle     *Lifecycle             `protobuf:"bytes,9,opt,name=lifecycle,proto3" json:"lifecycle,omitempty"`
-	Labels        map[string]string      `protobuf:"bytes,10,rep,name=labels,proto3" json:"labels,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
-	NetworkPolicy string                 `protobuf:"bytes,11,opt,name=network_policy,json=networkPolicy,proto3" json:"network_policy,omitempty"`
-	Runtime       string                 `protobuf:"bytes,12,opt,name=runtime,proto3" json:"runtime,omitempty"` // internal tier: fc|runc|runsc; empty = node default
-	RequestId     string                 `protobuf:"bytes,13,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
+	state protoimpl.MessageState `protogen:"open.v1"`
+	// snapshot_id is set only when restoring. Every sandbox restored from one
+	// checkpoint unpacks to the same bytes, so a node caches the unpacked form
+	// under this id rather than repeating the work per restore. Empty means
+	// "unpack from the stream", which keeps a restore self-contained.
+	SnapshotId    string            `protobuf:"bytes,14,opt,name=snapshot_id,json=snapshotId,proto3" json:"snapshot_id,omitempty"`
+	SandboxId     string            `protobuf:"bytes,1,opt,name=sandbox_id,json=sandboxId,proto3" json:"sandbox_id,omitempty"`
+	Image         string            `protobuf:"bytes,2,opt,name=image,proto3" json:"image,omitempty"`
+	Cpu           float64           `protobuf:"fixed64,3,opt,name=cpu,proto3" json:"cpu,omitempty"`
+	MemoryMib     int64             `protobuf:"varint,4,opt,name=memory_mib,json=memoryMib,proto3" json:"memory_mib,omitempty"`
+	DiskMib       int64             `protobuf:"varint,5,opt,name=disk_mib,json=diskMib,proto3" json:"disk_mib,omitempty"`
+	Env           map[string]string `protobuf:"bytes,6,rep,name=env,proto3" json:"env,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	Cmd           []string          `protobuf:"bytes,7,rep,name=cmd,proto3" json:"cmd,omitempty"` // override image CMD; empty = keep image config
+	AutoStartCmd  bool              `protobuf:"varint,8,opt,name=auto_start_cmd,json=autoStartCmd,proto3" json:"auto_start_cmd,omitempty"`
+	Lifecycle     *Lifecycle        `protobuf:"bytes,9,opt,name=lifecycle,proto3" json:"lifecycle,omitempty"`
+	Labels        map[string]string `protobuf:"bytes,10,rep,name=labels,proto3" json:"labels,omitempty" protobuf_key:"bytes,1,opt,name=key" protobuf_val:"bytes,2,opt,name=value"`
+	NetworkPolicy string            `protobuf:"bytes,11,opt,name=network_policy,json=networkPolicy,proto3" json:"network_policy,omitempty"`
+	Runtime       string            `protobuf:"bytes,12,opt,name=runtime,proto3" json:"runtime,omitempty"` // internal tier: fc|runc|runsc; empty = node default
+	RequestId     string            `protobuf:"bytes,13,opt,name=request_id,json=requestId,proto3" json:"request_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -605,6 +610,13 @@ func (x *SandboxSpec) ProtoReflect() protoreflect.Message {
 // Deprecated: Use SandboxSpec.ProtoReflect.Descriptor instead.
 func (*SandboxSpec) Descriptor() ([]byte, []int) {
 	return file_bean_node_v1_node_proto_rawDescGZIP(), []int{9}
+}
+
+func (x *SandboxSpec) GetSnapshotId() string {
+	if x != nil {
+		return x.SnapshotId
+	}
+	return ""
 }
 
 func (x *SandboxSpec) GetSandboxId() string {
@@ -1928,8 +1940,10 @@ const file_bean_node_v1_node_proto_rawDesc = "" +
 	"\n" +
 	"node_token\x18\x02 \x01(\tR\tnodeToken\"J\n" +
 	"\x11SyncStateResponse\x125\n" +
-	"\bexpected\x18\x01 \x03(\v2\x19.bean.node.v1.SandboxSpecR\bexpected\"\xc5\x04\n" +
-	"\vSandboxSpec\x12\x1d\n" +
+	"\bexpected\x18\x01 \x03(\v2\x19.bean.node.v1.SandboxSpecR\bexpected\"\xe6\x04\n" +
+	"\vSandboxSpec\x12\x1f\n" +
+	"\vsnapshot_id\x18\x0e \x01(\tR\n" +
+	"snapshotId\x12\x1d\n" +
 	"\n" +
 	"sandbox_id\x18\x01 \x01(\tR\tsandboxId\x12\x14\n" +
 	"\x05image\x18\x02 \x01(\tR\x05image\x12\x10\n" +

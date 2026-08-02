@@ -25,7 +25,10 @@ const (
 
 // Spec is the node-side sandbox spec (subset of proto SandboxSpec).
 type Spec struct {
-	SandboxID    string
+	SandboxID string
+	// SnapshotID identifies the checkpoint a restore comes from, so a node can
+	// reuse state it has already unpacked. Empty for a cold start.
+	SnapshotID   string
 	Image        string
 	CPU          float64
 	MemoryMiB    int64

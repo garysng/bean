@@ -355,27 +355,26 @@ func writeZeros(dst io.Writer, n int64) (int64, error) {
 	return written, nil
 }
 
-// loadSnapshot unpacks a bundle and restores the VM from it. The guest resumes
-// with its memory intact, which is what makes a restore cheaper than a boot.
-func (r *FCRuntime) loadSnapshot(ctx context.Context, vm *fcVM, src io.Reader) error {
-	restoreDir := filepath.Join(vm.dir, "restore")
-	if err := os.MkdirAll(restoreDir, 0o700); err != nil {
-		return fmt.Errorf("fc: create restore dir: %w", err)
-	}
-
-	paths, err := readSnapshotBundle(src, restoreDir, vm.rootfs.Writable)
+// loadSnapshot restores a VM from a bundle. The guest resumes with its memory
+// intact, which is what makes a restore cheaper than a boot.
+//
+// The bundle's reusable parts — the machine state and the memory image — are
+// unpacked once per snapshot and shared by every restore of it. The writable
+// rootfs is not shared: two sandboxes restored from one checkpoint diverge as
+// soon as either writes, so its extents are replayed onto this sandbox's own
+// device. Those extents are small (a fresh sandbox has written almost nothing),
+// which is what makes the split worth having.
+func (r *FCRuntime) loadSnapshot(ctx context.Context, vm *fcVM, spec *Spec, src io.Reader) error {
+	entry, err := r.snapshotState(vm, spec, src)
 	if err != nil {
 		return err
-	}
-	if paths[snapshotStateFile] == "" || paths[snapshotMemFile] == "" {
-		return errors.New("fc: snapshot bundle missing vmstate or memory")
 	}
 
 	// Guest memory is served on demand rather than read up front. With the File
 	// backend Firecracker faults the whole image in through the page cache
 	// before the guest runs, which costs time proportional to the guest's size
 	// no matter how little of it the guest touches.
-	handler, err := newUffdHandler(vm.uffdHostPath(), paths[snapshotMemFile])
+	handler, err := newUffdHandler(vm.uffdHostPath(), entry.MemPath)
 	if err != nil {
 		return err
 	}
@@ -389,7 +388,7 @@ func (r *FCRuntime) loadSnapshot(ctx context.Context, vm *fcVM, src io.Reader) e
 	// which is why the path is derived from the sandbox directory the same way
 	// on both sides rather than recorded in the snapshot.
 	if err := vm.client.put(ctx, "/snapshot/load", fcSnapshotLoad{
-		SnapshotPath: paths[snapshotStateFile],
+		SnapshotPath: entry.StatePath,
 		MemBackend: fcMemBackend{
 			// Relative for the same reason the drives are: Firecracker records
 			// this path and resolves it again from its own working directory.
@@ -407,9 +406,58 @@ func (r *FCRuntime) loadSnapshot(ctx context.Context, vm *fcVM, src io.Reader) e
 	return nil
 }
 
+// snapshotState produces the machine state and memory image to restore from,
+// unpacking the bundle only if this node has not already done so for this
+// snapshot. The writable rootfs is replayed onto this sandbox's device either
+// way, since it cannot be shared.
+func (r *FCRuntime) snapshotState(vm *fcVM, spec *Spec, src io.Reader) (snapEntry, error) {
+	id := ""
+	if spec != nil {
+		id = spec.SnapshotID
+	}
+
+	if id != "" {
+		if entry, ok := r.snapshots.Lookup(id); ok {
+			// The reusable parts are already on disk, but this sandbox still
+			// needs the snapshot's filesystem on its own device.
+			if _, err := readSnapshotBundle(src, "", vm.rootfs.Writable); err != nil {
+				return snapEntry{}, err
+			}
+			return entry, nil
+		}
+		return r.snapshots.Fill(id, src, func(dir string) (map[string]string, error) {
+			return readSnapshotBundle(src, dir, vm.rootfs.Writable)
+		})
+	}
+
+	// Without an id there is nothing to key a cache on, so the bundle is
+	// unpacked into this sandbox's own directory.
+	restoreDir := filepath.Join(vm.dir, "restore")
+	if err := os.MkdirAll(restoreDir, 0o700); err != nil {
+		return snapEntry{}, fmt.Errorf("fc: create restore dir: %w", err)
+	}
+	paths, err := readSnapshotBundle(src, restoreDir, vm.rootfs.Writable)
+	if err != nil {
+		return snapEntry{}, err
+	}
+	if paths[snapshotStateFile] == "" || paths[snapshotMemFile] == "" {
+		return snapEntry{}, errors.New("fc: snapshot bundle missing vmstate or memory")
+	}
+	return snapEntry{
+		StatePath: paths[snapshotStateFile],
+		MemPath:   paths[snapshotMemFile],
+	}, nil
+}
+
 // readSnapshotBundle extracts a bundle. The rootfs is written straight over the
 // device the provider prepared, so the restored guest sees the filesystem it
 // was snapshotted with rather than a fresh copy of the base image.
+//
+// An empty dir skips the machine state and memory image, which is what a restore
+// wants when the node already holds them unpacked: the stream still has to be
+// read to reach the rootfs member, but writing 512 MiB of memory image again is
+// the cost the cache exists to avoid. An empty rootfsDevice likewise skips the
+// filesystem.
 func readSnapshotBundle(src io.Reader, dir, rootfsDevice string) (map[string]string, error) {
 	zr, err := gzip.NewReader(src)
 	if err != nil {
@@ -431,6 +479,9 @@ func readSnapshotBundle(src io.Reader, dir, rootfsDevice string) (map[string]str
 		var dest string
 		switch hdr.Name {
 		case snapshotStateFile, snapshotMemFile:
+			if dir == "" {
+				continue
+			}
 			dest = filepath.Join(dir, hdr.Name)
 		case snapshotRootfsFile:
 			if rootfsDevice == "" {

@@ -71,6 +71,10 @@ type FCRuntime struct {
 	// is how that evidence is recovered.
 	DebugConsole bool
 
+	// snapshots holds unpacked snapshot state, so restoring the same checkpoint
+	// twice does not unpack it twice.
+	snapshots *snapCache
+
 	mu   sync.Mutex
 	vms  map[string]*fcVM
 	once sync.Once
@@ -114,6 +118,9 @@ func NewFCRuntime(fcBin, kernel, agentDisk, baseDir string, images image.Provide
 		BaseDir:        baseDir,
 		Images:         images,
 		vms:            map[string]*fcVM{},
+		// Beside the sandboxes rather than inside any one of them: the entries
+		// outlive the sandbox that first unpacked them.
+		snapshots: newSnapCache(filepath.Join(baseDir, ".snapshots")),
 	}
 }
 
@@ -254,7 +261,7 @@ func (r *FCRuntime) create(ctx context.Context, spec *Spec, restoreFrom io.Reade
 	}
 
 	if restoreFrom != nil {
-		if err = r.loadSnapshot(ctx, vm, restoreFrom); err != nil {
+		if err = r.loadSnapshot(ctx, vm, spec, restoreFrom); err != nil {
 			return nil, err
 		}
 	} else {

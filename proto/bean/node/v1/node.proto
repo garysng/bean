@@ -26,7 +26,9 @@ service SandboxService {
   // frozen for the duration and returned to its prior state afterwards.
   rpc SnapshotSandbox(SnapshotSandboxRequest) returns (stream SnapshotChunk);
   // RestoreSandbox creates a sandbox from a checkpoint stream. The first
-  // frame carries the spec; the rest is checkpoint data.
+  // frame carries the spec; the rest is checkpoint data. A node that already
+  // holds the checkpoint unpacked answers without reading the data frames, so
+  // the sender must tolerate the stream being cut short.
   rpc RestoreSandbox(stream RestoreSandboxFrame) returns (RestoreSandboxResponse);
   rpc StartUserProcess(StartUserProcessNodeRequest) returns (StartUserProcessNodeResponse);
   // PrewarmImage makes an image ready on the node without creating a sandbox.
@@ -108,6 +110,12 @@ message SyncStateResponse {
 }
 
 message SandboxSpec {
+  // snapshot_id is set only when restoring. Every sandbox restored from one
+  // checkpoint unpacks to the same bytes, so a node caches the unpacked form
+  // under this id rather than repeating the work per restore. Empty means
+  // "unpack from the stream", which keeps a restore self-contained.
+  string snapshot_id = 14;
+
   string sandbox_id = 1;
   string image = 2;
   double cpu = 3;

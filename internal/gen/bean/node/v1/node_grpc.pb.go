@@ -234,7 +234,9 @@ type SandboxServiceClient interface {
 	// frozen for the duration and returned to its prior state afterwards.
 	SnapshotSandbox(ctx context.Context, in *SnapshotSandboxRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[SnapshotChunk], error)
 	// RestoreSandbox creates a sandbox from a checkpoint stream. The first
-	// frame carries the spec; the rest is checkpoint data.
+	// frame carries the spec; the rest is checkpoint data. A node that already
+	// holds the checkpoint unpacked answers without reading the data frames, so
+	// the sender must tolerate the stream being cut short.
 	RestoreSandbox(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[RestoreSandboxFrame, RestoreSandboxResponse], error)
 	StartUserProcess(ctx context.Context, in *StartUserProcessNodeRequest, opts ...grpc.CallOption) (*StartUserProcessNodeResponse, error)
 	// PrewarmImage makes an image ready on the node without creating a sandbox.
@@ -499,7 +501,9 @@ type SandboxServiceServer interface {
 	// frozen for the duration and returned to its prior state afterwards.
 	SnapshotSandbox(*SnapshotSandboxRequest, grpc.ServerStreamingServer[SnapshotChunk]) error
 	// RestoreSandbox creates a sandbox from a checkpoint stream. The first
-	// frame carries the spec; the rest is checkpoint data.
+	// frame carries the spec; the rest is checkpoint data. A node that already
+	// holds the checkpoint unpacked answers without reading the data frames, so
+	// the sender must tolerate the stream being cut short.
 	RestoreSandbox(grpc.ClientStreamingServer[RestoreSandboxFrame, RestoreSandboxResponse]) error
 	StartUserProcess(context.Context, *StartUserProcessNodeRequest) (*StartUserProcessNodeResponse, error)
 	// PrewarmImage makes an image ready on the node without creating a sandbox.

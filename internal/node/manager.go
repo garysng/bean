@@ -692,6 +692,7 @@ const agentReadyTimeout = 20 * time.Second
 func specToRuntime(spec *nodev1.SandboxSpec) *runtime.Spec {
 	return &runtime.Spec{
 		SandboxID:    spec.SandboxId,
+		SnapshotID:   spec.SnapshotId,
 		Image:        spec.Image,
 		CPU:          spec.Cpu,
 		MemoryMiB:    spec.MemoryMib,
