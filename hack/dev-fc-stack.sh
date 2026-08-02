@@ -27,6 +27,12 @@ NODE_METRICS_PORT=${NODE_METRICS_PORT:-17444}
 # a sandbox that is already running.
 NODED_FLAGS=${NODED_FLAGS:-}
 
+# Node capacity. Defaults suit a small development host; a stress run on a large
+# machine overrides them. These are what the node reports as allocatable, before
+# any overcommit factor.
+NODE_CPU=${NODE_CPU:-8}
+NODE_MEM_MIB=${NODE_MEM_MIB:-16384}
+
 API_KEY=${API_KEY:-devkey}
 NODE_TOKEN=${NODE_TOKEN:-ntok}
 BOOTSTRAP_TOKEN=${BOOTSTRAP_TOKEN:-btok}
@@ -83,7 +89,7 @@ nohup "$BIN/noded" \
   --agent-disk "$ASSETS/agent.ext4" \
   --base-dir /var/lib/bean/sandboxes \
   --image-dir /var/lib/bean/images \
-  --cpu 8 --memory-mib 16384 \
+  --cpu "${NODE_CPU:-8}" --memory-mib "${NODE_MEM_MIB:-16384}" \
   --labels tier=fc \
   --metrics "127.0.0.1:$NODE_METRICS_PORT" \
   --buildkit-addr "${BUILDKIT_ADDR:-unix:///run/bean/buildkitd.sock}" \
