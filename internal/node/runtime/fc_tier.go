@@ -26,4 +26,7 @@ type FCTierConfig struct {
 	// DebugConsole attaches guests to the serial console. It costs roughly
 	// 500ms per boot, so it is a debugging aid rather than a default.
 	DebugConsole bool
+	// CPUTemplate masks CPU features from guests so memory snapshots survive a
+	// move between CPU generations. Empty means none.
+	CPUTemplate CPUTemplate
 }

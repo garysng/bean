@@ -71,6 +71,12 @@ type FCRuntime struct {
 	// is how that evidence is recovered.
 	DebugConsole bool
 
+	// CPUTemplate masks CPU features from guests so a memory snapshot is not
+	// bound to the host that produced it. See cpu_template.go — it must be set
+	// before a guest boots, so it is node configuration and not a per-snapshot
+	// choice.
+	CPUTemplate CPUTemplate
+
 	// snapshots holds unpacked snapshot state, so restoring the same checkpoint
 	// twice does not unpack it twice.
 	snapshots *snapCache
@@ -352,6 +358,16 @@ func (r *FCRuntime) configureAndBoot(ctx context.Context, vm *fcVM, spec *Spec) 
 		VCPUCount: vcpus, MemSizeMiB: mem,
 	}); err != nil {
 		return err
+	}
+
+	// Masking has to happen before InstanceStart. A guest reads CPUID once
+	// during early boot and caches what it found — glibc picks its string
+	// routines from it — so a template applied any later would be masking
+	// features the guest has already committed to using.
+	if cfg := cpuConfigFor(r.CPUTemplate); cfg != nil {
+		if err := vm.client.put(ctx, "/cpu-config", cfg); err != nil {
+			return fmt.Errorf("apply cpu template %s: %w", r.CPUTemplate, err)
+		}
 	}
 
 	// The agent disk boots as the root device and the user image is attached

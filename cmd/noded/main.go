@@ -59,6 +59,9 @@ func main() {
 	buildctlBin := flag.String("buildctl-bin", "buildctl", "BuildKit client binary")
 	debugConsole := flag.Bool("debug-console", false,
 		"attach guests to the serial console; costs ~500ms per boot (fc runtime)")
+	cpuTemplate := flag.String("cpu-template", "none",
+		"mask guest CPU features so memory snapshots survive a move between CPU "+
+			"generations: none|portable (fc runtime)")
 	logFormat := flag.String("log-format", "text", "log format: text|json")
 	logLevel := flag.String("log-level", "info", "log level: debug|info|warn|error")
 	otlpEndpoint := flag.String("otlp-endpoint", os.Getenv("BEAN_OTLP_ENDPOINT"),
@@ -85,6 +88,14 @@ func main() {
 		log.Fatalf("refusing to listen on %s without --node-token (or BEAN_NODE_TOKEN)", *listen)
 	}
 
+	// A misspelled template must stop the node rather than fall back to none:
+	// the fallback silently produces snapshots bound to this host's CPU, and
+	// nothing surfaces that until a restore elsewhere misbehaves.
+	tmpl, err := runtime.ParseCPUTemplate(*cpuTemplate)
+	if err != nil {
+		log.Fatalf("--cpu-template: %v", err)
+	}
+
 	var rt runtime.Runtime
 	switch *rtName {
 	case "local":
@@ -100,6 +111,7 @@ func main() {
 			BuildkitAddr:   *buildkitAddr,
 			BuildctlBin:    *buildctlBin,
 			DebugConsole:   *debugConsole,
+			CPUTemplate:    tmpl,
 		})
 		if err != nil {
 			log.Fatalf("fc runtime: %v", err)

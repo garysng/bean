@@ -48,6 +48,14 @@ func NewFCTier(cfg FCTierConfig) (Runtime, error) {
 	if cfg.DebugConsole {
 		slog.Warn("guest serial console on", "costPerBoot", "~500ms")
 	}
+	rt.CPUTemplate = cfg.CPUTemplate
+	if cfg.CPUTemplate == CPUTemplatePortable {
+		slog.Info("cpu template masks features for snapshot portability",
+			"masked", MaskedCPUFeatures(cfg.CPUTemplate),
+			// Snapshots still bind to these, so the limit is stated at startup
+			// rather than left for a failed restore to reveal.
+			"cannotMask", UnmaskableCPUFeatures(cfg.CPUTemplate))
+	}
 	// Committed images land beside pulled ones, because a committed image is a
 	// base image like any other — that is the point of committing rather than
 	// snapshotting.
