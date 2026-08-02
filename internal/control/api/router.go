@@ -9,6 +9,7 @@ import (
 
 	nodev1 "github.com/garysng/bean/internal/gen/bean/node/v1"
 	"github.com/garysng/bean/internal/node"
+	"github.com/garysng/bean/internal/obs"
 )
 
 // NodeResolver maps a node id to its data-plane address.
@@ -48,10 +49,13 @@ func (r *NodeRouter) Client(nodeID string) (nodev1.SandboxServiceClient, error) 
 		return nil, fmt.Errorf("node %s has no known address", nodeID)
 	}
 	unary, stream := node.TokenClientInterceptors(r.nodeToken)
+	// Trace injection runs after the token interceptor so both sets of
+	// metadata reach the node; chaining is required because gRPC keeps only
+	// the last WithUnaryInterceptor.
 	conn, err := grpc.NewClient(addr,
 		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithUnaryInterceptor(unary),
-		grpc.WithStreamInterceptor(stream))
+		grpc.WithChainUnaryInterceptor(unary, obs.UnaryClientTrace()),
+		grpc.WithChainStreamInterceptor(stream, obs.StreamClientTrace()))
 	if err != nil {
 		return nil, fmt.Errorf("dial node %s at %s: %w", nodeID, addr, err)
 	}

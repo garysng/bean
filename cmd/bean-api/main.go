@@ -32,6 +32,7 @@ import (
 	"github.com/garysng/bean/internal/control/store"
 	nodev1 "github.com/garysng/bean/internal/gen/bean/node/v1"
 	"github.com/garysng/bean/internal/logging"
+	"github.com/garysng/bean/internal/obs"
 )
 
 var version = "dev"
@@ -61,9 +62,25 @@ func main() {
 		"address buckets as /bucket/key (required by MinIO and most self-hosted gateways)")
 	logFormat := flag.String("log-format", "text", "log format: text|json")
 	logLevel := flag.String("log-level", "info", "log level: debug|info|warn|error")
+	otlpEndpoint := flag.String("otlp-endpoint", os.Getenv("BEAN_OTLP_ENDPOINT"),
+		"OTLP/gRPC collector for traces, e.g. localhost:4317 (empty = tracing off)")
 	flag.Parse()
 
 	logging.Setup(*logFormat, *logLevel)
+
+	shutdownTracing, err := obs.SetupTracing(context.Background(), obs.TracingConfig{
+		Endpoint: *otlpEndpoint, Service: "bean-api", Version: version, Insecure: true,
+	})
+	if err != nil {
+		log.Fatalf("tracing: %v", err)
+	}
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := shutdownTracing(ctx); err != nil {
+			slog.Warn("flushing traces", logging.KeyError, err)
+		}
+	}()
 
 	if *apiKey == "" {
 		log.Fatal("api key required: set --api-key or BEAN_API_KEY")
@@ -134,7 +151,10 @@ func main() {
 		OnLost:         func(nodeID string) { markNodeSandboxesLost(st, sched, nodeID) },
 	})
 
-	grpcSrv := grpc.NewServer()
+	grpcSrv := grpc.NewServer(
+		grpc.ChainUnaryInterceptor(obs.UnaryServerTrace("bean-api")),
+		grpc.ChainStreamInterceptor(obs.StreamServerTrace("bean-api")),
+	)
 	nodev1.RegisterNodeServiceServer(grpcSrv, nodeSvc)
 	nodeLis, err := net.Listen("tcp", *nodeGRPC)
 	if err != nil {

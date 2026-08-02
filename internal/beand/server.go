@@ -21,6 +21,7 @@ import (
 
 	agentv1 "github.com/garysng/bean/internal/gen/bean/agent/v1"
 	commonv1 "github.com/garysng/bean/internal/gen/bean/common/v1"
+	"github.com/garysng/bean/internal/logging"
 )
 
 const (
@@ -175,6 +176,13 @@ func (s *Server) Exec(ctx context.Context, req *commonv1.ExecRequest) (*commonv1
 	start := time.Now()
 	err := cmd.Run()
 	dur := time.Since(start)
+
+	// The agent cannot export spans, so this line is how work inside the guest
+	// becomes visible: it carries the caller's trace id, which makes the gap
+	// between the node's Exec span and the command's own runtime attributable
+	// instead of a guess.
+	logging.From(ctx).Info("exec finished",
+		"cmd", req.Cmd[0], "durationMs", dur.Milliseconds())
 
 	resp := &commonv1.ExecResponse{
 		Stdout:     stdout.Bytes(),

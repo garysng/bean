@@ -12,6 +12,7 @@ import (
 
 	"github.com/garysng/bean/internal/beand"
 	agentv1 "github.com/garysng/bean/internal/gen/bean/agent/v1"
+	"github.com/garysng/bean/internal/logging"
 )
 
 var version = "dev"
@@ -21,7 +22,11 @@ func main() {
 	rootDir := flag.String("root", "", "confine file ops under this dir (dev mode); empty = host root")
 	pivot := flag.String("pivot", "",
 		"block device holding the user image; mounted as / before serving (fc tier)")
+	logFormat := flag.String("log-format", "text", "log format: text|json")
+	logLevel := flag.String("log-level", "info", "log level: debug|info|warn|error")
 	flag.Parse()
+
+	logging.Setup(*logFormat, *logLevel)
 
 	// As PID 1 in a microVM the agent owns early boot: the user image is not
 	// the root filesystem until this runs, so it happens before the listener is
@@ -41,7 +46,10 @@ func main() {
 		log.Fatalf("listen %s: %v", *listenAddr, err)
 	}
 
-	srv := grpc.NewServer()
+	srv := grpc.NewServer(
+		grpc.ChainUnaryInterceptor(beand.UnaryTraceLogging()),
+		grpc.ChainStreamInterceptor(beand.StreamTraceLogging()),
+	)
 	agentv1.RegisterAgentServiceServer(srv, beand.NewServer(version, *rootDir))
 	slog.Info("beand listening", "version", version, "addr", *listenAddr, "root", *rootDir)
 	if err := srv.Serve(lis); err != nil {

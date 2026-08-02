@@ -13,6 +13,8 @@ import (
 	"strings"
 	"time"
 
+	"go.opentelemetry.io/otel/propagation"
+	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
@@ -106,7 +108,39 @@ func (s *Server) nodeClientFor(rec *store.Sandbox) (nodev1.SandboxServiceClient,
 	return s.router.Client(rec.NodeID)
 }
 
-func (s *Server) Handler() http.Handler { return s.authMiddleware(s.mux) }
+func (s *Server) Handler() http.Handler { return s.traceMiddleware(s.authMiddleware(s.mux)) }
+
+// traceMiddleware opens the root span for a request and seeds the request id.
+//
+// It wraps auth rather than sitting inside it so that a rejected request is
+// still one span: an authentication failure is a thing worth seeing in a trace,
+// and putting the span inside auth would make those the only invisible requests.
+//
+// The request id is derived from the trace id rather than generated separately.
+// Two ids for one request means every correlation needs a join, and the one
+// place they would inevitably diverge is the path that matters — a request that
+// crossed a process boundary.
+func (s *Server) traceMiddleware(next http.Handler) http.Handler {
+	tracer := obs.Tracer("bean-api")
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/healthz" || r.URL.Path == "/metrics" {
+			next.ServeHTTP(w, r)
+			return
+		}
+		ctx := obs.HTTPExtract(r.Context(), propagation.HeaderCarrier(r.Header))
+		ctx, span := tracer.Start(ctx, r.Method+" "+r.URL.Path,
+			trace.WithSpanKind(trace.SpanKindServer))
+		defer span.End()
+
+		if id := obs.TraceIDFrom(ctx); id != "" {
+			ctx = logging.WithRequest(ctx, id)
+			// Returning the id lets a caller reporting a slow request name
+			// the trace to look up, instead of correlating by timestamp.
+			w.Header().Set("X-Bean-Trace-Id", id)
+		}
+		next.ServeHTTP(w, r.WithContext(ctx))
+	})
+}
 
 func (s *Server) routes() {
 	s.mux.HandleFunc("POST /v1/sandboxes", s.handleCreate)

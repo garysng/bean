@@ -58,8 +58,39 @@ Python SDK 也有 `sandbox.commit(tag)`。
 否则按 sandbox 聚合会因为各组件拼写不同而失效。
 context 里带 request id,便于跨组件关联同一次请求。
 
-**注意:这不是 trace。** 没有 OTel 依赖,没有跨进程 span,
-一次 create 还不能作为一棵耗时树被追踪。字段化是它的前置条件。
+trace 走 OTel,`--otlp-endpoint` 指向 OTLP/gRPC collector(空则关闭,
+装 no-op provider —— 埋点处不做条件判断)。request id **就是 trace id**,
+不是另一套编号:两套 id 意味着每次关联都要 join,而它们必然在
+跨进程那一跳上分叉。
+
+实测(真机,`hack/tracedump` 收 span):
+
+```
+POST /v1/sandboxes                 bean-api   1196.0ms
+  SandboxService/CreateSandbox     noded      1110.2ms
+    node.Create                    noded      1110.1ms   events=[phase.*]
+      runtime.Create               noded       324.2ms
+      agent.WaitHealthy            noded       785.8ms
+
+POST /v1/sandboxes/{id}/exec       bean-api     18.6ms
+  SandboxService/Exec              noded        17.4ms
+    (beand 日志 request=283a333e…)  guest         8.0ms
+```
+
+第一棵树立刻给出一个此前没有任何指标覆盖的数字:gateway 与 noded
+之间差 **86ms**(1196 − 1110),那是调度 + 落库的开销。
+
+**beand 只采纳 trace id,不导出 span**,而且刻意不链 OTel SDK
+(`go list -deps` 验证过为 0):它在 guest 内没有到 collector 的路径,
+且 agent 盘的体积按每次 boot 计价。它把调用方的 trace id 写进自己的
+日志,所以「慢在 guest 内」可以被核对而不是猜测。
+**但 guest 的 stderr 只在 `--debug-console` 下经串口出来** ——
+默认关串口(省 493ms)的代价就是那条日志默认不可见。
+guest 内日志的常规出口还没做。
+
+阶段耗时的 metric 与 span event 由**同一次调用**产生
+(`Manager.observePhase`),所以不会出现某个阶段只进了直方图、
+在 trace 里却是一段空白。
 
 fc 档实测(镜像已缓存):`runtime_create` ~234ms(起 VMM)、
 `agent_ready` ~770ms(内核启动 + pivot + listen)、`total` ~952ms。
@@ -93,7 +124,7 @@ restore ~950ms(同一快照首次 1617ms,要付 unpack 代价);
 | overlaybd lazy-pull | ⚠️ **能力已实测跑通,尚未接入代码**。当前生产路径是「拉全量 + 转换 + CoW 共享」（每 sandbox 8 KiB）。overlaybd 侧已在验证机上验证:挂载 7ms、只传 19.6% 的层字节就能挂载并读文件、8 个 HTTP 206、可写上层实占 40 KiB（`docs/decisions.md` §3.1）。剩下的是写 `OverlaybdProvider` 接进 `image.Provider` |
 | diff snapshot（增量） | ⚠️ 当前 full snapshot;Firecracker 支持 diff,接口无需改。**这是与 tensorlake 的主要差距**——他们把「磁盘快照成本 O(changed bytes)」当核心卖点 |
 | fork / shared-fs 卷 / proxy 端口暴露 | ⛔ P3–P4 范围,未开始 |
-| OTel trace | ⛔ **未开始**。零 OTel 依赖,无 span,一次 create 追不了 gateway → noded → beand。日志已字段化并带 request id(前置条件已具备),但那只解决关联,不是 trace。metrics registry 是另一套东西,不能「包一层」变成 trace |
+| OTel trace | ✅ **已实装并实测**。一次 create/exec 是一棵跨进程 span 树(下方「可观测」段有实测树)。`--otlp-endpoint` 为空则装 no-op provider,埋点无需条件判断。**限制**:beand 在 guest 内无出网路径,只采纳 trace id 写进自己的日志、不导出 span;而 guest 的 stderr 只在 `--debug-console` 下经串口出来,所以默认配置看不到那条日志 |
 | Postgres | ⚠️ 接口已抽象,当前 SQLite |
 | 创建阶段指标 network | ⚠️ 埋点位已留,等网络实装 |
 
@@ -130,8 +161,10 @@ multipathd 会把多个 overlaybd 设备合并成一条 multipath,
    「首次使用一个大镜像的等待时间」。
 2. **build 的构建日志与取消**：现在 build 是「起了就等」,失败只能从 image state
    看到 FAILED。日志落存储 + 可流式查看 + `cancel` 才算完整（`docs/image-build.md` §6）。
-3. **OTel trace**：一次 create 跨 gateway → noded → beand,现在只能靠
-   request id 关联日志,没有耗时树。这是排查长尾延迟的前提。
+3. **guest 内日志的出口**:beand 已把 trace id 写进日志,但默认关串口
+   意味着那条日志没有出口(只有 `--debug-console` 能看到)。
+   应该走 vsock 把 guest 日志收到节点侧,而不是靠串口 ——
+   串口既慢(493ms/boot)又只能在调试时开。
 4. **restore 剩下的 ~950ms**：命中 unpack 缓存后,仍要把整个 bundle 从
    gateway 传过来并解 gzip,只为取出 rootfs 那一个 member。
    要么命中时让节点告诉控制面「别发了」,要么把 rootfs 拆成独立对象。

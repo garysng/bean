@@ -282,12 +282,14 @@ GET /metrics                                            // Prometheus 格式（�
     // bean_events_total{type}  bean_event_subscribers
 ```
 
-**OTel 采集（设计意图,尚未实装）**：
+**OTel 采集**：
 
-> 当前状态:metrics 是 Prometheus 端点(已实装);logs 已字段化并带
-> request id(`internal/logging`,已实装);**trace 完全没有** ——
-> 零 OTel 依赖、无 span、一次 create 追不了 gateway → noded → beand。
-> 注意 metrics registry 与 trace 是两套东西,不能「包一层」变过去。
+> 当前状态:metrics 是 Prometheus 端点(已实装,与 trace 是两套东西);
+> logs 已字段化(`internal/logging`);**trace 已实装并实测** ——
+> `--otlp-endpoint` 开启,一次 create/exec 是一棵跨进程 span 树,
+> request id 即 trace id。响应头回 `X-Bean-Trace-Id`,
+> 调用方报慢时可以直接给出要查的 trace。
+> per-sandbox 资源指标与 sandbox 内应用 OTLP 透传仍未实装。
 
 - 平台组件（gateway/scheduler/noded/agent）trace/metrics/logs 统一 OTLP 导出
   （Prometheus 兼容端点保留）;request_id 贯穿即 trace id

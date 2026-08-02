@@ -10,6 +10,8 @@ import (
 	"sync"
 	"time"
 
+	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/backoff"
 	"google.golang.org/grpc/credentials/insecure"
@@ -61,10 +63,17 @@ func (m *Manager) Metrics() *obs.Registry { return m.metrics }
 
 // observePhase records one create-phase duration. Phase names mirror the
 // cold-start budget in docs/security-and-startup.md B1.
-func (m *Manager) observePhase(phase string, d time.Duration) {
+//
+// The same call feeds the histogram and the span, so a phase cannot appear in
+// one and be missing from the other. Recording them separately is how the two
+// drift: someone adds a phase, updates the metric, and the trace keeps a gap
+// that looks like idle time.
+func (m *Manager) observePhase(ctx context.Context, phase string, d time.Duration) {
 	m.metrics.ObserveDuration("bean_node_create_phase_seconds",
 		"Sandbox create latency by phase.",
 		map[string]string{"phase": phase, "runtime": m.rt.Name()}, d)
+	trace.SpanFromContext(ctx).AddEvent("phase."+phase,
+		trace.WithAttributes(attribute.Int64("duration_ms", d.Milliseconds())))
 }
 
 func (m *Manager) Close() {
@@ -85,6 +94,13 @@ func (m *Manager) Create(ctx context.Context, spec *nodev1.SandboxSpec) (*Sandbo
 	if spec.GetSandboxId() == "" {
 		return nil, fmt.Errorf("sandbox_id required")
 	}
+	ctx, span := obs.Tracer("noded").Start(ctx, "node.Create",
+		trace.WithAttributes(
+			attribute.String(obs.AttrSandbox, spec.GetSandboxId()),
+			attribute.String(obs.AttrImage, spec.GetImage()),
+		))
+	defer span.End()
+
 	m.mu.Lock()
 	if _, exists := m.sandboxes[spec.SandboxId]; exists {
 		m.mu.Unlock()
@@ -103,12 +119,16 @@ func (m *Manager) Create(ctx context.Context, spec *nodev1.SandboxSpec) (*Sandbo
 		m.metrics.IncCounter("bean_node_creates_total",
 			"Sandbox creates handled by this node.",
 			map[string]string{"outcome": outcome, "runtime": m.rt.Name()}, 1)
-		m.observePhase("total", time.Since(createStart))
+		m.observePhase(ctx, "total", time.Since(createStart))
 	}()
 
 	rtStart := time.Now()
-	handle, err := m.rt.Create(ctx, rspec)
-	m.observePhase("runtime_create", time.Since(rtStart))
+	rtCtx, rtSpan := obs.Tracer("noded").Start(ctx, "runtime.Create",
+		trace.WithAttributes(obs.Phase("runtime_create")))
+	handle, err := m.rt.Create(rtCtx, rspec)
+	obs.Fail(rtCtx, err)
+	rtSpan.End()
+	m.observePhase(ctx, "runtime_create", time.Since(rtStart))
 	if err != nil {
 		m.dropFailed(spec.SandboxId)
 		return nil, err
@@ -278,8 +298,14 @@ func (m *Manager) Destroy(ctx context.Context, id string, force bool) error {
 		_ = sb.conn.Close()
 	}
 	start := time.Now()
-	err := m.rt.Destroy(ctx, id, force)
-	m.observePhase("destroy", time.Since(start))
+	dCtx, dSpan := obs.Tracer("noded").Start(ctx, "runtime.Destroy",
+		trace.WithAttributes(obs.Phase("destroy"),
+			attribute.String(obs.AttrSandbox, id),
+			attribute.Bool("force", force)))
+	err := m.rt.Destroy(dCtx, id, force)
+	obs.Fail(dCtx, err)
+	dSpan.End()
+	m.observePhase(ctx, "destroy", time.Since(start))
 	m.metrics.IncCounter("bean_node_destroys_total", "Sandbox destroys handled by this node.",
 		map[string]string{"outcome": boolOutcome(err == nil), "runtime": m.rt.Name()}, 1)
 	return err
@@ -363,7 +389,7 @@ func (m *Manager) Snapshot(ctx context.Context, id string, w io.Writer) error {
 
 	start := time.Now()
 	err := m.rt.Checkpoint(ctx, id, w)
-	m.observePhase("checkpoint", time.Since(start))
+	m.observePhase(ctx, "checkpoint", time.Since(start))
 	m.metrics.IncCounter("bean_node_snapshots_total",
 		"Snapshots taken on this node.",
 		map[string]string{"outcome": boolOutcome(err == nil), "runtime": m.rt.Name()}, 1)
@@ -447,7 +473,7 @@ func (m *Manager) CommitSandbox(ctx context.Context, id, tag string) error {
 
 	start := time.Now()
 	err := committer.CommitSandbox(ctx, id, tag)
-	m.observePhase("commit", time.Since(start))
+	m.observePhase(ctx, "commit", time.Since(start))
 	m.metrics.IncCounter("bean_node_commits_total",
 		"Sandbox commits on this node.",
 		map[string]string{"outcome": boolOutcome(err == nil), "runtime": m.rt.Name()}, 1)
@@ -496,7 +522,7 @@ func (m *Manager) BuildImage(ctx context.Context, req runtime.BuildRequest) (str
 	}
 	start := time.Now()
 	ref, err := builder.BuildImage(ctx, req)
-	m.observePhase("image_build", time.Since(start))
+	m.observePhase(ctx, "image_build", time.Since(start))
 	m.metrics.IncCounter("bean_node_image_builds_total",
 		"Image builds on this node.",
 		map[string]string{"outcome": boolOutcome(err == nil), "runtime": m.rt.Name()}, 1)
@@ -533,7 +559,7 @@ func (m *Manager) PrewarmImage(ctx context.Context, imageRef string) error {
 	}
 	start := time.Now()
 	err := warmer.PrewarmImage(ctx, imageRef)
-	m.observePhase("image_prewarm", time.Since(start))
+	m.observePhase(ctx, "image_prewarm", time.Since(start))
 	m.metrics.IncCounter("bean_node_image_prewarms_total",
 		"Image prewarm attempts on this node.",
 		map[string]string{"outcome": boolOutcome(err == nil), "runtime": m.rt.Name()}, 1)
@@ -582,6 +608,13 @@ func (m *Manager) RestoreSandbox(ctx context.Context, spec *nodev1.SandboxSpec,
 	if spec.GetSandboxId() == "" {
 		return nil, fmt.Errorf("sandbox_id required")
 	}
+	ctx, span := obs.Tracer("noded").Start(ctx, "node.Restore",
+		trace.WithAttributes(
+			attribute.String(obs.AttrSandbox, spec.GetSandboxId()),
+			attribute.String(obs.AttrSnapshot, spec.GetSnapshotId()),
+		))
+	defer span.End()
+
 	m.mu.Lock()
 	if _, exists := m.sandboxes[spec.SandboxId]; exists {
 		m.mu.Unlock()
@@ -597,7 +630,7 @@ func (m *Manager) RestoreSandbox(ctx context.Context, spec *nodev1.SandboxSpec,
 		m.metrics.IncCounter("bean_node_restores_total",
 			"Sandbox restores handled by this node.",
 			map[string]string{"outcome": outcome, "runtime": m.rt.Name()}, 1)
-		m.observePhase("restore", time.Since(start))
+		m.observePhase(ctx, "restore", time.Since(start))
 	}()
 
 	// Unpacking the bundle and loading it into a VMM are measured apart from
@@ -605,8 +638,13 @@ func (m *Manager) RestoreSandbox(ctx context.Context, spec *nodev1.SandboxSpec,
 	// does not, so a single number for the whole restore cannot say which one to
 	// attack.
 	loadStart := time.Now()
-	handle, err := m.rt.Restore(ctx, specToRuntime(spec), src)
-	m.observePhase("restore_load", time.Since(loadStart))
+	rCtx, rSpan := obs.Tracer("noded").Start(ctx, "runtime.Restore",
+		trace.WithAttributes(obs.Phase("restore_load"),
+			attribute.String(obs.AttrSnapshot, spec.GetSnapshotId())))
+	handle, err := m.rt.Restore(rCtx, specToRuntime(spec), src)
+	obs.Fail(rCtx, err)
+	rSpan.End()
+	m.observePhase(ctx, "restore_load", time.Since(loadStart))
 	if err != nil {
 		m.dropFailed(spec.SandboxId)
 		return nil, err
@@ -667,15 +705,28 @@ func (m *Manager) connectAgent(ctx context.Context, handle *runtime.Handle) (*gr
 				MaxDelay:   time.Second,
 			},
 			MinConnectTimeout: 2 * time.Second,
-		}))
+		}),
+		// The agent runs inside the guest and cannot reach a collector itself
+		// (it has no route out, only an inbound vsock), so it does not export
+		// spans. Injecting the trace context anyway means the agent's own logs
+		// carry the same trace id as the surrounding spans, which is what makes
+		// "the slow part was inside the guest" a followable claim.
+		grpc.WithChainUnaryInterceptor(obs.UnaryClientTrace()),
+		grpc.WithChainStreamInterceptor(obs.StreamClientTrace()))
 	if err != nil {
 		return nil, fmt.Errorf("agent dial: %w", err)
 	}
 	healthStart := time.Now()
 	// A microVM has to boot a kernel and pivot to the user image before its
 	// agent listens, which takes longer than a process-level sandbox needs.
-	err = waitHealthy(ctx, conn, agentReadyTimeout)
-	m.observePhase("agent_ready", time.Since(healthStart))
+	// This span covers guest boot: it is normally the largest single piece of
+	// a create, and the one a reader most often wants isolated from the rest.
+	hCtx, hSpan := obs.Tracer("noded").Start(ctx, "agent.WaitHealthy",
+		trace.WithAttributes(obs.Phase("agent_ready")))
+	err = waitHealthy(hCtx, conn, agentReadyTimeout)
+	obs.Fail(hCtx, err)
+	hSpan.End()
+	m.observePhase(ctx, "agent_ready", time.Since(healthStart))
 	if err != nil {
 		conn.Close()
 		return nil, fmt.Errorf("agent health: %w", err)

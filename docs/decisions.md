@@ -232,6 +232,53 @@ TCMU 默认不给唯一序列号,两个内容完全不同的 overlaybd 设备 WW
 **结论**:tcmu 后端功能完备,不必先升内核。ublk(≥6.0)只是性能更好。
 接 `image.Provider` 接口时这两条必须编码进去,靠文档记不住。
 
+## 3.5 trace:OTel + W3C traceparent,但 agent 不链 SDK
+
+**为什么 request id 不够**:字段化日志能回答「这次请求发生了什么」,
+不能回答「1.2 秒花在哪一层」。后者需要父子关系,而关系存在于
+**进程之间**,任何单个进程的日志里都没有。
+
+实测第一棵树就给出了一个此前无人知晓的数字:
+
+```
+POST /v1/sandboxes            bean-api   1196.0ms
+  CreateSandbox               noded      1110.2ms   ← 差 86ms
+    runtime.Create            noded       324.2ms
+    agent.WaitHealthy         noded       785.8ms
+```
+
+那 86ms 是调度 + 落库,之前没有任何指标覆盖它。这正是 trace 的价值:
+它暴露的是**没人想到要去测的那一段**。
+
+**竞品对照**:
+
+| | trace 方案 | guest 内 |
+|---|---|---|
+| e2b | OTel,`traceparent` 贯穿 | agent 出 span(envd 有出网路径) |
+| agentenv | OTel | 同上 |
+| tensorlake | 自建 timing 上报 | — |
+| **bean** | OTel + W3C traceparent | **只采纳 trace id,不出 span** |
+
+**bean 与 e2b 的差异是有意的**:e2b 的 envd 能直连 collector,我们的
+beand 只有一条入向 vsock,没有出网路径。给它加一条反向通道要么破坏
+「入站零暴露」,要么需要在 noded 里做一层 OTLP 中继 —— 后者可行但
+不是现在的瓶颈。所以选择是:beand 采纳调用方的 trace id 写进自己的日志,
+**并刻意不链 OTel SDK**(`go list -deps ./cmd/beand` 为 0)。理由是
+agent 盘挂在每一个 microVM 上,体积按 boot 次数计价,而那份 SDK 服务的
+遥测数据根本出不了 guest。
+
+**代价必须说清**:guest 的 stderr 只在 `--debug-console` 下经串口出来,
+而串口默认关闭(§1.1,省 493ms)。所以那条带 trace id 的日志
+**默认看不到**。要真正闭环,得走 vsock 把 guest 日志收到节点侧 —— 未做。
+
+**request id 就是 trace id,不另发号**。两套 id 意味着每次关联都要 join,
+而它们必然在跨进程那一跳上分叉 —— 那一跳恰恰是唯一需要关联的地方。
+
+**一个只有真机能暴露的 bug**:`resource.Merge(resource.Default(), ...)`
+在 pinned semconv 版本与 SDK 不一致时直接返回错误,进程起不来。
+所有单测都通过,因为它们把 `Endpoint` 留空、在那一行之前就 return 了。
+补的测试专门走带 endpoint 的路径(exporter 懒连接,所以不需要真 collector)。
+
 ## 4. 未决 / 待验证
 
 - **overlaybd lazy-pull 接入 `image.Provider`**:能力本身已实测跑通(§3.1),

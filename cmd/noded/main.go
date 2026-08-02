@@ -21,6 +21,7 @@ import (
 	"github.com/garysng/bean/internal/logging"
 	"github.com/garysng/bean/internal/node"
 	"github.com/garysng/bean/internal/node/runtime"
+	"github.com/garysng/bean/internal/obs"
 )
 
 var version = "dev"
@@ -60,9 +61,25 @@ func main() {
 		"attach guests to the serial console; costs ~500ms per boot (fc runtime)")
 	logFormat := flag.String("log-format", "text", "log format: text|json")
 	logLevel := flag.String("log-level", "info", "log level: debug|info|warn|error")
+	otlpEndpoint := flag.String("otlp-endpoint", os.Getenv("BEAN_OTLP_ENDPOINT"),
+		"OTLP/gRPC collector for traces, e.g. localhost:4317 (empty = tracing off)")
 	flag.Parse()
 
 	logging.Setup(*logFormat, *logLevel)
+
+	shutdownTracing, err := obs.SetupTracing(context.Background(), obs.TracingConfig{
+		Endpoint: *otlpEndpoint, Service: "noded", Version: version, Insecure: true,
+	})
+	if err != nil {
+		log.Fatalf("tracing: %v", err)
+	}
+	defer func() {
+		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer cancel()
+		if err := shutdownTracing(ctx); err != nil {
+			slog.Warn("flushing traces", logging.KeyError, err)
+		}
+	}()
 
 	if *nodeToken == "" && !isLoopback(*listen) {
 		log.Fatalf("refusing to listen on %s without --node-token (or BEAN_NODE_TOKEN)", *listen)
@@ -100,9 +117,12 @@ func main() {
 		log.Fatalf("listen: %v", err)
 	}
 	unaryAuth, streamAuth := node.TokenAuth(*nodeToken)
+	// Trace extraction runs before auth so a rejected call still appears in the
+	// trace: "the node refused the token" is a diagnosis, and it is only
+	// visible if the span exists.
 	srv := grpc.NewServer(
-		grpc.UnaryInterceptor(unaryAuth),
-		grpc.StreamInterceptor(streamAuth),
+		grpc.ChainUnaryInterceptor(obs.UnaryServerTrace("noded"), unaryAuth),
+		grpc.ChainStreamInterceptor(obs.StreamServerTrace("noded"), streamAuth),
 	)
 	nodev1.RegisterSandboxServiceServer(srv, node.NewGRPCServer(mgr))
 
