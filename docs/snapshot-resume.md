@@ -47,7 +47,21 @@ POST /sandboxes/{id}/snapshot
 
 - 整机级一致性：TCP 栈、fd、进程树全部在 guest 内一起冻结，无 CRIU 的外部状态问题
 - restore：拉 base 镜像块设备（缓存命中）+ memory file + overlay diff → LoadSnapshot
-  → resume vCPU，目标百 ms 级（本地）/ 秒级（跨节点冷拉）
+  → resume vCPU
+
+**restore 的内存不落盘（已实装,实测）**：用 Firecracker 的 `Uffd` memory backend
+而不是 `File`。`File` 会在 guest 跑起来之前把整个内存镜像读进来,成本跟 guest
+大小成正比而与「实际访问了多少」无关 —— 512 MiB guest 上是 1303ms。
+改成 userfaultfd 后 guest 内存匿名映射,缺页时由 handler 供页,
+`/snapshot/load` 降到 **7ms**。e2b / agentenv / tensorlake 都是这么做的。
+
+**解 bundle 每快照只做一次(已实装)**:同一快照的每次 restore 解出的字节完全
+相同,所以按 snapshot id 缓存 vmstate + memory。安全性来自 Firecracker 对
+memory 文件是 `MAP_PRIVATE`(实测 guest 写 64MB 后宿主文件 md5 不变)。
+**可写 rootfs 不缓存** —— 同一快照恢复出的两个 sandbox 一写就分叉。
+
+实测 restore ~950ms(首次 1617ms,付 unpack 代价)。剩余成本是把 bundle
+从 gateway 传过来并解 gzip,只为取 rootfs 那个 member —— 未优化。
 - fork（独立 API：`POST /sandboxes/{id}/fork {count}`）：瞬时 CoW 快照 + N 次
   LoadSnapshot → 一母多子,不产生持久 snapshot 对象（要留存用 /snapshot）。
   子实例宿主侧资源全部新分配：tap 设备、vsock CID、可写层 CoW 克隆、新

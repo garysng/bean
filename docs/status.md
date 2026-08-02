@@ -3,8 +3,11 @@
 > 快照日期：2026-08-02。CI 全绿（lint / race 单测 / e2e / SDK / proto drift），
 > 覆盖率 80.5%。控制面与节点面均在 Linux x86_64 上验证过，无 darwin 平台假设。
 >
-> **microVM 档已实装并在真 KVM 机器上跑通**：Alpine 3.20 启动 2.2s，
-> host 经 vsock exec 拿到输出，snapshot 20 MiB、restore 1.8s。
+> **microVM 档已实装并在真 KVM 机器上跑通**：alpine 创建 952ms、
+> host 经 vsock exec 拿到输出、snapshot 16-20 MiB、restore 950ms。
+>
+> 启动优化的归因过程与被否掉的方案见 `docs/decisions.md` —— 那里是
+> 「为什么这么选」的权威记录,本文只记「做到哪一步了」。
 
 ## 1. 已完成
 
@@ -50,12 +53,24 @@ Python SDK 也有 `sandbox.commit(tag)`。
 `bean-api /metrics`：创建结果与延迟、exec 延迟、各状态 sandbox 数、事件计数与订阅数。
 `noded /metrics`：创建阶段耗时、创建/销毁/idle/snapshot 计数、节点 sandbox 状态与 in-flight。
 
-fc 档实测（镜像已缓存）：`runtime_create` ~200-270ms（起 VMM）、
-`agent_ready` ~1.9s（内核启动 + pivot + listen）、`total` ~2.2s。
-**内核启动是主要成本**,后续加速从这里入手。
+日志走 `log/slog`,字段化 + 分级,`--log-format json` 给采集器、
+`--log-level` 控制粒度。字段名是共享常量(`internal/logging`),
+否则按 sandbox 聚合会因为各组件拼写不同而失效。
+context 里带 request id,便于跨组件关联同一次请求。
 
-snapshot：checkpoint 1.5s、restore 1.8s、bundle 约 16-20 MiB。
-镜像首次拉取转换：busybox 5-10s,alpine 在网络不稳时 2m45s ——
+**注意:这不是 trace。** 没有 OTel 依赖,没有跨进程 span,
+一次 create 还不能作为一棵耗时树被追踪。字段化是它的前置条件。
+
+fc 档实测(镜像已缓存):`runtime_create` ~234ms(起 VMM)、
+`agent_ready` ~770ms(内核启动 + pivot + listen)、`total` ~952ms。
+裸 Firecracker 到 agent 可连是 606ms,所以上层开销已基本挤干。
+
+snapshot:checkpoint 1.5s、bundle 约 16-20 MiB。
+restore ~950ms(同一快照首次 1617ms,要付 unpack 代价);
+其中 FC `/snapshot/load` 只占 7ms —— guest 内存按需供页(UFFD),
+不再把整个内存镜像读进来。剩下的成本是解 bundle。
+
+镜像首次拉取转换:busybox 5-10s,alpine 在网络不稳时 2m45s ——
 所以 prewarm 是必需的,不是优化。
 
 ### 验证覆盖
@@ -76,9 +91,9 @@ snapshot：checkpoint 1.5s、restore 1.8s、bundle 约 16-20 MiB。
 |---|---|
 | build image：声明式 steps（Modal 风格链式 API） | ⛔ 未开始;Dockerfile 路径已通,steps 只是另一个前端编译到同一个 plan（`docs/image-build.md` §3.2、§5） |
 | overlaybd lazy-pull | ⚠️ 当前是「拉全量 + 转换 + CoW 共享」,已能用且成本低（每 sandbox 8 KiB）;overlaybd 的价值在于**首次拉取**也按需,节点已装好组件,接同一个 `image.Provider` 接口即可 |
-| diff snapshot（增量） | ⚠️ 当前 full snapshot;Firecracker 支持 diff,接口无需改 |
+| diff snapshot（增量） | ⚠️ 当前 full snapshot;Firecracker 支持 diff,接口无需改。**这是与 tensorlake 的主要差距**——他们把「磁盘快照成本 O(changed bytes)」当核心卖点 |
 | fork / shared-fs 卷 / proxy 端口暴露 | ⛔ P3–P4 范围,未开始 |
-| OTLP 导出 | ⚠️ registry 已就位,包一层即可 |
+| OTel trace | ⛔ **未开始**。零 OTel 依赖,无 span,一次 create 追不了 gateway → noded → beand。日志已字段化并带 request id(前置条件已具备),但那只解决关联,不是 trace。metrics registry 是另一套东西,不能「包一层」变成 trace |
 | Postgres | ⚠️ 接口已抽象,当前 SQLite |
 | 创建阶段指标 network | ⚠️ 埋点位已留,等网络实装 |
 
@@ -87,7 +102,11 @@ snapshot：checkpoint 1.5s、restore 1.8s、bundle 约 16-20 MiB。
 fc 档需要：
 
 - `/dev/kvm`（Intel VT-x 或 AMD SVM）
-- Firecracker 二进制、guest 内核镜像、agent 盘（`hack/build-assets.sh` 构建）
+- Firecracker 二进制、guest 内核镜像、agent 盘（`hack/build-assets.sh` 构建;
+  `kernel` 子命令下载 Firecracker CI 的 `vmlinux-6.1.102` 及其 config）
+- **userfaultfd**（`CONFIG_USERFAULTFD=y`）：restore 靠它按需供页。
+  5.15 走 `userfaultfd` syscall,6.1+ 走 `/dev/userfaultfd`;
+  `unprivileged_userfaultfd=0` 也可以,因为 noded 以 root 运行。
 - **AMD 主机需 `kvm.ignore_msrs=Y`**：Firecracker 保存快照时读 Intel 专有的
   MSR 0x3a,AMD 上 KVM 会拒绝。`NewFCTier` 启动时检查并给出修复命令,
   而不是等到快照失败才暴露。
@@ -98,10 +117,17 @@ overlaybd 需要 ublk（内核 ≥ 6.0)或 tcmu 后端。当前验证机是 Ubun
 
 ## 4. 下一步
 
-1. **build 的构建日志与取消**：现在 build 是「起了就等」,失败只能从 image state
+1. **overlaybd lazy-pull 的真实验证**：组件已装在验证机上
+   (`/opt/overlaybd/bin`,tcmu 模块已加载),但**功能从未跑通过** ——
+   「装好了」不等于「能用」。让首次拉取也按需读块,而不是拉全量再转换。
+   CoW 已经解决「每 sandbox 的成本」,overlaybd 解决的是
+   「首次使用一个大镜像的等待时间」。tcmu 在 5.15 就能验证,不必先升内核。
+2. **build 的构建日志与取消**：现在 build 是「起了就等」,失败只能从 image state
    看到 FAILED。日志落存储 + 可流式查看 + `cancel` 才算完整（`docs/image-build.md` §6）。
-2. **加速创建**：2.2s 里 1.9s 是内核启动。精简 guest config,或维护一个
-   snapshot 预热池（restore 1.8s 也不快,但可以在请求到来前就备好）。
-3. **overlaybd lazy-pull**：让首次拉取也按需读块,而不是拉全量再转换。
-   现在 CoW 已经解决了「每 sandbox 的成本」,overlaybd 解决的是
-   「首次使用一个大镜像的等待时间」。
+3. **OTel trace**：一次 create 跨 gateway → noded → beand,现在只能靠
+   request id 关联日志,没有耗时树。这是排查长尾延迟的前提。
+4. **restore 剩下的 ~950ms**：命中 unpack 缓存后,仍要把整个 bundle 从
+   gateway 传过来并解 gzip,只为取出 rootfs 那一个 member。
+   要么命中时让节点告诉控制面「别发了」,要么把 rootfs 拆成独立对象。
+5. **diff snapshot**:当前 full snapshot。这是与 tensorlake 的主要差距。
+6. **destroy 耗时 5.2s**:比 create 慢 5 倍,尚未归因。

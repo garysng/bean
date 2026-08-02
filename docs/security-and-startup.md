@@ -119,6 +119,16 @@ sandbox token（JWT）：签名密钥控制面持有，绑定 sandbox-id + 过�
 
 每阶段打点进创建耗时直方图（noded exporter），回归监控。
 
+**实测(2026-08-02,真 KVM 机器,镜像已缓存,无网络项)**:
+`runtime_create` 234ms + `agent_ready` 770ms = **952ms**,落在预算内。
+但预算表里的归因是错的:它把成本压在「VM 启动 + 内核引导」上,
+而实测最大的两块开销都在我们自己的代码里 —— gRPC 重连退避(800ms)
+和 guest 串口同步写(493ms),内核本身只值 90ms。
+详见 `docs/decisions.md` §5。
+
+restore 路径:950ms(首次 1617ms)。guest 内存靠 userfaultfd 按需供页,
+FC `/snapshot/load` 只占 7ms。
+
 ### B2. overlaybd lazy-pull from S3
 
 ```

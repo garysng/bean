@@ -137,38 +137,47 @@ await sbx.kill();
 
 ### 4.1 命令面
 
+**已实装**（`cli/cli.go`,与代码一致）：
+
 ```
-bean run IMAGE [--cpu 2 --mem 4Gi --disk 20Gi --env K=V ...]
-         [--volume vol_xxx:/workspace] [-- CMD...]
-                            # 创建并可选执行；-i/-t 进入交互 PTY（类 docker run）
-bean ls  [--label k=v] [--state RUNNING] [-o json|table|wide]
-bean exec SBX [-i -t] -- CMD...
-bean cp   ./local sbx:SBX:/path    |    sbx:SBX:/path ./local     # 目录自动 tar
-bean logs SBX [-f --tail 100]
+bean run --image IMG | --snapshot SNAP
+         [--label k=v] [--idle-timeout 300s] [--on-idle pause|kill]
+bean ls   [--label k=v]
+bean exec SBX -- CMD...
+bean cp   ./local sbx:SBX:/path  |  sbx:SBX:/path ./local
+bean logs SBX [--tail N]
 bean events SBX             # 历史;`-f [SBX] [--label k=v]` 跟随实时流(SSE)
-bean kill SBX...            # 支持 --label 批量
-bean attach SBX             # 重连 detach 的 PTY 会话
-bean start SBX              # 拉起原 entrypoint
+bean kill SBX [--force]
 bean pause SBX / bean resume SBX
-bean volume create NAME [--quota 100Gi]     # 首期仅 shared-fs
-bean volume ls / rm VOL
-bean fork SBX --count 8
-bean snapshot create SBX --name after-setup
-bean snapshot ls / rm SNAP
-bean port expose SBX 8888 [--public]
-bean prewarm IMAGE... [--nodes 10]
-bean image status IMAGE
-bean node ls [-o wide]      # 运维：容量/能力/缓存水位
-bean version / bean config [get|set|use-profile]
+bean build  --tag REF [--file Dockerfile] [CONTEXT]   # 平台上构建镜像
+bean commit SBX --tag REF                             # 把文件系统固化成镜像
+bean snapshot create SBX [--name N] [--no-keep-running]
+bean snapshot ls [--label k=v] / bean snapshot rm SNAP
+bean image ls | image status REF | image prewarm REF... [--replicas N]
+bean version
 ```
+
+**未实装**（保留为设计意图）：`attach`、`start`、`volume *`、`fork`、
+`port expose`、`config`、批量 `kill --label`、交互 PTY（`-i/-t`）。
+
+**为什么没有 `bean node ls`**：节点是平台的调度对象,不是用户的概念。
+e2b / Modal / Daytona 都不向用户暴露「我的 sandbox 落在哪台机器上」——
+一旦暴露,用户就会依赖它,调度器也就不能再自由迁移了。
+`/v1/nodes` 与 drain 保留为**运维 API,不进 CLI**。
+同理 `prewarm` 的参数是 `--replicas`(副本数)而不是 `--nodes`(机器数)。
 
 ### 4.2 输出约定
 
-- 默认人类可读 table;`-o json` 稳定 schema（脚本友好）;TTY 检测自动着色
-- 长操作（run 等待 RUNNING、snapshot）显示 spinner + 阶段（SCHEDULED→PULLING→…），
-  `--no-wait` 立即返回 id
-- 退出码：0 成功;`bean exec` 透传远端 exit code;平台错误 ≥ 125
+- 默认人类可读 table(`tabwriter` 对齐);`--json` 输出结构化 JSON;
+  `--quiet` 只输出标识符(脚本取 id 用)
+- 表头由字段名生成,所以新增字段不可能只出现在数据里而不出现在表头
+- `--json` 下进度提示(如「uploading N KiB」)不输出 —— 混进流里会破坏解析
+- 退出码按「脚本该不该重试」区分:
+  `0` 成功、`64` 不存在、`69` 网络不可达/无容量(**重试可能有用**)、
+  `70` 平台明确拒绝、`125` 用法错误。`bean exec` 透传远端 exit code
 - 环境变量：`BEAN_BASE_URL`、`BEAN_API_KEY`、`BEAN_TIMEOUT`（Go duration,默认 15m）
+
+**未实装**：TTY 自动着色、长操作 spinner 与阶段展示、`--no-wait`。
 
 ### 4.3 交互模式
 

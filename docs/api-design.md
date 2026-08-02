@@ -181,6 +181,11 @@ POST /images/prewarm   { "refs": ["img:a"], "region": "ap-east-1",
 GET  /images/prewarm/{jobId}      各镜像 × 节点就绪矩阵
 ```
 
+`cachedNodes` / `targetNodes` 是**运维语义,故意不进 CLI**：副本落在几台机器上
+是调度细节,用户无法据此行动,暴露了只会让人依赖调度结果、调度器反而不能再迁移。
+CLI 侧只报 ready / warming,对应的参数叫 `--replicas`。
+详见 `docs/sdk-cli-design.md` §4.1。
+
 **Registry 认证**（私有镜像）：按 registry host 登记一次凭证,之后私有镜像与
 公开镜像用法完全相同——只给 ref。
 
@@ -277,7 +282,12 @@ GET /metrics                                            // Prometheus 格式（�
     // bean_events_total{type}  bean_event_subscribers
 ```
 
-**OTel 采集**：
+**OTel 采集（设计意图,尚未实装）**：
+
+> 当前状态:metrics 是 Prometheus 端点(已实装);logs 已字段化并带
+> request id(`internal/logging`,已实装);**trace 完全没有** ——
+> 零 OTel 依赖、无 span、一次 create 追不了 gateway → noded → beand。
+> 注意 metrics registry 与 trace 是两套东西,不能「包一层」变过去。
 
 - 平台组件（gateway/scheduler/noded/agent）trace/metrics/logs 统一 OTLP 导出
   （Prometheus 兼容端点保留）;request_id 贯穿即 trace id
