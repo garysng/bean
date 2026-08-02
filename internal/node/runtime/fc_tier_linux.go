@@ -50,6 +50,18 @@ func NewFCTier(cfg FCTierConfig) (Runtime, error) {
 	}
 	rt.CPUTemplate = cfg.CPUTemplate
 	rt.TrackDirtyPages = cfg.TrackDirtyPages
+	rt.SnapshotCache = cfg.SnapshotCache
+	if !cfg.SnapshotCache.Enabled() {
+		// Stated because the growth is otherwise invisible: the cache consumes no
+		// commitment, so a node can fill its disk while placement still believes it
+		// has room.
+		slog.Warn("snapshot cache is unbounded; it grows by roughly one guest's " +
+			"memory per distinct snapshot restored on this node")
+	} else {
+		slog.Info("snapshot cache bounded",
+			"highBytes", cfg.SnapshotCache.HighBytes,
+			"lowBytes", cfg.SnapshotCache.LowBytes)
+	}
 	if cfg.TrackDirtyPages {
 		// Stated at startup because every guest pays for it while only some
 		// sandboxes are ever checkpointed twice, and because a guest booted

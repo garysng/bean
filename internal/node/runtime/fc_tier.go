@@ -34,4 +34,8 @@ type FCTierConfig struct {
 	// carried in a snapshot, so this is node configuration: a guest booted without
 	// it can never produce an incremental checkpoint.
 	TrackDirtyPages bool
+	// SnapshotCache bounds the unpacked snapshot cache. The zero value leaves it
+	// unbounded, which grows by roughly one guest's memory per distinct snapshot
+	// restored on this node and is invisible to the scheduler.
+	SnapshotCache EvictionPolicy
 }

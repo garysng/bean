@@ -1012,4 +1012,15 @@ func (m *Manager) RefreshGauges() {
 	}
 	m.metrics.SetGauge("bean_node_requests_in_flight",
 		"Data-plane requests currently in flight across sandboxes.", nil, inFlight)
+
+	// Reported because this space is not committed to anything, so it is the one
+	// part of a node's disk that can grow without the scheduler noticing. A
+	// measured 4.6 GB accumulated on a development node before it was bounded.
+	if reporter, ok := m.rt.(runtime.CacheReporter); ok {
+		if used, err := reporter.SnapshotCacheBytes(); err == nil {
+			m.metrics.SetGauge("bean_node_snapshot_cache_bytes",
+				"Disk held by unpacked snapshots, which no commitment covers.",
+				nil, float64(used))
+		}
+	}
 }

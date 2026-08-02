@@ -10,6 +10,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -491,6 +492,11 @@ func (r *FCRuntime) snapshotState(rootfsDest string, spec *Spec, layers []Snapsh
 
 	if id != "" {
 		if entry, ok := r.snapshots.Lookup(id); ok {
+			// Recorded before the layers are drained, so eviction can tell a leaf a
+			// fan-out is hammering from one restored months ago. Failure is ignored:
+			// a stale timestamp costs a re-unpack, while failing the restore over it
+			// would trade a cheap loss for an expensive one.
+			_ = r.snapshots.Touch(id)
 			// The merged image is already on disk, so the layers are read only for
 			// the leaf's filesystem. This is what makes a fan-out cheap: a chain is
 			// merged once per node and every later restore of the same leaf skips
@@ -510,14 +516,39 @@ func (r *FCRuntime) snapshotState(rootfsDest string, spec *Spec, layers []Snapsh
 			}
 			return entry, nil
 		}
-		return r.snapshots.Fill(id, func(dir string) (snapEntry, error) {
+		entry, err := r.snapshots.Fill(id, func(dir string) (snapEntry, error) {
 			return mergeChain(layers, dir, rootfsDest)
 		})
+		if err != nil {
+			return snapEntry{}, err
+		}
+		// Swept after the entry is published rather than before, so a restore never
+		// waits on eviction to reach its own image. The entry just added is pinned
+		// by the caller, so this cannot reclaim what it just built.
+		r.sweepSnapshotCache()
+		return entry, nil
 	}
 
 	// Without an id there is nothing to key a cache on, so the merged image is
 	// written beside the writable layer and discarded with it.
 	return mergeChain(layers, filepath.Dir(rootfsDest), rootfsDest)
+}
+
+// sweepSnapshotCache reclaims cold cache entries if the cache is over its
+// watermark. Failure is logged rather than returned: a restore that produced a
+// valid image has succeeded, and refusing it because the disk could not be tidied
+// afterwards would turn a housekeeping problem into an outage. The node running
+// short of disk is the separate, visible signal.
+func (r *FCRuntime) sweepSnapshotCache() {
+	freed, err := r.snapshots.Evict(r.SnapshotCache)
+	if err != nil {
+		slog.Warn("snapshot cache sweep failed", "err", err)
+		return
+	}
+	if freed > 0 {
+		slog.Info("snapshot cache swept", "freedBytes", freed,
+			"highBytes", r.SnapshotCache.HighBytes, "lowBytes", r.SnapshotCache.LowBytes)
+	}
 }
 
 // readSnapshotBundle extracts a bundle to files, writing the writable layer's

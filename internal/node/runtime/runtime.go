@@ -136,6 +136,21 @@ type ImageLister interface {
 	CachedImages() (map[string]int64, error)
 }
 
+// CacheReporter is implemented by runtimes that hold node-local caches whose size
+// the control plane should know about.
+//
+// It exists because these caches are otherwise invisible: they consume no
+// commitment, so a node can fill its disk with them while placement still
+// believes it has room. Reporting them does not make them a resource the
+// scheduler allocates — it makes the gap between committed and actual disk
+// something an operator can see before it becomes an incident.
+type CacheReporter interface {
+	// SnapshotCacheBytes is the space held by unpacked snapshots, in allocated
+	// blocks rather than apparent size: a merged memory image is sparse where no
+	// ancestor wrote, and its apparent size overstates it by orders of magnitude.
+	SnapshotCacheBytes() (int64, error)
+}
+
 // ImageBuilder is implemented by runtimes on nodes that can build images.
 //
 // Building is optional per node: it needs BuildKit, and a cluster may well want

@@ -76,6 +76,12 @@ type FCRuntime struct {
 	// choice.
 	CPUTemplate CPUTemplate
 
+	// SnapshotCache bounds the unpacked snapshot cache. The zero value leaves it
+	// unbounded, which is the historical behaviour and measured 4.6 GB across nine
+	// entries on a development node — invisible to the scheduler, since the cache
+	// consumes no commitment.
+	SnapshotCache EvictionPolicy
+
 	// TrackDirtyPages lets guests on this node produce diff checkpoints, which
 	// capture only the memory written since their base.
 	//
@@ -155,6 +161,11 @@ func (r *FCRuntime) PrewarmImage(ctx context.Context, imageRef string) error {
 		return errors.New("fc: no image provider")
 	}
 	return r.Images.Prewarm(ctx, imageRef)
+}
+
+// SnapshotCacheBytes reports the space held by unpacked snapshots.
+func (r *FCRuntime) SnapshotCacheBytes() (int64, error) {
+	return r.snapshots.Usage()
 }
 
 // CachedImages reports the images available on this node.

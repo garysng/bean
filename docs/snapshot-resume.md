@@ -194,6 +194,30 @@ POST /sandboxes { "snapshot": "snap_...", ... }
   卸载失败（fd 占用）→ snapshot 失败并报明确错误
 - snapshot manifest 记录完整卷挂载表（dataset 卷启用后:按 manifest 重 attach 块设备）
 
+### 3.5.5 节点本地解包缓存的回收 ✅
+
+`snapCache` 让同一 leaf 的多次 restore 复用一份解包内存镜像,
+这是 fan-out 便宜的原因。代价是它**每恢复一个新快照就多占约一份 guest 内存**,
+而这部分空间不占任何承诺量 —— 调度器看不见,所以节点能在「账面充足」时把盘写满。
+实测一台开发机积累到 4.6 GB / 9 条目。
+
+高低水位 + LRU,默认关(`--snapshot-cache-high-mib` / `--snapshot-cache-low-mib`):
+
+| 机制 | 取值 | 理由 |
+|---|---|---|
+| 触发/回收线成对 | 低位默认 = 高位 80% | 抄 kubelet image GC。单阈值让触发后每次 restore 都付一次回收 |
+| 大小按已分配块 | `st_blocks * 512` | 合并出的镜像是稀疏的,按名义大小会为回收零字节而淘汰条目 |
+| 淘汰顺序 | 目录 mtime,命中时 `Touch` | atime 在 relatime 下一天才更新一次,热条目会被当成冷的 |
+| 删除方式 | 先 rename 到临时目录再删 | 原地删会经过「vmstate 没了但内存镜像还在」的状态,`Lookup` 撞上会认为条目可用 |
+
+**pin 只护 `Lookup`→`open` 这一段。** restore 先拿到路径,过一会儿才打开内存镜像;
+在这两点之间被淘汰,open 就是 ENOENT,而那时 stream 已消费完、无从重建。
+一旦打开就安全了 —— unlink 一个已 mmap 的文件不影响读(实测验证,decisions §3.7),
+所以 `stage.Close()` 就释放 pin,不必等 VM 结束。
+
+上报为 `bean_node_snapshot_cache_bytes`,通过可选接口 `runtime.CacheReporter` ——
+不占额度的空间至少要可见。
+
 ### 3.6 生命周期（两档共通）⚠️
 
 - snapshot 独立对象、独立配额（总字节数 per key）；TTL 可选，S3 lifecycle 兜底

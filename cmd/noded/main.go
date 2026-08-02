@@ -75,6 +75,14 @@ func main() {
 		"log guest writes so checkpoints can capture only what changed; must be on "+
 			"from boot, so a guest started without it can never produce an "+
 			"incremental snapshot (fc runtime)")
+	snapCacheHighMiB := flag.Int64("snapshot-cache-high-mib", 0,
+		"reclaim unpacked snapshots once the cache reaches this size; 0 leaves it "+
+			"unbounded, which grows by roughly one guest's memory per distinct "+
+			"snapshot restored and is invisible to the scheduler (fc runtime)")
+	snapCacheLowMiB := flag.Int64("snapshot-cache-low-mib", 0,
+		"size a reclaim brings the snapshot cache down to; must be below the high "+
+			"mark, so eviction runs as an occasional batch rather than on every "+
+			"restore past the trigger. 0 derives 80% of the high mark (fc runtime)")
 	logFormat := flag.String("log-format", "text", "log format: text|json")
 	logLevel := flag.String("log-level", "info", "log level: debug|info|warn|error")
 	otlpEndpoint := flag.String("otlp-endpoint", os.Getenv("BEAN_OTLP_ENDPOINT"),
@@ -117,6 +125,17 @@ func main() {
 			"reportedMemoryMiB", overcommit.ApplyMemory(*memAlloc))
 	}
 
+	// A low mark defaulted from the high one rather than required alongside it:
+	// the ratio is the part an operator has no basis to choose, while the size the
+	// cache may reach is the part they do.
+	snapCache := runtime.EvictionPolicy{HighBytes: *snapCacheHighMiB << 20, LowBytes: *snapCacheLowMiB << 20}
+	if snapCache.HighBytes > 0 && snapCache.LowBytes == 0 {
+		snapCache.LowBytes = snapCache.HighBytes / 5 * 4
+	}
+	if err := snapCache.Validate(); err != nil {
+		log.Fatalf("--snapshot-cache-*: %v", err)
+	}
+
 	tmpl, err := runtime.ParseCPUTemplate(*cpuTemplate)
 	if err != nil {
 		log.Fatalf("--cpu-template: %v", err)
@@ -149,6 +168,7 @@ func main() {
 			DebugConsole:    *debugConsole,
 			CPUTemplate:     tmpl,
 			TrackDirtyPages: *trackDirtyPages,
+			SnapshotCache:   snapCache,
 		})
 		if err != nil {
 			log.Fatalf("fc runtime: %v", err)

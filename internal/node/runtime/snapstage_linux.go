@@ -30,6 +30,10 @@ type snapshotStage struct {
 	// so applying it is a straight replay onto whatever the provider creates.
 	rootfs string
 	dir    string
+	// unpin releases the cache entry once the memory image has been opened. Until
+	// then the entry is only a path, and a sweep that removed it would turn the
+	// open into ENOENT with the restore's stream already consumed.
+	unpin func()
 }
 
 // stageSnapshot unpacks a chain into dir without touching any device.
@@ -38,6 +42,13 @@ func (r *FCRuntime) stageSnapshot(dir string, spec *Spec, layers []SnapshotLayer
 		return nil, fmt.Errorf("fc: create snapshot staging dir: %w", err)
 	}
 	stage := &snapshotStage{dir: dir, rootfs: filepath.Join(dir, snapshotRootfsFile)}
+
+	// Pinned across the whole staging-to-load span, not just the lookup: the entry
+	// is a set of paths until loadSnapshot opens the memory image, and a sweep in
+	// between would leave this restore with nothing to rebuild from.
+	if spec != nil && spec.SnapshotID != "" {
+		stage.unpin = r.snapshots.Pin(spec.SnapshotID)
+	}
 
 	entry, err := r.snapshotState(stage.rootfs, spec, layers)
 	if err != nil {
@@ -83,13 +94,25 @@ func (s *snapshotStage) SeedWritable(dest string) error {
 	return nil
 }
 
-// Close drops the staged extent stream once it has been replayed. It is the only
-// part removed: an uncached bundle leaves its machine state and memory image in
-// this directory, and the VM is still using them — Firecracker faults guest
-// pages from the memory image for as long as it runs. They go when the sandbox
-// directory does.
+// Close drops the staged extent stream once it has been replayed, and releases
+// the cache pin. The extent stream is the only file removed: an uncached bundle
+// leaves its machine state and memory image in this directory, and the VM is
+// still using them — Firecracker faults guest pages from the memory image for as
+// long as it runs. They go when the sandbox directory does.
+//
+// Releasing the pin here is safe even though the VM is still running, because by
+// this point the memory image is open and mapped. An unlinked file's inode
+// survives until the last mapping goes away, so a sweep after this point costs
+// the next restore a re-unpack and costs this VM nothing.
 func (s *snapshotStage) Close() {
-	if s == nil || s.rootfs == "" {
+	if s == nil {
+		return
+	}
+	if s.unpin != nil {
+		s.unpin()
+		s.unpin = nil
+	}
+	if s.rootfs == "" {
 		return
 	}
 	os.Remove(s.rootfs)

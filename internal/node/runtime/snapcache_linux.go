@@ -8,6 +8,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"time"
 )
 
 // Unpacking a snapshot bundle is the whole remaining cost of a restore: the
@@ -29,7 +30,16 @@ type snapCache struct {
 
 	mu      sync.Mutex
 	pending map[string]*snapUnpack
+	// pins counts restores that have looked an entry up but not yet opened its
+	// memory image. See Pin — this is the only window where eviction could break
+	// a restore.
+	pins map[string]int
 }
+
+// timeNow is a variable so a test can order cache entries without sleeping
+// between them: mtime granularity is coarse enough that two entries created in
+// the same instant compare equal.
+var timeNow = time.Now
 
 // snapUnpack is one in-flight unpack. Callers that arrive while it runs read its
 // result instead of starting their own.
@@ -40,7 +50,11 @@ type snapUnpack struct {
 }
 
 func newSnapCache(dir string) *snapCache {
-	return &snapCache{dir: dir, pending: map[string]*snapUnpack{}}
+	return &snapCache{
+		dir:     dir,
+		pending: map[string]*snapUnpack{},
+		pins:    map[string]int{},
+	}
 }
 
 // snapEntry is an unpacked bundle's reusable parts.
