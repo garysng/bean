@@ -215,6 +215,86 @@ POST /sandboxes { "snapshot": "snap_...", ... }
 - manifest 的 `runtime` 字段区分格式，restore 调度按格式匹配节点能力
 - snapshot API 语义一致，档位差异只体现在速度与 fork 可用性
 
+## 4.5 fork 设计 📐
+
+> **未实现。** 这一节是设计,写出来是因为 fork 的可行性已经被现有代码证明了 ——
+> 它需要的机制都在,缺的是编排。
+
+### fork 与 restore 的本质区别
+
+restore 从**持久对象**重建一个 sandbox。fork 从**一个活着的 sandbox**派生 N 个,
+不产生持久对象。要留存就用 snapshot。
+
+对用户是「装环境一次,fan-out N 个实验」;对实现是「跳过打包与传输」。
+
+### 为什么内存镜像可以被 N 个子实例共享 ✅(机制已验证)
+
+这是 fork 便宜的全部原因,而它已经在 snapCache 里被验证过:
+
+```
+UFFD handler:  mmap(PROT_READ | MAP_SHARED)     ← 我们只读
+Firecracker:   guest 内存是匿名映射
+供页:          UFFDIO_COPY 把页 *拷进* guest 的匿名页
+```
+
+guest 写自己的内存,写的是它自己的匿名页,**碰不到我们的镜像文件** ——
+已用「guest 写 64MB 后宿主文件校验和不变」实测过(snapcache_linux.go 的注释)。
+
+所以**一份 unpacked memory 能服务任意多个实例**,不需要拷贝。
+snapCache 现在就是靠这条让同一快照的多次 restore 复用一份内存镜像;
+fork 只是把「多次 restore」变成「一次派生 N 个」。
+
+### 每个子实例必须新分配什么
+
+| 资源 | 能否共享 | 理由 |
+|---|---|---|
+| 内存镜像 | ✅ 共享 | 见上,UFFDIO_COPY 语义保证 |
+| vmstate | ✅ 共享 | 只读加载 |
+| **CoW 层** | ❌ 每个新建 | 一写就分叉,这是 sandbox 的定义 |
+| **vsock UDS 路径** | ❌ 每个独立 | 路径相对于 sandbox 目录(vm-assembly §5) |
+| sandbox id / token | ❌ 每个独立 | 身份 |
+| dm 映射名 | ❌ 每个独立 | `bean-<id>`,flat namespace |
+
+`guestCID` 与 vsock port 可以都用常量,因为每个 VM 有自己的 vsock 命名空间
+(vm-assembly §7)—— 这一点让 fork 少一层分配。
+
+网络实现之后会多出 MAC/IP 需要 guest 内重配,当前没有网络所以没有这个问题。
+
+### 与 snapCache 的关系
+
+fork 天然是「同一个 leaf 被恢复很多次」—— **正是 snapCache 设计针对的场景**。
+所以 fork 的实现应该复用它而不是新建一条路径:第一个子实例填缓存,
+其余直接命中。
+
+`Fill` 的语义已经支持这个:每个 caller 都会被调用(处理自己的 CoW 层),
+但只有一个真正构建共享 entry。这个语义是修一个 bug 时明确下来的 ——
+等待方原本直接返回缓存 entry 而不执行回调,于是既不 drain 自己的流也不 stage
+自己的可写层。
+
+### 要压测的风险
+
+**N 个子实例同时缺页,会不会打爆 UFFD handler?**
+
+当前 handler 的 `serve()` 是**单个 goroutine 的循环**:读一个 fault 事件、
+`UFFDIO_COPY` 填一页、继续。每个 VM 有自己的 handler 实例,所以 N 个 fork
+是 N 个 handler —— 不共享那个循环。
+
+但它们共享:
+- 同一份 mmap 的镜像(page cache 层面是好事:只有一份)
+- 宿主的内存带宽与 page fault 处理能力
+
+所以风险不在 handler 的串行度,而在**同时冷启动 N 个 guest 时宿主的缺页吞吐**。
+这个数字没有测过 —— 属于 GitHub #18 压测的范围,而且是 fork 实装前应该先知道的。
+
+**第二个风险**:fork 出来的 N 个实例内存承诺量是 N 倍,而实际 RSS 因为按需供页
+远低于此。这正是超卖(noded-design §3.2)想利用的富余,但内存超卖当前默认关 ——
+所以 fork N 个会按 N 倍承诺量占额度,可能比实际需要保守很多。
+
+### 实现顺序建议
+
+1. 先测 §上面那两个数字(缺页吞吐、RSS 与承诺量的偏差)
+2. 再实装 fork —— 因为如果缺页吞吐是瓶颈,fork 的 API 形态可能要带并发上限
+
 ## 5. API 汇总（重述）⚠️
 
 ```

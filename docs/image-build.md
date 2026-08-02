@@ -156,6 +156,41 @@ Build 状态机：`PENDING → RUNNING → CONVERTING → READY | FAILED | CANCE
 原计划:push 到平台 S3（overlaybd blob），
 元数据回写控制面。
 
+## 7.5 Dockerfile 构建的实现细节 ✅
+
+`internal/node/image/build_linux.go`。调用 buildctl 而不是链 BuildKit 的 Go 客户端:
+
+```
+buildctl --addr <buildkitd> build
+  --frontend dockerfile.v0
+  --local context=<dir> --local dockerfile=<dir>
+  --output type=tar,dest=<out.tar>
+  [--opt build-arg:K=V ...]
+```
+
+**为什么 `type=tar` 而不是 `type=image`**:base 镜像在我们这里就是一个扁平文件系统
+(要 mkfs 成 ext4)。导出 image 意味着 BuildKit 组装出分层结构,我们再把它压平 ——
+多一步且没有收益。`type=tar` 直接给出压平后的内容。
+
+**stdout 与 stderr 合并收集**:BuildKit 把进度写 stderr,失败时那里面才有
+「哪一步失败了」。所以两路都收进同一个 buffer,失败时取尾部 40 行 ——
+全量输出对一个构建可能是几千行,而有用的信息在末尾。
+
+**大小估算比转换那边准**:构建输出的 tar 是未压缩的,所以它的大小就是内容大小
+(对比镜像转换只有压缩层大小可用,要 × 3 估,见 image-pipeline §2)。
+仍要留 headroom 给文件系统开销与 sandbox 后续写入。
+
+**`--frontend dockerfile.v0` 意味着完整 Dockerfile 语义** —— 多阶段构建、
+`COPY --from`、缓存挂载都是 BuildKit 自己的能力,我们不解析 Dockerfile。
+这是选 BuildKit 而不是自己实现构建的全部理由。
+
+### cacheKey 字段存在但未使用 ⚠️
+
+`store.BuildStep.CacheKey` 已定义,设计意图是「hash 前序步骤链 + 本步内容」,
+让未变的前缀复用缓存。**当前没有代码计算或使用它** —— Dockerfile 构建的缓存
+完全由 BuildKit 自己管(它有自己的内容寻址缓存),而 `steps` 形式未实现,
+所以还没有需要我们自己算 cacheKey 的场景。
+
 ## 8. 不做（明确边界）
 
 - **push 回外部 OCI registry**：built 镜像只在 bean 内部可用。反向转换或双格式

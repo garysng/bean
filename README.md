@@ -186,6 +186,9 @@ made networking and jailer look shipped. Convention in
 | [status.md](docs/status.md) | **what is actually built**, with measurements |
 | [decisions.md](docs/decisions.md) | **why** each choice was made — measured data, competitor comparisons, and the traps that only appeared on hardware |
 | [architecture.md](docs/architecture.md) | components, design decisions, state machine |
+| [vm-assembly.md](docs/vm-assembly.md) | how a microVM is assembled, and the two orderings that must not change |
+| [image-pipeline.md](docs/image-pipeline.md) | OCI ref → mountable block device |
+| [s3-storage.md](docs/s3-storage.md) | hand-rolled SigV4, multipart, the `Blobs` contract |
 | [noded-design.md](docs/noded-design.md) | node daemon and in-sandbox agent |
 | [api-design.md](docs/api-design.md) | REST and gRPC surface, auth, error codes |
 | [snapshot-resume.md](docs/snapshot-resume.md) | pause/resume/snapshot/restore |

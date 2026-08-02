@@ -8,6 +8,10 @@
 >
 > 启动优化的归因过程与被否掉的方案见 `docs/decisions.md` —— 那里是
 > 「为什么这么选」的权威记录,本文只记「做到哪一步了」。
+>
+> 实现细节分三篇:`vm-assembly.md`(microVM 怎么组起来,含两处不能动的顺序约束)、
+> `image-pipeline.md`(OCI ref 怎么变成块设备)、`s3-storage.md`(自实现 SigV4 与
+> Blobs 抽象)。
 
 ## 1. 已完成
 
