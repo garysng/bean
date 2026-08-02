@@ -149,8 +149,12 @@ CreateSandbox → overlaybd/ublk 组装块设备（元数据数 MiB）→ 立即
   镜像总量可超磁盘容量）
 - 风险与对策：
   - S3 首字节延迟波动 → 按 trace 预取 + obd-cache 命中兜底
-  - ublk 依赖较新内核（6.0+）→ 节点 OS 统一基线;老内核退 overlaybd tcmu 后端;
+  - ublk 依赖较新内核（6.0+）→ 节点 OS 统一基线;**tcmu 后端在 5.15 上已实测
+    功能完备**（挂载 7ms、只传 19.6% 层字节、HTTP 206 range read,
+    见 `docs/decisions.md` §3.1）,是可用的主路径而非降级路径,ublk 仅性能更优;
     两者皆不可用的节点不上报 fc 能力（fc 依赖块设备后端），仅容器档 overlayfs 兜底
+  - tcmu 需给每个 backstore 设唯一 `vpd_unit_serial`,否则宿主 `multipathd`
+    会合并不同镜像的设备并返回错误数据（静默,不报错）
   - 运行中 S3 不可达 → 块读失败重试 + sandbox 级 IO 错误上报（区别于任务自身失败）
 
 ### B3. 缓存与预热策略

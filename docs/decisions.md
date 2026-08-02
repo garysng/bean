@@ -197,14 +197,50 @@ dm-snapshot 只要 `dm_snapshot` 模块。
 agentenv 的 `uffd-core/src/overlaybd.rs` 表明这两件事可以合并:
 UFFD 缺页直接从 overlaybd 镜像读。这是比我们现在更远的一步。
 
+### 3.1 overlaybd lazy-pull:已在 tcmu 后端实测跑通
+
+**实测**(2026-08-02,Ubuntu 20.04 / 内核 5.15 / tcmu 后端 / alpine 3.20):
+
+```
+挂载耗时                        7 ms
+挂载 + 读 /etc/os-release       1014 KiB / 5175 KiB = 19.6% of layer
+读完整个文件系统                1270 KiB(zfile 压缩,只传访问到的块)
+registry 响应                   8 × HTTP 206 Partial Content
+可写上层实占                    40 KiB(表面 1.1 GB,真稀疏)
+```
+
+链路:`overlaybd-create --mkfs` 建空层 → `overlaybd-apply` 把 OCI tar 写进去 →
+`overlaybd-commit -z -t` 封成 zfile blob → 推 registry → tcmu 以
+`repoBlobUrl` 挂载。overlaybd 日志里的 `__open_ro_remote` 确认它打开的是
+**HTTP URL 而不是本地文件**,25ms 就 ready,没有下载整层。
+
+**验证过程踩到两个坑,都会在生产上复现:**
+
+**(1) LUN 必须在 nexus 之后建。** 顺序错了内核报
+`TCM_Loop I_T Nexus does not exist`,SCSI host 注册时就去扫 LUN,那时 nexus
+还是空的,扫描失败后**再写 nexus 也不会重扫** —— 设备永远不出现,而 configfs
+看起来完全正常(`enable=1`、`info` 显示 ACTIVATED、overlaybd 侧 `result=success`)。
+正确顺序:backstore → tpgt → **nexus** → LUN 链接。
+
+**(2) 必须设 `wwn/vpd_unit_serial`,否则 multipathd 会静默合并设备。**
+TCMU 默认不给唯一序列号,两个内容完全不同的 overlaybd 设备 WWID 都是
+`36001405` + 全零,multipathd 把它们当成同一 LUN 的两条路径合成 `mpatha`。
+后果不是报错而是**读到另一个镜像的数据**,而且原设备变 busy 无法直接挂载
+(mount 报 "already mounted or mount point busy",极具误导性)。
+每个 backstore 写一个唯一 serial 即可。
+
+**结论**:tcmu 后端功能完备,不必先升内核。ublk(≥6.0)只是性能更好。
+接 `image.Provider` 接口时这两条必须编码进去,靠文档记不住。
+
 ## 4. 未决 / 待验证
 
-- **overlaybd lazy-pull**:组件已装(`/opt/overlaybd/bin`,tcmu 模块已加载),
-  但**功能未验证**。ublk 后端需要 ≥6.0 内核,tcmu 在 5.15 可用 ——
-  功能验证不需要升内核。
+- **overlaybd lazy-pull 接入 `image.Provider`**:能力本身已实测跑通(§3.1),
+  剩下的是写 `OverlaybdProvider` —— configfs 编排 + registry 推送 + 生命周期。
+  不再是「能不能用」的问题,是「接进来」的工程量。
 - **升级宿主内核到 6.8**:20.04 的 apt 里没有 6.x(HWE 终点是 5.15)。
   需要 mainline PPA 或升级发行版。收益是 ublk(overlaybd 的更快后端)。
   这台机器是 VM(`/dev/vda2`),换内核后 nested KVM 能否保持可用未验证。
+  **优先级已下调** —— tcmu 后端功能完备,ublk 只是性能优化。
 - **destroy 耗时 5.2s**:比 create 慢 5 倍,独立问题,未归因。
   怀疑是 `SendCtrlAltDel` 后等 guest 自己关机的那段(3s 超时 + 5s 等待),
   但没验证。

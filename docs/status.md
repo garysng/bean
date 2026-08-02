@@ -90,7 +90,7 @@ restore ~950ms(同一快照首次 1617ms,要付 unpack 代价);
 | 项 | 状态 |
 |---|---|
 | build image：声明式 steps（Modal 风格链式 API） | ⛔ 未开始;Dockerfile 路径已通,steps 只是另一个前端编译到同一个 plan（`docs/image-build.md` §3.2、§5） |
-| overlaybd lazy-pull | ⚠️ 当前是「拉全量 + 转换 + CoW 共享」,已能用且成本低（每 sandbox 8 KiB）;overlaybd 的价值在于**首次拉取**也按需,节点已装好组件,接同一个 `image.Provider` 接口即可 |
+| overlaybd lazy-pull | ⚠️ **能力已实测跑通,尚未接入代码**。当前生产路径是「拉全量 + 转换 + CoW 共享」（每 sandbox 8 KiB）。overlaybd 侧已在验证机上验证:挂载 7ms、只传 19.6% 的层字节就能挂载并读文件、8 个 HTTP 206、可写上层实占 40 KiB（`docs/decisions.md` §3.1）。剩下的是写 `OverlaybdProvider` 接进 `image.Provider` |
 | diff snapshot（增量） | ⚠️ 当前 full snapshot;Firecracker 支持 diff,接口无需改。**这是与 tensorlake 的主要差距**——他们把「磁盘快照成本 O(changed bytes)」当核心卖点 |
 | fork / shared-fs 卷 / proxy 端口暴露 | ⛔ P3–P4 范围,未开始 |
 | OTel trace | ⛔ **未开始**。零 OTel 依赖,无 span,一次 create 追不了 gateway → noded → beand。日志已字段化并带 request id(前置条件已具备),但那只解决关联,不是 trace。metrics registry 是另一套东西,不能「包一层」变成 trace |
@@ -112,16 +112,22 @@ fc 档需要：
   而不是等到快照失败才暴露。
 
 overlaybd 需要 ublk（内核 ≥ 6.0)或 tcmu 后端。当前验证机是 Ubuntu 20.04 +
-内核 5.15,无 `/dev/ublk-control`,所以 overlaybd 走 **tcmu**;
-换 22.04 + HWE 6.8 才有 ublk（性能更好）。
+内核 5.15,无 `/dev/ublk-control`,所以走 **tcmu**（`target_core_user` +
+`tcm_loop` 模块）—— **已实测功能完备**,ublk 只是性能更好,不是前提。
+
+tcmu 路径另需注意宿主上的 `multipathd`:TCMU 设备默认无唯一序列号,
+multipathd 会把多个 overlaybd 设备合并成一条 multipath,
+**读到的是别的镜像的数据**。必须给每个 backstore 写 `wwn/vpd_unit_serial`。
 
 ## 4. 下一步
 
-1. **overlaybd lazy-pull 的真实验证**：组件已装在验证机上
-   (`/opt/overlaybd/bin`,tcmu 模块已加载),但**功能从未跑通过** ——
-   「装好了」不等于「能用」。让首次拉取也按需读块,而不是拉全量再转换。
+1. **overlaybd 接入 `image.Provider`**:能力已在验证机上实测跑通
+   (tcmu 后端,`docs/decisions.md` §3.1),不再是「能不能用」的问题。
+   要写的是 `OverlaybdProvider`:configfs 编排(**LUN 必须在 nexus 之后建、
+   必须设唯一 `vpd_unit_serial`**,两个坑都会静默失败)、
+   转换产物推 registry、设备生命周期与释放。
    CoW 已经解决「每 sandbox 的成本」,overlaybd 解决的是
-   「首次使用一个大镜像的等待时间」。tcmu 在 5.15 就能验证,不必先升内核。
+   「首次使用一个大镜像的等待时间」。
 2. **build 的构建日志与取消**：现在 build 是「起了就等」,失败只能从 image state
    看到 FAILED。日志落存储 + 可流式查看 + `cancel` 才算完整（`docs/image-build.md` §6）。
 3. **OTel trace**：一次 create 跨 gateway → noded → beand,现在只能靠
