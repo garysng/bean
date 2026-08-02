@@ -97,6 +97,49 @@ VM 不读 memory 文件,缺页时由 handler 进程按需提供。**restore 时�
 `unprivileged_userfaultfd=0` 但 noded 以 root 运行,可用。
 5.15 走 `userfaultfd` syscall,6.1+ 走 `/dev/userfaultfd`。
 
+### 2.1 实测结果与两个只能靠跑才发现的协议细节
+
+`/snapshot/load` 从 **1303ms → 7ms**。真机验证,按需供页。
+
+两个坑,文档里都没写清楚:
+
+1. **fd 和 region layout 不一定在同一个 datagram 里。** 单次 `ReadMsgUnix`
+   拿到 fd 但 body 是空的 → JSON 解析失败 → handler 死掉,而 Firecracker
+   在缺页上永久阻塞。必须循环收齐两者。agentenv 的 Rust 实现也是循环。
+2. **Firecracker 递过来的 fd 是非阻塞的。** 直接 `read` 立刻返回 EAGAIN,
+   fault 循环当场退出。必须 `poll` 等可读。
+   这个错误的表现就是「`snapshot/load` 永久挂起」,和 handler 崩溃无法区分 ——
+   所以 handler 必须有 `Err()` 通道,否则只能看到一个 hang。
+
+### 2.2 unpack 缓存:每节点每快照一次
+
+UFFD 干掉 load 成本后,剩下的 1060ms 全是 unpack(解 gzip + 落盘 512MB memory)。
+同一个快照的每次 restore 解出的字节完全相同,所以按 snapshot ID 缓存。
+
+**安全性已验证**:Firecracker 对 memory 文件是 `MAP_PRIVATE`。
+guest 内写 64MB 后宿主文件 md5 不变 → 一份解开的 memory 可以服务任意多次 restore。
+
+**writable rootfs 故意不缓存**:同一快照恢复出的两个 sandbox 一写就分叉,
+必须各有自己的设备。好在它是 sparse extent list,新 sandbox 几乎没写过东西,
+所以很小 —— 这才使得「memory 共享 + rootfs 独立」的拆分成立。
+
+**实测**:
+```
+首次 restore   1617 ms   (付 unpack 代价)
+后续 restore    ~950 ms
+```
+
+并发正确性:同一快照的并发 restore 只 unpack 一次。
+写测试时发现一个真实竞态 —— 等待者在 `wg.Done()` 和自己重新查缓存之间,
+会看到「盘上还没出现」而重新 unpack 一遍。改成等待者直接读 in-flight 结果。
+publish 用「写临时目录 + rename」,所以中断的 unpack 不会留下残缺条目。
+
+### 2.3 还没做:剩下的 ~950ms
+
+命中缓存后仍要**把整个 16MB bundle 从 gateway streaming 过来并解 gzip**,
+只为了取出 rootfs 那个 member。正确做法是让节点在命中时告诉控制面
+「别发了」,或者把 rootfs 拆成独立对象。**未实现。**
+
 **已知风险**(来自 Firecracker 官方文档):handler 进程死掉会让 Firecracker
 在下次缺页时**永久挂起**,所以必须有存活监控。balloon 的 `MADV_DONTNEED`
 会产生 `UFFD_EVENT_REMOVE`,handler 必须把对应页面置零而不是回读文件

@@ -524,15 +524,34 @@ func TestCmdImage(t *testing.T) {
 		t.Errorf("status out = %q", out)
 	}
 
-	out, _, code = runCLI(t, ts, "image", "prewarm", "busybox:1.36", "--nodes", "2")
+	out, _, code = runCLI(t, ts, "image", "prewarm", "busybox:1.36", "--replicas", "2")
 	if code != 0 {
 		t.Fatalf("prewarm code = %d", code)
 	}
-	if !strings.Contains(out, "pw_cli1") || !strings.Contains(out, "2 node") {
+	// Readiness is what a caller acts on. How many machines hold the image is
+	// not reported: it is placement, which they cannot influence and should not
+	// come to depend on.
+	if !strings.Contains(out, "pw_cli1") || !strings.Contains(out, "ready") {
 		t.Errorf("prewarm out = %q", out)
+	}
+	if strings.Contains(out, "node") {
+		t.Errorf("prewarm output mentions nodes: %q", out)
 	}
 	if got := (*seen)[2]; got != "prewarm:nodes=2" {
 		t.Errorf("prewarm request = %q", got)
+	}
+}
+
+func TestCmdImagePrewarmRejectsANonNumericReplicaCount(t *testing.T) {
+	ts, _ := stubAPI(t)
+	// Silently ignoring the value would warm one copy while the caller believed
+	// they had asked for many.
+	_, errStr, code := runCLI(t, ts, "image", "prewarm", "busybox:1.36", "--replicas", "lots")
+	if code == 0 {
+		t.Error("accepted a non-numeric replica count")
+	}
+	if !strings.Contains(errStr, "replicas") {
+		t.Errorf("stderr = %q, want it to name the flag", errStr)
 	}
 }
 

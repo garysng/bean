@@ -155,7 +155,7 @@ commands:
   snapshot create SBX [--name N] [--no-keep-running]
   snapshot ls [--label k=v] | snapshot rm SNAP
   run --snapshot SNAP                           # restore instead of image
-  image ls | image status REF | image prewarm REF... [--nodes N]
+  image ls | image status REF | image prewarm REF... [--replicas N]
 env: BEAN_BASE_URL (default http://127.0.0.1:8080), BEAN_API_KEY`
 
 func envOr(k, def string) string {
@@ -387,13 +387,12 @@ func cmdBuild(c *Client, args []string, stdout io.Writer) error {
 
 	var out struct {
 		ImageRef string `json:"imageRef"`
-		NodeID   string `json:"nodeId"`
 		State    string `json:"state"`
 	}
 	if err := c.doJSON("POST", "/v1/images/build", body, &out); err != nil {
 		return err
 	}
-	fmt.Fprintf(stdout, "%s\t%s\tbuilding on %s\n", out.ImageRef, out.State, out.NodeID)
+	fmt.Fprintf(stdout, "%s\t%s\n", out.ImageRef, out.State)
 	fmt.Fprintf(stdout, "follow with: bean image status %s\n", out.ImageRef)
 	return nil
 }
@@ -639,19 +638,18 @@ func cmdImage(c *Client, args []string, stdout io.Writer) error {
 	case "ls":
 		var out struct {
 			Images []struct {
-				Ref         string `json:"ref"`
-				State       string `json:"state"`
-				CachedNodes int    `json:"cachedNodes"`
-				SizeBytes   int64  `json:"sizeBytes"`
+				Ref       string `json:"ref"`
+				State     string `json:"state"`
+				SizeBytes int64  `json:"sizeBytes"`
 			} `json:"images"`
 		}
 		if err := c.doJSON("GET", "/v1/images", nil, &out); err != nil {
 			return err
 		}
 		tw := tabwriter.NewWriter(stdout, 2, 4, 2, ' ', 0)
-		fmt.Fprintln(tw, "REF\tSTATE\tCACHED NODES\tSIZE")
+		fmt.Fprintln(tw, "REF\tSTATE\tSIZE")
 		for _, i := range out.Images {
-			fmt.Fprintf(tw, "%s\t%s\t%d\t%d\n", i.Ref, i.State, i.CachedNodes, i.SizeBytes)
+			fmt.Fprintf(tw, "%s\t%s\t%d\n", i.Ref, i.State, i.SizeBytes)
 		}
 		return tw.Flush()
 
@@ -664,7 +662,7 @@ func cmdImage(c *Client, args []string, stdout io.Writer) error {
 			return err
 		}
 		tw := tabwriter.NewWriter(stdout, 2, 4, 2, ' ', 0)
-		for _, k := range []string{"ref", "digest", "state", "format", "cachedNodes", "sizeBytes"} {
+		for _, k := range []string{"ref", "digest", "state", "format", "sizeBytes"} {
 			if v, ok := out[k]; ok {
 				fmt.Fprintf(tw, "%s:\t%v\n", k, v)
 			}
@@ -673,13 +671,18 @@ func cmdImage(c *Client, args []string, stdout io.Writer) error {
 
 	case "prewarm":
 		if len(pos) < 2 {
-			return fmt.Errorf("usage: bean image prewarm REF... [--nodes N]")
+			return fmt.Errorf("usage: bean image prewarm REF... [--replicas N]")
 		}
 		body := map[string]any{"refs": pos[1:]}
-		if n := flags["nodes"]; n != "" {
-			if parsed, err := strconv.Atoi(n); err == nil {
-				body["targetNodes"] = parsed
+		// How widely to warm an image is a capacity decision a caller can act
+		// on, so it stays. It is named for the copies rather than the machines
+		// holding them: nodes are not part of the platform's vocabulary.
+		if n := flags["replicas"]; n != "" {
+			parsed, err := strconv.Atoi(n)
+			if err != nil {
+				return fmt.Errorf("--replicas %q: not a number", n)
 			}
+			body["targetNodes"] = parsed
 		}
 		var out struct {
 			JobID string         `json:"jobId"`
@@ -689,8 +692,14 @@ func cmdImage(c *Client, args []string, stdout io.Writer) error {
 			return err
 		}
 		fmt.Fprintf(stdout, "%s\n", out.JobID)
+		// Whether an image is ready is the user's concern; how many machines
+		// hold it is not something they can act on.
 		for ref, n := range out.Ready {
-			fmt.Fprintf(stdout, "  %s: cached on %d node(s)\n", ref, n)
+			state := "warming"
+			if n > 0 {
+				state = "ready"
+			}
+			fmt.Fprintf(stdout, "  %s: %s\n", ref, state)
 		}
 		return nil
 
