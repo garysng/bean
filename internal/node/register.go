@@ -3,13 +3,14 @@ package node
 import (
 	"context"
 	"fmt"
-	"log"
+	"log/slog"
 	"time"
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
 	nodev1 "github.com/garysng/bean/internal/gen/bean/node/v1"
+	"github.com/garysng/bean/internal/logging"
 	"github.com/garysng/bean/internal/node/runtime"
 )
 
@@ -66,7 +67,7 @@ func (r *Registrar) Run(ctx context.Context) error {
 	backoff := time.Second
 	for ctx.Err() == nil {
 		if err := r.session(ctx, client); err != nil && ctx.Err() == nil {
-			log.Printf("control-plane session ended: %v (retrying in %s)", err, backoff)
+			slog.Warn("control-plane session ended", logging.KeyError, err, "retryIn", backoff)
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
@@ -109,10 +110,10 @@ func (r *Registrar) session(ctx context.Context, client nodev1.NodeServiceClient
 	if resp.HeartbeatIntervalSeconds > 0 {
 		r.interval = time.Duration(resp.HeartbeatIntervalSeconds) * time.Second
 	}
-	log.Printf("registered with control plane as %s (region=%s)", r.NodeID, r.Region)
+	slog.Info("registered with control plane", logging.KeyNode, r.NodeID, "region", r.Region)
 
 	if err := r.reconcile(ctx, client); err != nil {
-		log.Printf("reconcile: %v", err)
+		slog.Error("reconcile failed", logging.KeyError, err)
 	}
 
 	stream, err := client.Heartbeat(ctx)
@@ -161,9 +162,9 @@ func (r *Registrar) reconcile(ctx context.Context, client nodev1.NodeServiceClie
 	}
 	for _, st := range r.mgr.Statuses() {
 		if !expected[st.SandboxId] {
-			log.Printf("reconcile: destroying orphan sandbox %s", st.SandboxId)
+			slog.Info("destroying orphan sandbox", logging.KeySandbox, st.SandboxId)
 			if err := r.mgr.Destroy(ctx, st.SandboxId, true); err != nil {
-				log.Printf("reconcile: destroy %s: %v", st.SandboxId, err)
+				slog.Error("cannot destroy orphan sandbox", logging.KeySandbox, st.SandboxId, logging.KeyError, err)
 			}
 		}
 	}

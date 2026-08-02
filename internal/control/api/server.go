@@ -7,7 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"strconv"
 	"strings"
@@ -23,6 +23,7 @@ import (
 	"github.com/garysng/bean/internal/control/store"
 	commonv1 "github.com/garysng/bean/internal/gen/bean/common/v1"
 	nodev1 "github.com/garysng/bean/internal/gen/bean/node/v1"
+	"github.com/garysng/bean/internal/logging"
 	"github.com/garysng/bean/internal/obs"
 )
 
@@ -379,14 +380,14 @@ func (s *Server) failCreate(rec *store.Sandbox, cause error) {
 	_ = s.store.PutSandbox(rec)
 	s.emit(rec.ID, "sandbox.lifecycle.failed", map[string]string{"reason": cause.Error()})
 	if err := s.placer.Release(rec.ID); err != nil {
-		log.Printf("sandbox %s: release reservation: %v", rec.ID, err)
+		slog.Error("cannot release reservation", logging.KeySandbox, rec.ID, logging.KeyError, err)
 	}
 }
 
 // releasePlacement returns capacity for a sandbox that has stopped.
 func (s *Server) releasePlacement(rec *store.Sandbox) {
 	if err := s.placer.Release(rec.ID); err != nil {
-		log.Printf("sandbox %s: release reservation: %v", rec.ID, err)
+		slog.Error("cannot release reservation", logging.KeySandbox, rec.ID, logging.KeyError, err)
 	}
 }
 
@@ -430,7 +431,7 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 	s.refreshStateGauges()
 	w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 	if err := s.metrics.WritePrometheus(w); err != nil {
-		log.Printf("write metrics: %v", err)
+		slog.Error("cannot write metrics", logging.KeyError, err)
 	}
 }
 
@@ -439,7 +440,7 @@ func (s *Server) handleMetrics(w http.ResponseWriter, r *http.Request) {
 func (s *Server) refreshStateGauges() {
 	recs, err := s.store.ListSandboxes("", "", "")
 	if err != nil {
-		log.Printf("metrics: list sandboxes: %v", err)
+		slog.Error("metrics cannot list sandboxes", logging.KeyError, err)
 		return
 	}
 	counts := map[string]float64{}
@@ -714,7 +715,7 @@ func (s *Server) handleReadFile(w http.ResponseWriter, r *http.Request) {
 		if rerr != nil {
 			// Response already committed with 200: abort the connection so the
 			// client sees a truncated transfer instead of a silent short read.
-			log.Printf("readFile %s %s: mid-stream error: %v", id, path, rerr)
+			slog.Error("readFile failed mid-stream", logging.KeySandbox, id, "path", path, logging.KeyError, rerr)
 			panic(http.ErrAbortHandler)
 		}
 		if _, werr := w.Write(chunk.Data); werr != nil {
@@ -788,7 +789,7 @@ func (s *Server) handleLogs(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		if rerr != nil {
-			log.Printf("logs %s: mid-stream error: %v", id, rerr)
+			slog.Error("logs failed mid-stream", logging.KeySandbox, id, logging.KeyError, rerr)
 			panic(http.ErrAbortHandler)
 		}
 		if _, werr := w.Write(chunk.Data); werr != nil {
@@ -822,7 +823,7 @@ func (s *Server) emit(sandboxID, typ string, data map[string]string) {
 		Type: typ, Timestamp: time.Now(), SandboxID: sandboxID, Data: data, Version: "v1",
 	}
 	if err := s.store.AppendEvent(ev); err != nil {
-		log.Printf("emit event %s %s: %v", sandboxID, typ, err)
+		slog.Error("cannot emit event", logging.KeySandbox, sandboxID, "event", typ, logging.KeyError, err)
 	}
 	// Label filtering for subscribers needs the sandbox's labels; a missing
 	// record only costs label-filtered subscribers this one event.

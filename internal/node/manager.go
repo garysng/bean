@@ -6,7 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -17,6 +17,7 @@ import (
 	agentv1 "github.com/garysng/bean/internal/gen/bean/agent/v1"
 	commonv1 "github.com/garysng/bean/internal/gen/bean/common/v1"
 	nodev1 "github.com/garysng/bean/internal/gen/bean/node/v1"
+	"github.com/garysng/bean/internal/logging"
 	"github.com/garysng/bean/internal/node/runtime"
 	"github.com/garysng/bean/internal/obs"
 )
@@ -132,7 +133,7 @@ func (m *Manager) Create(ctx context.Context, spec *nodev1.SandboxSpec) (*Sandbo
 			_, err := agentv1.NewAgentServiceClient(conn).StartUserProcess(ctx,
 				&agentv1.StartUserProcessRequest{Cmd: spec.Cmd, Env: spec.Env})
 			if err != nil {
-				log.Printf("sandbox %s: autoStartCmd failed: %v", spec.SandboxId, err)
+				slog.Error("autoStartCmd failed", logging.KeySandbox, spec.SandboxId, logging.KeyError, err)
 			}
 		}
 	}
@@ -371,7 +372,7 @@ func (m *Manager) Snapshot(ctx context.Context, id string, w io.Writer) error {
 	// sandbox running rather than silently stuck.
 	if prev == runtime.StateRunning {
 		if rerr := m.rt.Resume(ctx, id); rerr != nil {
-			log.Printf("sandbox %s: resume after snapshot failed: %v", id, rerr)
+			slog.Error("resume after snapshot failed", logging.KeySandbox, id, logging.KeyError, rerr)
 		}
 	}
 
@@ -379,7 +380,7 @@ func (m *Manager) Snapshot(ctx context.Context, id string, w io.Writer) error {
 	// is dead even though the sandbox is running again. Reconnecting here keeps
 	// that a detail of snapshotting rather than an error the next exec reports.
 	if rerr := m.redialAgent(ctx, id); rerr != nil {
-		log.Printf("sandbox %s: reconnect after snapshot failed: %v", id, rerr)
+		slog.Error("reconnect after snapshot failed", logging.KeySandbox, id, logging.KeyError, rerr)
 	}
 
 	restore()
@@ -453,7 +454,7 @@ func (m *Manager) CommitSandbox(ctx context.Context, id, tag string) error {
 
 	if prev == runtime.StateRunning {
 		if rerr := m.rt.Resume(ctx, id); rerr != nil {
-			log.Printf("sandbox %s: resume after commit failed: %v", id, rerr)
+			slog.Error("resume after commit failed", logging.KeySandbox, id, logging.KeyError, rerr)
 		}
 	}
 	restore()
@@ -514,7 +515,7 @@ func (m *Manager) CachedImages() map[string]int64 {
 	}
 	cached, err := lister.CachedImages()
 	if err != nil {
-		log.Printf("list cached images: %v", err)
+		slog.Error("cannot list cached images", logging.KeyError, err)
 		return nil
 	}
 	return cached
@@ -811,9 +812,9 @@ func (m *Manager) sweepIdle() {
 			"Sandboxes acted on by the idle sweep.",
 			map[string]string{"action": a.onIdle, "outcome": boolOutcome(err == nil)}, 1)
 		if err != nil {
-			log.Printf("idle sweep %s (%s): %v", a.id, a.onIdle, err)
+			slog.Error("idle sweep failed", logging.KeySandbox, a.id, "action", a.onIdle, logging.KeyError, err)
 		} else {
-			log.Printf("idle sweep: sandbox %s -> %s", a.id, a.onIdle)
+			slog.Info("sandbox idled out", logging.KeySandbox, a.id, "action", a.onIdle)
 		}
 	}
 }

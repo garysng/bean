@@ -6,6 +6,7 @@ package main
 import (
 	"flag"
 	"log"
+	"log/slog"
 
 	"google.golang.org/grpc"
 
@@ -42,7 +43,7 @@ func main() {
 
 	srv := grpc.NewServer()
 	agentv1.RegisterAgentServiceServer(srv, beand.NewServer(version, *rootDir))
-	log.Printf("beand %s listening on %s (root=%q)", version, *listenAddr, *rootDir)
+	slog.Info("beand listening", "version", version, "addr", *listenAddr, "root", *rootDir)
 	if err := srv.Serve(lis); err != nil {
 		log.Fatal(err)
 	}

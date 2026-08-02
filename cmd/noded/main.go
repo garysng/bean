@@ -6,6 +6,7 @@ import (
 	"context"
 	"flag"
 	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -17,6 +18,7 @@ import (
 	"google.golang.org/grpc"
 
 	nodev1 "github.com/garysng/bean/internal/gen/bean/node/v1"
+	"github.com/garysng/bean/internal/logging"
 	"github.com/garysng/bean/internal/node"
 	"github.com/garysng/bean/internal/node/runtime"
 )
@@ -56,7 +58,11 @@ func main() {
 	buildctlBin := flag.String("buildctl-bin", "buildctl", "BuildKit client binary")
 	debugConsole := flag.Bool("debug-console", false,
 		"attach guests to the serial console; costs ~500ms per boot (fc runtime)")
+	logFormat := flag.String("log-format", "text", "log format: text|json")
+	logLevel := flag.String("log-level", "info", "log level: debug|info|warn|error")
 	flag.Parse()
+
+	logging.Setup(*logFormat, *logLevel)
 
 	if *nodeToken == "" && !isLoopback(*listen) {
 		log.Fatalf("refusing to listen on %s without --node-token (or BEAN_NODE_TOKEN)", *listen)
@@ -104,7 +110,7 @@ func main() {
 		sig := make(chan os.Signal, 1)
 		signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 		<-sig
-		log.Println("shutting down")
+		slog.Info("shutting down")
 		srv.GracefulStop()
 	}()
 
@@ -115,7 +121,7 @@ func main() {
 			mgr.RefreshGauges()
 			w.Header().Set("Content-Type", "text/plain; version=0.0.4; charset=utf-8")
 			if err := mgr.Metrics().WritePrometheus(w); err != nil {
-				log.Printf("write metrics: %v", err)
+				slog.Error("cannot write metrics", logging.KeyError, err)
 			}
 		})
 		mux.HandleFunc("GET /healthz", func(w http.ResponseWriter, _ *http.Request) {
@@ -128,10 +134,10 @@ func main() {
 		}
 		go func() {
 			if err := metricsSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
-				log.Printf("metrics server: %v", err)
+				slog.Error("metrics server stopped", logging.KeyError, err)
 			}
 		}()
-		log.Printf("metrics on http://%s/metrics", *metricsAddr)
+		slog.Info("metrics listening", "addr", *metricsAddr)
 	}
 
 	// Multi-node mode: dial out to the control plane, register, then keep
@@ -157,13 +163,14 @@ func main() {
 		defer cancel()
 		go func() {
 			if err := reg.Run(ctx); err != nil && ctx.Err() == nil {
-				log.Printf("registrar stopped: %v", err)
+				slog.Error("registrar stopped", logging.KeyError, err)
 			}
 		}()
-		log.Printf("registering with control plane %s as %s (advertise=%s)", *controlPlane, id, adv)
+		slog.Info("registering with control plane",
+			"controlPlane", *controlPlane, logging.KeyNode, id, "advertise", adv)
 	}
 
-	log.Printf("noded %s (runtime=%s) listening on %s", version, rt.Name(), *listen)
+	slog.Info("noded listening", "version", version, "runtime", rt.Name(), "addr", *listen)
 	if err := srv.Serve(lis); err != nil {
 		log.Fatal(err)
 	}

@@ -11,6 +11,7 @@ import (
 	"context"
 	"flag"
 	"log"
+	"log/slog"
 	"net"
 	"net/http"
 	"os"
@@ -30,6 +31,7 @@ import (
 	"github.com/garysng/bean/internal/control/snapshot"
 	"github.com/garysng/bean/internal/control/store"
 	nodev1 "github.com/garysng/bean/internal/gen/bean/node/v1"
+	"github.com/garysng/bean/internal/logging"
 )
 
 var version = "dev"
@@ -57,7 +59,11 @@ func main() {
 	s3Region := flag.String("s3-region", "us-east-1", "S3 region")
 	s3PathStyle := flag.Bool("s3-path-style", true,
 		"address buckets as /bucket/key (required by MinIO and most self-hosted gateways)")
+	logFormat := flag.String("log-format", "text", "log format: text|json")
+	logLevel := flag.String("log-level", "info", "log level: debug|info|warn|error")
 	flag.Parse()
+
+	logging.Setup(*logFormat, *logLevel)
 
 	if *apiKey == "" {
 		log.Fatal("api key required: set --api-key or BEAN_API_KEY")
@@ -80,7 +86,7 @@ func main() {
 			log.Fatalf("secret key: %v", err)
 		}
 	} else {
-		log.Print("no --secret-key: registry credentials disabled (public images only)")
+		slog.Warn("registry credentials disabled: no --secret-key, so only public images work")
 	}
 
 	// Snapshot blobs go to object storage in production; multiple gateway
@@ -104,7 +110,8 @@ func main() {
 		if blobs, err = snapshot.NewS3Blobs(ctx, s3c, *s3Bucket); err != nil {
 			log.Fatalf("snapshot storage: %v", err)
 		}
-		log.Printf("snapshot blobs: s3 %s bucket %s", *s3Endpoint, *s3Bucket)
+		slog.Info("snapshot blobs in object storage",
+			"endpoint", *s3Endpoint, "bucket", *s3Bucket)
 	} else {
 		blobDir := *snapshotDir
 		if blobDir == "" {
@@ -115,7 +122,7 @@ func main() {
 			log.Fatalf("snapshot storage: %v", err)
 		}
 		blobs = dir
-		log.Printf("snapshot blobs: directory %s", blobDir)
+		slog.Info("snapshot blobs on local disk", "dir", blobDir)
 	}
 
 	sched := scheduler.New(st, scheduler.DefaultWeights())
@@ -135,7 +142,7 @@ func main() {
 	}
 	go func() {
 		if err := grpcSrv.Serve(nodeLis); err != nil {
-			log.Printf("NodeService stopped: %v", err)
+			slog.Error("NodeService stopped", logging.KeyError, err)
 		}
 	}()
 	go func() {
@@ -169,8 +176,8 @@ func main() {
 		_ = httpSrv.Shutdown(shutCtx)
 	}()
 
-	log.Printf("bean-api %s: HTTP %s, NodeService %s (region=%s runtime-tier=%s)",
-		version, *listen, *nodeGRPC, *region, *runtimeTier)
+	slog.Info("bean-api listening", "version", version, "http", *listen,
+		"nodeGrpc", *nodeGRPC, "region", *region, "runtimeTier", *runtimeTier)
 	if err := httpSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatal(err)
 	}
@@ -182,7 +189,8 @@ func main() {
 func markNodeSandboxesLost(st *store.Store, sched *scheduler.Scheduler, nodeID string) {
 	recs, err := st.ListSandboxes("", "", "")
 	if err != nil {
-		log.Printf("mark lost for %s: %v", nodeID, err)
+		slog.Error("cannot list sandboxes to mark lost",
+			logging.KeyNode, nodeID, logging.KeyError, err)
 		return
 	}
 	for _, rec := range recs {
@@ -191,11 +199,15 @@ func markNodeSandboxesLost(st *store.Store, sched *scheduler.Scheduler, nodeID s
 		}
 		rec.State = store.SandboxLost
 		if err := st.PutSandbox(rec); err != nil {
-			log.Printf("mark %s lost: %v", rec.ID, err)
+			slog.Error("cannot mark sandbox lost",
+				logging.KeySandbox, rec.ID, logging.KeyNode, nodeID,
+				logging.KeyError, err)
 			continue
 		}
 		if err := sched.Release(rec.ID); err != nil {
-			log.Printf("release %s after node loss: %v", rec.ID, err)
+			slog.Error("cannot release capacity after node loss",
+				logging.KeySandbox, rec.ID, logging.KeyNode, nodeID,
+				logging.KeyError, err)
 		}
 		_ = st.AppendEvent(&store.Event{
 			Type: "sandbox.lifecycle.lost", Timestamp: time.Now(),
@@ -212,7 +224,8 @@ type storeLister struct{ store *store.Store }
 func (l *storeLister) ExpectedForNode(nodeID string) []*nodev1.SandboxSpec {
 	recs, err := l.store.ListSandboxes("", "", "")
 	if err != nil {
-		log.Printf("ExpectedForNode %s: %v", nodeID, err)
+		slog.Error("cannot list a node's expected sandboxes",
+			logging.KeyNode, nodeID, logging.KeyError, err)
 		return nil
 	}
 	var out []*nodev1.SandboxSpec

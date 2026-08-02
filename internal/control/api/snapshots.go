@@ -4,13 +4,14 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"time"
 
 	"github.com/garysng/bean/internal/control/snapshot"
 	"github.com/garysng/bean/internal/control/store"
 	nodev1 "github.com/garysng/bean/internal/gen/bean/node/v1"
+	"github.com/garysng/bean/internal/logging"
 )
 
 // Snapshot endpoints. A snapshot captures a sandbox so it can be recreated
@@ -118,7 +119,7 @@ func (s *Server) handleCreateSnapshot(w http.ResponseWriter, r *http.Request) {
 	if !keepRunning {
 		if _, err := nodeClient.DestroySandbox(r.Context(),
 			&nodev1.DestroySandboxRequest{SandboxId: rec.ID}); err != nil {
-			log.Printf("snapshot %s: destroy source sandbox: %v", snapID, err)
+			slog.Error("cannot destroy snapshot source sandbox", logging.KeySnapshot, snapID, logging.KeyError, err)
 		} else {
 			rec.State = store.SandboxStopped
 			_ = s.store.PutSandbox(rec)
@@ -139,7 +140,7 @@ func (s *Server) failSnapshot(snap *store.Snapshot, cause error) {
 	snap.State = store.SnapshotFailed
 	snap.Reason = cause.Error()
 	if err := s.store.PutSnapshot(snap); err != nil {
-		log.Printf("snapshot %s: record failure: %v", snap.ID, err)
+		slog.Error("cannot record snapshot failure", logging.KeySnapshot, snap.ID, logging.KeyError, err)
 	}
 	s.emit(snap.SandboxID, "sandbox.snapshot.failed",
 		map[string]string{"snapshotId": snap.ID, "reason": cause.Error()})
@@ -178,7 +179,7 @@ func (s *Server) handleDeleteSnapshot(w http.ResponseWriter, r *http.Request) {
 	case err == nil:
 		if s.snapshots != nil {
 			if derr := s.snapshots.Delete(id); derr != nil {
-				log.Printf("snapshot %s: delete blob: %v", id, derr)
+				slog.Error("cannot delete snapshot blob", logging.KeySnapshot, id, logging.KeyError, derr)
 			}
 		}
 		w.WriteHeader(http.StatusNoContent)
@@ -213,7 +214,7 @@ func (s *Server) createFromSnapshot(w http.ResponseWriter, r *http.Request,
 	}
 	defer func() {
 		if rerr := s.store.ReleaseSnapshot(snap.ID); rerr != nil {
-			log.Printf("snapshot %s: release ref: %v", snap.ID, rerr)
+			slog.Error("cannot release snapshot reference", logging.KeySnapshot, snap.ID, logging.KeyError, rerr)
 		}
 	}()
 

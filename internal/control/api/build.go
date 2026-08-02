@@ -6,13 +6,14 @@ import (
 	"encoding/json"
 	"errors"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"time"
 
 	"github.com/garysng/bean/internal/control/image"
 	"github.com/garysng/bean/internal/control/store"
 	nodev1 "github.com/garysng/bean/internal/gen/bean/node/v1"
+	"github.com/garysng/bean/internal/logging"
 )
 
 // Builds run on a node, where BuildKit and the image cache already live. The
@@ -157,7 +158,7 @@ func (s *Server) runBuild(nodeID string, req buildRequest, contextTar []byte) {
 		BuildArgs:  req.BuildArgs,
 		SizeMib:    req.SizeMiB,
 	}); err != nil {
-		log.Printf("build %s on %s: %v", req.Tag, nodeID, err)
+		slog.Error("build failed", logging.KeyImage, req.Tag, logging.KeyNode, nodeID, logging.KeyError, err)
 		s.failImage(req.Tag, err.Error())
 		return
 	}
@@ -165,6 +166,6 @@ func (s *Server) runBuild(nodeID string, req buildRequest, contextTar []byte) {
 	// A built image needs no conversion — BuildKit's flat output is already the
 	// format the tier boots — so it goes straight to READY.
 	if err := s.images.MarkReady(req.Tag, "", 0); err != nil {
-		log.Printf("build %s: mark ready: %v", req.Tag, err)
+		slog.Error("cannot mark build ready", logging.KeyImage, req.Tag, logging.KeyError, err)
 	}
 }

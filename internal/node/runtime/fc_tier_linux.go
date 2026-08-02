@@ -4,11 +4,12 @@ package runtime
 
 import (
 	"fmt"
-	"log"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"strings"
 
+	"github.com/garysng/bean/internal/logging"
 	"github.com/garysng/bean/internal/node/image"
 )
 
@@ -45,7 +46,7 @@ func NewFCTier(cfg FCTierConfig) (Runtime, error) {
 		cfg.BaseDir, selectProvider(cfg))
 	rt.DebugConsole = cfg.DebugConsole
 	if cfg.DebugConsole {
-		log.Print("fc tier: guest serial console on, which costs ~500ms per boot")
+		slog.Warn("guest serial console on", "costPerBoot", "~500ms")
 	}
 	// Committed images land beside pulled ones, because a committed image is a
 	// base image like any other — that is the point of committing rather than
@@ -69,7 +70,7 @@ func NewFCTier(cfg FCTierConfig) (Runtime, error) {
 			return nil, fmt.Errorf("fc tier: builds requested but %w", err)
 		}
 		rt.Builder = builder
-		log.Printf("fc tier: image builds via buildkit at %s", cfg.BuildkitAddr)
+		slog.Info("image builds enabled", "buildkit", cfg.BuildkitAddr)
 	}
 	return rt, nil
 }
@@ -85,14 +86,14 @@ func selectProvider(cfg FCTierConfig) image.Provider {
 	var assembler image.Provider
 	dm := image.NewDevMapperProvider(cfg.BaseDir, cfg.ImageDir, cfg.DefaultDiskMiB)
 	if err := dm.Available(); err != nil {
-		log.Printf("fc tier: %v; falling back to copying base images", err)
+		slog.Warn("device-mapper unavailable, copying base images instead", logging.KeyError, err)
 		assembler = &image.FileProvider{
 			BaseDir:        cfg.BaseDir,
 			ImageDir:       cfg.ImageDir,
 			DefaultSizeMiB: cfg.DefaultDiskMiB,
 		}
 	} else {
-		log.Printf("fc tier: rootfs via device-mapper copy-on-write")
+		slog.Info("rootfs via device-mapper copy-on-write")
 		assembler = dm
 	}
 

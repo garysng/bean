@@ -3,13 +3,14 @@ package api
 import (
 	"encoding/json"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"time"
 
 	"github.com/garysng/bean/internal/control/image"
 	"github.com/garysng/bean/internal/control/store"
 	nodev1 "github.com/garysng/bean/internal/gen/bean/node/v1"
+	"github.com/garysng/bean/internal/logging"
 )
 
 // Commit turns a sandbox's filesystem into a base image others can start from.
@@ -109,6 +110,6 @@ func (s *Server) failImage(ref, reason string) {
 		return
 	}
 	if err := s.images.MarkFailed(ref, reason); err != nil {
-		log.Printf("commit %s: mark failed: %v", ref, err)
+		slog.Error("cannot mark commit failed", logging.KeyImage, ref, logging.KeyError, err)
 	}
 }

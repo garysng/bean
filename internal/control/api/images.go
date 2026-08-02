@@ -4,13 +4,14 @@ import (
 	"context"
 	"encoding/json"
 	"io"
-	"log"
+	"log/slog"
 	"net/http"
 	"time"
 
 	"github.com/garysng/bean/internal/control/image"
 	"github.com/garysng/bean/internal/control/store"
 	nodev1 "github.com/garysng/bean/internal/gen/bean/node/v1"
+	"github.com/garysng/bean/internal/logging"
 )
 
 // Image endpoints. A caller only ever supplies a native OCI reference;
@@ -111,7 +112,7 @@ func (s *Server) handlePrewarm(w http.ResponseWriter, r *http.Request) {
 func (s *Server) runPrewarmJob(jobID string, refs []string, region string) {
 	nodes, err := s.placer.Nodes()
 	if err != nil {
-		log.Printf("prewarm %s: list nodes: %v", jobID, err)
+		slog.Error("prewarm cannot list nodes", "job", jobID, logging.KeyError, err)
 		return
 	}
 
@@ -126,7 +127,7 @@ func (s *Server) runPrewarmJob(jobID string, refs []string, region string) {
 		}
 		client, err := s.router.Client(node.ID)
 		if err != nil {
-			log.Printf("prewarm %s: node %s: %v", jobID, node.ID, err)
+			slog.Error("prewarm cannot reach node", "job", jobID, logging.KeyNode, node.ID, logging.KeyError, err)
 			continue
 		}
 		for _, ref := range refs {
@@ -137,7 +138,7 @@ func (s *Server) runPrewarmJob(jobID string, refs []string, region string) {
 			_, err := client.PrewarmImage(ctx, &nodev1.PrewarmImageRequest{Image: ref})
 			cancel()
 			if err != nil {
-				log.Printf("prewarm %s: %s on %s: %v", jobID, ref, node.ID, err)
+				slog.Error("prewarm failed", "job", jobID, logging.KeyImage, ref, logging.KeyNode, node.ID, logging.KeyError, err)
 			}
 			// Success is not recorded here: the node reports what it holds in
 			// its heartbeat, and that is the authority. Writing it from this

@@ -9,7 +9,7 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"io"
-	"log"
+	"log/slog"
 	"sync"
 	"time"
 
@@ -19,6 +19,7 @@ import (
 	"github.com/garysng/bean/internal/control/scheduler"
 	"github.com/garysng/bean/internal/control/store"
 	nodev1 "github.com/garysng/bean/internal/gen/bean/node/v1"
+	"github.com/garysng/bean/internal/logging"
 	"github.com/garysng/bean/internal/node"
 )
 
@@ -119,7 +120,7 @@ func (s *Service) Register(ctx context.Context, req *nodev1.RegisterRequest) (*n
 	s.tokens[req.NodeId] = token
 	s.mu.Unlock()
 
-	log.Printf("node %s registered (region=%s runtimes=%v)", req.NodeId, req.Region, caps.GetRuntimes())
+	slog.Info("node registered", logging.KeyNode, req.NodeId, "region", req.Region, "runtimes", caps.GetRuntimes())
 	return &nodev1.RegisterResponse{
 		NodeToken:                token,
 		HeartbeatIntervalSeconds: int64(s.heartbeatInterval.Seconds()),
@@ -208,11 +209,11 @@ func (s *Service) RunLivenessSweep(ctx context.Context, interval time.Duration) 
 		case <-t.C:
 			lost, err := s.sched.SweepLiveness()
 			if err != nil {
-				log.Printf("liveness sweep: %v", err)
+				slog.Error("liveness sweep failed", logging.KeyError, err)
 				continue
 			}
 			for _, nodeID := range lost {
-				log.Printf("node %s lease expired -> LOST", nodeID)
+				slog.Warn("node lease expired", logging.KeyNode, nodeID, "state", "LOST")
 				if s.onLost != nil {
 					s.onLost(nodeID)
 				}
@@ -220,9 +221,9 @@ func (s *Service) RunLivenessSweep(ctx context.Context, interval time.Duration) 
 			// A gateway that died mid-create would otherwise leak that
 			// node's capacity permanently.
 			if n, err := s.sched.ReclaimOrphanReservations(); err != nil {
-				log.Printf("reclaim orphan reservations: %v", err)
+				slog.Error("cannot reclaim orphan reservations", logging.KeyError, err)
 			} else if n > 0 {
-				log.Printf("reclaimed %d orphan reservation(s)", n)
+				slog.Info("reclaimed orphan reservations", "count", n)
 			}
 		}
 	}
