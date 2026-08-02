@@ -17,6 +17,12 @@ set -uo pipefail
 
 COUNT=${COUNT:-20}
 IMAGE=${IMAGE:-alpine:3.20}
+# The per-sandbox disk request is what limits density, not max_creates: the
+# scheduler reserves the nominal size while the sparse layer actually costs
+# kilobytes, so the default 20 GiB request exhausts a 100 GiB node after five
+# sandboxes. Overriding it is how this script reaches a concurrency worth
+# measuring on a node whose disk figure has not been tuned.
+DISK_MIB=${DISK_MIB:-}
 BASE_URL=${BEAN_BASE_URL:-http://127.0.0.1:18080}
 API_KEY=${BEAN_API_KEY:-devkey}
 BEAN=${BEAN:-/tmp/bean}
@@ -27,6 +33,7 @@ while [[ $# -gt 0 ]]; do
   case "$1" in
     --count) COUNT="$2"; shift 2 ;;
     --image) IMAGE="$2"; shift 2 ;;
+    --disk-mib) DISK_MIB="$2"; shift 2 ;;
     --keep) KEEP=1; shift ;;
     -h|--help) sed -n '2,16p' "$0" | sed 's/^# \?//'; exit 0 ;;
     *) echo "unknown argument: $1" >&2; exit 64 ;;
@@ -62,6 +69,9 @@ hr
 create_one() {
   local i="$1" out="$WORK/create.$1"
   local body="{\"image\":\"$IMAGE\"}"
+  if [[ -n "$DISK_MIB" ]]; then
+    body="{\"image\":\"$IMAGE\",\"resources\":{\"diskMiB\":$DISK_MIB}}"
+  fi
   local resp
   resp=$(curl -s -o "$WORK/body.$i" -w '%{time_total} %{http_code}' \
     -X POST "$BASE_URL/v1/sandboxes" \

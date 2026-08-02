@@ -32,6 +32,10 @@ NODED_FLAGS=${NODED_FLAGS:-}
 # any overcommit factor.
 NODE_CPU=${NODE_CPU:-8}
 NODE_MEM_MIB=${NODE_MEM_MIB:-16384}
+# Sandbox disk is reserved at its nominal request while the sparse layer costs
+# kilobytes, so this figure — not max_creates — is what caps density: the
+# default 20 GiB request fits five sandboxes in 100 GiB.
+NODE_DISK_MIB=${NODE_DISK_MIB:-102400}
 
 API_KEY=${API_KEY:-devkey}
 NODE_TOKEN=${NODE_TOKEN:-ntok}
@@ -89,7 +93,7 @@ nohup "$BIN/noded" \
   --agent-disk "$ASSETS/agent.ext4" \
   --base-dir /var/lib/bean/sandboxes \
   --image-dir /var/lib/bean/images \
-  --cpu "${NODE_CPU:-8}" --memory-mib "${NODE_MEM_MIB:-16384}" \
+  --cpu "$NODE_CPU" --memory-mib "$NODE_MEM_MIB" --disk-mib "$NODE_DISK_MIB" \
   --labels tier=fc \
   --metrics "127.0.0.1:$NODE_METRICS_PORT" \
   --buildkit-addr "${BUILDKIT_ADDR:-unix:///run/bean/buildkitd.sock}" \

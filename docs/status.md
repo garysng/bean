@@ -136,29 +136,64 @@ exception table 读进内核,而 restore 是在那之后才把 extents 写进 `c
 镜像首次拉取转换:busybox 5-10s,alpine 在网络不稳时 2m45s ——
 所以 prewarm 是必需的,不是优化。
 
-### 规模压测(首轮,2026-08-02)⚠️
+### 规模压测(2026-08-03)⚠️
 
-`hack/stress-fc.sh`。Zen 2 / 8 核 / 16 GB,30 并发创建小规格 sandbox:
+`hack/stress-fc.sh` + `hack/phase-delta.py`(差分两次 metrics 抓取,
+把单次压测的相位耗时从累计直方图里分离出来)。Zen 2 / **16 物理核** / 24 GB,
+alpine:3.20:
+
+| 并发 | p50 | agent_ready | runtime_create |
+|---|---|---|---|
+| 1 | 938ms | 627ms | 241ms |
+| 2 | 1228ms | | |
+| 4 | 2010ms | | |
+| 8 | 3803ms | 2920ms | 272ms |
+| 12 | 5556ms | | |
+| 16 | 6805ms | 5710ms | 369ms |
+
+#### 结论:瓶颈是 guest boot 抢 CPU,不是我们的代码 ✅(已归因)
+
+**`agent_ready` 占 94%**(6079ms 里的 5710ms),而 `runtime_create`
+(dm-snapshot 组装 + VMM spawn)从 241ms 只涨到 369ms —— **几乎不随并发变化**。
+所以 dmsetup/losetup/稀疏文件那条链不是瓶颈,`DevMapperProvider.mu`
+也不是(它只包 map 操作,里面那次 `losetup` 是每镜像一次而非每 sandbox 一次)。
+
+压测中 `vmstat` 的读数是决定性的:
 
 ```
-total 30   ok 16   failed 14(全部 503 NO_CAPACITY)
-p50 5971ms   p95 6213ms   p99 6215ms   min 5159ms
+ r  b   bi    bo    in     cs    us sy id wa
+16  0   0     20   5030   2048   62 38  0  0     ← 16 runnable / 16 核 / id=0
 ```
 
-**两个发现,都是实装缺陷而不是调参问题:**
+`r=16`、`id=0`、`us+sy=100%`、`wa≈0`、`b=0`:**16 个可运行线程占满 16 个核,
+且没有 IO 等待**。逐进程确认:每个 firecracker 在 21s wall 里烧了
+**5 CPU-秒**,16 × 5 = 80 CPU-秒挤进 16 核 → 每个 boot 被拉长约 5 倍。
+且 21s→53s 之间 CPU 时间**停在 5s 不动**,说明这 5s 全是 boot,idle guest 不耗 CPU。
 
-1. **磁盘按名义大小记账,高估约 47 万倍**(GitHub #24)。CoW 实际占 44 KiB,
-   记账按 20 GiB。第一轮 20 并发只成功 5 个,就是 `102400 / 20480 = 5`。
-   eval 负载几乎不写盘,所以这把节点密度压到了实际能力的几百分之一。
-2. **`max_creates=16` 既是拒绝阈值也超过了实际并行能力**(GitHub #19)。
-   成功数恰好 16;而单个 create 是 952ms,16 并发时 p50 变成 5971ms(**6.3 倍**)。
-   饱和点在 16 以下,且拒绝语义对批量场景是错的 —— 调用方拿到 503 而不是排队。
+**所以吞吐上限约 2.3 creates/s,由「每次 boot 5 CPU-秒 ÷ 核数」决定。**
+降低单次延迟必须减少每 boot 的 CPU 消耗(内核裁剪、更少的 guest 初始化),
+而不是加大并发窗口。**从快照 restore 是绕开这 5 CPU-秒的正解** ——
+这也是 restore 相对 create 的真实价值。
 
-**没有泄漏**:26 个并发 sandbox 全部销毁后,dm 映射、firecracker 进程、
-持有已删除文件的 loop device 全部归零 —— loop 泄漏的修复(#16)在并发下成立。
+#### `max_creates=16` 从来不是真正的限制器 ⚠️(GitHub #19)
 
-大内存机器(128 核 / 503 GB)上的第二轮待跑,用来确定 `max_creates` 与核数的关系,
-以及内存承诺量与实际 RSS 的偏差(决定 `--overcommit-memory` 能开多大)。
+三次压测暴露了限制器会随配置迁移,而**先撞上的总是记账最粗的那个资源**:
+
+| 节点配置 | 30 并发成功数 | 真正的限制器 |
+|---|---|---|
+| disk 100 GiB, cpu 8 | **5** | `102400 / 20480` = 磁盘名义记账 |
+| disk 100 GiB, cpu 8, 请求 2 GiB 盘 | **8** | `cpuAllocatable 8 / 1 vCPU` |
+| disk 1 TiB, cpu 32 | **16** | 这才是 `max_creates` |
+
+**默认配置下先撞的是磁盘,不是 `max_creates`。** 之前把「成功 16 个」
+归因给 `max_creates` 是巧合 —— 那台机器恰好 16 核。
+`max_creates=16` 是 `store.go:112` 的硬编码默认值,与核数无关。
+
+**磁盘按名义大小记账,高估约 47 万倍**(GitHub #24):CoW 实际 44 KiB,
+记账 20 GiB。eval 负载几乎不写盘,所以这把节点密度压到实际能力的几百分之一。
+
+**没有泄漏**:每轮压测后 dm 映射、firecracker 进程、持有已删除文件的
+loop device 全部归零 —— loop 泄漏的修复(#16)在并发下成立。
 
 ### 验证覆盖
 
