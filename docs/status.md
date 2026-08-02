@@ -96,10 +96,21 @@ fc 档实测(镜像已缓存):`runtime_create` ~234ms(起 VMM)、
 `agent_ready` ~770ms(内核启动 + pivot + listen)、`total` ~952ms。
 裸 Firecracker 到 agent 可连是 606ms,所以上层开销已基本挤干。
 
+destroy **214ms**(曾是 5.25s)。原先销毁前用 ACPI 请 guest 关机并等它退出,
+但 guest 内核没编 `CONFIG_ACPI_BUTTON`、beand 又是没有信号处理的 PID 1 ——
+那 5 秒**每次必然超时**。改成经 agent 执行 `sync`:达成的是同一个目的
+(可写层与 sandbox 写入一致),而且是确认而非假设。
+
 snapshot:checkpoint 1.5s、bundle 约 16-20 MiB。
 restore ~950ms(同一快照首次 1617ms,要付 unpack 代价);
 其中 FC `/snapshot/load` 只占 7ms —— guest 内存按需供页(UFFD),
 不再把整个内存镜像读进来。剩下的成本是解 bundle。
+
+**内存快照绑 CPU**,所以 restore 是受约束的:节点上报 vendor/family/template,
+快照记下产出它的那三项,调度器按此硬过滤,不兼容返回 409 `INCOMPATIBLE_CPU`
+而不是放置后让 guest 崩。`--cpu-template portable` 掩掉宽向量特征
+(实测 `avx avx2 fma f16c` 消失,`sse2`/`xsave` 保留)让快照能跨 CPU 型号,
+但 vendor 与 family 掩不掉 —— 详见 `docs/decisions.md` §3.6。
 
 镜像首次拉取转换:busybox 5-10s,alpine 在网络不稳时 2m45s ——
 所以 prewarm 是必需的,不是优化。
@@ -169,4 +180,7 @@ multipathd 会把多个 overlaybd 设备合并成一条 multipath,
    gateway 传过来并解 gzip,只为取出 rootfs 那一个 member。
    要么命中时让节点告诉控制面「别发了」,要么把 rootfs 拆成独立对象。
 5. **diff snapshot**:当前 full snapshot。这是与 tensorlake 的主要差距。
-6. **destroy 耗时 5.2s**:比 create 慢 5 倍,尚未归因。
+6. **AVX-512 掩码与跨型号 restore 未实测**:验证机是 Zen 2,
+   没有 AVX-512,也只有一台 fc 机器 —— 所以 CPU template 的
+   「跨型号可移植」这个核心目的没有实证,只有逻辑推导。
+   `hack/cpu-template-probe.sh` 会报告本机缺哪些特征。

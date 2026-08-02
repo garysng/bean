@@ -279,6 +279,69 @@ agent 盘挂在每一个 microVM 上,体积按 boot 次数计价,而那份 SDK �
 所有单测都通过,因为它们把 `Endpoint` 留空、在那一行之前就 return 了。
 补的测试专门走带 endpoint 的路径(exporter 懒连接,所以不需要真 collector)。
 
+## 3.6 内存快照的 CPU 绑定:自定义 template + 调度器过滤
+
+**问题**:guest 启动时读一次 CPUID 就缓存下来(glibc 据此选 string routine),
+迁到没有该特征的机器上**不会在 restore 时失败**,而是之后在某段代码里崩。
+所以掩码只能在 guest 启动前做 —— 快照时补不了。
+
+### 为什么不用 Firecracker 的静态 template
+
+在验证机(AMD EPYC 7542,family 23 / Zen 2)上实测,五个内置 template
+**一个都启不来**:
+
+```
+T2 / C3 / T2S / T2CL  →  "CPU vendor mismatched"(都是 Intel 专用)
+T2A                   →  "current CPU model is not permitted"(限 Milan/Zen 3)
+```
+
+注意 `PUT /machine-config` 对**所有** template 名都返回成功 ——
+厂商校验发生在 `InstanceStart`。只测配置会得到「全部支持」的假结论。
+
+改用 `/cpu-config` 自定义 template,顺带也不必把可移植性绑在
+AWS 选择支持哪些 CPU 型号上。
+
+### 两个只有真机能发现的细节
+
+**(1) bitmap 宽度是 31 而不是 32。** 32 位报 `string is too long`。
+单测按 32 位全过,真机第一次创建就失败。后果是 **bit 31 无法掩** ——
+`avx512vl` 正在那一位,所以它被单列进 `UnmaskableCPUFeatures` 并写进启动日志,
+而不是谎称已掩。
+
+**(2) 不掩 xsave。** 掩 leaf 1 ECX bit26 确实让 `xsave` 消失,但 XSAVE
+子特征在 leaf 0xD,实测仍然可见 —— guest 会看到有 `xsaveopt` 却没有 `xsave`
+的 CPUID,那不对应任何真实处理器。且所有能跑 FC 的机器都有 xsave。
+
+### 掩不掉的东西:vendor 与 family
+
+CPUID leaf 0 的 vendor 字符串和 family 都无法掩,guest 内核要据此做 errata
+处理和 MSR 访问。所以 **template 只在同厂商同 family 内提供可移植性**,
+跨越必须由调度器拒绝 —— 见 `scheduler.CPUConstraint`。
+
+**故意不记录 model**:掩指令集特征正是为了让快照跨型号可用,
+按 model 匹配会把 template 的价值抹掉。
+
+### 竞品对照
+
+| | 内存快照的 CPU 处理 |
+|---|---|
+| e2b | CPU template 固定 baseline,节点池按 CPU 型号分组 |
+| agentenv | 同上;以单节点 fork 为主(16 子实例),跨节点靠同型号池 |
+| tensorlake | 磁盘增量为主卖点,内存快照限本机/同型号 |
+| **bean** | 自定义 template + 调度器按 vendor/family 硬过滤,不兼容回 409 |
+
+### 摸底脚本
+
+`hack/cpu-template-probe.sh` 把上面所有探测固化下来:哪些内置 template
+能启动、bitmap 宽度上限、本机有哪些会被掩的特征。
+**换机器必须重跑** —— 这些答案都是 per-host 的,而且失败是静默的
+(被拒的 `/cpu-config` 让 guest 完全不设掩码)。
+脚本在与代码里 `cpuBitmapWidth` 不一致时以 70 退出。
+
+它还揭示了一个验证边界:**这台验证机没有 AVX-512**,
+所以 mask 表里那 5 个 avx512 位从未被真正验证过 ——
+只有 `avx avx2 fma f16c` 是实测掩掉的。
+
 ## 4. 未决 / 待验证
 
 - **overlaybd lazy-pull 接入 `image.Provider`**:能力本身已实测跑通(§3.1),
@@ -288,9 +351,13 @@ agent 盘挂在每一个 microVM 上,体积按 boot 次数计价,而那份 SDK �
   需要 mainline PPA 或升级发行版。收益是 ublk(overlaybd 的更快后端)。
   这台机器是 VM(`/dev/vda2`),换内核后 nested KVM 能否保持可用未验证。
   **优先级已下调** —— tcmu 后端功能完备,ublk 只是性能优化。
-- **destroy 耗时 5.2s**:比 create 慢 5 倍,独立问题,未归因。
-  怀疑是 `SendCtrlAltDel` 后等 guest 自己关机的那段(3s 超时 + 5s 等待),
-  但没验证。
+- **AVX-512 掩码未实测**:验证机(Zen 2)没有 AVX-512,
+  所以 mask 表里 5 个 avx512 位只是「按 CPUID 规范写对了」,
+  没有在真硬件上验证过掩掉的效果。需要一台有 AVX-512 的机器跑
+  `hack/cpu-template-probe.sh` + guest 对比。
+- **同 family 跨 model 的 restore 未实测**:只有一台 fc 机器,
+  无法验证 template 是否真的让快照跨型号可用 —— 这正是它存在的理由。
+  逻辑上正确(掩掉了型号差异的来源),但没有实证。
 - **diff snapshot(增量)**:tensorlake 的核心差异化点,我们没有。
   Firecracker 原生支持,接口不用改。
 - **日志与 CLI 输出标准化**:日志全是 `log.Printf`(71 处),无结构化、
