@@ -469,6 +469,18 @@ func (r *FCRuntime) loadSnapshot(ctx context.Context, vm *fcVM, spec *Spec, stag
 	//
 	// The load also resets the dirty bitmap, so the guest's first diff covers
 	// what it wrote after the restore rather than what its base wrote before.
+	//
+	// NetworkOverrides is left empty on purpose, and spec.Network is not consulted
+	// here. The interface came back with the machine state, attached to the host
+	// device name it was created with, and that name is beantap0 in every
+	// namespace -- so the snapshot is already pointing at the right device in this
+	// sandbox's namespace. An override would restate what is already true, and
+	// sending one would imply this path needs to know the tap name, which is the
+	// coupling the constant name exists to avoid. See fcNetOverride for why the
+	// field is kept anyway.
+	//
+	// The no-memory branch above is different: it boots rather than resumes, so it
+	// goes through configureAndBoot and registers the interface like any cold start.
 	if err := vm.client.put(ctx, "/snapshot/load", fcSnapshotLoad{
 		SnapshotPath: entry.StatePath,
 		MemBackend: fcMemBackend{

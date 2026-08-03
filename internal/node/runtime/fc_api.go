@@ -121,6 +121,28 @@ type fcVsock struct {
 	UDSPath  string `json:"uds_path"`
 }
 
+type fcNetworkInterface struct {
+	IfaceID     string `json:"iface_id"`
+	HostDevName string `json:"host_dev_name"`
+	// GuestMAC is deliberately left empty. Firecracker only advertises
+	// VIRTIO_NET_F_MAC when it is set, and without that bit the guest driver
+	// picks its own address.
+	//
+	// Pinning it would buy nothing the design needs. A snapshot carries whatever
+	// link-layer address the guest ended up with, so a restore inherits it either
+	// way — the constant guest IP has no MAC counterpart to keep. What a constant
+	// would add is a hazard: identical link-layer addresses are only harmless
+	// because each sandbox sits alone in its own namespace on a point-to-point
+	// link, and the day that stops being true they collide (docs/network.md
+	// section 1). Declared rather than dropped so the choice is visible here
+	// rather than inferred from its absence.
+	GuestMAC string `json:"guest_mac,omitempty"`
+	// MTU is left unset for now: the uplink is 1500 and whether two layers of
+	// NAT need it lowered has not been measured, so advertising a number nobody
+	// has verified would be worse than letting the guest use its default.
+	MTU int `json:"mtu,omitempty"`
+}
+
 type fcAction struct {
 	ActionType string `json:"action_type"`
 }
@@ -148,6 +170,23 @@ type fcMemBackend struct {
 	BackendType string `json:"backend_type"`
 }
 
+// fcNetOverride repoints an interface at a different tap while a snapshot is
+// loading. Nothing sets it, and that is the intended state.
+//
+// A snapshot records the host device name its interface was attached to, and a
+// restore looks for that name again. The name is beantap0 in every namespace, so
+// what the snapshot recorded is already correct wherever it is restored — the
+// override would only ever restate it. Sending one anyway would be worse than
+// pointless: it would make the restore path look as though it depends on the
+// runtime knowing the tap name, when the whole reason the tap name is a constant
+// is that it does not.
+//
+// It is kept because it is the only escape hatch. If namespace organisation has
+// to change — jailer is the likely reason (GitHub #20) — and the tap name stops
+// being constant, this is the alternative to making the guest renumber itself
+// after every restore, which is the failure mode docs/network.md section 1
+// rejects: three more steps on the restore path, each of which fails as
+// "networking works, but only sometimes".
 type fcNetOverride struct {
 	IfaceID     string `json:"iface_id"`
 	HostDevName string `json:"host_dev_name"`
