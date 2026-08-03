@@ -40,6 +40,7 @@ vet:
 
 lint: vet
 	test -z "$$(gofmt -l . | grep -v internal/gen)" || (gofmt -l . | grep -v internal/gen; exit 1)
+	hack/check-ascii.sh
 
 clean:
 	rm -f coverage.out

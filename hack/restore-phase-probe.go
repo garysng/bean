@@ -12,13 +12,14 @@
 // count). So this decomposes the path into the three candidates and times each
 // against a real bundle:
 //
-//   gunzip        — the bundle is gzip BestSpeed; a 512 MiB memory image has to
-//                   be inflated even when only the rootfs member is wanted
-//   tar walk      — header parsing and member seeking
-//   sparse write  — writing the memory image out to disk
+//	gunzip        — the bundle is gzip BestSpeed; a 512 MiB memory image has to
+//	                be inflated even when only the rootfs member is wanted
+//	tar walk      — header parsing and member seeking
+//	sparse write  — writing the memory image out to disk
 //
 // Usage:
-//   go run hack/restore-phase-probe.go --bundle /path/to/bundle.tar.gz
+//
+//	go run hack/restore-phase-probe.go --bundle /path/to/bundle.tar.gz
 //
 // The bundle is whatever the node stored: /var/lib/bean/sandboxes/.snapshots holds
 // unpacked entries, so use a blob from the control plane's snapshot store, or

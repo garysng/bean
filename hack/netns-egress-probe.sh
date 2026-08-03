@@ -102,7 +102,7 @@ ip netns exec "$NS" ip addr add "$LINK_NS/30" dev "$VETH_NS"
 ip netns exec "$NS" ip link set "$VETH_NS" up
 ip netns exec "$NS" ip route add default via "$LINK_HOST"
 
-# Two translations, so two rules: guest段 → veth段 → uplink.
+# Two translations, so two rules: guest subnet → veth subnet → uplink.
 ip netns exec "$NS" iptables -t nat -A POSTROUTING -s "$GUEST_NET" \
   -o "$VETH_NS" -j MASQUERADE
 iptables -t nat -A POSTROUTING -s "$LINK_NET" -o "$UPLINK" -j MASQUERADE

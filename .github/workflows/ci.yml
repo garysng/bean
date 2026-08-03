@@ -39,10 +39,11 @@ jobs:
           echo "MinIO did not become ready" >&2
           docker logs minio >&2
           exit 1
-      - name: Lint (gofmt + vet)
+      - name: Lint (gofmt + vet + ascii)
         run: |
           test -z "$(gofmt -l . | grep -v internal/gen)" || (gofmt -l . | grep -v internal/gen; exit 1)
           go vet ./...
+          hack/check-ascii.sh --commits
       - name: Unit tests (race + coverage)
         run: make cover
       - name: E2E tests

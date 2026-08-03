@@ -211,9 +211,25 @@ remain unverified.
 make build          # all binaries
 make test           # unit tests, race detector
 make test-e2e       # end-to-end, local tier
-make lint vet
+make lint vet       # gofmt, go vet, and the ASCII check below
 make proto          # regenerate from proto/
 ```
+
+### Language
+
+Prose documentation may be written in any language: `docs/` holds the English
+versions and `docs/zh/` the Chinese ones. **Everything else is ASCII** — code,
+comments, scripts, configuration, commit messages and branch names.
+
+The reason is not preference. Someone who cannot read Chinese should be able to
+work on every file that is not documentation, and `git log` should stay readable
+to everyone, which it stops being as soon as half the history needs translating.
+
+`hack/check-ascii.sh` enforces it and runs as part of `make lint`. It rejects only
+CJK, not everything non-ASCII: em-dashes, arrows and box-drawing characters are
+used deliberately in comments and diagrams. Adding `--commits` also checks the
+messages of commits not yet pushed — the line is drawn there because rewriting
+published history to fix a message costs more than the message is worth.
 
 Most of the interesting behaviour needs a KVM host, root, and device-mapper, so
 those tests **skip** rather than fail on a developer machine — `go test ./...`
