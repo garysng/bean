@@ -127,6 +127,8 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		err = cmdCp(c, rest, stdout)
 	case "events":
 		err = cmdEvents(c, rest, stdout)
+	case "fork":
+		err = cmdFork(c, rest, stdout)
 	case "snapshot":
 		err = cmdSnapshot(c, rest, stdout)
 	case "commit":
@@ -160,6 +162,8 @@ commands:
   events SBX | events -f [SBX] [--label k=v]    # -f follows the live stream
   build --tag REF [--file Dockerfile] [CONTEXT] # build an image on the platform
   commit SBX --tag REF                          # freeze the filesystem as an image
+  fork SBX [--count N] [--label k=v]            # N independent copies of SBX,
+                                                # leaving SBX running
   snapshot create SBX [--name N] [--no-keep-running] [--no-memory] [--base SNAP]
                                                 # --no-memory: filesystem only,
                                                 # restores on any CPU but reboots
@@ -584,6 +588,69 @@ func cmdCommit(c *Client, args []string, stdout io.Writer) error {
 	}
 	return newPrinter(stdout, flags).result(out.ImageRef,
 		field{"sandboxId", pos[0]})
+}
+
+// cmdFork derives new sandboxes from a running one.
+//
+// The two-step equivalent still works and is still the right tool when the
+// checkpoint itself is what you want: snapshot create, then run --snapshot. This
+// is for when the copies are what you want, which is the common case -- it takes
+// the checkpoint once for the whole batch and reclaims it afterwards, so nothing
+// is left to clean up.
+func cmdFork(c *Client, args []string, stdout io.Writer) error {
+	flags, pos := parseFlags(args)
+	if len(pos) == 0 {
+		return usagef("usage: bean fork SBX [--count N] [--label k=v]")
+	}
+	body := map[string]any{}
+	if n := flags["count"]; n != "" {
+		count, err := strconv.Atoi(n)
+		if err != nil || count < 1 {
+			return usagef("--count must be a positive integer")
+		}
+		body["count"] = count
+	}
+	if lbl := flags["label"]; lbl != "" {
+		if parts := strings.SplitN(lbl, "=", 2); len(parts) == 2 {
+			body["labels"] = map[string]string{parts[0]: parts[1]}
+		}
+	}
+
+	var out struct {
+		SourceID  string   `json:"sourceId"`
+		ForkIDs   []string `json:"forkIds"`
+		Sandboxes []struct {
+			ID    string `json:"id"`
+			State string `json:"state"`
+			Node  string `json:"nodeId"`
+		} `json:"sandboxes"`
+		// Failures is populated when some children could not be started. Reported
+		// rather than swallowed: the command succeeded partially, and a caller
+		// asking for 50 and getting 40 has to be told which way it went.
+		Failures []struct {
+			Index   int    `json:"index"`
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		} `json:"failures"`
+	}
+	if err := c.doJSON("POST", "/v1/sandboxes/"+pos[0]+"/fork", body, &out); err != nil {
+		return err
+	}
+
+	p := newPrinter(stdout, flags)
+	rows := make([]row, 0, len(out.Sandboxes))
+	for _, sb := range out.Sandboxes {
+		rows = append(rows, newRow("id", sb.ID).
+			with("state", sb.State).
+			with("node", sb.Node))
+	}
+	if err := p.table("sandboxes", rows); err != nil {
+		return err
+	}
+	for _, f := range out.Failures {
+		p.note("fork %d failed: %s: %s", f.Index, f.Code, f.Message)
+	}
+	return nil
 }
 
 // cmdSnapshot handles snapshot create/ls/rm.

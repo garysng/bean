@@ -473,8 +473,18 @@ func (m *Manager) Snapshot(ctx context.Context, id string, w io.Writer,
 	// Taking a snapshot resets the guest's transport, so the cached connection
 	// is dead even though the sandbox is running again. Reconnecting here keeps
 	// that a detail of snapshotting rather than an error the next exec reports.
-	if rerr := m.redialAgent(ctx, id); rerr != nil {
-		slog.Error("reconnect after snapshot failed", logging.KeySandbox, id, logging.KeyError, rerr)
+	//
+	// Only for a source that is running again. Reconnecting waits for the agent
+	// to answer a health check, and an agent inside a sandbox that was already
+	// PAUSED when the snapshot began is not scheduled to answer one — so this
+	// spent the full agentReadyTimeout failing, on every snapshot of a paused
+	// sandbox, and then logged an error for a sandbox that was behaving
+	// correctly. Resuming re-dials on its own, which is the point at which the
+	// agent can respond.
+	if prev == runtime.StateRunning {
+		if rerr := m.redialAgent(ctx, id); rerr != nil {
+			slog.Error("reconnect after snapshot failed", logging.KeySandbox, id, logging.KeyError, rerr)
+		}
 	}
 
 	restore()
@@ -722,17 +732,25 @@ func (m *Manager) redialAgent(ctx context.Context, id string) error {
 	return nil
 }
 
-// RestoreSandbox creates a sandbox from a checkpoint. It mirrors Create,
-// including agent health-checking, so a restored sandbox is immediately
-// usable through the same data-plane paths.
-// RestoreSandbox recreates a sandbox from a checkpoint chain, ordered base-first.
+// ForkSandbox creates a sandbox from a checkpoint chain, ordered base-first. It
+// mirrors Create, including agent health-checking, so the new sandbox is
+// immediately usable through the same data-plane paths.
+//
 // A self-contained checkpoint is one layer; an incremental one is its whole
 // chain, since a diff holds only what changed since its base.
-func (m *Manager) RestoreSandbox(ctx context.Context, spec *nodev1.SandboxSpec,
+//
+// This may be called many times, concurrently, against one checkpoint: the
+// runtime shares the read-only parts and copies the writable ones, so each call
+// yields an independent sandbox rather than competing to recover the same one.
+// The spec's sandbox id is what distinguishes them, and a duplicate is rejected.
+func (m *Manager) ForkSandbox(ctx context.Context, spec *nodev1.SandboxSpec,
 	layers []runtime.SnapshotLayer) (*Sandbox, error) {
 	if spec.GetSandboxId() == "" {
 		return nil, fmt.Errorf("sandbox_id required")
 	}
+	// Span and metric names are unchanged: they are the operational interface that
+	// dashboards and alerts are written against, and renaming them would make
+	// existing history look like a gap rather than a rename.
 	ctx, span := obs.Tracer("noded").Start(ctx, "node.Restore",
 		trace.WithAttributes(
 			attribute.String(obs.AttrSandbox, spec.GetSandboxId()),
@@ -766,7 +784,7 @@ func (m *Manager) RestoreSandbox(ctx context.Context, spec *nodev1.SandboxSpec,
 	rCtx, rSpan := obs.Tracer("noded").Start(ctx, "runtime.Restore",
 		trace.WithAttributes(obs.Phase("restore_load"),
 			attribute.String(obs.AttrSnapshot, spec.GetSnapshotId())))
-	handle, err := m.rt.Restore(rCtx, specToRuntime(spec), layers)
+	handle, err := m.rt.Fork(rCtx, specToRuntime(spec), layers)
 	obs.Fail(rCtx, err)
 	rSpan.End()
 	m.observePhase(ctx, "restore_load", time.Since(loadStart))
