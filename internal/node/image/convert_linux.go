@@ -66,7 +66,7 @@ func (c *Converter) Convert(ctx context.Context, imageRef string) (path string, 
 		return "", err
 	}
 
-	return writeBaseImage(c.ImageDir, c.WorkDir, imageRef, c.sizeFor(manifest),
+	return writeBaseImage(c.ImageDir, c.WorkDir, imageRef, manifest.Digest, c.sizeFor(manifest),
 		func(root string) error {
 			for i, layer := range manifest.Layers {
 				if err := c.applyLayer(ctx, ref, layer, root); err != nil {

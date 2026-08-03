@@ -126,7 +126,7 @@ func (b *Builder) Build(ctx context.Context, req BuildRequest) (path string, err
 		size = b.sizeForTar(rootfsTar)
 	}
 
-	return writeBaseImage(b.ImageDir, b.WorkDir, req.Tag, size, func(root string) error {
+	return writeBaseImage(b.ImageDir, b.WorkDir, req.Tag, "", size, func(root string) error {
 		f, err := os.Open(rootfsTar)
 		if err != nil {
 			return fmt.Errorf("image: open build output: %w", err)

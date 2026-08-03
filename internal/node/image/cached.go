@@ -28,12 +28,31 @@ const (
 )
 
 // recordRef notes which reference an image file corresponds to.
-func recordRef(imageDir, imageRef string) error {
+func recordRef(imageDir, imageRef, digest string) error {
 	name, err := refToFilename(imageRef)
 	if err != nil {
 		return err
 	}
-	data, err := json.Marshal(map[string]string{"ref": imageRef})
+	rec := map[string]string{"ref": imageRef}
+	// The digest is what makes an image identifiable independently of the name it
+	// was fetched under, and nothing else on the node records it: refToFilename is
+	// a string encoding that does not resolve anything, so python:3.12 and
+	// python@sha256:... are unrelated cache entries even for the same image.
+	//
+	// A warm snapshot (GitHub #26) has to be keyed on it rather than on the
+	// reference, because a tag that moves must not serve the environment captured
+	// from the image it used to name. That failure is silent -- the wrong snapshot
+	// restores successfully -- which is why the digest is recorded at the moment it
+	// is known instead of being re-resolved later against a registry that may have
+	// moved on.
+	//
+	// Omitted rather than written empty when unknown, so a reader can tell "this
+	// image predates the field" from "this image has no digest", and a build, whose
+	// output never had a manifest, does not claim one.
+	if digest != "" {
+		rec["digest"] = digest
+	}
+	data, err := json.Marshal(rec)
 	if err != nil {
 		return err
 	}
@@ -86,6 +105,43 @@ func cachedImages(imageDir string) (map[string]int64, error) {
 		out[rec.Ref] = info.Size()
 	}
 	return out, nil
+}
+
+// cachedDigest reports the manifest digest an image reference resolved to when
+// it was converted, or "" if that is not recorded.
+//
+// Read from the sidecar rather than from a registry, deliberately. Re-resolving
+// the tag would ask what it points at now, while the question is what the local
+// file was built from -- and those differ precisely when it matters, after a tag
+// has moved. A lookup keyed on the answer from the registry would then match a
+// warm snapshot captured from an image this node no longer has.
+//
+// An empty return is not an error. Images converted before this was recorded have
+// no digest, and the caller's correct response is to treat the lookup as a miss
+// and boot, which is the same thing it does on a node whose CPU has no warm
+// snapshot.
+func cachedDigest(imageDir, imageRef string) (string, error) {
+	name, err := refToFilename(imageRef)
+	if err != nil {
+		return "", err
+	}
+	raw, err := os.ReadFile(filepath.Join(imageDir, name+refSuffix))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", nil
+		}
+		return "", err
+	}
+	var rec struct {
+		Digest string `json:"digest"`
+	}
+	if err := json.Unmarshal(raw, &rec); err != nil {
+		// A corrupt sidecar is reported: it means the image is present but its
+		// identity is unknown, and silently treating that as "no digest" would hide
+		// a damaged cache behind a slow path that still works.
+		return "", fmt.Errorf("image: read digest for %s: %w", imageRef, err)
+	}
+	return rec.Digest, nil
 }
 
 // cachedRefs caches the image listing so a heartbeat, which fires every few

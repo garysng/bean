@@ -22,7 +22,7 @@ func seedCachedImage(t *testing.T, dir, ref string, size int64) {
 	if err := createSparse(filepath.Join(dir, name+".ext4"), size); err != nil {
 		t.Fatal(err)
 	}
-	if err := recordRef(dir, ref); err != nil {
+	if err := recordRef(dir, ref, ""); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -202,7 +202,7 @@ func TestCachedRefsReturnsACopy(t *testing.T) {
 // one would make a perfectly usable image invisible.
 func TestRecordRefIsAtomic(t *testing.T) {
 	dir := t.TempDir()
-	if err := recordRef(dir, "atomic:1"); err != nil {
+	if err := recordRef(dir, "atomic:1", ""); err != nil {
 		t.Fatal(err)
 	}
 	entries, err := os.ReadDir(dir)
@@ -216,13 +216,116 @@ func TestRecordRefIsAtomic(t *testing.T) {
 	}
 
 	// Recording again must overwrite cleanly rather than fail.
-	if err := recordRef(dir, "atomic:1"); err != nil {
+	if err := recordRef(dir, "atomic:1", ""); err != nil {
 		t.Errorf("second recordRef: %v", err)
 	}
 }
 
 func TestRecordRefRejectsEmptyRef(t *testing.T) {
-	if err := recordRef(t.TempDir(), ""); err == nil {
+	if err := recordRef(t.TempDir(), "", ""); err == nil {
 		t.Error("recordRef accepted an empty reference")
+	}
+}
+
+// TestCachedDigestRoundTrips covers the field warm snapshots key on.
+func TestCachedDigestRoundTrips(t *testing.T) {
+	dir := t.TempDir()
+	const ref = "python:3.12"
+	const digest = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
+	if err := recordRef(dir, ref, digest); err != nil {
+		t.Fatal(err)
+	}
+	got, err := cachedDigest(dir, ref)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != digest {
+		t.Errorf("cachedDigest = %q, want %q", got, digest)
+	}
+}
+
+// TestCachedDigestOfAnImageWithoutOne is the compatibility path: an image
+// converted before the digest was recorded, and a build or commit whose output
+// never had a manifest.
+//
+// The empty return must not be an error. A caller looking up a warm snapshot
+// treats it as a miss and boots, which is the same thing it does on a node whose
+// CPU has no warm snapshot -- and if this errored instead, adding the field would
+// have broken every image already on a node.
+func TestCachedDigestOfAnImageWithoutOne(t *testing.T) {
+	dir := t.TempDir()
+	if err := recordRef(dir, "built:1", ""); err != nil {
+		t.Fatal(err)
+	}
+	got, err := cachedDigest(dir, "built:1")
+	if err != nil {
+		t.Fatalf("an image with no digest must not be an error: %v", err)
+	}
+	if got != "" {
+		t.Errorf("cachedDigest = %q, want empty", got)
+	}
+}
+
+// TestCachedDigestOfAnAbsentImage distinguishes "not here" from "here without a
+// digest". Both return empty, and neither is an error, because the caller's
+// response to both is the same: boot.
+func TestCachedDigestOfAnAbsentImage(t *testing.T) {
+	got, err := cachedDigest(t.TempDir(), "never:pulled")
+	if err != nil {
+		t.Fatalf("absent image must not be an error: %v", err)
+	}
+	if got != "" {
+		t.Errorf("cachedDigest = %q, want empty", got)
+	}
+}
+
+// TestMovedTagGetsADistinctDigest is the reason the field exists.
+//
+// Keying a warm snapshot on the reference would serve the environment captured
+// from whatever the tag used to name, and it would do so silently: the wrong
+// snapshot restores successfully. This asserts the recorded digest follows the
+// image rather than the name, which is what makes the key safe.
+func TestMovedTagGetsADistinctDigest(t *testing.T) {
+	dir := t.TempDir()
+	const tag = "app:latest"
+	const before = "sha256:aaaa111111111111111111111111111111111111111111111111111111111111"
+	const after = "sha256:bbbb222222222222222222222222222222222222222222222222222222222222"
+
+	if err := recordRef(dir, tag, before); err != nil {
+		t.Fatal(err)
+	}
+	// The tag moves and the image is converted again under the same name.
+	if err := recordRef(dir, tag, after); err != nil {
+		t.Fatal(err)
+	}
+	got, err := cachedDigest(dir, tag)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got == before {
+		t.Errorf("cachedDigest still reports the pre-move digest %q; a warm "+
+			"snapshot keyed on it would restore an environment captured from an "+
+			"image this tag no longer names, and the restore would succeed", before)
+	}
+	if got != after {
+		t.Errorf("cachedDigest = %q, want %q", got, after)
+	}
+}
+
+// TestCachedDigestReportsACorruptSidecar keeps a damaged cache from hiding behind
+// the slow path. An unparseable sidecar means the image is present but its
+// identity is unknown, which is worth surfacing rather than treating as "no
+// digest" and quietly booting forever.
+func TestCachedDigestReportsACorruptSidecar(t *testing.T) {
+	dir := t.TempDir()
+	name, err := refToFilename("broken:1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(dir, name+refSuffix), []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := cachedDigest(dir, "broken:1"); err == nil {
+		t.Error("a corrupt sidecar was reported as an image without a digest")
 	}
 }
