@@ -147,7 +147,7 @@ func (p *DevMapperProvider) Prepare(ctx context.Context, sandboxID, imageRef str
 	// "P" makes the snapshot persistent, so its exceptions survive a teardown
 	// and the device can be reassembled; 8 sectors is the standard chunk size,
 	// small enough that a one-block write does not copy much.
-	name := dmName(sandboxID)
+	name := DMName(sandboxID)
 	table := fmt.Sprintf("0 %d snapshot %s %s P 8", base.sectors, base.loopDev, cowLoop)
 	if err := run("dmsetup", "create", name, "--table", table); err != nil {
 		return nil, fmt.Errorf("image: create snapshot device: %w", err)
@@ -264,13 +264,6 @@ func (p *DevMapperProvider) releaseBase(basePath string) {
 	}
 	delete(p.bases, basePath)
 	_ = detachLoop(base.loopDev)
-}
-
-// dmName derives a mapping name. Device-mapper names are a flat namespace
-// shared with everything else on the host, so the prefix both avoids collisions
-// and makes orphans identifiable during reconciliation.
-func dmName(sandboxID string) string {
-	return "bean-" + sandboxID
 }
 
 func attachLoop(path string, readOnly bool) (string, error) {

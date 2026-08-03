@@ -20,6 +20,7 @@ import (
 	nodev1 "github.com/garysng/bean/internal/gen/bean/node/v1"
 	"github.com/garysng/bean/internal/logging"
 	"github.com/garysng/bean/internal/node"
+	"github.com/garysng/bean/internal/node/reclaim"
 	"github.com/garysng/bean/internal/node/runtime"
 	"github.com/garysng/bean/internal/obs"
 )
@@ -283,6 +284,19 @@ func main() {
 				CpuTemplate:          string(tmpl),
 			})
 		reg.Advertise = adv
+
+		// Host reconciliation is enabled only for the microVM tier, and only in
+		// multi-node mode. It is deliberately not a standalone startup step: what
+		// separates an orphan from a sandbox that outlived the last noded is the
+		// control plane's expected set, so it can only run once that is in hand.
+		// A single-node node has nobody to ask, and the local tier creates no
+		// device-mapper mappings or loop devices to leak.
+		if *rtName == "fc" {
+			reg.ReclaimHost = reclaim.NewLinuxHost(*baseDir)
+			reg.BaseDir = *baseDir
+			reg.ImageDir = *imageDir
+		}
+
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 		go func() {
