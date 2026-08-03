@@ -11,6 +11,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	runtime2 "runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -21,6 +22,7 @@ import (
 	nodev1 "github.com/garysng/bean/internal/gen/bean/node/v1"
 	"github.com/garysng/bean/internal/logging"
 	"github.com/garysng/bean/internal/node"
+	"github.com/garysng/bean/internal/node/network"
 	"github.com/garysng/bean/internal/node/reclaim"
 	"github.com/garysng/bean/internal/node/runtime"
 	"github.com/garysng/bean/internal/obs"
@@ -67,6 +69,21 @@ func main() {
 			"one. This must be the upstream resolver the host forwards to, not a copy "+
 			"of the host's /etc/resolv.conf: that commonly holds 127.0.0.53 "+
 			"(systemd-resolved), and inside a guest loopback names the guest")
+	guestSubnet := flag.String("guest-subnet", "",
+		"the /30 every sandbox's guest sees, e.g. 172.31.0.0/30. Empty leaves "+
+			"sandboxes with no network interface at all, which is what they had "+
+			"before this existed. Setting it gives each sandbox its own namespace, "+
+			"tap and egress, and requires --uplink. The same addresses are used in "+
+			"every sandbox on purpose: a restored snapshot resumes with the IP it "+
+			"was taken with, so a constant is what lets one checkpoint fan out. This "+
+			"node refuses to start if the range is already routed here -- colliding "+
+			"means another subsystem's NAT rules eat sandbox traffic, and that shows "+
+			"up as a network that works only sometimes")
+	uplink := flag.String("uplink", "",
+		"host interface sandbox egress leaves by, e.g. eth0. Required with "+
+			"--guest-subnet: it is what the MASQUERADE rule matches on, and there is "+
+			"no safe default because guessing wrong produces a sandbox that resolves "+
+			"and routes but reaches nothing")
 	debugConsole := flag.Bool("debug-console", false,
 		"attach guests to the serial console; costs ~500ms per boot (fc runtime)")
 	cpuTemplate := flag.String("cpu-template", "none",
@@ -171,6 +188,43 @@ func main() {
 		}
 	}
 
+	// Sandbox networking, off unless a subnet is named. Built before the runtime so
+	// a misconfiguration stops the node here rather than at the first create: every
+	// failure below is one an operator can fix by editing a flag, and none of them
+	// are worth discovering one sandbox at a time.
+	var netProv node.Provisioner
+	if *guestSubnet != "" {
+		if *uplink == "" {
+			log.Fatal("--guest-subnet needs --uplink: the host MASQUERADE rule has to " +
+				"name the interface egress leaves by, and a wrong guess produces a " +
+				"sandbox that routes but reaches nothing")
+		}
+		host := network.NewHost(*uplink)
+		if host == nil {
+			log.Fatalf("--guest-subnet is set but this build cannot create network "+
+				"namespaces (%s); sandbox networking needs linux", runtime2.GOOS)
+		}
+		// docs/network.md section 2. Refusing here is the whole point: an overlapping
+		// route means sandbox traffic is matched by whoever already owns the range --
+		// Docker holds six /16s in 172.16/12 on these hosts -- and the symptom is
+		// intermittent connectivity rather than an error anyone can attribute.
+		if err := network.CheckSubnetFree(*guestSubnet, host); err != nil {
+			log.Fatalf("--guest-subnet: %v", err)
+		}
+		prov, err := network.NewProvisioner(*guestSubnet, host)
+		if err != nil {
+			log.Fatalf("--guest-subnet: %v", err)
+		}
+		netProv = prov
+		slog.Info("sandbox networking on", "guestSubnet", *guestSubnet, "uplink", *uplink)
+	} else {
+		// Stated because it is the difference between "pip install fails because of
+		// a proxy" and "pip install fails because this node gives sandboxes no
+		// interface at all", and only one of those is worth debugging in the guest.
+		slog.Warn("no --guest-subnet set; sandboxes on this node have no network " +
+			"interface, so anything needing egress will fail inside the guest")
+	}
+
 	// The CPU identity is reported so the control plane can refuse to restore a
 	// memory snapshot onto a CPU its guest cannot run on. A node that cannot
 	// read it still starts: the effect is that it will not be chosen for
@@ -212,6 +266,10 @@ func main() {
 	}
 
 	mgr := node.NewManager(rt)
+	// Assigned before Close is deferred, so the shutdown sweep tears down the
+	// namespaces of anything still running rather than leaving one per sandbox for
+	// the next process to find.
+	mgr.Net = netProv
 	defer mgr.Close()
 
 	// The guard watches the base directory because that is where the sparse

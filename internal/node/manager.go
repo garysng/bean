@@ -20,9 +20,25 @@ import (
 	commonv1 "github.com/garysng/bean/internal/gen/bean/common/v1"
 	nodev1 "github.com/garysng/bean/internal/gen/bean/node/v1"
 	"github.com/garysng/bean/internal/logging"
+	"github.com/garysng/bean/internal/node/network"
 	"github.com/garysng/bean/internal/node/runtime"
 	"github.com/garysng/bean/internal/obs"
 )
+
+// Provisioner assigns and removes one sandbox's networking.
+//
+// Declared here rather than used as the concrete *network.Provisioner so a test
+// can drive the create and destroy ordering without root: the orderings this
+// manager is responsible for -- release the slot when setup fails, tear down
+// before the sandbox record goes -- are the part that leaks host resources when
+// wrong, and none of them need a kernel to check.
+type Provisioner interface {
+	// Provision reserves a slot and builds the namespace, returning the addresses
+	// the runtime attaches to. An error means nothing was left behind.
+	Provision(sandboxID string) (*network.Layout, error)
+	// Deprovision removes the namespace and returns the slot.
+	Deprovision(sandboxID string) error
+}
 
 // Sandbox is noded's in-memory record of one sandbox.
 type Sandbox struct {
@@ -45,6 +61,14 @@ type Manager struct {
 	// admits everything. See diskguard.go for why this exists as well as the
 	// scheduler's disk commitment rather than instead of it.
 	Disk DiskGuard
+
+	// Net gives each sandbox its own namespace, tap and egress rules. Nil means
+	// this node has no networking configured, and that path is not a degraded
+	// mode: sandboxes ran with no interface at all before this existed, and a node
+	// without the flags set must behave exactly as it did then rather than refuse
+	// every create. So every use of this is guarded, and the guard is the
+	// behaviour rather than a precaution.
+	Net Provisioner
 
 	mu        sync.Mutex
 	sandboxes map[string]*Sandbox
@@ -139,6 +163,28 @@ func (m *Manager) Create(ctx context.Context, spec *nodev1.SandboxSpec) (*Sandbo
 		m.observePhase(ctx, "total", time.Since(createStart))
 	}()
 
+	// Networking is built before the runtime starts, because the tap has to exist
+	// before Firecracker is told to attach to it: the network-interface endpoint is
+	// pre-boot only, so a guest that starts without one has no NIC for the rest of
+	// its life and the symptom appears much later as pip and git failing inside the
+	// sandbox (fc_linux.go, configureAndBoot).
+	//
+	// A failure here fails the create. Letting it continue would produce exactly
+	// that sandbox -- running, believing it has a network, with nothing to attach
+	// to -- and the whole reason this module is not shipped half done
+	// (docs/network.md section 7) is that such a sandbox makes people doubt their
+	// own code rather than the platform.
+	if m.Net != nil {
+		netStart := time.Now()
+		layout, err := m.Net.Provision(spec.SandboxId)
+		m.observePhase(ctx, "network_setup", time.Since(netStart))
+		if err != nil {
+			m.dropFailed(spec.SandboxId)
+			return nil, fmt.Errorf("sandbox %s: %w", spec.SandboxId, err)
+		}
+		rspec.Network = layout
+	}
+
 	rtStart := time.Now()
 	rtCtx, rtSpan := obs.Tracer("noded").Start(ctx, "runtime.Create",
 		trace.WithAttributes(obs.Phase("runtime_create")))
@@ -201,10 +247,39 @@ func waitHealthy(ctx context.Context, conn *grpc.ClientConn, timeout time.Durati
 // dropFailed removes a sandbox whose creation failed. The runtime has
 // already been cleaned up, so keeping a FAILED entry would leak memory
 // with no way to reclaim it.
+//
+// The namespace goes with it. Every path that abandons a half-made sandbox comes
+// through here, so releasing the slot here rather than at each call site is what
+// makes it impossible to add a new failure path that leaks one -- and a leaked
+// slot is invisible until the node refuses a create at a count nobody can
+// explain.
 func (m *Manager) dropFailed(id string) {
 	m.mu.Lock()
-	defer m.mu.Unlock()
 	delete(m.sandboxes, id)
+	m.mu.Unlock()
+
+	// Outside the lock: teardown shells out to ip and iptables, and holding the
+	// manager's mutex across that would stall every other sandbox operation on the
+	// node for the duration.
+	m.releaseNetwork(id)
+}
+
+// releaseNetwork tears down a sandbox's networking, if it had any.
+//
+// Failures are logged rather than returned. Both callers are already unwinding --
+// a create that failed, or a destroy whose outcome is reported separately -- and
+// there is nothing further either could do. It is not silent: what is left behind
+// is a namespace, which the allocator sees on the next Reserve and refuses to
+// hand out, so the cost of a failed teardown is a lost slot rather than two
+// sandboxes sharing addresses.
+func (m *Manager) releaseNetwork(id string) {
+	if m.Net == nil {
+		return
+	}
+	if err := m.Net.Deprovision(id); err != nil {
+		slog.Error("sandbox network teardown failed; its slot stays occupied "+
+			"until this node restarts", logging.KeySandbox, id, logging.KeyError, err)
+	}
 }
 
 // Get returns the sandbox or nil.
@@ -343,6 +418,18 @@ func (m *Manager) Destroy(ctx context.Context, id string, force bool) error {
 	obs.Fail(dCtx, err)
 	dSpan.End()
 	m.observePhase(ctx, "destroy", time.Since(start))
+
+	// After the runtime, not before: the VMM has the tap open, and removing the
+	// namespace from under a live Firecracker leaves it with a device that has gone
+	// away rather than shutting it down.
+	//
+	// Unconditional on the runtime's outcome. A destroy that failed still had its
+	// record deleted above, so nothing will ever ask about this sandbox again --
+	// skipping the teardown because the runtime errored would leak the namespace and
+	// its index permanently, which is the loop-device failure (GitHub #16) in a
+	// resource whose reuse gives two sandboxes the same addresses.
+	m.releaseNetwork(id)
+
 	m.metrics.IncCounter("bean_node_destroys_total", "Sandbox destroys handled by this node.",
 		map[string]string{"outcome": boolOutcome(err == nil), "runtime": m.rt.Name()}, 1)
 	return err
@@ -796,6 +883,24 @@ func (m *Manager) ForkSandbox(ctx context.Context, spec *nodev1.SandboxSpec,
 		m.observePhase(ctx, "restore", time.Since(start))
 	}()
 
+	rspec := specToRuntime(spec)
+
+	// A fork needs its own namespace for the same reason a cold start does, and
+	// more sharply: this is the fan-out case docs/network.md is built around. N
+	// sandboxes derived from one checkpoint all come back holding the identical
+	// guest address, and what keeps that from colliding is each one sitting in a
+	// namespace of its own. Skipping this would leave a restored guest looking for
+	// beantap0 in the host namespace, where either nothing answers or -- worse --
+	// another sandbox's tap does.
+	if m.Net != nil {
+		layout, err := m.Net.Provision(spec.SandboxId)
+		if err != nil {
+			m.dropFailed(spec.SandboxId)
+			return nil, fmt.Errorf("sandbox %s: %w", spec.SandboxId, err)
+		}
+		rspec.Network = layout
+	}
+
 	// Unpacking the bundle and loading it into a VMM are measured apart from
 	// waiting for the agent: the first scales with snapshot size and the second
 	// does not, so a single number for the whole restore cannot say which one to
@@ -804,7 +909,7 @@ func (m *Manager) ForkSandbox(ctx context.Context, spec *nodev1.SandboxSpec,
 	rCtx, rSpan := obs.Tracer("noded").Start(ctx, "runtime.Restore",
 		trace.WithAttributes(obs.Phase("restore_load"),
 			attribute.String(obs.AttrSnapshot, spec.GetSnapshotId())))
-	handle, err := m.rt.Fork(rCtx, specToRuntime(spec), layers)
+	handle, err := m.rt.Fork(rCtx, rspec, layers)
 	obs.Fail(rCtx, err)
 	rSpan.End()
 	m.observePhase(ctx, "restore_load", time.Since(loadStart))
