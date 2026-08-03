@@ -250,6 +250,17 @@ func writeSnapshotBundle(w io.Writer, statePath, memPath, rootfsPath string, dif
 	return zw.Close()
 }
 
+// The order of members is a performance decision, not a formatting one.
+//
+// Tar is sequential, so reaching a member means inflating everything ahead of it.
+// Guest memory is by far the largest — 512 MiB against kilobytes for the other
+// two — and it is the one member a restore can already have cached. Emitting it
+// last means a cache hit, which needs only the 12 KiB writable layer, stops
+// reading after a few kilobytes instead of inflating half a gigabyte to reach
+// past it.
+//
+// Measured on a 512 MiB guest: inflating the whole stream is 489ms of a 940ms
+// restore, and a cache hit was paying all of it (hack/restore-phase-probe.go).
 func writeBundleEntries(w io.Writer, statePath, memPath, rootfsPath string, diff bool) error {
 	tw := tar.NewWriter(w)
 
@@ -259,6 +270,15 @@ func writeBundleEntries(w io.Writer, statePath, memPath, rootfsPath string, diff
 	if statePath != "" {
 		if err := writeTarFile(tw, snapshotStateFile, statePath); err != nil {
 			return fmt.Errorf("fc: bundle %s: %w", snapshotStateFile, err)
+		}
+	}
+
+	// The writable layer is provisioned large and used lightly, so it goes in as
+	// an extent list. Emitting its full length as zeroes for the compressor to
+	// remove measured at 15s of paused-sandbox time on a 20 GiB store.
+	if rootfsPath != "" {
+		if err := writeSparseTarFile(tw, snapshotRootfsFile, rootfsPath); err != nil {
+			return fmt.Errorf("fc: bundle %s: %w", snapshotRootfsFile, err)
 		}
 	}
 
@@ -277,15 +297,6 @@ func writeBundleEntries(w io.Writer, statePath, memPath, rootfsPath string, diff
 		}
 		if err != nil {
 			return fmt.Errorf("fc: bundle %s: %w", name, err)
-		}
-	}
-
-	// The writable layer is provisioned large and used lightly, so it goes in as
-	// an extent list. Emitting its full length as zeroes for the compressor to
-	// remove measured at 15s of paused-sandbox time on a 20 GiB store.
-	if rootfsPath != "" {
-		if err := writeSparseTarFile(tw, snapshotRootfsFile, rootfsPath); err != nil {
-			return fmt.Errorf("fc: bundle %s: %w", snapshotRootfsFile, err)
 		}
 	}
 	return tw.Close()
@@ -556,10 +567,19 @@ func (r *FCRuntime) sweepSnapshotCache() {
 // applied to one later, while the provider is assembling it.
 //
 // An empty dir skips the machine state and memory image, which is what a restore
-// wants when the node already holds them unpacked: the stream still has to be
-// read to reach the rootfs member, but writing 512 MiB of memory image again is
-// the cost the cache exists to avoid. An empty rootfsDest likewise skips the
-// filesystem.
+// wants when the node already holds them unpacked. An empty rootfsDest likewise
+// skips the filesystem.
+//
+// Skipping a member means not decompressing it either. Guest memory is emitted
+// last precisely so a restore that already holds it can stop inflating once it has
+// the writable layer, which measured at 489ms of a 940ms restore — paid on every
+// cache hit, for nothing.
+//
+// Stopping the inflation is not the same as stopping the read. The sender streams
+// the whole bundle without knowing what this node has cached, so the remaining
+// bytes still have to be consumed or the sender blocks on a stream nobody is
+// reading and the restore fails with EOF. They are drained compressed: reading
+// 16 MiB off the wire costs almost nothing next to inflating the 512 MiB inside.
 func readSnapshotBundle(src io.Reader, dir, rootfsDest string) (map[string]string, error) {
 	zr, err := gzip.NewReader(src)
 	if err != nil {
@@ -567,9 +587,25 @@ func readSnapshotBundle(src io.Reader, dir, rootfsDest string) (map[string]strin
 	}
 	defer zr.Close()
 
+	// What this caller is here for. A restore with a cache hit wants only the
+	// writable layer; one without wants the machine state and memory too.
+	wantState := dir != ""
+	wantRootfs := rootfsDest != ""
+
+	// Whatever happens, the stream is consumed to its end. Deferred rather than
+	// written at each exit because there are several, and one that forgot would
+	// hang a sender rather than fail visibly.
+	defer func() { _, _ = io.Copy(io.Discard, src) }()
+
 	paths := map[string]string{}
 	tr := tar.NewReader(zr)
 	for {
+		// Everything asked for has been extracted, so there is no reason to inflate
+		// what remains. A filesystem-only checkpoint has no memory member at all,
+		// which is why this is checked before reading rather than after.
+		if !wantState && !wantRootfs {
+			return paths, nil
+		}
 		hdr, err := tr.Next()
 		if err == io.EOF {
 			return paths, nil
@@ -585,11 +621,18 @@ func readSnapshotBundle(src io.Reader, dir, rootfsDest string) (map[string]strin
 				continue
 			}
 			dest = filepath.Join(dir, hdr.Name)
+			// Memory is the last thing written and the largest, so seeing it means
+			// the machine state came earlier and nothing further is wanted from the
+			// stream. A checkpoint carries one memory member or none.
+			if hdr.Name != snapshotStateFile {
+				wantState = false
+			}
 		case snapshotRootfsFile:
 			if rootfsDest == "" {
 				continue
 			}
 			dest = rootfsDest
+			wantRootfs = false
 		default:
 			// An unknown member is skipped rather than rejected, so a bundle
 			// gaining parts stays loadable by an older node.
