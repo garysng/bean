@@ -167,7 +167,8 @@ commands:
                                                 # since SNAP (needs guest memory)
   snapshot ls [--label k=v] | snapshot rm SNAP
   run --snapshot SNAP                           # restore instead of image
-  image ls | image status REF | image prewarm REF... [--replicas N]
+  image ls [--source built|imported] | image status REF
+  image prewarm REF... [--replicas N]
 
 output: --json for machine-readable output, --quiet for identifiers only
 exit:   0 ok, 64 not found, 69 unavailable (retry may help), 70 failed,
@@ -713,7 +714,8 @@ func cmdSnapshot(c *Client, args []string, stdout io.Writer) error {
 func cmdImage(c *Client, args []string, stdout io.Writer) error {
 	flags, pos := parseFlags(args)
 	if len(pos) == 0 {
-		return usagef("usage: bean image ls | status REF | prewarm REF...")
+		return usagef("usage: bean image ls [--source built|imported] | " +
+			"status REF | prewarm REF...")
 	}
 	switch pos[0] {
 	case "ls":
@@ -721,16 +723,29 @@ func cmdImage(c *Client, args []string, stdout io.Writer) error {
 			Images []struct {
 				Ref       string `json:"ref"`
 				State     string `json:"state"`
+				Source    string `json:"source"`
 				SizeBytes int64  `json:"sizeBytes"`
 			} `json:"images"`
 		}
-		if err := c.doJSON("GET", "/v1/images", nil, &out); err != nil {
+		path := "/v1/images"
+		// --source built is the "images I built" listing. It is a filter rather
+		// than its own subcommand because the alternative grows a command per
+		// field, and the server already scopes the list to the caller.
+		if src := flags["source"]; src != "" {
+			path += "?source=" + url.QueryEscape(src)
+		}
+		if err := c.doJSON("GET", path, nil, &out); err != nil {
 			return err
 		}
 		rows := make([]row, 0, len(out.Images))
 		for _, i := range out.Images {
+			source := i.Source
+			if source == "" {
+				source = "imported"
+			}
 			rows = append(rows, newRow("ref", i.Ref).
 				with("state", i.State).
+				with("source", source).
 				with("sizeBytes", i.SizeBytes))
 		}
 		return newPrinter(stdout, flags).table("images", rows)
@@ -744,7 +759,7 @@ func cmdImage(c *Client, args []string, stdout io.Writer) error {
 			return err
 		}
 		r := newRow("ref", fmt.Sprint(out["ref"]))
-		for _, k := range []string{"digest", "state", "format", "sizeBytes"} {
+		for _, k := range []string{"digest", "state", "format", "source", "owner", "sizeBytes"} {
 			if v, ok := out[k]; ok {
 				r = r.with(k, v)
 			}

@@ -79,6 +79,12 @@ type envOpts struct {
 	WithoutSnapshots bool
 	// WithoutImages disables the image service.
 	WithoutImages bool
+	// ImagePolicy restricts which images a create may use. The zero value
+	// permits everything, matching an unconfigured deployment.
+	ImagePolicy image.Policy
+	// WithIdentity attributes images to the caller named by the owner header,
+	// standing in for the external layer that will authenticate for real.
+	WithIdentity bool
 }
 
 // mapResolver resolves node ids to data-plane addresses.
@@ -145,8 +151,11 @@ func startEnv(t *testing.T, opts envOpts) *testEnv {
 
 	apiOpts := Options{Region: "local", APIKey: testKey, RuntimeTier: "local"}
 	if !opts.WithoutImages {
-		env.Images = image.New(st, nil)
+		env.Images = image.NewWithPolicy(st, nil, opts.ImagePolicy)
 		apiOpts.Images = env.Images
+	}
+	if opts.WithIdentity {
+		apiOpts.Identity = OwnerFromHeader(OwnerHeader)
 	}
 	if !opts.WithoutSnapshots {
 		blobs, err := snapshot.NewDirBlobs(filepath.Join(dir, "blobs"))
@@ -224,6 +233,38 @@ func (e *testEnv) do(method, path string, body any) (*http.Response, map[string]
 		e.T.Fatal(err)
 	}
 	req.Header.Set("Authorization", "Bearer "+testKey)
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		e.T.Fatal(err)
+	}
+	defer resp.Body.Close()
+	var out map[string]any
+	_ = json.NewDecoder(resp.Body).Decode(&out)
+	return resp, out
+}
+
+// doAs issues an authenticated JSON request carrying an owner identity, the
+// way the external platform layer is expected to.
+func (e *testEnv) doAs(owner, method, path string, body any) (*http.Response, map[string]any) {
+	e.T.Helper()
+	var rd *bytes.Reader
+	if body != nil {
+		b, err := json.Marshal(body)
+		if err != nil {
+			e.T.Fatal(err)
+		}
+		rd = bytes.NewReader(b)
+	} else {
+		rd = bytes.NewReader(nil)
+	}
+	req, err := http.NewRequest(method, e.Server.URL+path, rd)
+	if err != nil {
+		e.T.Fatal(err)
+	}
+	req.Header.Set("Authorization", "Bearer "+testKey)
+	if owner != "" {
+		req.Header.Set(OwnerHeader, owner)
+	}
 	resp, err := http.DefaultClient.Do(req)
 	if err != nil {
 		e.T.Fatal(err)

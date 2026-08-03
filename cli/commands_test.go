@@ -9,6 +9,7 @@ import (
 	"net/http/httptest"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -130,9 +131,16 @@ func stubAPI(t *testing.T) (*httptest.Server, *[]string) {
 		w.WriteHeader(204)
 	})
 	mux.HandleFunc("GET /v1/images", func(w http.ResponseWriter, r *http.Request) {
-		seen = append(seen, "images")
+		// The source filter has to reach the server as a query param; the CLI
+		// deciding locally would list images the caller cannot see.
+		if source := r.URL.Query().Get("source"); source != "" {
+			seen = append(seen, "images:source="+source)
+		} else {
+			seen = append(seen, "images")
+		}
 		json.NewEncoder(w).Encode(map[string]any{"images": []map[string]any{{
-			"ref": "busybox:1.36", "state": "PENDING", "cachedNodes": 0, "sizeBytes": 0,
+			"ref": "busybox:1.36", "state": "PENDING", "source": "imported",
+			"cachedNodes": 0, "sizeBytes": 0,
 		}}})
 	})
 	mux.HandleFunc("GET /v1/images/status", func(w http.ResponseWriter, r *http.Request) {
@@ -514,6 +522,19 @@ func TestCmdImage(t *testing.T) {
 	if code != 0 || !strings.Contains(out, "busybox:1.36") {
 		t.Errorf("ls: code=%d out=%q", code, out)
 	}
+	// Provenance is shown, because "is this ours or pulled from outside" is the
+	// question someone looking at an unfamiliar ref has.
+	if !strings.Contains(out, "imported") {
+		t.Errorf("ls does not report source: %q", out)
+	}
+
+	out, _, code = runCLI(t, ts, "image", "ls", "--source", "built")
+	if code != 0 {
+		t.Fatalf("ls --source code = %d out=%q", code, out)
+	}
+	if !slices.Contains(*seen, "images:source=built") {
+		t.Errorf("--source not passed to the server: %v", *seen)
+	}
 
 	out, _, code = runCLI(t, ts, "image", "status", "busybox:1.36")
 	if code != 0 {
@@ -537,8 +558,10 @@ func TestCmdImage(t *testing.T) {
 	if strings.Contains(out, "node") {
 		t.Errorf("prewarm output mentions nodes: %q", out)
 	}
-	if got := (*seen)[2]; got != "prewarm:nodes=2" {
-		t.Errorf("prewarm request = %q", got)
+	// Matched by content rather than position: an index breaks whenever an
+	// unrelated request is added to this test, which says nothing about prewarm.
+	if !slices.Contains(*seen, "prewarm:nodes=2") {
+		t.Errorf("prewarm request not seen: %v", *seen)
 	}
 }
 

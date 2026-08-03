@@ -370,6 +370,17 @@ type Image struct {
 
 	// Source distinguishes an imported OCI reference from a platform build.
 	Source ImageSource `json:"source"`
+	// Owner is the identity that caused this image to exist: the caller who
+	// built it, or the first caller to reference it. Empty means unowned,
+	// which is what every image predating this field is and what a
+	// deployment with no identity source produces — so an empty owner has to
+	// keep meaning "visible to everyone" rather than "belongs to nobody",
+	// or an upgrade would hide the platform base images from every caller.
+	//
+	// Ownership is recorded, not enforced: it scopes listings. Access control
+	// belongs to whatever fronts this API, because that layer is the only one
+	// that knows whether two identities are allowed to see each other's work.
+	Owner string `json:"owner,omitempty"`
 	// BaseRef is the image this one was built on top of; layer reuse and
 	// garbage collection both need it.
 	BaseRef string `json:"baseRef,omitempty"`

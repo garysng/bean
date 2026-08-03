@@ -88,7 +88,12 @@ CREATE TABLE IF NOT EXISTS images (
   ref TEXT PRIMARY KEY,
   data TEXT NOT NULL,
   state TEXT NOT NULL,
-  updated_at INTEGER NOT NULL
+  updated_at INTEGER NOT NULL,
+  -- Promoted so a caller's own images can be listed without decoding every
+  -- blob. Empty means unowned, which reads as "visible to everyone": that is
+  -- what an imported public ref is, and what every image from before this
+  -- column became.
+  owner TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS prewarm_jobs (
   id TEXT PRIMARY KEY,
@@ -183,10 +188,17 @@ func (s *Store) addMissingColumns() error {
 		`ALTER TABLE nodes ADD COLUMN cpu_template TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE snapshots ADD COLUMN base_id TEXT NOT NULL DEFAULT ''`,
 		`ALTER TABLE nodes ADD COLUMN disk_used_mib INTEGER NOT NULL DEFAULT 0`,
+		`ALTER TABLE images ADD COLUMN owner TEXT NOT NULL DEFAULT ''`,
 	} {
 		if _, err := s.db.Exec(stmt); err != nil && !isDuplicateColumn(err) {
 			return fmt.Errorf("migrate: %q: %w", stmt, err)
 		}
+	}
+	// Indexes on migrated columns come last: on an old database the column does
+	// not exist until the ALTER above runs, and CREATE INDEX would fail.
+	if _, err := s.db.Exec(
+		`CREATE INDEX IF NOT EXISTS idx_images_owner ON images(owner)`); err != nil {
+		return fmt.Errorf("migrate: index images(owner): %w", err)
 	}
 	return nil
 }
@@ -537,10 +549,10 @@ func (s *Store) PutImage(img *Image) error {
 		return err
 	}
 	_, err = s.db.Exec(
-		`INSERT INTO images(ref, data, state, updated_at) VALUES(?,?,?,?)
+		`INSERT INTO images(ref, data, state, updated_at, owner) VALUES(?,?,?,?,?)
 		 ON CONFLICT(ref) DO UPDATE SET data=excluded.data, state=excluded.state,
-		   updated_at=excluded.updated_at`,
-		img.Ref, string(blob), string(img.State), img.UpdatedAt.Unix())
+		   updated_at=excluded.updated_at, owner=excluded.owner`,
+		img.Ref, string(blob), string(img.State), img.UpdatedAt.Unix(), img.Owner)
 	return err
 }
 
@@ -563,10 +575,24 @@ func (s *Store) GetImage(ref string) (*Image, error) {
 	return &img, nil
 }
 
-func (s *Store) ListImages() ([]*Image, error) {
+// ListImages returns images most recently updated first.
+//
+// An empty owner lists everything, which is the operator's view and the
+// behaviour of every deployment that has no identity source. A non-empty owner
+// lists that owner's images together with the unowned ones, because unowned
+// means visible to everyone: excluding them would make an upgraded deployment
+// look like it had lost the base images it is still perfectly able to run.
+func (s *Store) ListImages(owner string) ([]*Image, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	rows, err := s.db.Query(`SELECT data FROM images ORDER BY updated_at DESC`)
+	query := `SELECT data FROM images ORDER BY updated_at DESC`
+	args := []any{}
+	if owner != "" {
+		query = `SELECT data FROM images WHERE owner=? OR owner=''
+		         ORDER BY updated_at DESC`
+		args = append(args, owner)
+	}
+	rows, err := s.db.Query(query, args...)
 	if err != nil {
 		return nil, err
 	}

@@ -68,7 +68,10 @@ func (s *Server) handleCommit(w http.ResponseWriter, r *http.Request) {
 	// image endpoint sees it in progress rather than nothing at all.
 	img := &store.Image{
 		Ref: req.Tag, Source: store.ImageBuilt, State: store.ImageBuilding,
-		CreatedAt: time.Now(),
+		// A commit is a build by another name, so the caller owns it. BaseRef
+		// records what it was committed from, which is what a later garbage
+		// collector needs to know it cannot drop the base.
+		Owner: s.owner(r), BaseRef: rec.Image, CreatedAt: time.Now(),
 	}
 	if err := s.store.PutImage(img); err != nil {
 		writeErr(w, http.StatusInternalServerError, "INTERNAL", err.Error())

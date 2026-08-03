@@ -180,6 +180,112 @@ func TestPrewarmValidation(t *testing.T) {
 	}
 }
 
+func TestResolveForRecordsOwnerAndSource(t *testing.T) {
+	svc, _ := newSvc(t, nil)
+	img, err := svc.ResolveFor("python:3.12", "user-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if img.Owner != "user-a" {
+		t.Errorf("owner = %q, want user-a", img.Owner)
+	}
+	// A caller-supplied ref is an import, and saying so is what makes the
+	// distinction answerable later.
+	if img.Source != store.ImageImported {
+		t.Errorf("source = %q, want imported", img.Source)
+	}
+}
+
+func TestResolveForDoesNotReassignOwnership(t *testing.T) {
+	svc, _ := newSvc(t, nil)
+	if _, err := svc.ResolveFor("shared:v1", "user-a"); err != nil {
+		t.Fatal(err)
+	}
+	// A second caller running the same base image must not take it over.
+	img, err := svc.ResolveFor("shared:v1", "user-b")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if img.Owner != "user-a" {
+		t.Errorf("owner = %q, want the first claimant user-a", img.Owner)
+	}
+}
+
+func TestResolveWithoutIdentityLeavesImageUnowned(t *testing.T) {
+	svc, _ := newSvc(t, nil)
+	img, err := svc.Resolve("python:3.12")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if img.Owner != "" {
+		t.Errorf("owner = %q, want empty", img.Owner)
+	}
+}
+
+func TestListForScopesToCaller(t *testing.T) {
+	svc, _ := newSvc(t, nil)
+	svc.ResolveFor("a:1", "user-a")
+	svc.ResolveFor("b:1", "user-b")
+	svc.Resolve("shared:1")
+
+	mine, err := svc.ListFor("user-a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(mine) != 2 {
+		t.Errorf("images = %d, want 2 (own + unowned)", len(mine))
+	}
+	// The unscoped list stays the operator's view.
+	all, err := svc.List()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(all) != 3 {
+		t.Errorf("all images = %d, want 3", len(all))
+	}
+}
+
+func TestServicePolicyRefusesDeniedRef(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "img.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+	svc := NewWithPolicy(st, nil, Policy{
+		AllowedSources: []store.ImageSource{store.ImageBuilt},
+	})
+
+	if _, err := svc.ResolveFor("python:3.12", "user-a"); !errors.Is(err, ErrPolicyDenied) {
+		t.Fatalf("err = %v, want ErrPolicyDenied", err)
+	}
+	// A refused reference must not be registered: recording it would make the
+	// platform's own image list grow with things it declined to run.
+	if imgs, _ := svc.List(); len(imgs) != 0 {
+		t.Errorf("refused ref was registered: %+v", imgs)
+	}
+}
+
+func TestServicePolicyAppliesToAlreadyRegisteredRef(t *testing.T) {
+	st, err := store.Open(filepath.Join(t.TempDir(), "img.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { st.Close() })
+
+	// Registered while the deployment was permissive.
+	permissive := New(st, nil)
+	if _, err := permissive.Resolve("ghcr.io/x/y:1"); err != nil {
+		t.Fatal(err)
+	}
+
+	// Tightening the policy has to bite on the next create, not only on refs
+	// nobody has run yet.
+	strict := NewWithPolicy(st, nil, Policy{AllowedRegistries: []string{"reg.example.com"}})
+	if _, err := strict.Resolve("ghcr.io/x/y:1"); !errors.Is(err, ErrPolicyDenied) {
+		t.Errorf("err = %v, want ErrPolicyDenied for an already-registered ref", err)
+	}
+}
+
 func TestJobStatusUnknown(t *testing.T) {
 	svc, _ := newSvc(t, nil)
 	job, err := svc.JobStatus("pw_missing")
