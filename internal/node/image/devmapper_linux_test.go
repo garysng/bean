@@ -197,7 +197,7 @@ func TestDevMapperReleaseRemovesEverything(t *testing.T) {
 	}
 
 	if out, err := exec.Command("dmsetup", "ls").Output(); err == nil {
-		if strings.Contains(string(out), dmName("sbx_dm_clean")) {
+		if strings.Contains(string(out), DMName("sbx_dm_clean")) {
 			t.Error("release left the device-mapper target behind")
 		}
 	}
@@ -346,7 +346,7 @@ func TestDevMapperSeedFailureLeavesNothing(t *testing.T) {
 	if _, err := os.Stat(filepath.Join(p.BaseDir, "sbx_seed_fail")); !os.IsNotExist(err) {
 		t.Errorf("sandbox directory survived a failed seed: %v", err)
 	}
-	if out, _ := exec.Command("dmsetup", "info", dmName("sbx_seed_fail")).CombinedOutput(); !strings.Contains(string(out), "does not exist") {
+	if out, _ := exec.Command("dmsetup", "info", DMName("sbx_seed_fail")).CombinedOutput(); !strings.Contains(string(out), "does not exist") {
 		t.Errorf("mapping survived a failed seed: %s", out)
 	}
 }

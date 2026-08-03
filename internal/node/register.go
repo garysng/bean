@@ -11,6 +11,7 @@ import (
 
 	nodev1 "github.com/garysng/bean/internal/gen/bean/node/v1"
 	"github.com/garysng/bean/internal/logging"
+	"github.com/garysng/bean/internal/node/reclaim"
 	"github.com/garysng/bean/internal/node/runtime"
 )
 
@@ -32,11 +33,27 @@ type Registrar struct {
 	// Advertise is the address the control plane should dial for this
 	// node's data plane. Empty means the control plane must already know.
 	Advertise string
+	// ReclaimHost reclaims host resources a previous noded left behind. Nil
+	// disables it, which is what the local runtime and every test that is not
+	// about reconciliation want: there is nothing to reconcile without
+	// device-mapper.
+	ReclaimHost reclaim.Host
+	// BaseDir and ImageDir bound what reconciliation may touch. See
+	// internal/node/reclaim for why the boundary is a directory rather than a
+	// list of resources.
+	BaseDir  string
+	ImageDir string
 
 	mgr *Manager
 
 	nodeToken string
 	interval  time.Duration
+
+	// reclaimed records that host reconciliation has run. It is a startup task,
+	// not a periodic one: a reconnect to the control plane is not evidence that
+	// anything on the host was orphaned, and re-running on every session would
+	// mean racing the sandboxes this process has since created.
+	reclaimed bool
 }
 
 func NewRegistrar(mgr *Manager, controlPlane, nodeID, region, bootstrapToken string,
@@ -168,7 +185,41 @@ func (r *Registrar) reconcile(ctx context.Context, client nodev1.NodeServiceClie
 			}
 		}
 	}
+
+	// Host resources come after the sandbox pass, and only once. The destroys
+	// above release what this process knows about, so anything still on the host
+	// afterwards has no owner in memory — which is exactly the population
+	// reconciliation is looking for. Running it before the destroys would find
+	// those resources still mapped and correctly decline to touch them.
+	r.reclaimHost(expected)
 	return nil
+}
+
+// reclaimHost returns host resources left by a previous noded, once, using the
+// control plane's expected set to tell an orphan from a sandbox that predates
+// this process.
+//
+// The expected set is what makes this safe, so a failure to obtain it must not
+// reach here: reconcile only calls this after SyncState has succeeded. A
+// reconciliation pass run against an empty set because a lookup failed would
+// classify every running sandbox on the node as garbage.
+func (r *Registrar) reclaimHost(expected map[string]bool) {
+	if r.ReclaimHost == nil || r.reclaimed {
+		return
+	}
+	r.reclaimed = true
+	rec := &reclaim.Reconciler{
+		BaseDir:  r.BaseDir,
+		ImageDir: r.ImageDir,
+		Host:     r.ReclaimHost,
+		Metrics:  r.mgr.Metrics(),
+	}
+	if _, err := rec.Run(expected); err != nil {
+		// Not fatal. A node that cannot reconcile still runs sandboxes; it just
+		// keeps holding whatever the previous process leaked, which is the
+		// behaviour before this existed.
+		slog.Error("host resource reconciliation failed", logging.KeyError, err)
+	}
 }
 
 func (r *Registrar) usage() *nodev1.NodeUsage {
