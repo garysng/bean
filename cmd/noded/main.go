@@ -17,6 +17,7 @@ import (
 
 	"google.golang.org/grpc"
 
+	"github.com/garysng/bean/internal/beand"
 	nodev1 "github.com/garysng/bean/internal/gen/bean/node/v1"
 	"github.com/garysng/bean/internal/logging"
 	"github.com/garysng/bean/internal/node"
@@ -58,6 +59,14 @@ func main() {
 	buildkitAddr := flag.String("buildkit-addr", "",
 		"buildkitd address enabling image builds on this node, e.g. unix:///run/bean/buildkitd.sock")
 	buildctlBin := flag.String("buildctl-bin", "buildctl", "BuildKit client binary")
+	guestDNS := flag.String("guest-dns", "",
+		"resolver the in-guest agent writes into /etc/resolv.conf. Empty leaves "+
+			"the user image's own file alone, which is what a node with no sandbox "+
+			"networking wants: without egress a nameserver is unreachable anyway, so "+
+			"rewriting the file would only replace one failure with a less obvious "+
+			"one. This must be the upstream resolver the host forwards to, not a copy "+
+			"of the host's /etc/resolv.conf: that commonly holds 127.0.0.53 "+
+			"(systemd-resolved), and inside a guest loopback names the guest")
 	debugConsole := flag.Bool("debug-console", false,
 		"attach guests to the serial console; costs ~500ms per boot (fc runtime)")
 	cpuTemplate := flag.String("cpu-template", "none",
@@ -150,6 +159,18 @@ func main() {
 		log.Fatalf("--cpu-template: %v", err)
 	}
 
+	// Checked at startup rather than at the first create, and fatally. An
+	// operator deriving this from the host's /etc/resolv.conf gets 127.0.0.53 on
+	// any systemd-resolved machine, and a guest pointed at loopback resolves
+	// nothing while its route, NAT and ping to a literal address all test clean.
+	// That misconfiguration has to stop the node it was typed on, not travel into
+	// every sandbox the node then admits.
+	if *guestDNS != "" {
+		if err := beand.ValidateResolver(*guestDNS); err != nil {
+			log.Fatalf("--guest-dns: %v", err)
+		}
+	}
+
 	// The CPU identity is reported so the control plane can refuse to restore a
 	// memory snapshot onto a CPU its guest cannot run on. A node that cannot
 	// read it still starts: the effect is that it will not be chosen for
@@ -163,7 +184,9 @@ func main() {
 	var rt runtime.Runtime
 	switch *rtName {
 	case "local":
-		rt = runtime.NewLocalRuntime(*agentBin, *baseDir)
+		localRT := runtime.NewLocalRuntime(*agentBin, *baseDir)
+		localRT.GuestDNS = *guestDNS
+		rt = localRT
 	case "fc":
 		fcRT, err := runtime.NewFCTier(runtime.FCTierConfig{
 			FirecrackerBin:  *fcBin,
@@ -178,6 +201,7 @@ func main() {
 			CPUTemplate:     tmpl,
 			TrackDirtyPages: *trackDirtyPages,
 			SnapshotCache:   snapCache,
+			GuestDNS:        *guestDNS,
 		})
 		if err != nil {
 			log.Fatalf("fc runtime: %v", err)

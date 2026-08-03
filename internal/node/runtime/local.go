@@ -21,6 +21,11 @@ type LocalRuntime struct {
 	agentBin string
 	baseDir  string
 
+	// GuestDNS is the resolver the agent writes into the sandbox's
+	// /etc/resolv.conf. Empty leaves the image's own file alone, which is what a
+	// node with no sandbox networking wants.
+	GuestDNS string
+
 	mu    sync.Mutex
 	procs map[string]*localSandbox
 }
@@ -38,6 +43,20 @@ func NewLocalRuntime(agentBin, baseDir string) *LocalRuntime {
 }
 
 func (r *LocalRuntime) Name() string { return "local" }
+
+// agentArgs assembles the agent's command line for one sandbox.
+//
+// --guest-dns is omitted rather than passed empty when no resolver is
+// configured, so a node without networking spawns the agent with exactly the
+// arguments it used before this flag existed. "Unset" then means the previous
+// behaviour rather than a new path that has to be trusted separately.
+func (r *LocalRuntime) agentArgs(sock, root string) []string {
+	args := []string{"--listen", sock, "--root", root}
+	if r.GuestDNS != "" {
+		args = append(args, "--guest-dns", r.GuestDNS)
+	}
+	return args
+}
 
 func (r *LocalRuntime) Create(ctx context.Context, spec *Spec) (*Handle, error) {
 	return r.create(ctx, spec, nil)
@@ -103,7 +122,7 @@ func (r *LocalRuntime) create(ctx context.Context, spec *Spec, restoreFrom io.Re
 	}
 	sock := filepath.Join(sockDir, "a.sock")
 
-	cmd := exec.Command(r.agentBin, "--listen", sock, "--root", root)
+	cmd := exec.Command(r.agentBin, r.agentArgs(sock, root)...)
 	cmd.Env = os.Environ()
 	for k, v := range spec.Env {
 		cmd.Env = append(cmd.Env, k+"="+v)

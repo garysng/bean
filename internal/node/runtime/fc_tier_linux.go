@@ -50,6 +50,18 @@ func NewFCTier(cfg FCTierConfig) (Runtime, error) {
 	}
 	rt.CPUTemplate = cfg.CPUTemplate
 	rt.TrackDirtyPages = cfg.TrackDirtyPages
+	// Stated at startup because the alternative to noticing it here is noticing it
+	// as a package install that cannot resolve a name, several minutes into
+	// somebody else's build. The absence is the more surprising case of the two:
+	// a guest with working egress and no resolver looks like a broken network.
+	if cfg.GuestDNS == "" {
+		slog.Warn("no --guest-dns set; guests keep whatever /etc/resolv.conf their " +
+			"image shipped, which resolves nothing unless it happens to name a " +
+			"reachable server")
+	} else {
+		slog.Info("guest resolver configured", "nameserver", cfg.GuestDNS,
+			"agentArgs", GuestDNSBootArgs(cfg.GuestDNS))
+	}
 	rt.SnapshotCache = cfg.SnapshotCache
 	if !cfg.SnapshotCache.Enabled() {
 		// Stated because the growth is otherwise invisible: the cache consumes no

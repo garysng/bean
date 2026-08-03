@@ -38,4 +38,34 @@ type FCTierConfig struct {
 	// unbounded, which grows by roughly one guest's memory per distinct snapshot
 	// restored on this node and is invisible to the scheduler.
 	SnapshotCache EvictionPolicy
+	// GuestDNS is the resolver the in-guest agent writes into /etc/resolv.conf.
+	// Empty leaves the user image's own file alone, which is what a node with no
+	// sandbox networking wants: a nameserver the guest has no egress to reach is
+	// not an improvement on whatever the image shipped.
+	//
+	// It is node configuration rather than a per-sandbox field because the guest's
+	// addresses are identical in every sandbox (docs/network.md section 2), so
+	// there is nothing per-sandbox for it to vary with.
+	GuestDNS string
+}
+
+// GuestDNSBootArgs renders the agent flags that carry a resolver into a guest,
+// for appending to the kernel command line after the "--" that separates the
+// kernel's arguments from the agent's.
+//
+// It returns the empty string when no resolver is configured, because the guest
+// must then boot with a command line identical to the one it used before this
+// existed: an empty --guest-dns would be a new argument for the agent to
+// interpret, and the whole point of "unset" is that nothing changes.
+//
+// This is a function rather than an inlined concatenation so the quoting rule
+// lives next to the reason for it: the kernel command line is split on
+// whitespace with no quoting whatsoever, so a value containing a space would
+// silently become a separate argument. ValidateResolver rejects anything that is
+// not a bare IP literal, which is what makes that safe here.
+func GuestDNSBootArgs(guestDNS string) string {
+	if guestDNS == "" {
+		return ""
+	}
+	return " --guest-dns " + guestDNS
 }
