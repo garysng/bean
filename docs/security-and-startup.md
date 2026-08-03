@@ -15,7 +15,7 @@ What has to be defended:
 | Kernel escape | Take over the node | FC microVM / gVisor isolation tier (A2) |
 | Lateral movement | Reach other sandboxes / internal services | 📐 the network stack is unimplemented, sandboxes currently have no network (A4) |
 | Credential theft | Obtain S3/control-plane credentials | Zero long-lived credentials (A5) |
-| Resource abuse | Mining, fork bombs, filling the disk | ⚠️ currently relies on the guest kernel limiting itself and on the CoW disk size; host cgroups are unimplemented (A3) |
+| Resource abuse | Mining, fork bombs, filling the disk | ⚠️ the guest kernel limiting itself plus the CoW disk size; a host cgroup around the VMM exists but is off unless `--fc-cgroups` is set (A3) |
 | Egress abuse | Use it as a jump box to attack outward, DDoS | 📐 same as above, unimplemented (A4) |
 | Malicious images | Supply-chain poisoning | Image provenance control (A6) |
 | The agent's attack surface | Attack the agent from inside the container → noded | Minimal API + socket permissions (A7) |
@@ -48,24 +48,57 @@ should not be used for untrusted code. The container tiers (runc/runsc) are unim
 | seccomp on the FC process itself | ✅ | Firecracker's built-in strict profile, in effect as long as `--no-seccomp` is not passed |
 | Hard limit on writable-layer disk size | ✅ | The host assembles the CoW file, and its size is naturally the ceiling |
 | Self-limiting resources inside the guest | ✅ | The guest kernel manages itself, and the only thing it can exhaust is its own VM's resources |
-| **jailer (chroot + separate uid/gid + device allowlist)** | 📐 | **Unimplemented.** noded execs the firecracker binary directly; `grep -rn jailer` across the repo returns 0 |
-| **Host-side cgroup wrapping the FC process** | 📐 | **Unimplemented.** The cpu/mem belt-and-braces is currently only the scheduler's committed-quantity accounting, with no kernel enforcement |
+| **jailer (chroot + device allowlist)** | 📐 | **Unimplemented.** noded execs the firecracker binary directly. The chroot and the narrowed `/dev` are GitHub #20 phase 2, blocked on placing the per-sandbox dm device inside a jail — see [jailer.md](jailer.md) §3 |
+| **Privilege drop (separate uid/gid)** | ⚠️ | Implemented, **off by default**, `--fc-vmm-uid` / `--fc-vmm-gid`. Drops the VMM to an unprivileged uid; does **not** confine what it can see (see below) |
+| **Host-side cgroup wrapping the FC process** | ⚠️ | Implemented, **off by default**, `--fc-cgroups`. Memory ceiling, CPU quota and pid cap per sandbox, from that sandbox's own spec. cgroup v1 and v2 both supported. A node without the flag is unchanged and has no kernel-enforced limit |
+| **rlimits on the FC process** | ⚠️ | `RLIMIT_NOFILE` and `RLIMIT_NPROC`, applied only when the privilege drop is on (they travel with `--fc-vmm-uid`) |
 
 This section previously wrote jailer and cgroups up as "delivered in P2", and that was wrong
 — they were never implemented. That kind of error is most expensive in a security document:
-readers use it to judge what code they can run.
+readers use it to judge what code they can run. The three ⚠️ rows above are the reason this
+paragraph stays: they are code that exists and is **not on unless a flag turns it on**, which
+is a different claim from "delivered", and the distinction is the whole point.
 
-**What missing jailer actually means**: the FC process runs as root in the host's mount
-namespace, with no chroot, no privilege drop and no device allowlist. An FC or KVM
-vulnerability then means "host root" rather than "a low-privilege user inside a chroot". The
-hardware virtualisation boundary is still there, but defence in depth is one layer short —
-and Firecracker upstream lists jailer as the recommended practice for production deployment.
+**What missing jailer still means**: the FC process runs in the host's mount namespace with no
+chroot and no device allowlist. With `--fc-vmm-uid` it is at least not root, so an FC or KVM
+vulnerability yields "an unprivileged user with a full view of the host filesystem" rather than
+"host root" — but the *view* is unnarrowed, and narrowing it is what the mount namespace does.
+That is the substantive half still outstanding; [jailer.md](jailer.md) §7 itemises what each
+half buys. Note also that `PR_SET_NO_NEW_PRIVS` is **not** set: Go's `syscall.SysProcAttr` has
+no such field (checked against go1.26.1 — jailer.md §7 claims otherwise and is wrong), and
+setting it needs a wrapper binary, which is ruled out because the pid noded records would be
+the wrapper's rather than the VMM's.
 
-**What missing cgroup wrapping actually means**: the committed quantity is only the
-scheduler's ledger. A guest cannot exceed its own VM's memory configuration (FC enforces
-that), but **the FC process itself** has no cgroup limit on the host, so under host memory
-pressure there is no kernel-level fairness guarantee. This matters more in an overcommit
-scenario (see architecture.md D12).
+**What the cgroup now does, and what it does not**: with `--fc-cgroups` the VMM sits in a group
+with a memory ceiling derived from its guest's declared RAM plus a fixed headroom, a CPU quota
+from the same vCPU count the machine configuration gets, and a pid cap. That is the kernel
+enforcement `overcommit.go` and `cmd/noded/main.go` both name as the prerequisite for raising
+memory overcommit above 1.0 — the other prerequisite, a measurement of how far a guest's real
+footprint sits below its declaration, still does not exist, so the ceiling's headroom is
+deliberately generous rather than tight. **Without the flag nothing changed**: the committed
+quantity is only the scheduler's ledger, and under host memory pressure there is no
+kernel-level fairness guarantee (see architecture.md D12).
+
+Two limits of the cgroup work worth stating rather than leaving as absences:
+
+- **cgroup v1 cannot cap swap.** v2's `memory.swap.max=0` has no v1 equivalent unless the
+  kernel booted with `swapaccount=1`, which is off by default on the distro kernels checked.
+  On a v1 host the ceiling bounds RAM and not swap. The version is detected at runtime and the
+  startup log names it; the target host measured for this work is v1 with controllers mounted
+  separately.
+- **A node with no usable controller starts anyway**, with no limits, and says so. Refusing to
+  start would take a working node out of service to enforce a limit it had been running
+  without. The cost is that "limits requested" and "limits in force" can differ, which is why
+  the startup line names the controllers that are *missing* as well as the ones in force.
+
+**The privilege drop's uid is per node, not per sandbox.** Every sandbox on a node shares it, so
+one compromised VMM can reach another sandbox's directory. A per-sandbox uid needs a reserved
+range and an allocator with the same reclaim problem as every other per-sandbox resource here,
+for a boundary between processes that are each already behind their own VM; it is deferred, not
+dismissed. Turning the drop on requires the node's shared assets (guest kernel, agent disk) to
+be world-readable and the uid to be in the group owning `/dev/kvm`; both are checked at startup
+and are fatal, because each otherwise fails every create on the node with a symptom that does
+not name its cause.
 
 **Container tier** (runc/runsc, 📐 unimplemented, arriving with P5):
 
@@ -81,8 +114,9 @@ scenario (see architecture.md D12).
 - ✅ seccomp on the FC process itself (Firecracker's built-in strict profile, on by default)
 - ✅ Guest disk-write ceiling = the size of the writable-layer file (assembled by the host, a natural hard limit)
 - ✅ pids/fork bombs: the guest kernel limits itself (the only thing it can exhaust is its own VM's resources)
-- 📐 jailer: chroot + separate uid/gid + device allowlist — **unimplemented**
-- 📐 Host-side cgroup wrapping the FC process (cpu/mem belt-and-braces) — **unimplemented**
+- 📐 jailer: chroot + device allowlist — **unimplemented** (GitHub #20 phase 2)
+- ⚠️ Separate uid/gid for the FC process — implemented, off unless `--fc-vmm-uid` is set
+- ⚠️ Host-side cgroup wrapping the FC process (cpu/mem/pids) — implemented, off unless `--fc-cgroups` is set
 
 ### A4. Network security 📐
 

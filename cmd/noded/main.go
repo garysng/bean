@@ -95,9 +95,31 @@ func main() {
 			"(the kernel time-slices)")
 	overcommitMemory := flag.Float64("overcommit-memory", 1.0,
 		"multiply allocatable memory by this factor. Unlike CPU this does not "+
-			"degrade gracefully — being wrong means a killed process — and there is "+
-			"no cgroup around the VMM processes to enforce fairness, so raise it "+
-			"only with measurements")
+			"degrade gracefully — being wrong means a killed process — so raise it "+
+			"only with measurements, and only with --fc-cgroups on: without a cgroup "+
+			"around the VMM there is nothing in the kernel enforcing fairness when "+
+			"the host comes under pressure")
+	fcCgroups := flag.Bool("fc-cgroups", false,
+		"put each sandbox's VMM in a cgroup with a memory ceiling, CPU quota and "+
+			"pid cap from its own spec (fc runtime). Off by default because the "+
+			"memory headroom above the guest's declared RAM is not yet measured "+
+			"against real workloads, and a ceiling set too low is not a slow "+
+			"sandbox but a killed one. Turning it on is the prerequisite for "+
+			"raising --overcommit-memory: without it the committed quantity is only "+
+			"the scheduler's ledger. Both cgroup v1 and v2 are supported; a node "+
+			"with neither logs that fact and runs with no limits")
+	fcVMMUid := flag.Int("fc-vmm-uid", 0,
+		"run the VMM as this uid instead of root (fc runtime). 0 leaves it as "+
+			"noded's own identity, which is what it has always been. The uid needs "+
+			"to be in the group owning /dev/kvm, and this node's kernel and agent "+
+			"disk must be world-readable; both are checked at startup. Note this "+
+			"drops privilege without confining what the process can see -- the host "+
+			"filesystem stays visible to it, and narrowing that needs the mount "+
+			"namespace work in GitHub #20 phase 2")
+	fcVMMGid := flag.Int("fc-vmm-gid", 0,
+		"primary gid for --fc-vmm-uid. Required with it: the sandbox directory and "+
+			"its block device are chowned to both, and a gid of 0 would leave them "+
+			"group-owned by root")
 	trackDirtyPages := flag.Bool("track-dirty-pages", false,
 		"log guest writes so checkpoints can capture only what changed; must be on "+
 			"from boot, so a guest started without it can never produce an "+
@@ -256,6 +278,9 @@ func main() {
 			TrackDirtyPages: *trackDirtyPages,
 			SnapshotCache:   snapCache,
 			GuestDNS:        *guestDNS,
+			Cgroups:         *fcCgroups,
+			VMMUid:          *fcVMMUid,
+			VMMGid:          *fcVMMGid,
 		})
 		if err != nil {
 			log.Fatalf("fc runtime: %v", err)

@@ -11,7 +11,7 @@ sandbox 内运行的是 **AI 生成的不可信代码**（eval 任务、agent ro
 | 内核逃逸 | 接管节点 | FC microVM / gVisor 隔离档（A2） |
 | 横向移动 | 访问其他 sandbox / 内网服务 | 📐 网络栈未实现,当前 sandbox 无网络（A4） |
 | 凭证窃取 | 拿到 S3/控制面凭证 | 零长期凭证（A5） |
-| 资源滥用 | 挖矿、fork 炸弹、磁盘写满 | ⚠️ 当前靠 guest 内核自限与 CoW 盘大小;宿主 cgroup 未实现（A3） |
+| 资源滥用 | 挖矿、fork 炸弹、磁盘写满 | ⚠️ guest 内核自限加 CoW 盘大小;包裹 VMM 的宿主 cgroup 已存在,但不设 `--fc-cgroups` 就不生效（A3） |
 | 出网滥用 | 作为跳板攻击外部、DDoS | 📐 同上,未实现（A4） |
 | 恶意镜像 | 供应链投毒 | 镜像来源控制（A6） |
 | agent 攻击面 | 从容器内攻击 agent → noded | 最小 API + socket 权限（A7） |
@@ -43,21 +43,52 @@ CI 使用,**没有任何隔离**,不在下表里也不该用于不可信代码�
 | FC 进程自身 seccomp | ✅ | Firecracker 内置严格 profile,不传 `--no-seccomp` 即生效 |
 | 可写层盘大小硬限 | ✅ | 宿主组装 CoW 文件,大小天然是上限 |
 | guest 内资源自限 | ✅ | guest 内核自管,能耗尽的只有自己 VM 的资源 |
-| **jailer(chroot + 独立 uid/gid + 设备白名单)** | 📐 | **未实现**。noded 直接 exec firecracker 二进制,`grep -rn jailer` 全仓库为 0 |
-| **宿主侧 cgroup 包裹 FC 进程** | 📐 | **未实现**。cpu/mem 的双保险目前只有调度器的承诺量记账,没有内核强制 |
+| **jailer(chroot + 设备白名单)** | 📐 | **未实现**。noded 直接 exec firecracker 二进制。chroot 与收窄的 `/dev` 属 GitHub #20 phase 2,卡在「把每 sandbox 的 dm 设备放进 jail」这一步 —— 见 [jailer.md](../jailer.md) §3 |
+| **降权(独立 uid/gid)** | ⚠️ | 已实现,**默认关**,`--fc-vmm-uid` / `--fc-vmm-gid`。把 VMM 降到非 root uid;但**不收窄它能看见什么**(见下) |
+| **宿主侧 cgroup 包裹 FC 进程** | ⚠️ | 已实现,**默认关**,`--fc-cgroups`。按每 sandbox 自己的 spec 给内存上限、CPU 配额与 pid 上限。cgroup v1 与 v2 都支持。不带这个 flag 的节点行为完全不变,也没有内核强制的限制 |
+| **FC 进程的 rlimit** | ⚠️ | `RLIMIT_NOFILE` 与 `RLIMIT_NPROC`,只在降权开启时施加(它们随 `--fc-vmm-uid` 一起走) |
 
 之前这一节把 jailer 和 cgroup 写成「P2 交付」,是错的 —— 它们从未实现。
-这类错误在安全文档里代价最高:读者会据此判断可以跑什么代码。
+这类错误在安全文档里代价最高:读者会据此判断可以跑什么代码。上面三行 ⚠️ 正是
+这段话保留的原因:它们是**存在但不开 flag 就不生效**的代码,这跟「已交付」是
+两个不同的说法,而这个区分就是重点。
 
-**缺 jailer 的实际含义**:FC 进程以 root 跑在宿主的 mount namespace 里,
-没有 chroot、没有降权、没有设备白名单。一个 FC 或 KVM 的漏洞,其后果是
-「拿到宿主 root」而不是「拿到一个被 chroot 的低权用户」。硬件虚拟化边界还在,
-但纵深防御少了一层 —— 而 Firecracker 官方把 jailer 列为生产部署的建议做法。
+**仍然缺 jailer 的实际含义**:FC 进程跑在宿主的 mount namespace 里,没有 chroot,
+没有设备白名单。开了 `--fc-vmm-uid` 之后它至少不是 root 了,所以一个 FC 或 KVM 的
+漏洞给出的是「一个能看见整个宿主文件系统的低权用户」而不是「宿主 root」——
+但那个**视野**没有被收窄,收窄它正是 mount namespace 做的事。这是仍然欠着的
+实质性一半;[jailer.md](../jailer.md) §7 逐项列了两半各自买到什么。另外
+`PR_SET_NO_NEW_PRIVS` **没有**设置:Go 的 `syscall.SysProcAttr` 没有这个字段
+(对 go1.26.1 核对过 —— jailer.md §7 说有,是错的),设它需要一个 wrapper 二进制,
+而 wrapper 被否掉的理由与 `netns_linux.go` 否掉它的理由相同 —— noded 记下的 pid
+会是 wrapper 的,`killVMM` 的 `kill(-pid)` 就会信错进程组。
 
-**缺 cgroup 包裹的实际含义**:承诺量只是调度器的账本。一个 guest 无法超过
-自己 VM 的内存配置(FC 强制),但 **FC 进程本身**在宿主上没有 cgroup 限制,
-所以宿主内存压力下没有内核层面的公平性保证。这在超卖场景下更要紧
+**cgroup 现在做了什么、没做什么**:开了 `--fc-cgroups` 之后 VMM 待在一个 cgroup 里,
+内存上限由其 guest 声明的 RAM 加一段固定余量推出,CPU 配额来自 machine config 拿到的
+同一个 vCPU 数,再加一个 pid 上限。这就是 `overcommit.go` 与 `cmd/noded/main.go` 都点名
+的、把内存超卖抬到 1.0 以上的前置条件 —— 另一个前置条件,即「guest 实际占用比声明低
+多少」的测量,仍然不存在,所以上限的余量是刻意给宽而不是给紧。**不带这个 flag
+则什么都没变**:承诺量只是调度器的账本,宿主内存压力下没有内核层面的公平性保证
 (见 architecture.md D12)。
+
+cgroup 这部分有两个限制,写出来而不是留成空白:
+
+- **cgroup v1 无法限制 swap。** v2 的 `memory.swap.max=0` 在 v1 没有对等物,除非内核以
+  `swapaccount=1` 启动,而核对过的发行版内核默认都是关的。在 v1 宿主上这个上限管住的
+  是 RAM,不是 swap。版本在运行时探测,启动日志会点名是哪一版;这次工作实测的目标宿主
+  是 v1、controller 分开挂载。
+- **没有可用 controller 的节点照样启动**,不带任何限制,并且明说这件事。为了强制一个
+  它本来就没有也跑得好的限制而拒绝启动,等于把一台好节点摘出服务。代价是「请求的限制」
+  与「生效的限制」可能不同,这也是启动那行日志既点名生效的 controller、也点名**缺失**
+  的那些的原因。
+
+**降权的 uid 是每节点一个,不是每 sandbox 一个。** 节点上所有 sandbox 共用它,所以一个
+被攻陷的 VMM 能够到另一个 sandbox 的目录。每 sandbox 一个 uid 需要预留一段 uid 区间和
+一个分配器,而那个分配器带着与这里其他每 sandbox 资源一样的回收问题,换来的却只是两个
+本来就各自待在自己 VM 后面的进程之间的边界;这是推迟,不是否掉。开启降权要求节点的共享
+资产(guest kernel、agent 盘)对 others 可读,且该 uid 在 `/dev/kvm` 的属组里;两者都在
+启动时检查且是致命的,因为否则它们各自会让节点上每一次 create 都失败,而症状并不点名
+自己的成因。
 
 **容器档**（runc/runsc,📐 未实现,随 P5 引入）：
 
@@ -73,8 +104,9 @@ CI 使用,**没有任何隔离**,不在下表里也不该用于不可信代码�
 - ✅ FC 进程自身 seccomp（Firecracker 内置严格 profile,默认生效）
 - ✅ guest 磁盘写入上限 = 可写层文件大小（宿主组装，天然硬限）
 - ✅ pids/fork 炸弹：guest 内核自限（能耗尽的只有自己 VM 的资源）
-- 📐 jailer：chroot + 独立 uid/gid + 设备白名单 —— **未实现**
-- 📐 宿主侧 cgroup 包裹 FC 进程（cpu/mem 双保险）—— **未实现**
+- 📐 jailer：chroot + 设备白名单 —— **未实现**（GitHub #20 phase 2）
+- ⚠️ FC 进程独立 uid/gid —— 已实现,不设 `--fc-vmm-uid` 则不生效
+- ⚠️ 宿主侧 cgroup 包裹 FC 进程（cpu/mem/pids）—— 已实现,不设 `--fc-cgroups` 则不生效
 
 ### A4. 网络安全 📐
 
