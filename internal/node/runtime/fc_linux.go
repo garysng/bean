@@ -126,6 +126,12 @@ type fcVM struct {
 	// what a diff checkpoint needs. It is set when the VM starts and cannot
 	// change afterwards, so it is the authority on whether a diff is possible.
 	dirtyPages bool
+	// netnsPath is the handle of the network namespace the VMM runs in, or "" on
+	// a node with no networking. It is carried on the VM rather than read from
+	// the Spec inside startVMM because startVMM is given the VM, matching how
+	// dir and rootfs reach it; and it is a path rather than a name so that the
+	// jailer work in GitHub #20 can pass the same value to --netns.
+	netnsPath string
 	// done closes when the VMM process exits, so waiters do not poll.
 	done chan struct{}
 }
@@ -315,6 +321,9 @@ func (r *FCRuntime) create(ctx context.Context, spec *Spec, layers []SnapshotLay
 		dir:    dir,
 		rootfs: rootfs,
 		done:   make(chan struct{}),
+		// Resolved here, where the Spec is in hand. Empty on a node with no
+		// network pool, which keeps that node's launch identical to before.
+		netnsPath: netnsPathFor(spec),
 	}
 
 	apiSocket := filepath.Join(dir, "api.sock")
@@ -372,6 +381,12 @@ func (r *FCRuntime) validate() error {
 // startVMM launches Firecracker with its API socket. The process is its own
 // group leader so a kill reaches everything it spawned, and its console goes
 // to a file: a guest that fails to boot leaves no other evidence.
+//
+// When the sandbox has networking, the VMM is launched inside that sandbox's
+// network namespace. It has to be: the tap lives in the namespace and is
+// addressed by name, so a VMM in the host namespace cannot see the device the
+// NIC registration names. See netns_linux.go for why the join is done with a
+// pinned thread rather than by wrapping the command.
 func (r *FCRuntime) startVMM(ctx context.Context, vm *fcVM, apiSocket string) error {
 	logFile, err := os.OpenFile(filepath.Join(vm.dir, "console.log"),
 		os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
@@ -393,7 +408,11 @@ func (r *FCRuntime) startVMM(ctx context.Context, vm *fcVM, apiSocket string) er
 	// restored into another.
 	cmd.Dir = vm.dir
 
-	if err := cmd.Start(); err != nil {
+	// Joining the namespace does not disturb any of the above. The cwd is
+	// unaffected by setns (measured, network.md section 1), and the log fds are
+	// inherited because this forks the same cmd rather than running it under a
+	// helper binary.
+	if err := startInNetns(cmd, vm.netnsPath); err != nil {
 		return fmt.Errorf("fc: start firecracker: %w", err)
 	}
 	vm.cmd = cmd
