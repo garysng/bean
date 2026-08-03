@@ -9,27 +9,18 @@ import (
 
 // The limits are written into a tree at a path this package is given, so the
 // whole mechanism is exercised against a directory built by the test rather than
-// against /sys/fs/cgroup. That is what makes both interface versions testable at
-// all: the target host is v1 and no developer machine has both, so a test that
-// needed a real tree could only ever cover one of them, and the version-specific
-// filenames are exactly where a mistake is silent -- a write to a file that does
-// not exist is the only symptom, and nothing reads it back.
+// against /sys/fs/cgroup. That is what makes the filenames testable off a Linux
+// host at all, and the filenames are exactly where a mistake is silent -- a write
+// to a file that does not exist is the only symptom, and nothing reads it back.
+//
+// Only cgroup v2 exists here, because only v2 is supported: v1 cannot cap swap
+// (see cgroup.go), so a v1 host is refused at startup rather than written to. The
+// refusal itself is a Statfs on the real mount point and is tested in
+// cgroup_fc_linux_test.go.
 //
 // What this cannot cover is whether the kernel honours what was written. The
 // filename, the value and the teardown are asserted here; enforcement is
 // unverified without a real KVM host.
-
-// fakeV1Tree builds a v1 layout: one directory per controller under the root.
-func fakeV1Tree(t *testing.T) string {
-	t.Helper()
-	root := t.TempDir()
-	for _, c := range cgroupControllers {
-		if err := os.MkdirAll(filepath.Join(root, c), 0o755); err != nil {
-			t.Fatal(err)
-		}
-	}
-	return root
-}
 
 // fakeV2Tree builds a v2 layout: one unified tree, with the controllers
 // advertised and delegated the way a v2 parent has to advertise them.
@@ -46,19 +37,20 @@ func fakeV2Tree(t *testing.T) string {
 	return root
 }
 
-// TestCgroupV1WritesTheV1FilenamesAndValues is the test that goes red if the
-// memory ceiling stops being applied, and the one that goes red if v2's spelling
-// is used on a v1 host.
+// TestCgroupWritesOnlyV2Filenames is the test that goes red if a v1 filename
+// comes back.
 //
-// The target host measured for this work is v1 with controllers mounted
-// separately: /sys/fs/cgroup is tmpfs, there is no cgroup.controllers, and
-// memory.max does not exist anywhere. A VMM on such a host with only memory.max
-// written is completely unbounded while every log line says limits are on.
-func TestCgroupV1WritesTheV1FilenamesAndValues(t *testing.T) {
-	root := fakeV1Tree(t)
-	h := newCgroupHost(root, cgroupV1)
+// It matters because a WriteFile into a directory that exists succeeds: writing
+// memory.limit_in_bytes on a v2 host creates an ordinary file that the kernel
+// never reads, so the VMM is unbounded while every log line says limits are on.
+// The same shape of mistake in reverse is what made supporting both versions
+// fragile, and it is the reason the v1 spelling is asserted absent rather than
+// merely deleted from the code.
+func TestCgroupWritesOnlyV2Filenames(t *testing.T) {
+	root := fakeV2Tree(t)
+	h := newCgroupHost(root)
 	if !h.Enabled() {
-		t.Fatal("no controller usable in a tree that has all of them")
+		t.Fatal("no controller usable in a tree that advertises all of them")
 	}
 
 	spec := &Spec{SandboxID: "sb1", CPU: 2, MemoryMiB: 1024}
@@ -66,19 +58,19 @@ func TestCgroupV1WritesTheV1FilenamesAndValues(t *testing.T) {
 		t.Fatalf("createCgroup: %v", err)
 	}
 
+	dir := filepath.Join(root, "bean-sb1")
 	// memory: 1024 MiB of guest RAM plus the VMM's own headroom.
 	wantMem := (1024 + vmmMemoryHeadroomMiB) << 20
 	for _, tc := range []struct{ file, want string }{
-		{filepath.Join("memory", "bean-sb1", "memory.limit_in_bytes"), "1342177280"},
-		{filepath.Join("cpu", "bean-sb1", "cpu.cfs_period_us"), "100000"},
-		// 2 cores of a 100ms period.
-		{filepath.Join("cpu", "bean-sb1", "cpu.cfs_quota_us"), "200000"},
-		{filepath.Join("pids", "bean-sb1", "pids.max"), "512"},
+		{"memory.max", "1342177280"},
+		// 2 cores of a 100ms period, quota and period in one write.
+		{"cpu.max", "200000 100000"},
+		{"pids.max", "512"},
 	} {
-		b, err := os.ReadFile(filepath.Join(root, tc.file))
+		b, err := os.ReadFile(filepath.Join(dir, tc.file))
 		if err != nil {
-			t.Errorf("%s was not written: %v; on a v1 host this limit is not in "+
-				"force and nothing reports that", tc.file, err)
+			t.Errorf("%s was not written: %v; this limit is not in force and nothing "+
+				"reports that", tc.file, err)
 			continue
 		}
 		if got := string(b); got != tc.want {
@@ -89,19 +81,32 @@ func TestCgroupV1WritesTheV1FilenamesAndValues(t *testing.T) {
 		t.Fatalf("headroom arithmetic changed: %d", wantMem)
 	}
 
-	// And specifically not v2's names, which would be created as ordinary files by
-	// a WriteFile into a directory that exists.
-	for _, absent := range []string{"memory.max", "cpu.max"} {
-		if _, err := os.Stat(filepath.Join(root, "memory", "bean-sb1", absent)); err == nil {
-			t.Errorf("%s exists in a v1 tree: the v2 spelling was used", absent)
+	// v1's spellings must not appear anywhere. On a v2 host each of these is an
+	// inert regular file, which is the silent-failure mode this narrowing removed.
+	for _, absent := range []string{
+		"memory.limit_in_bytes", "memory.memsw.limit_in_bytes",
+		"cpu.cfs_period_us", "cpu.cfs_quota_us",
+	} {
+		if _, err := os.Stat(filepath.Join(dir, absent)); err == nil {
+			t.Errorf("%s was written: that is a v1 filename, inert on v2, and the "+
+				"limit it looks like it applies is not applied", absent)
+		}
+	}
+	// And no per-controller subtree was created: v2 has one directory per sandbox,
+	// and a stray memory/ or cpu/ directory under the group would keep rmdir
+	// refused and leak the group forever.
+	for _, c := range cgroupControllers {
+		if _, err := os.Stat(filepath.Join(root, c)); err == nil {
+			t.Errorf("a per-controller tree %q was created: that is v1's layout", c)
 		}
 	}
 }
 
-// TestCgroupV2WritesTheUnifiedFilenames is the mirror: one tree, v2 names.
+// TestCgroupV2WritesTheUnifiedFilenames covers the fractional-CPU and swap half
+// of the same write path.
 func TestCgroupV2WritesTheUnifiedFilenames(t *testing.T) {
 	root := fakeV2Tree(t)
-	h := newCgroupHost(root, cgroupV2)
+	h := newCgroupHost(root)
 	if !h.Enabled() {
 		t.Fatal("no controller usable in a v2 tree advertising all of them")
 	}
@@ -166,7 +171,7 @@ func TestV2ControllerNotAdvertisedIsNotUsed(t *testing.T) {
 	if err := os.WriteFile(filepath.Join(root, "cgroup.subtree_control"), nil, 0o644); err != nil {
 		t.Fatal(err)
 	}
-	h := newCgroupHost(root, cgroupV2)
+	h := newCgroupHost(root)
 	if h.Enabled() {
 		t.Errorf("controllers %v were taken as usable from a tree advertising only "+
 			"cpuset and io", h.controllers)
@@ -180,42 +185,30 @@ func TestV2ControllerNotAdvertisedIsNotUsed(t *testing.T) {
 // outlives its sandbox is the same class of bug as the loop-device leak in
 // GitHub #16: invisible to everything, and permanent until the host reboots.
 func TestCgroupRemoveLeavesNothingBehind(t *testing.T) {
-	for name, tc := range map[string]struct {
-		root    func(*testing.T) string
-		version cgroupVersion
-	}{
-		"v1": {fakeV1Tree, cgroupV1},
-		"v2": {fakeV2Tree, cgroupV2},
-	} {
-		t.Run(name, func(t *testing.T) {
-			root := tc.root(t)
-			h := newCgroupHost(root, tc.version)
-			g, err := h.createCgroup("sb-leak", limitsFor(&Spec{
-				SandboxID: "sb-leak", CPU: 1, MemoryMiB: 256,
-			}))
-			if err != nil {
-				t.Fatal(err)
-			}
-			if len(g.dirs) == 0 {
-				t.Fatal("no directory was created, so this proves nothing")
-			}
-			created := append([]string(nil), g.dirs...)
+	root := fakeV2Tree(t)
+	h := newCgroupHost(root)
+	g, err := h.createCgroup("sb-leak", limitsFor(&Spec{
+		SandboxID: "sb-leak", CPU: 1, MemoryMiB: 256,
+	}))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if g.dir == "" {
+		t.Fatal("no directory was created, so this proves nothing")
+	}
+	created := g.dir
 
-			if err := g.Remove(); err != nil {
-				t.Fatalf("Remove: %v", err)
-			}
-			for _, d := range created {
-				if _, err := os.Stat(d); err == nil {
-					t.Errorf("%s survived teardown: a leaked cgroup is invisible to "+
-						"every other subsystem and stays for the life of the host", d)
-				}
-			}
-			// Removing twice must be safe: the failed-create path and Destroy can
-			// both reach it, and a second error would mask the first.
-			if err := g.Remove(); err != nil {
-				t.Errorf("second Remove: %v", err)
-			}
-		})
+	if err := g.Remove(); err != nil {
+		t.Fatalf("Remove: %v", err)
+	}
+	if _, err := os.Stat(created); err == nil {
+		t.Errorf("%s survived teardown: a leaked cgroup is invisible to every other "+
+			"subsystem and stays for the life of the host", created)
+	}
+	// Removing twice must be safe: the failed-create path and Destroy can both
+	// reach it, and a second error would mask the first.
+	if err := g.Remove(); err != nil {
+		t.Errorf("second Remove: %v", err)
 	}
 }
 
@@ -223,34 +216,39 @@ func TestCgroupRemoveLeavesNothingBehind(t *testing.T) {
 // same leak. A group half-built and then abandoned is worse than one that leaks
 // on destroy: no caller holds a reference to it, so nothing can ever remove it.
 func TestCreateCgroupCleansUpAfterAFailedWrite(t *testing.T) {
-	root := fakeV1Tree(t)
-	// The pids tree is replaced by a regular file, so the mkdir under it fails with
-	// ENOTDIR and the group is left half-built after memory and cpu succeeded.
-	//
-	// A mode-based trigger was tried first and does not work: noded runs as root,
-	// the cross-compiled test binary is run as root under Docker, and root ignores
-	// the write bit -- so a 0500 directory is still writable and the create
-	// succeeded. That is exactly the false pass this whole verification pass exists
-	// to catch, and it only showed up when the Linux binary was actually run.
-	pidsTree := filepath.Join(root, cgroupPids)
-	if err := os.RemoveAll(pidsTree); err != nil {
+	root := fakeV2Tree(t)
+	dir := filepath.Join(root, "bean-sb-partial")
+	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	if err := os.WriteFile(pidsTree, []byte("not a directory"), 0o644); err != nil {
+	// pids.max is made a dangling symlink, so the write to it fails with ENOENT
+	// after the memory and cpu writes have already created files. That is the
+	// half-built group: the directory exists, some limits are in it, and the create
+	// is going to return an error.
+	//
+	// The trigger has to be something root cannot ignore. A mode-based one was tried
+	// first and does not work: noded runs as root, the cross-compiled test binary is
+	// run as root under Docker, and root ignores the write bit -- so a 0500
+	// directory is still writable and the create succeeded. That false pass only
+	// showed up when the Linux binary was actually run, which is why it is written
+	// down here. A directory in pids.max's place would fail the write too, but
+	// rmdirGroup deliberately refuses to remove a subdirectory, so the cleanup this
+	// test is asserting could not happen and the test would be measuring the trigger
+	// instead of the code.
+	if err := os.Symlink(filepath.Join(root, "no-such-dir", "pids.max"),
+		filepath.Join(dir, "pids.max")); err != nil {
 		t.Fatal(err)
 	}
 
-	h := &cgroupHost{root: root, version: cgroupV1, controllers: cgroupControllers}
+	h := &cgroupHost{root: root, controllers: cgroupControllers}
 	if _, err := h.createCgroup("sb-partial", limitsFor(&Spec{
 		SandboxID: "sb-partial", CPU: 1, MemoryMiB: 256,
 	})); err == nil {
-		t.Fatal("createCgroup succeeded with an unwritable controller tree")
+		t.Fatal("createCgroup succeeded with an unwritable limit file")
 	}
-	for _, c := range []string{cgroupMemory, cgroupCPU} {
-		if _, err := os.Stat(filepath.Join(root, c, "bean-sb-partial")); err == nil {
-			t.Errorf("%s/bean-sb-partial survived a failed create: nothing holds a "+
-				"reference to it, so nothing will ever remove it", c)
-		}
+	if _, err := os.Stat(dir); err == nil {
+		t.Errorf("%s survived a failed create: nothing holds a reference to it, so "+
+			"nothing will ever remove it", dir)
 	}
 }
 
@@ -258,15 +256,16 @@ func TestCreateCgroupCleansUpAfterAFailedWrite(t *testing.T) {
 // depends on. The tree is shared with systemd, Docker and anything else on the
 // host, and removing one of theirs is not recoverable by restarting anything.
 func TestSweepOrphansRemovesOnlyBeansOwnGroups(t *testing.T) {
-	root := fakeV1Tree(t)
-	h := newCgroupHost(root, cgroupV1)
+	root := fakeV2Tree(t)
+	h := newCgroupHost(root)
 
+	// The names a real unified tree is shared with. systemd's own slices sit right
+	// beside bean's groups in the same directory, which is what makes the prefix
+	// check load-bearing rather than decorative.
 	strangers := []string{"docker", "system.slice", "kubepods"}
-	for _, c := range cgroupControllers {
-		for _, s := range strangers {
-			if err := os.MkdirAll(filepath.Join(root, c, s), 0o755); err != nil {
-				t.Fatal(err)
-			}
+	for _, s := range strangers {
+		if err := os.MkdirAll(filepath.Join(root, s), 0o755); err != nil {
+			t.Fatal(err)
 		}
 	}
 	if _, err := h.createCgroup("sb-old", limitsFor(&Spec{SandboxID: "sb-old", MemoryMiB: 128})); err != nil {
@@ -274,20 +273,20 @@ func TestSweepOrphansRemovesOnlyBeansOwnGroups(t *testing.T) {
 	}
 
 	removed, inUse := h.SweepOrphans()
-	if removed != len(cgroupControllers) {
-		t.Errorf("swept %d directories, want %d (one per controller)", removed, len(cgroupControllers))
+	// One directory per sandbox in the unified tree, so the count is sandboxes as
+	// well as directories.
+	if removed != 1 {
+		t.Errorf("swept %d directories, want 1 (one per sandbox)", removed)
 	}
 	if inUse != 0 {
 		t.Errorf("%d directories reported in use; nothing here holds a process", inUse)
 	}
-	for _, c := range cgroupControllers {
-		if _, err := os.Stat(filepath.Join(root, c, "bean-sb-old")); err == nil {
-			t.Errorf("%s/bean-sb-old survived the sweep", c)
-		}
-		for _, s := range strangers {
-			if _, err := os.Stat(filepath.Join(root, c, s)); err != nil {
-				t.Errorf("the sweep removed %s/%s, which is not bean's: %v", c, s, err)
-			}
+	if _, err := os.Stat(filepath.Join(root, "bean-sb-old")); err == nil {
+		t.Error("bean-sb-old survived the sweep")
+	}
+	for _, s := range strangers {
+		if _, err := os.Stat(filepath.Join(root, s)); err != nil {
+			t.Errorf("the sweep removed %s, which is not bean's: %v", s, err)
 		}
 	}
 }
@@ -346,7 +345,7 @@ func TestNilCgroupHostIsTheUntouchedPath(t *testing.T) {
 	}
 	// And an empty-but-present host, which is the "cgroups requested, no usable
 	// controller" case: a node in it starts and runs unlimited.
-	empty := &cgroupHost{root: t.TempDir(), version: cgroupV1}
+	empty := &cgroupHost{root: t.TempDir()}
 	if empty.Enabled() {
 		t.Error("a host with no controllers reports limits enabled")
 	}
@@ -364,19 +363,27 @@ func TestSummaryStatesWhatIsNotEnforced(t *testing.T) {
 		t.Errorf("nil host summary does not say the VMM is unlimited: %q", s)
 	}
 
-	root := fakeV1Tree(t)
-	if err := os.RemoveAll(filepath.Join(root, cgroupMemory)); err != nil {
+	// A kernel built without the memory controller: the unified tree is there and
+	// advertises the rest, so the node starts and enforces cpu and pids. Memory is
+	// the one an operator must not assume, because it is the one --overcommit-memory
+	// depends on.
+	root := t.TempDir()
+	avail := strings.Join([]string{cgroupCPU, cgroupPids}, " ")
+	if err := os.WriteFile(filepath.Join(root, "cgroup.controllers"), []byte(avail), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	h := newCgroupHost(root, cgroupV1)
+	if err := os.WriteFile(filepath.Join(root, "cgroup.subtree_control"), nil, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	h := newCgroupHost(root)
 	s := h.Summary()
 	if !strings.Contains(s, "unavailable") || !strings.Contains(s, cgroupMemory) {
 		t.Errorf("summary does not name the missing memory controller: %q", s)
 	}
-	// v1's inability to cap swap is a real gap and has to be stated rather than
-	// left as an absence.
-	if !strings.Contains(s, "swap") {
-		t.Errorf("v1 summary does not mention that swap is uncapped: %q", s)
+	// And it says which interface it found, because "v2" is the claim that the
+	// ceiling bounds swap as well as RAM.
+	if !strings.Contains(s, "v2") {
+		t.Errorf("summary does not name the cgroup version: %q", s)
 	}
 }
 
@@ -408,7 +415,7 @@ func TestLimitsForUsesTheSandboxSpec(t *testing.T) {
 	// A guest with no memory limit must produce no memory write at all, rather
 	// than a limit of the headroom alone -- which would be a ceiling below the
 	// 512 MiB configureAndBoot defaults the guest to, and would kill it.
-	h := &cgroupHost{root: t.TempDir(), version: cgroupV2, controllers: cgroupControllers}
+	h := &cgroupHost{root: t.TempDir(), controllers: cgroupControllers}
 	if w := h.writesFor(cgroupMemory, unsized); len(w) != 0 {
 		t.Errorf("writesFor produced %+v for an unsized spec", w)
 	}
@@ -418,7 +425,7 @@ func TestLimitsForUsesTheSandboxSpec(t *testing.T) {
 // kernel rejects a quota below 1ms, and a create must not fail over a sandbox
 // asking for a thousandth of a core.
 func TestCPUQuotaIsFlooredAtTheKernelMinimum(t *testing.T) {
-	h := &cgroupHost{root: t.TempDir(), version: cgroupV2, controllers: cgroupControllers}
+	h := &cgroupHost{root: t.TempDir(), controllers: cgroupControllers}
 	w := h.writesFor(cgroupCPU, cgroupLimits{CPUCores: 0.000001})
 	if len(w) != 1 || w[0].value != "1000 100000" {
 		t.Errorf("writesFor cpu = %+v, want a quota floored at 1000us", w)

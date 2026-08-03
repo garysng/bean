@@ -32,6 +32,11 @@ type Overcommit struct {
 	// rather than only the scheduler's ledger -- now exists, but it is off unless
 	// the node runs with --fc-cgroups. On a node without it nothing has changed and
 	// this must stay at 1.0.
+	//
+	// The ceiling also has to bound swap, not just RAM, or overcommitting trades a
+	// killed process for a thrashing host and the guest cannot tell the difference
+	// from a hang. That is why --fc-cgroups requires cgroup v2 and refuses to start
+	// on v1: see internal/node/runtime/cgroup.go.
 	Memory float64
 }
 

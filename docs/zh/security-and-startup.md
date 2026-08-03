@@ -45,7 +45,7 @@ CI 使用,**没有任何隔离**,不在下表里也不该用于不可信代码�
 | guest 内资源自限 | ✅ | guest 内核自管,能耗尽的只有自己 VM 的资源 |
 | **jailer(chroot + 设备白名单)** | 📐 | **未实现**。noded 直接 exec firecracker 二进制。chroot 与收窄的 `/dev` 属 GitHub #20 phase 2,卡在「把每 sandbox 的 dm 设备放进 jail」这一步 —— 见 [jailer.md](../jailer.md) §3 |
 | **降权(独立 uid/gid)** | ⚠️ | 已实现,**默认关**,`--fc-vmm-uid` / `--fc-vmm-gid`。把 VMM 降到非 root uid;但**不收窄它能看见什么**(见下) |
-| **宿主侧 cgroup 包裹 FC 进程** | ⚠️ | 已实现,**默认关**,`--fc-cgroups`。按每 sandbox 自己的 spec 给内存上限、CPU 配额与 pid 上限。cgroup v1 与 v2 都支持。不带这个 flag 的节点行为完全不变,也没有内核强制的限制 |
+| **宿主侧 cgroup 包裹 FC 进程** | ⚠️ | 已实现,**默认关**,`--fc-cgroups`。按每 sandbox 自己的 spec 给内存上限(RAM **与** swap)、CPU 配额与 pid 上限。**要求 cgroup v2**;v1 的节点会拒绝启动,而不是不带限制地跑起来。不带这个 flag 的节点行为完全不变,也没有内核强制的限制 |
 | **FC 进程的 rlimit** | ⚠️ | `RLIMIT_NOFILE` 与 `RLIMIT_NPROC`,只在降权开启时施加(它们随 `--fc-vmm-uid` 一起走) |
 
 之前这一节把 jailer 和 cgroup 写成「P2 交付」,是错的 —— 它们从未实现。
@@ -64,23 +64,40 @@ CI 使用,**没有任何隔离**,不在下表里也不该用于不可信代码�
 会是 wrapper 的,`killVMM` 的 `kill(-pid)` 就会信错进程组。
 
 **cgroup 现在做了什么、没做什么**:开了 `--fc-cgroups` 之后 VMM 待在一个 cgroup 里,
-内存上限由其 guest 声明的 RAM 加一段固定余量推出,CPU 配额来自 machine config 拿到的
-同一个 vCPU 数,再加一个 pid 上限。这就是 `overcommit.go` 与 `cmd/noded/main.go` 都点名
+内存上限由其 guest 声明的 RAM 加一段固定余量推出,swap 直接禁掉(`memory.swap.max=0`),
+CPU 配额来自 machine config 拿到的
+同一个 vCPU 数,再加一个 pid 上限。限住 swap 才让这个上限成为「停下」而不是「变慢」,
+这也正是必须要求 v2 的原因,见下。这就是 `overcommit.go` 与 `cmd/noded/main.go` 都点名
 的、把内存超卖抬到 1.0 以上的前置条件 —— 另一个前置条件,即「guest 实际占用比声明低
 多少」的测量,仍然不存在,所以上限的余量是刻意给宽而不是给紧。**不带这个 flag
 则什么都没变**:承诺量只是调度器的账本,宿主内存压力下没有内核层面的公平性保证
 (见 architecture.md D12)。
 
-cgroup 这部分有两个限制,写出来而不是留成空白:
+**cgroup v2 是节点硬性要求,理由就是 swap。** 带 `--fc-cgroups` 的节点在 v1 宿主上会
+拒绝启动。这不是偏好更新的接口:
 
-- **cgroup v1 无法限制 swap。** v2 的 `memory.swap.max=0` 在 v1 没有对等物,除非内核以
-  `swapaccount=1` 启动,而核对过的发行版内核默认都是关的。在 v1 宿主上这个上限管住的
-  是 RAM,不是 swap。版本在运行时探测,启动日志会点名是哪一版;这次工作实测的目标宿主
-  是 v1、controller 分开挂载。
-- **没有可用 controller 的节点照样启动**,不带任何限制,并且明说这件事。为了强制一个
-  它本来就没有也跑得好的限制而拒绝启动,等于把一台好节点摘出服务。代价是「请求的限制」
-  与「生效的限制」可能不同,这也是启动那行日志既点名生效的 controller、也点名**缺失**
-  的那些的原因。
+- v1 唯一能算上 swap 的上限是 `memory.memsw.limit_in_bytes`,而它**只有**内核以
+  `swapaccount=1` 启动时才存在 —— 核对过的发行版内核默认都是关的。于是 v1 的内存上限
+  只管住 RAM 不管 swap,而 VMM 撞到上限时内核最省事的办法就是把页换到 swap:group 始终
+  在上限之内,每行日志都报告限制已生效,宿主却在颠簞。而 guest 分不清自己的页在宿主
+  swap 上和卡死有什么区别。
+- 这恰恰就是这个上限存在要防的失败,而且恰恰发生在这个特性所服务的场景里:为不可信的
+  评测负载超卖内存。在 v1 上说「限制已经就位」,在最要紧的那个维度上是假话,比干脆不
+  支持 v1 更糟。v2 把它写作 `memory.swap.max`,不需要任何启动参数;bean 把它设为 0。
+- 这个要求并不苛刻。systemd 从 v243 起就默认统一层级,所以 **Ubuntu 22.04+、Debian 11+、
+  RHEL 9+** 以及更新的发行版本来就是 v2。(Ubuntu 20.04 是 v1 —— 它把默认值改回去一直
+  改到 21.10,所以 20.04 的宿主不满足这个要求。)
+
+另有两点写出来而不是留成空白:
+
+- **v1 是被拒绝,不是被静默降级。** 区别就是要点:把 cgroup 关掉的节点是运维方知情的
+  选择,启动时也明说;而因为是 v1 就悄悄退成毫无强制的节点,会让人以为存在一条边界,
+  而那里其实没有 —— 并且会在此基础上去调高 `--overcommit-memory`。那与本节最初那处错误
+  声明属于同一类错误,只是发生在代码里而不是文字里。
+- **内核缺某个 controller 的节点照样启动**,带上其余的限制,并且明说这件事。那里拒绝
+  启动等于为了一个启动日志本来就会点名的缺失,把一台好节点摘出服务 —— 这和 v1 不同,
+  v1 给的是一个**看起来**生效的上限。代价是「请求的限制」与「生效的限制」可能不同,
+  这也是启动那行日志既点名生效的 controller、也点名**缺失**的那些的原因。
 
 **降权的 uid 是每节点一个,不是每 sandbox 一个。** 节点上所有 sandbox 共用它,所以一个
 被攻陷的 VMM 能够到另一个 sandbox 的目录。每 sandbox 一个 uid 需要预留一段 uid 区间和
@@ -106,7 +123,7 @@ cgroup 这部分有两个限制,写出来而不是留成空白:
 - ✅ pids/fork 炸弹：guest 内核自限（能耗尽的只有自己 VM 的资源）
 - 📐 jailer：chroot + 设备白名单 —— **未实现**（GitHub #20 phase 2）
 - ⚠️ FC 进程独立 uid/gid —— 已实现,不设 `--fc-vmm-uid` 则不生效
-- ⚠️ 宿主侧 cgroup 包裹 FC 进程（cpu/mem/pids）—— 已实现,不设 `--fc-cgroups` 则不生效
+- ⚠️ 宿主侧 cgroup 包裹 FC 进程（cpu/mem+swap/pids）—— 已实现,不设 `--fc-cgroups` 则不生效;要求 cgroup v2,v1 宿主拒绝启动
 
 ### A4. 网络安全 📐
 

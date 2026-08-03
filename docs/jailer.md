@@ -21,7 +21,7 @@ comment claims** even today. Both are established below from source and API spec
 | Item | Status | Note |
 |---|---|---|
 | jailer wired into noded | 📐 | No code. Phase 2, and still blocked on §8's item 4 |
-| Host cgroup around the VMM | ⚠️ | **Phase 1 delivered**, off unless `--fc-cgroups`. `internal/node/runtime/cgroup.go`. Both v1 and v2; the version is detected at runtime because §7 below assumed v2 and the target host is v1 |
+| Host cgroup around the VMM | ⚠️ | **Phase 1 delivered**, off unless `--fc-cgroups`. `internal/node/runtime/cgroup.go`. **cgroup v2 only, and required**: a v1 node refuses to start rather than run unlimited, because v1 cannot cap swap (§7) |
 | Privilege drop | ⚠️ | **Phase 1 delivered**, off unless `--fc-vmm-uid`. `internal/node/runtime/vmmcreds.go`. Uid only — the mount namespace and the device allowlist are still phase 2, so the process is unprivileged with a full view of the host filesystem |
 | rlimits (`nofile`, `nproc`) | ⚠️ | Phase 1 delivered, applied with the privilege drop |
 | Device allowlist | 📐 | No code, and not reachable without a mount namespace (§7 item 2) |
@@ -195,7 +195,7 @@ Reachable with `SysProcAttr` plus writing cgroup files from noded:
 
 | Control | Mechanism | Notes |
 |---|---|---|
-| cpu/memory/pids limits | write the limits in a per-sandbox cgroup dir, then put the child's pid in `cgroup.procs` | This is the part `overcommit.go:30` is blocked on. **No path change, no snapshot risk.** Delivered. **Correction:** this row originally named `cpu.max`, `memory.max` and `memory.swap.max=0`, which are cgroup **v2** interfaces, and the target host is **v1 with controllers mounted separately** (`/sys/fs/cgroup` is tmpfs, no `cgroup.controllers`, one directory per controller). On such a host those filenames do not exist, the writes fail with ENOENT and nothing enforces anything. The version is therefore detected at runtime: v1 writes `memory.limit_in_bytes` and `cpu.cfs_period_us`/`cpu.cfs_quota_us` under per-controller trees, v2 writes `memory.max` and `cpu.max` under one unified tree. `pids.max` is the one file both spell alike. v1 also **cannot cap swap** — `memory.memsw.limit_in_bytes` needs `swapaccount=1` at boot |
+| cpu/memory/pids limits | write `cpu.max`, `memory.max`, `memory.swap.max=0` and `pids.max` in a per-sandbox group under the unified tree, then put the child's pid in `cgroup.procs` | This is the part `overcommit.go:30` is blocked on. **No path change, no snapshot risk.** Delivered, **v2 only**. This row once named the v2 filenames while the development host was v1, so both hierarchies were supported for a while; that support has been removed and **v2 is now a node requirement**, on one ground: **v1 cannot cap swap.** `memory.memsw.limit_in_bytes` needs `swapaccount=1` at boot (off by default), so a v1 ceiling bounds RAM only and a VMM at its limit is pushed into swap instead of stopped — the host thrashes while the limit reports as enforced, which is the exact failure overcommitting memory depends on this limit to prevent. A v1 host is therefore **refused at startup**, not silently downgraded to no limits. Floor: Ubuntu 22.04+, Debian 11+, RHEL 9+ (systemd has defaulted to the unified hierarchy since v243; Ubuntu 20.04 is v1). Note `cgroup.subtree_control` must be written on the parent or a child group has no controller files at all and the limits are silently absent |
 | Privilege drop | `SysProcAttr.Credential{Uid, Gid}` | Requires chowning the sandbox dir, the dm device node and `/dev/kvm` to that uid |
 | No new privileges | `prctl(PR_SET_NO_NEW_PRIVS)` — needs a `fork/exec` hook or a tiny re-exec shim | ~~Go's `SysProcAttr` has `NoNewPrivs` on Linux~~ **This was wrong.** Checked against go1.26.1: `syscall.SysProcAttr` has `Credential`, `AmbientCaps`, `Cloneflags` and no `NoNewPrivs`. The prctl needs a shim, and a shim is ruled out for the same reason `netns_linux.go` rules one out — the pid noded records would be the shim's, so `killVMM`'s `kill(-pid)` would signal the wrong group. It arrives with jailer, which does the prctl itself |
 | netns | `setns` before exec, or keep `ip netns exec` | Achievable without jailer |
@@ -231,7 +231,9 @@ blocking something else.**
 **Phase 1 — cgroup + credential drop + rlimits, no chroot. ⚠️ Delivered, off by default.**
 Delivers item 4 and the resource-fairness enforcement that `overcommit.go` and
 `cmd/noded/main.go:99` both name as the prerequisite for raising memory overcommit above 1.0.
-Touches no path. Cannot break restore or fork.
+Touches no path. Cannot break restore or fork. The cgroup half **requires cgroup v2** and a v1
+node refuses to start with `--fc-cgroups`; the credential drop and the rlimits are independent
+of the hierarchy.
 
 What the delivered form does *not* include, against the list above: item 3's fd hygiene and
 environment wipe (jailer does both unconditionally; nothing here does either), and

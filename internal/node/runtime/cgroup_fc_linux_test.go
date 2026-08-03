@@ -30,8 +30,8 @@ func TestStartVMMPutsThePidInItsCgroup(t *testing.T) {
 	dir := t.TempDir()
 	bin, pidFile, _ := stubVMM(t, dir)
 
-	root := fakeV1Tree(t)
-	h := newCgroupHost(root, cgroupV1)
+	root := fakeV2Tree(t)
+	h := newCgroupHost(root)
 	rt := &FCRuntime{FirecrackerBin: bin, Cgroups: h}
 
 	spec := &Spec{SandboxID: "sb-cg", CPU: 1, MemoryMiB: 512}
@@ -51,17 +51,15 @@ func TestStartVMMPutsThePidInItsCgroup(t *testing.T) {
 	// on. Checking against the stub's own view keeps this test honest if a wrapper
 	// is ever introduced.
 	want := waitFile(t, pidFile)
-	for _, c := range cgroupControllers {
-		procs := filepath.Join(root, c, "bean-sb-cg", "cgroup.procs")
-		b, err := os.ReadFile(procs)
-		if err != nil {
-			t.Errorf("%s: %v: the VMM was never added to its %s group, so that "+
-				"limit does not apply to it", procs, err, c)
-			continue
-		}
-		if got := strings.TrimSpace(string(b)); got != want {
-			t.Errorf("%s holds %q, want the VMM's pid %q", procs, got, want)
-		}
+	// One group in the unified tree, so one cgroup.procs holds the pid for every
+	// controller at once.
+	procs := filepath.Join(root, "bean-sb-cg", "cgroup.procs")
+	b, err := os.ReadFile(procs)
+	if err != nil {
+		t.Errorf("%s: %v: the VMM was never added to its group, so none of the "+
+			"limits apply to it", procs, err)
+	} else if got := strings.TrimSpace(string(b)); got != want {
+		t.Errorf("%s holds %q, want the VMM's pid %q", procs, got, want)
 	}
 	if strconv.Itoa(vm.cmd.Process.Pid) != want {
 		t.Errorf("vm.cmd pid is %d but the VMM reports %s", vm.cmd.Process.Pid, want)
@@ -136,15 +134,15 @@ func TestDestroyRemovesTheCgroup(t *testing.T) {
 	dir := t.TempDir()
 	bin, _, _ := stubVMM(t, dir)
 
-	root := fakeV1Tree(t)
-	h := newCgroupHost(root, cgroupV1)
+	root := fakeV2Tree(t)
+	h := newCgroupHost(root)
 	rt := &FCRuntime{FirecrackerBin: bin, Cgroups: h, vms: map[string]*fcVM{}}
 
 	cg, err := h.createCgroup("sb-destroy", limitsFor(&Spec{SandboxID: "sb-destroy", MemoryMiB: 256}))
 	if err != nil {
 		t.Fatal(err)
 	}
-	created := append([]string(nil), cg.dirs...)
+	created := cg.dir
 	vm := &fcVM{id: "sb-destroy", dir: dir, cgroup: cg, done: make(chan struct{})}
 	if err := rt.startVMM(t.Context(), vm, filepath.Join(dir, "api.sock")); err != nil {
 		t.Fatal(err)
@@ -156,12 +154,53 @@ func TestDestroyRemovesTheCgroup(t *testing.T) {
 	if err := rt.Destroy(t.Context(), "sb-destroy", true); err != nil {
 		t.Fatalf("Destroy: %v", err)
 	}
-	for _, d := range created {
-		if _, err := os.Stat(d); err == nil {
-			t.Errorf("%s survived Destroy: an orphaned cgroup is invisible to every "+
-				"other subsystem and stays for the life of the host", d)
-		}
+	if _, err := os.Stat(created); err == nil {
+		t.Errorf("%s survived Destroy: an orphaned cgroup is invisible to every "+
+			"other subsystem and stays for the life of the host", created)
 	}
+}
+
+// TestDetectCgroupHostRefusesAnythingButV2 is the test that goes red if a v1 host
+// starts anyway.
+//
+// The distinction it defends: a node with cgroups switched off runs unlimited by
+// an operator's choice and says so, while a node that silently dropped to no
+// enforcement because it was v1 leaves somebody believing there is a boundary
+// where there is none. detectCgroupHost must therefore return an error and never
+// a nil host with a nil error -- the latter is indistinguishable, at the call
+// site, from "not configured".
+//
+// This runs against the real /sys/fs/cgroup, so it asserts a property of the
+// outcome rather than a fixed answer: the machine it runs on may be either
+// version, and both are meaningful results.
+func TestDetectCgroupHostRefusesAnythingButV2(t *testing.T) {
+	h, err := detectCgroupHost()
+	if err != nil {
+		// A v1 or unreadable host. The error is the whole point, so it has to name
+		// the reason and the remedy rather than just failing.
+		for _, want := range []string{"v2", "swap", "--fc-cgroups"} {
+			if !strings.Contains(err.Error(), want) {
+				t.Errorf("refusal does not mention %q, so an operator cannot act on "+
+					"it: %v", want, err)
+			}
+		}
+		if h != nil {
+			t.Errorf("a host was returned alongside the refusal: %+v; the caller uses "+
+				"a non-nil host to mean limits are in force", h)
+		}
+		t.Logf("this host is not cgroup v2, so the refusal path was exercised: %v", err)
+		return
+	}
+	// A v2 host. It must not have silently concluded "no limits": that is the
+	// downgrade this function exists to rule out.
+	if h == nil {
+		t.Fatal("detectCgroupHost returned no host and no error, which the caller " +
+			"cannot tell apart from cgroups being switched off")
+	}
+	if !strings.Contains(h.Summary(), "v2") {
+		t.Errorf("summary does not identify the hierarchy: %q", h.Summary())
+	}
+	t.Logf("this host is cgroup v2: %s", h.Summary())
 }
 
 // What none of the above establishes, stated so it is not mistaken for covered:

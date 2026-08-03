@@ -93,7 +93,16 @@ func NewFCTier(cfg FCTierConfig) (Runtime, error) {
 	// in docs/security-and-startup.md had, and it is worse here because somebody
 	// would raise memory overcommit on the strength of it.
 	if cfg.Cgroups {
-		rt.Cgroups = detectCgroupHost()
+		// Fatal on a v1 host, rather than a fall back to running unlimited. An
+		// operator who asked for limits and got none silently would raise
+		// --overcommit-memory believing the kernel enforces a ceiling; a node that
+		// refuses to start says so where it cannot be missed. Not asking for limits
+		// at all remains fine -- that is the else branch below.
+		h, err := detectCgroupHost()
+		if err != nil {
+			return nil, fmt.Errorf("fc tier: %w", err)
+		}
+		rt.Cgroups = h
 		slog.Info("VMM resource limits: " + rt.Cgroups.Summary())
 		// Swept here, at startup, before this process has created anything: every
 		// bean group standing now belongs to a previous noded. rmdir refuses a group

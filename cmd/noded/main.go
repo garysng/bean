@@ -106,8 +106,10 @@ func main() {
 			"against real workloads, and a ceiling set too low is not a slow "+
 			"sandbox but a killed one. Turning it on is the prerequisite for "+
 			"raising --overcommit-memory: without it the committed quantity is only "+
-			"the scheduler's ledger. Both cgroup v1 and v2 are supported; a node "+
-			"with neither logs that fact and runs with no limits")
+			"the scheduler's ledger. Requires cgroup v2 (Ubuntu 22.04+, Debian 11+ "+
+			"and RHEL 9+ already are); a v1 node refuses to start rather than run "+
+			"unlimited, because v1 cannot cap swap and so cannot stop a guest at its "+
+			"ceiling instead of letting it thrash the host")
 	fcVMMUid := flag.Int("fc-vmm-uid", 0,
 		"run the VMM as this uid instead of root (fc runtime). 0 leaves it as "+
 			"noded's own identity, which is what it has always been. The uid needs "+
