@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -14,6 +15,7 @@ import (
 	"time"
 
 	"github.com/garysng/bean/internal/node/image"
+	"github.com/garysng/bean/internal/node/network"
 	"github.com/garysng/bean/internal/node/vsock"
 )
 
@@ -39,6 +41,40 @@ const guestRootfsDevice = "/dev/vdb"
 // have to match on restore. Deriving it from the sandbox would make that key
 // depend on which sandbox took the snapshot.
 const guestIfaceID = "eth0"
+
+// guestIPBootArg renders the kernel's ip= parameter for a sandbox's layout, or ""
+// when the sandbox has no network.
+//
+// Registering the NIC gives the guest a device; it does not give it an address.
+// Without this the guest boots with eth0 present, down, and unaddressed, which is
+// the state every assertion in this package tolerates: the NIC is registered before
+// InstanceStart, the VMM is in the right namespace, the tap exists, the host rules
+// are installed, and nothing can reach anything.
+//
+// The kernel does the configuring, from the command line, before init runs. That is
+// the reason for choosing it over having the agent do the work: the agent is PID 1
+// and does several things before it is reachable -- it pivots to the user rootfs and
+// binds a vsock listener -- so an interface configured there would be absent during
+// the guest's own early startup. It also means a guest whose agent fails still has a
+// network to debug over.
+//
+// The form is the full colon-separated one rather than ip=dhcp, because there is no
+// DHCP server in the namespace. Fields are
+// client:server:gateway:netmask:hostname:device:autoconf. The empty server and
+// hostname are deliberate: there is no NFS root, and the guest's name is not the
+// network's business. The trailing "off" stops the kernel probing for DHCP or BOOTP,
+// which on a link with nothing listening costs seconds of boot before it gives up.
+//
+// Every value is rendered from a net.IP or a constant, so none can contain the
+// whitespace the kernel command line splits on and does not let anything quote.
+func guestIPBootArg(l *network.Layout) string {
+	if l == nil {
+		return ""
+	}
+	mask := net.IP(l.GuestSubnet.Mask).String()
+	return fmt.Sprintf(" ip=%s::%s:%s::%s:off",
+		l.GuestIP, l.GuestGateway, mask, guestIfaceID)
+}
 
 // FCRuntime runs each sandbox as a Firecracker microVM.
 //
@@ -76,6 +112,15 @@ type FCRuntime struct {
 	// which is the point: a boot that fails leaves no other evidence, and this
 	// is how that evidence is recovered.
 	DebugConsole bool
+	// GuestDNS is the resolver the in-guest agent writes into the guest's
+	// /etc/resolv.conf. Empty leaves the user image's own file alone.
+	//
+	// Carried here because the boot arguments are the only channel to the agent:
+	// it is PID 1, started by the kernel, with no environment and no config file.
+	// FCConfig validated and logged this value before this field existed and then
+	// dropped it, so a node configured with a resolver produced guests that could
+	// not resolve and said nothing about why.
+	GuestDNS string
 
 	// CPUTemplate masks CPU features from guests so a memory snapshot is not
 	// bound to the host that produced it. See cpu_template.go — it must be set
@@ -586,8 +631,9 @@ func (r *FCRuntime) configureAndBoot(ctx context.Context, vm *fcVM, spec *Spec) 
 		console = "console=ttyS0"
 	}
 	bootArgs := fmt.Sprintf(
-		"%s reboot=k panic=-1 pci=off init=/bean/beand -- --listen vsock:%d --pivot %s",
-		console, agentVsockPort, guestRootfsDevice)
+		"%s reboot=k panic=-1 pci=off%s init=/bean/beand -- --listen vsock:%d --pivot %s%s",
+		console, guestIPBootArg(spec.Network), agentVsockPort, guestRootfsDevice,
+		GuestDNSBootArgs(r.GuestDNS))
 	if err := vm.client.put(ctx, "/boot-source", fcBootSource{
 		KernelImagePath: r.KernelPath, BootArgs: bootArgs,
 	}); err != nil {

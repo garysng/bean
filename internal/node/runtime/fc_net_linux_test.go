@@ -128,10 +128,20 @@ func (rec *fcRecorder) requireBody(t *testing.T, path string) []byte {
 // bootVMAgainst runs configureAndBoot with layout, returning the recorder.
 func bootVMAgainst(t *testing.T, layout *network.Layout) *fcRecorder {
 	t.Helper()
+	return bootVMWithDNS(t, layout, "")
+}
+
+// bootVMWithDNS is bootVMAgainst with a node resolver configured, for the tests
+// that check what reaches the guest's command line.
+func bootVMWithDNS(t *testing.T, layout *network.Layout, guestDNS string) *fcRecorder {
+	t.Helper()
 	rec := startFCRecorder(t)
 	dir := t.TempDir()
 
-	rt := &FCRuntime{KernelPath: "/does/not/need/to/exist/vmlinux"}
+	rt := &FCRuntime{
+		KernelPath: "/does/not/need/to/exist/vmlinux",
+		GuestDNS:   guestDNS,
+	}
 	vm := &fcVM{
 		id:     "sb-net",
 		dir:    dir,
@@ -265,5 +275,141 @@ func TestLoadSnapshotWithoutMemoryRegistersNIC(t *testing.T) {
 	if rec.indexOf("/snapshot/load") >= 0 {
 		t.Errorf("a checkpoint with no memory must boot rather than load; requests: %v",
 			rec.paths())
+	}
+}
+
+// The tests below are about the guest's command line rather than its devices, and
+// they exist because every assertion above passed on a stack where no guest could
+// reach anything. A registered NIC gives the guest a device; nothing in the API
+// gives it an address. Measured on real hardware, the guest came up with eth0
+// present, down and unaddressed -- and the three reachability denials in
+// hack/guest-egress-probe.sh all "passed", because nothing was reachable in either
+// direction.
+
+// bootArgsOf returns the kernel command line the boot source was configured with.
+func bootArgsOf(t *testing.T, rec *fcRecorder) string {
+	t.Helper()
+	var src fcBootSource
+	if err := json.Unmarshal(rec.requireBody(t, "/boot-source"), &src); err != nil {
+		t.Fatalf("decode boot source: %v", err)
+	}
+	return src.BootArgs
+}
+
+// TestBootArgsCarryTheGuestAddress is the check whose absence let a guest boot
+// with an interface it could not use. The kernel configures eth0 from ip= before
+// init runs; without it the address exists only in the host's layout.
+func TestBootArgsCarryTheGuestAddress(t *testing.T) {
+	layout := testLayout(t)
+	args := bootArgsOf(t, bootVMAgainst(t, layout))
+
+	// Asserted as the whole parameter rather than by substring, because the field
+	// order is what the kernel parses positionally: a gateway written where the
+	// netmask belongs configures an interface that comes up and routes nowhere.
+	mask := net.IP(layout.GuestSubnet.Mask).String()
+	want := "ip=" + layout.GuestIP.String() + "::" + layout.GuestGateway.String() +
+		":" + mask + "::" + guestIfaceID + ":off"
+	if !strings.Contains(args, want) {
+		t.Errorf("boot args do not configure the interface.\n got: %s\nwant to contain: %s\n"+
+			"without this the guest boots with eth0 down and unaddressed, which no "+
+			"other assertion in this package can tell apart from a working network",
+			args, want)
+	}
+}
+
+// TestBootArgsOmitTheAddressWithoutANetwork keeps the unconfigured node's command
+// line byte-identical to what it was before ip= existed. A stray ip= with empty
+// fields is not inert: the kernel would try to autoconfigure and stall the boot
+// probing a link with nothing on it.
+func TestBootArgsOmitTheAddressWithoutANetwork(t *testing.T) {
+	args := bootArgsOf(t, bootVMAgainst(t, nil))
+	if strings.Contains(args, "ip=") {
+		t.Errorf("boot args carry ip= with no layout: %s", args)
+	}
+}
+
+// TestBootArgsCarryTheResolver covers the other half that was computed and
+// dropped. GuestDNSBootArgs was called only to build a log line, so the node
+// reported a resolver it never passed on -- and the log was the only evidence.
+func TestBootArgsCarryTheResolver(t *testing.T) {
+	args := bootArgsOf(t, bootVMWithDNS(t, testLayout(t), "223.5.5.5"))
+	if !strings.Contains(args, "--guest-dns 223.5.5.5") {
+		t.Errorf("boot args do not carry the resolver: %s", args)
+	}
+	// After the -- separator, or the kernel takes it as one of its own parameters
+	// and the agent never sees it.
+	sep := strings.Index(args, " -- ")
+	if sep < 0 {
+		t.Fatalf("no -- separator in boot args: %s", args)
+	}
+	if strings.Index(args, "--guest-dns") < sep {
+		t.Errorf("--guest-dns is before the -- separator, so the kernel consumes it "+
+			"instead of the agent: %s", args)
+	}
+}
+
+// TestBootArgsOmitTheResolverWhenUnset pins the same untouched-command-line
+// promise for the resolver: an empty --guest-dns is a new argument for the agent
+// to interpret, not the absence of one.
+func TestBootArgsOmitTheResolverWhenUnset(t *testing.T) {
+	args := bootArgsOf(t, bootVMWithDNS(t, testLayout(t), ""))
+	if strings.Contains(args, "guest-dns") {
+		t.Errorf("boot args mention guest-dns with none configured: %s", args)
+	}
+}
+
+// TestBootArgsPutTheAddressBeforeTheSeparator is the mirror of the resolver's
+// ordering check. ip= is a kernel parameter, and after the -- it would reach the
+// agent, which has no such flag and would fail to parse its own command line.
+func TestBootArgsPutTheAddressBeforeTheSeparator(t *testing.T) {
+	args := bootArgsOf(t, bootVMAgainst(t, testLayout(t)))
+	sep := strings.Index(args, " -- ")
+	if sep < 0 {
+		t.Fatalf("no -- separator in boot args: %s", args)
+	}
+	if ip := strings.Index(args, "ip="); ip > sep {
+		t.Errorf("ip= is after the -- separator, where the kernel never reads it "+
+			"and the agent cannot parse it: %s", args)
+	}
+}
+
+// TestNewFCTierPassesTheResolverToTheRuntime closes the gap the tests above left
+// open. They set GuestDNS on the struct directly, so they pass whether or not
+// anything assigns it from the config -- which is exactly the bug that shipped:
+// NewFCTier validated the resolver, rendered it into a log line, and never
+// assigned it. Removing that assignment leaves every other test in this file green.
+//
+// Needs a real /dev/kvm and real files, so it skips rather than fails on a host
+// without them. That is a weaker guard than the rest of the package and it is the
+// only place the wiring is observable: the alternative is asserting on a log line.
+func TestNewFCTierPassesTheResolverToTheRuntime(t *testing.T) {
+	fcBin := os.Getenv("BEAN_TEST_FC_BIN")
+	kernel := os.Getenv("BEAN_TEST_KERNEL")
+	if fcBin == "" || kernel == "" {
+		t.Skip("set BEAN_TEST_FC_BIN and BEAN_TEST_KERNEL to check the tier wiring")
+	}
+	if _, err := os.Stat("/dev/kvm"); err != nil {
+		t.Skipf("no /dev/kvm: %v", err)
+	}
+
+	dir := t.TempDir()
+	rt, err := NewFCTier(FCTierConfig{
+		FirecrackerBin: fcBin,
+		KernelPath:     kernel,
+		BaseDir:        filepath.Join(dir, "sandboxes"),
+		ImageDir:       filepath.Join(dir, "images"),
+		GuestDNS:       "223.5.5.5",
+	})
+	if err != nil {
+		t.Fatalf("NewFCTier: %v", err)
+	}
+	fc, ok := rt.(*FCRuntime)
+	if !ok {
+		t.Fatalf("NewFCTier returned %T, want *FCRuntime", rt)
+	}
+	if fc.GuestDNS != "223.5.5.5" {
+		t.Errorf("GuestDNS = %q, want the configured resolver; the tier validated it "+
+			"and dropped it, so guests booted unable to resolve while the node's log "+
+			"reported a resolver was configured", fc.GuestDNS)
 	}
 }

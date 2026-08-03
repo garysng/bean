@@ -117,5 +117,8 @@ for _ in $(seq 1 40); do
 done
 
 echo "node did not register; logs:" >&2
-tail -20 "$RUN/api.log" "$RUN/noded.log" >&2
+# -n 20 rather than -20: GNU tail rejects the obsolescent form when more than one
+# file is named, so this printed "option used in invalid context" instead of the
+# logs -- swallowing the diagnostic in the one situation it exists to produce.
+tail -n 20 "$RUN/api.log" "$RUN/noded.log" >&2
 exit 1

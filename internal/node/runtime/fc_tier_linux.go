@@ -62,6 +62,11 @@ func NewFCTier(cfg FCTierConfig) (Runtime, error) {
 		slog.Info("guest resolver configured", "nameserver", cfg.GuestDNS,
 			"agentArgs", GuestDNSBootArgs(cfg.GuestDNS))
 	}
+	// Assigned, not merely logged. This line was missing: the value was validated
+	// at startup and rendered into the log message above, which made the node
+	// report a resolver it never passed to a guest -- the log was the only evidence
+	// and it said the feature was on.
+	rt.GuestDNS = cfg.GuestDNS
 	rt.SnapshotCache = cfg.SnapshotCache
 	if !cfg.SnapshotCache.Enabled() {
 		// Stated because the growth is otherwise invisible: the cache consumes no

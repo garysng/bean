@@ -90,3 +90,6 @@ func GuestDNSBootArgs(guestDNS string) string {
 	}
 	return " --guest-dns " + guestDNS
 }
+
+// guestIPBootArg is in fc_linux.go, beside the NIC registration it pairs with and
+// where guestIfaceID is declared.
