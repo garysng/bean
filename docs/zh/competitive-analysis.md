@@ -142,6 +142,67 @@ Orchestrate（`@application`/`@function` serverless 编排,每 function 独占 s
 > vCPU,比两者都快但做的事也少得多,所以它不是用来对标的那个数。三种操作、三种开销 ——
 > 见 [snapshot-resume.md](snapshot-resume.md) §0。
 
+## 2a. 网络维度横向对比（2026-08 调研）
+
+加这一节是因为两个待决问题都取决于它：bean 的 guest agent 该走 vsock 还是走 IP
+（[#27](https://github.com/garysng/bean/issues/27) 数据平面），以及出网过滤该留在
+FORWARD 还是移到 prerouting（[network.md](../network.md) §5a）。现在两个问题都有
+一手证据答案，其中一个否定了 bean 原本打算做的事。
+
+证据等级逐行标注。**代码**指读了规则构造本身；**文档**指只有厂商文档 ——
+网络这块的文档通常只描述 API 表面，不描述过滤器。
+
+| 平台 | 单沙箱拓扑 | 出网默认 | 过滤器挂在哪 | guest 能否访问宿主 | agent 传输 |
+|---|---|---|---|---|---|
+| **E2B**（代码） | 一个 netns，veth + tap0；guest 在每个沙箱里都是固定的 `169.254.0.21`，靠命名空间去重 | 放行 | **nftables prerouting，优先级 −150**，**只匹配入接口** | ✅ 有意为之，在 `192.0.2.1`（TEST-NET-1） | **IP** —— envd 监听 `0.0.0.0:49983` |
+| **AgentENV**（代码） | 一个 netns，tap0 + veth pair | 放行 | FORWARD，**每条规则**都带 `-i tap0 -o vpeer` | ✅ 在 `veth_host_ip/32`，排在 reject 之前 | **IP** |
+| Modal（文档） | 未说明 | 放行 | 未说明（有 `block_network`、CIDR + 域名白名单） | 不适用 —— gVisor 而非 VM | 不适用 |
+| Daytona（文档） | 每沙箱独立网络栈 | 放行 | 未说明（有 `networkBlockAll`、≤5 条 CIDR 白名单） | 未说明 | 不适用 |
+| Fly.io（文档） | 每 Machine 一个 **/112 IPv6**，取自 `fdaa::/16`，org/host/instance 编码在位里 | 放行 | 按其 6PN 博文的说法是"一个很简单的 BPF 程序" | `fdaa::3` 上的 DNS 是唯一有文档的例外 | 未公开 |
+| Cloudflare（文档） | 不存在宿主邻接问题：Worker → Durable Object → container | 未公开 | 不适用 | 不适用 —— 平台 RPC 就是数据平面 | 平台 RPC |
+| **bean** | 一个 netns，每沙箱一对 tap + veth /30 | 放行 | FORWARD，**两个 scope**（netns 与宿主） | ⛔ 暂无 —— 宿主侧没有监听者 | vsock |
+
+### 两个改变 bean 计划的结论
+
+**没有任何一家依赖「只匹配源地址的 FORWARD 规则」。** 两个 Firecracker 平台都撞上了
+bean 在真机上测到的同一个事实：内核本地投递的包，FORWARD 规则看不见。它们的修法都是
+结构性的，但方向相反。E2B **换了挂载点** —— prerouting 优先级 −150，任何入向包都会
+经过，无论路由之后是送 INPUT 还是 FORWARD，且只匹配入接口，于是宿主目标和转发目标被
+同一条规则覆盖。AgentENV **留在 FORWARD**，但每条规则都写上 `-o vpeer`，让规则如实
+声明「只管转发流量」，然后完全不依赖它们来阻断宿主访问。
+
+bean 的形状更接近 AgentENV，只是没有那个显式的 `-o`；而它当前正确的原因不同：
+netns scope 那条 DROP 匹配 guest 子网，在包还在命名空间**内部被转发**的阶段就命中，
+所以节点自身地址在那里就被拒了，宿主 scope 的规则根本没看到
+（已实测 —— `hack/netns-hostlocal-probe.sh`）。这是真实的防护，但它依赖 netns 规则
+存在、且 guest 没有别的路径。E2B 的 prerouting 挂载点不依赖这两点。作为加固记在
+[#21](https://github.com/garysng/bean/issues/21)，不是 bug。
+
+**两个 Firecracker 平台的 agent 都不走 vsock，这是最关键的结论。** E2B 的 envd 绑
+`0.0.0.0:49983`，orchestrator 用 `http://<host-interaction-ip>:49983` 去连；它们生成的
+Firecracker API 里有 vsock 模型，但沙箱路径上没用。AgentENV 树里同样没有 vsock。
+两家都通过一个排在拒绝规则**之前的单个 `/32`** 访问宿主。
+
+E2B 选的地址值得借鉴：`192.0.2.1` 是 TEST-NET-1 文档保留地址，因此不落在任何被拒范围里、
+不是节点真实 IP，guest 也无法从它推断出宿主的地址规划。宿主命名空间里再用 iptables
+REDIRECT 按端口映射到宿主本地监听（`:80` hyperloop、`:111` portmapper、`:2049` NFS 代理）。
+这条规则不可能被误扩大，因为扩大它就等于扩大一个别无他用的范围。
+
+bean 今天用 vsock，直接绕开了整个问题 —— vsock 连接不需要地址、不需要路由、不需要防火墙
+例外，INPUT 全拒的两难根本不出现。所以这个结论**不是**「改用 IP」。它是：如果
+[#27](https://github.com/garysng/bean/issues/27) 的数据平面将来确实需要一个宿主侧监听者，
+两个可比平台的先例都是「文档保留段 `/32` + REDIRECT」而不是节点真实地址 ——
+而 vsock 恰恰因为不需要这一切，仍然是更强的默认选择。
+
+### 证据薄弱处
+
+Fly 的出网 NAT 与 VM-宿主隔离内部机制、Modal 的私网与元数据行为、Cloudflare 的默认出网
+策略，以及 Cognition 的网络部分，全部没有一手来源。**两个 Firecracker 代码库里都没找到
+单沙箱带宽限制** —— 看起来都把整形交给宿主或下游设备（E2B 打 DSCP 标记供外部 L3 防火墙处理）。
+
+E2B 选 −150 这个 prerouting 优先级的**理由**是我从代码推断的；挂载点和只匹配入接口这两点
+已验证，理由本身在找到的任何提交或博文里都没有说明。
+
 ## 3. 结论：bean 的差异化定位
 
 1. **技术路线已被验证，竞争焦点在工程完成度**：AgentENV 证明了「overlaybd 直挂
@@ -169,3 +230,7 @@ Orchestrate（`@application`/`@function` serverless 编排,每 function 独占 s
 - Daytona 若补上 gVisor/microVM 档,与 bean 重叠度会显著上升
 - e2b Build System 演进是否消除 per-image template 成本
 - overlaybd/ublk 上游演进（内核 ublk 用户态块设备生态）
+- **是否有人做出单沙箱出网带宽限制** —— 两个 Firecracker 代码库里都没有，而这是 bean
+  终究会需要的一个吵闹邻居控制手段
+- **E2B 或 AgentENV 是否把 agent 传输改成 vsock** —— 两家都选了 IP，若有人回退，
+  说明 IP 路线撞上了 bean 尚未遇到的问题

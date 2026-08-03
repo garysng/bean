@@ -215,9 +215,24 @@ Two consequences worth stating rather than discovering:
   MASQUERADEd to the link address before it is forwarded, so the DROP must not match the
   post-translation source. Getting this wrong breaks all egress rather than just the denied
   destinations, which at least fails loudly.
-- **A node whose own control plane is on RFC1918 is still reachable from the host side.** These
-  rules constrain the guest, not the node. Sandbox-to-sandbox isolation follows from one netns per
-  sandbox with no route between them, which the address layout already gives.
+- **The node's own address is denied by the namespace rule, not by the host rule.** A packet the
+  host delivers locally never traverses the host's FORWARD chain, so no host-scope rule can deny
+  it — measured, with the rule's own packet counter as the evidence
+  (`hack/netns-hostlocal-probe.sh`). What denies it is the netns-scope DROP, which fires while the
+  packet is still being forwarded *inside* the sandbox namespace and before the host sees anything.
+  So the node is protected, but by the first scope rather than the second, and only as long as the
+  netns rule is present. Sandbox-to-sandbox isolation follows separately from one netns per sandbox
+  with no route between them, which the address layout already gives.
+
+  This is worth knowing because the obvious hardening — "add the missing host-side rule" — would
+  not be hardening at all; a host-scope FORWARD rule cannot reach this traffic no matter how it is
+  written. The two comparable Firecracker platforms both restructure instead: E2B hooks nftables at
+  **prerouting priority −150** matching on input interface only, so one rule covers both
+  locally-delivered and forwarded packets; AgentENV keeps FORWARD but writes `-o vpeer` on every
+  rule so the rules are honest about their scope. See
+  [competitive-analysis.md](competitive-analysis.md) §2a. Adopting the prerouting hook would remove
+  bean's dependence on the netns rule being the only thing between a guest and the node, and is
+  tracked as hardening on [#21](https://github.com/garysng/bean/issues/21).
 
 IPv6 is not addressed here. If the uplink has IPv6, the equivalent metadata address
 (`fd00:ec2::254`) is reachable and these v4 rules say nothing about it. Either the guest gets no

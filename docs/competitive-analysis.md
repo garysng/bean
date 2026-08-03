@@ -169,6 +169,83 @@ Built for Kimi K3's agentic RL training, and its target scenario (batches of het
 > doing far less, so it is not the number to compare. Three distinct operations,
 > three different costs — [snapshot-resume.md](snapshot-resume.md) §0.
 
+## 2a. Networking, vendor by vendor (researched 2026-08)
+
+Added because two open decisions turned on it: whether bean's guest agent should
+be reached over vsock or over IP ([#27](https://github.com/garysng/bean/issues/27),
+the data plane), and whether the egress filter should stay in FORWARD or move to
+prerouting ([network.md](network.md) §5a). Both now have primary-source answers,
+and one of them contradicted what bean was about to do.
+
+Source quality is marked per row. **Code** means the rule construction itself was
+read; **docs** means only the vendor's documentation, which for networking tends
+to describe the API surface and not the filter.
+
+| Platform | Per-sandbox topology | Egress default | Where the filter hooks | Guest → host reachable? | Agent transport |
+|---|---|---|---|---|---|
+| **E2B** (code) | one netns, veth + tap0; guest at a fixed `169.254.0.21` in every sandbox, deduplicated by the namespace | allowed | **nftables prerouting, priority −150**, matching **input interface only** | ✅ deliberately, at `192.0.2.1` (TEST-NET-1) | **IP** — envd on `0.0.0.0:49983` |
+| **AgentENV** (code) | one netns, tap0 + veth pair | allowed | FORWARD, with `-i tap0 -o vpeer` on **every** rule | ✅ at `veth_host_ip/32`, accepted before the rejects | **IP** |
+| Modal (docs) | not stated | allowed | not stated (`block_network`, CIDR + domain allowlists exist) | n/a — gVisor, not a VM | n/a |
+| Daytona (docs) | per-sandbox stack | allowed | not stated (`networkBlockAll`, ≤5 CIDR allowlist) | not stated | n/a |
+| Fly.io (docs) | per-Machine **/112 IPv6** from `fdaa::/16`, org/host/instance in the bits | allowed | "a trivial BPF program", per their 6PN post | DNS at `fdaa::3` is the one documented exception | not documented |
+| Cloudflare (docs) | no host adjacency: Worker → Durable Object → container | not documented | n/a | n/a — platform RPC is the data plane | platform RPC |
+| **bean** | one netns, tap + veth /30 per sandbox | allowed | FORWARD, **both scopes** (netns and host) | ⛔ not yet — no host-side listener exists | vsock |
+
+### The two findings that change bean's plans
+
+**Nobody relies on a FORWARD rule matching only on source.** Both Firecracker
+platforms deal with the same fact bean measured on real hardware: a FORWARD rule
+cannot see a packet the kernel delivers locally. They fix it structurally, in
+opposite directions. E2B **moves the hook** to prerouting priority −150, which
+every ingressing packet traverses regardless of whether routing later sends it to
+INPUT or FORWARD, and matches on input interface only — so host-destined and
+forwarded traffic are covered by one rule. AgentENV **stays in FORWARD** and
+writes `-o vpeer` on every rule, which makes the rules honest about covering only
+forwarded traffic, and then never depends on them for host access.
+
+bean is closer to AgentENV's shape without the explicit `-o`, and is currently
+correct for a different reason: the netns-scope DROP matches the guest subnet and
+fires while the packet is still being forwarded *inside* the namespace, so the
+node's own address is denied there and the host-scope rule never sees it
+(measured — `hack/netns-hostlocal-probe.sh`). That is a real defence, but it rests
+on the netns rule being present and on the guest having no other path. E2B's
+prerouting hook does not rest on either. Tracked as hardening in
+[#21](https://github.com/garysng/bean/issues/21), not as a bug.
+
+**Neither Firecracker platform uses vsock for the agent, and this is the load-bearing
+finding.** E2B's envd binds `0.0.0.0:49983` and the orchestrator dials
+`http://<host-interaction-ip>:49983`; vsock models exist in their generated
+Firecracker API surface but are unused in the sandbox path. AgentENV likewise has
+no vsock in its tree. Both reach the host over IP at a **single allowed `/32`**
+placed ahead of the denials.
+
+E2B's choice of address is the detail worth copying: `192.0.2.1` is a TEST-NET-1
+documentation address, so it is in no denied range, it is not the node's real IP,
+and a guest learns nothing about host addressing from it. iptables REDIRECT in the
+host namespace then maps it by port to host-local listeners (`:80` hyperloop,
+`:111` portmapper, `:2049` NFS proxy). The rule cannot accidentally widen, because
+widening it would mean widening a range nothing else uses.
+
+bean uses vsock today, which sidesteps the question entirely — a vsock connection
+needs no address, no route and no firewall exception, and the blanket-INPUT-DROP
+problem does not arise. The finding is therefore **not** "switch to IP". It is that
+if [#27](https://github.com/garysng/bean/issues/27)'s data plane ever wants a
+host-side listener, the precedent from both comparable platforms is a documentation-range
+`/32` plus REDIRECT rather than the node's real address — and that vsock remains
+the stronger default precisely because it needs none of that.
+
+### Where the evidence is thin
+
+Fly's egress NAT and VM-to-host isolation internals, Modal's private-IP and
+metadata behaviour, Cloudflare's default egress policy, and Cognition's networking
+entirely. Per-sandbox bandwidth limits were **not found in either Firecracker
+codebase** — both appear to leave shaping to the host or to a downstream device
+(E2B marks DSCP for an external L3 firewall to act on).
+
+E2B's *reason* for the −150 prerouting priority is inference from the code; the
+hook and the interface-only match are verified, the rationale is not stated in any
+commit or post that was found.
+
 ## 3. Conclusion: bean's differentiated position
 
 1. **The technical route is already validated, and the competitive focus is engineering
@@ -203,3 +280,7 @@ Built for Kimi K3's agentic RL training, and its target scenario (batches of het
 - If Daytona adds a gVisor/microVM tier, its overlap with bean rises markedly
 - Whether the evolution of e2b's Build System eliminates the per-image template cost
 - Upstream evolution of overlaybd/ublk (the kernel ublk userspace block device ecosystem)
+- **Whether anyone ships per-sandbox egress bandwidth limits** — not found in either
+  Firecracker codebase, and a noisy-neighbour lever bean will eventually need
+- **Whether E2B or AgentENV moves the agent transport to vsock** — both chose IP, and
+  a reversal would say the IP route hit a problem bean has not yet met
