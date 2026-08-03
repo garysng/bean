@@ -102,6 +102,21 @@ type FCRuntime struct {
 	// checkpointed more than once.
 	TrackDirtyPages bool
 
+	// Cgroups holds each sandbox's VMM in a cgroup with a memory ceiling, a CPU
+	// quota and a pid cap derived from that sandbox's own spec. Nil applies no
+	// limits, which is what a node that has not configured it gets and is the
+	// behaviour every existing deployment is running.
+	//
+	// This is what overcommit.go and cmd/noded/main.go name as the prerequisite for
+	// raising memory overcommit above 1.0: without it the committed quantity is the
+	// scheduler's ledger and nothing in the kernel enforces it.
+	Cgroups *cgroupHost
+
+	// VMMCreds drops the VMM to an unprivileged uid. Nil runs it with noded's own
+	// credentials, which is root -- see vmmcreds.go for what the drop does and does
+	// not buy without a mount namespace.
+	VMMCreds *vmmCreds
+
 	// snapshots holds unpacked snapshot state, so restoring the same checkpoint
 	// twice does not unpack it twice.
 	snapshots *snapCache
@@ -126,6 +141,15 @@ type fcVM struct {
 	// what a diff checkpoint needs. It is set when the VM starts and cannot
 	// change afterwards, so it is the authority on whether a diff is possible.
 	dirtyPages bool
+	// cgroup holds this VMM's resource limits. Nil on a node with no cgroup
+	// support or none configured.
+	//
+	// Carried on the VM rather than looked up again at teardown, because the
+	// directories it names are the only record that they exist: a Destroy that
+	// recomputed the path from the id would work, but a create that failed halfway
+	// through building the group would not have a path to recompute. That is the
+	// leak in GitHub #16 -- a resource nothing afterwards knows about.
+	cgroup *sandboxCgroup
 	// netnsPath is the handle of the network namespace the VMM runs in, or "" on
 	// a node with no networking. It is carried on the VM rather than read from
 	// the Spec inside startVMM because startVMM is given the VM, matching how
@@ -316,6 +340,36 @@ func (r *FCRuntime) create(ctx context.Context, spec *Spec, layers []SnapshotLay
 		return nil, fmt.Errorf("fc: link agent disk: %w", err)
 	}
 
+	// The cgroup is built before the VMM starts, and its limits are written before
+	// anything is put in it: a process added to an unconfigured group runs
+	// unbounded for as long as the writes take.
+	//
+	// Registered for cleanup immediately. A create that fails after this point must
+	// not leave the directory behind -- an orphaned cgroup is the same class of leak
+	// as GitHub #16's loop devices, invisible to everything and permanent until the
+	// host reboots.
+	cg, err := r.Cgroups.createCgroup(spec.SandboxID, limitsFor(spec))
+	if err != nil {
+		return nil, fmt.Errorf("fc: create cgroup: %w", err)
+	}
+	cleanup = append(cleanup, func() { _ = cg.Remove() })
+
+	// Ownership of everything the dropped uid has to open. No-ops when no uid is
+	// configured.
+	//
+	// The tree first, which covers the sandbox directory itself (Firecracker
+	// creates its API socket and the vsock UDS in it) and the staged files. Then
+	// the rootfs device separately: rootfs.img is a symlink to /dev/mapper and the
+	// walk deliberately does not follow it, so the device node is chowned by name.
+	// A dropped uid that cannot open its own rootfs fails at boot with the guest
+	// unable to find its root device.
+	if err = r.VMMCreds.chownTree(dir); err != nil {
+		return nil, fmt.Errorf("fc: hand sandbox dir to the VMM uid: %w", err)
+	}
+	if err = r.chownRootfsDevice(rootfs); err != nil {
+		return nil, err
+	}
+
 	vm := &fcVM{
 		id:     spec.SandboxID,
 		dir:    dir,
@@ -324,6 +378,7 @@ func (r *FCRuntime) create(ctx context.Context, spec *Spec, layers []SnapshotLay
 		// Resolved here, where the Spec is in hand. Empty on a node with no
 		// network pool, which keeps that node's launch identical to before.
 		netnsPath: netnsPathFor(spec),
+		cgroup:    cg,
 	}
 
 	apiSocket := filepath.Join(dir, "api.sock")
@@ -387,6 +442,12 @@ func (r *FCRuntime) validate() error {
 // addressed by name, so a VMM in the host namespace cannot see the device the
 // NIC registration names. See netns_linux.go for why the join is done with a
 // pinned thread rather than by wrapping the command.
+//
+// The confinement, when configured, is applied in a fixed order: the credential
+// drop is set on the command before the fork, the pid goes into the cgroup as soon
+// as it exists, and the rlimits are set on that pid. See vmmcreds_linux.go for why
+// the rlimits cannot be applied before the fork and why the window that leaves is
+// harmless here.
 func (r *FCRuntime) startVMM(ctx context.Context, vm *fcVM, apiSocket string) error {
 	logFile, err := os.OpenFile(filepath.Join(vm.dir, "console.log"),
 		os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600)
@@ -401,6 +462,16 @@ func (r *FCRuntime) startVMM(ctx context.Context, vm *fcVM, apiSocket string) er
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
+	// Added to the same SysProcAttr rather than replacing it: Setpgid has to
+	// survive, because killVMM signals the negative pid and depends on the VMM
+	// leading its own group.
+	applyCreds(cmd, r.VMMCreds)
+	// The console log is opened by noded as root and inherited as an fd, so the
+	// dropped uid writes to it without needing to open it. The fd is already open
+	// at the point of the drop, which is what makes that work.
+	if err := r.VMMCreds.chown(logFile.Name()); err != nil {
+		return fmt.Errorf("fc: %w", err)
+	}
 	// The working directory is the sandbox's own, which is what makes the vsock
 	// UDS path relative and therefore portable across a restore: Firecracker
 	// saves that path into the machine state and refuses to override it on load,
@@ -421,6 +492,47 @@ func (r *FCRuntime) startVMM(ctx context.Context, vm *fcVM, apiSocket string) er
 		_ = cmd.Wait()
 		close(vm.done)
 	}()
+
+	// The process exists now, so a failure below leaves a running VMM. It is not
+	// killed here: the caller's cleanup stack already holds killVMM, and vm.cmd is
+	// set above so that stack can reach it.
+	pid := cmd.Process.Pid
+	if err := vm.cgroup.Add(pid); err != nil {
+		return fmt.Errorf("fc: %w", err)
+	}
+	if err := applyRlimits(pid, r.VMMCreds); err != nil {
+		return fmt.Errorf("fc: %w", err)
+	}
+	return nil
+}
+
+// chownRootfsDevice hands the sandbox's block device to the dropped uid.
+//
+// Separate from the sandbox directory walk because rootfs.img is a symlink to
+// /dev/mapper/bean-<id> and the walk does not follow symlinks -- deliberately, so
+// it cannot chown a shared asset or a device node by accident. This chowns the
+// device node itself, by resolving the link.
+//
+// The device is per-sandbox, created and destroyed with it, so giving it to the
+// sandbox uid takes nothing away from anything else on the host. That is what
+// separates it from /dev/kvm, which is shared and reached through its group
+// instead.
+//
+// A dropped uid that cannot open this fails at boot: the guest kernel finds no
+// root device, and the only evidence is in the console log.
+func (r *FCRuntime) chownRootfsDevice(rootfs *image.Rootfs) error {
+	if !r.VMMCreds.Enabled() || rootfs == nil || rootfs.Device == "" {
+		return nil
+	}
+	// EvalSymlinks rather than Readlink: the FileProvider hands back a real file
+	// with no link at all, and that case must be chowned too.
+	target, err := filepath.EvalSymlinks(rootfs.Device)
+	if err != nil {
+		return fmt.Errorf("fc: resolve rootfs %s: %w", rootfs.Device, err)
+	}
+	if err := r.VMMCreds.chown(target); err != nil {
+		return fmt.Errorf("fc: hand rootfs device to the VMM uid: %w", err)
+	}
 	return nil
 }
 

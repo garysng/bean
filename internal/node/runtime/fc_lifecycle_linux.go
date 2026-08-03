@@ -96,6 +96,16 @@ func (r *FCRuntime) Destroy(ctx context.Context, id string, force bool) error {
 		errs = append(errs, fmt.Errorf("remove state dir: %w", err))
 	}
 	dSpan.End()
+
+	// After the kill, because rmdir on a cgroup fails with EBUSY while the group
+	// still holds a process. A failure here therefore means the VMM outlived
+	// killVMM, which is worth reporting: the directory left behind is a leak of the
+	// GitHub #16 kind, invisible to everything and permanent until the host
+	// reboots. The startup sweep is the backstop for the case where noded itself
+	// was killed and never got here at all.
+	if err := vm.cgroup.Remove(); err != nil {
+		errs = append(errs, err)
+	}
 	return errors.Join(errs...)
 }
 
@@ -454,6 +464,36 @@ func (r *FCRuntime) loadSnapshot(ctx context.Context, vm *fcVM, spec *Spec, stag
 		return err
 	}
 	vm.uffd = handler
+
+	// The socket is bound by noded and connected to by Firecracker, so with a
+	// dropped uid it has to be writable by that uid or the connect is refused. That
+	// failure is a HANG rather than an error: Firecracker blocks on the first page
+	// fault and nobody answers it, which is precisely what uffdHandler.failed and
+	// Faults() exist to distinguish. So the chown is not optional and its failure
+	// aborts the load.
+	//
+	// It must also happen before the load request below, for the same reason the
+	// bind does: Firecracker connects during the load, so a chown afterwards races
+	// the guest's first fault.
+	if err := r.VMMCreds.chown(vm.uffdHostPath()); err != nil {
+		handler.Close()
+		vm.uffd = nil
+		return fmt.Errorf("fc: hand the uffd socket to the VMM uid: %w", err)
+	}
+
+	// The machine state file is opened by Firecracker itself, by absolute path,
+	// out of the shared snapshot cache -- which is 0700 because noded was the only
+	// reader until now. A dropped uid that cannot traverse to it fails the load
+	// with a permission error, which is at least an error.
+	//
+	// The memory image needs nothing: Firecracker never opens it. noded mmaps it and
+	// serves faults over the socket above, and that sharing is what makes fork
+	// cheap (one page-cache copy across every restore).
+	if err := r.VMMCreds.ensureTraversable(r.BaseDir, entry.StatePath); err != nil {
+		handler.Close()
+		vm.uffd = nil
+		return fmt.Errorf("fc: make snapshot state readable by the VMM uid: %w", err)
+	}
 
 	// Nothing may be configured before loading: Firecracker rejects a load once
 	// boot-specific resources are set, because the snapshot carries the whole

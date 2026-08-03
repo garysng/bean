@@ -27,9 +27,16 @@ type Overcommit struct {
 	// Firecracker faults guest pages in on demand, so a guest's actual footprint
 	// is well below what it declares.
 	//
-	// That headroom is not yet measured, and there is no cgroup around the VMM
-	// processes to enforce fairness when the host comes under pressure. Both are
-	// prerequisites for raising this.
+	// That headroom is not yet measured. The other prerequisite -- a cgroup around
+	// the VMM processes, so that the host has a kernel-enforced ceiling per sandbox
+	// rather than only the scheduler's ledger -- now exists, but it is off unless
+	// the node runs with --fc-cgroups. On a node without it nothing has changed and
+	// this must stay at 1.0.
+	//
+	// The ceiling also has to bound swap, not just RAM, or overcommitting trades a
+	// killed process for a thrashing host and the guest cannot tell the difference
+	// from a hang. That is why --fc-cgroups requires cgroup v2 and refuses to start
+	// on v1: see internal/node/runtime/cgroup.go.
 	Memory float64
 }
 

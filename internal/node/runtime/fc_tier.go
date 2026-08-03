@@ -47,6 +47,27 @@ type FCTierConfig struct {
 	// addresses are identical in every sandbox (docs/network.md section 2), so
 	// there is nothing per-sandbox for it to vary with.
 	GuestDNS string
+
+	// Cgroups puts each sandbox's VMM in a cgroup with limits from its own spec.
+	// Off by default: the memory ceiling is derived from a headroom that has not
+	// been measured against real workloads, and a ceiling set too low does not
+	// degrade gracefully -- the kernel kills the VMM, and from outside that is a
+	// sandbox that died for no stated reason.
+	//
+	// Turning it on is what makes the committed quantity something the kernel
+	// enforces rather than a line in the scheduler's ledger, which is the
+	// prerequisite overcommit.go names for raising memory overcommit above 1.0.
+	Cgroups bool
+
+	// VMMUid and VMMGid run the VMM as an unprivileged user instead of root. Zero
+	// leaves it as noded's own identity, which is the pre-existing behaviour.
+	//
+	// One uid for every sandbox on the node rather than one each: see vmmcreds.go
+	// for what that does and does not bound. It also requires the node's shared
+	// assets (kernel, agent disk) to be readable by others, which is checked at
+	// startup rather than discovered one failed create at a time.
+	VMMUid int
+	VMMGid int
 }
 
 // GuestDNSBootArgs renders the agent flags that carry a resolver into a guest,

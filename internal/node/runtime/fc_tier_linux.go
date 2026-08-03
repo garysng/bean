@@ -87,6 +87,68 @@ func NewFCTier(cfg FCTierConfig) (Runtime, error) {
 			// rather than left for a failed restore to reveal.
 			"cannotMask", UnmaskableCPUFeatures(cfg.CPUTemplate))
 	}
+	// Host confinement of the VMM. Both halves are off unless asked for, and each
+	// is stated at startup whether or not it is in force: a limit believed to be
+	// enforced and silently absent is the failure mode the A3 documentation error
+	// in docs/security-and-startup.md had, and it is worse here because somebody
+	// would raise memory overcommit on the strength of it.
+	if cfg.Cgroups {
+		// Fatal on a v1 host, rather than a fall back to running unlimited. An
+		// operator who asked for limits and got none silently would raise
+		// --overcommit-memory believing the kernel enforces a ceiling; a node that
+		// refuses to start says so where it cannot be missed. Not asking for limits
+		// at all remains fine -- that is the else branch below.
+		h, err := detectCgroupHost()
+		if err != nil {
+			return nil, fmt.Errorf("fc tier: %w", err)
+		}
+		rt.Cgroups = h
+		slog.Info("VMM resource limits: " + rt.Cgroups.Summary())
+		// Swept here, at startup, before this process has created anything: every
+		// bean group standing now belongs to a previous noded. rmdir refuses a group
+		// that still holds a process, so a sandbox that survived the restart keeps
+		// its limits and is counted rather than disturbed. See SweepOrphans for why
+		// this is not in internal/node/reclaim.
+		if removed, inUse := rt.Cgroups.SweepOrphans(); removed > 0 || inUse > 0 {
+			slog.Info("swept cgroups left by a previous noded",
+				"removed", removed, "stillInUse", inUse)
+		}
+		if !rt.Cgroups.Enabled() {
+			// Not fatal. Refusing to start would take a node that was running fine
+			// out of service to enforce a limit it never had; the honest cost is
+			// that an operator must be told the limits are not in force.
+			slog.Warn("--fc-cgroups was requested but no usable cgroup controller " +
+				"was found; the VMM runs with no host limit, so do not raise " +
+				"--overcommit-memory on this node")
+		}
+	} else {
+		slog.Info("VMM runs outside any cgroup; the committed quantity is the " +
+			"scheduler's ledger and nothing in the kernel enforces it")
+	}
+
+	creds, err := parseVMMCreds(cfg.VMMUid, cfg.VMMGid, kvmGroupID())
+	if err != nil {
+		return nil, fmt.Errorf("fc tier: %w", err)
+	}
+	rt.VMMCreds = creds
+	slog.Info("VMM privileges: " + creds.Summary())
+	if creds.Enabled() {
+		// Checked at startup, fatally, because each of these fails every create on
+		// the node and none of them is diagnosable from the symptom: no /dev/kvm is
+		// EACCES from the VMM before it logs anything, an unreadable kernel is a
+		// guest that does not boot, and an unreadable agent disk is a guest that
+		// boots with no init.
+		if err := kvmAccessible(creds); err != nil {
+			return nil, fmt.Errorf("fc tier: %w", err)
+		}
+		if bad := checkSharedAssets(cfg.KernelPath, cfg.AgentDiskPath); len(bad) > 0 {
+			return nil, fmt.Errorf("fc tier: uid %d cannot read this node's shared "+
+				"assets, so no guest would boot: %s; these are read-only and shared "+
+				"by every sandbox, so make them world-readable rather than chowning "+
+				"them to one sandbox's identity", cfg.VMMUid, strings.Join(bad, "; "))
+		}
+	}
+
 	// Committed images land beside pulled ones, because a committed image is a
 	// base image like any other — that is the point of committing rather than
 	// snapshotting.

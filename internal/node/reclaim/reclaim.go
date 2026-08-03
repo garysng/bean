@@ -21,6 +21,19 @@
 //     counted costs disk until someone looks; a mapping removed from under a
 //     running guest costs that guest's filesystem, silently and permanently
 //     (see diskguard.go for what a broken dm-snapshot target does to a guest).
+//
+// Cgroups are a leftover of the same kind and are deliberately *not* handled
+// here. GitHub #20 phase 1 puts each VMM in a per-sandbox cgroup, and a noded
+// that is killed leaves the directory behind exactly as it leaves a mapping
+// behind. They are swept by the runtime instead
+// (runtime.cgroupHost.SweepOrphans), because the reason this package needs the
+// control plane's expected-sandbox set does not apply to them: a dm mapping
+// cannot be asked whether anyone is using it, so ownership has to be inferred,
+// while rmdir on a cgroup fails with EBUSY for exactly as long as the group holds
+// a process. That makes "is this in use" a question the kernel answers, and a
+// sweep that removes only what rmdir accepts cannot race a running sandbox and
+// needs nothing from the control plane. Extending the Host interface to cover them
+// would add an expected set to a decision that does not need one.
 package reclaim
 
 import (
