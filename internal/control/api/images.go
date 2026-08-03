@@ -23,12 +23,47 @@ func (s *Server) handleListImages(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusNotImplemented, "NOT_IMPLEMENTED", "image service not configured")
 		return
 	}
-	imgs, err := s.images.List()
+	// Scoped to the caller when an identity is configured, so "the images I
+	// built" is answerable. With no identity this returns everything, which is
+	// the operator's view and the historical behaviour.
+	//
+	// ?source=built|imported narrows further. It is a filter on the listing
+	// rather than a separate endpoint because provenance is a property of an
+	// image, not a different kind of thing to list.
+	imgs, err := s.images.ListFor(s.owner(r))
 	if err != nil {
 		writeErr(w, http.StatusInternalServerError, "INTERNAL", err.Error())
 		return
 	}
+	switch source := r.URL.Query().Get("source"); source {
+	case "":
+	case string(store.ImageBuilt), string(store.ImageImported):
+		imgs = filterBySource(imgs, store.ImageSource(source))
+	default:
+		writeErr(w, http.StatusBadRequest, "INVALID_ARGUMENT",
+			"source must be "+string(store.ImageBuilt)+" or "+string(store.ImageImported))
+		return
+	}
 	writeJSON(w, http.StatusOK, map[string]any{"images": imgs})
+}
+
+// filterBySource keeps images of one provenance.
+//
+// An image with no recorded source counts as imported: that is what a record
+// from before the field was written back is, and the platform only ever set it
+// explicitly for its own builds.
+func filterBySource(imgs []*store.Image, want store.ImageSource) []*store.Image {
+	out := make([]*store.Image, 0, len(imgs))
+	for _, img := range imgs {
+		source := img.Source
+		if source == "" {
+			source = store.ImageImported
+		}
+		if source == want {
+			out = append(out, img)
+		}
+	}
+	return out
 }
 
 func (s *Server) handleImageStatus(w http.ResponseWriter, r *http.Request) {
@@ -59,6 +94,14 @@ func (s *Server) handleImageStatus(w http.ResponseWriter, r *http.Request) {
 		"cachedNodes": img.CachedNodes,
 		// format tells the caller which tier can run this image today.
 		"format": imageFormat(img.State),
+		// source answers "is this ours or something pulled from outside", which
+		// is the question a caller looking at an unfamiliar ref actually has.
+		"source": imageSource(img.Source),
+		// owner is empty for an unowned image, and stays in the response so a
+		// caller can see that an image is shared rather than theirs.
+		"owner":   img.Owner,
+		"baseRef": img.BaseRef,
+		"buildId": img.BuildID,
 	})
 }
 
@@ -70,6 +113,16 @@ func imageFormat(state store.ImageState) string {
 		return "overlaybd"
 	}
 	return "oci"
+}
+
+// imageSource reports provenance, defaulting an unset value to imported so a
+// record written before the field was populated does not read as an absence of
+// origin. Nothing but a platform build ever set it, so the default is right.
+func imageSource(source store.ImageSource) store.ImageSource {
+	if source == "" {
+		return store.ImageImported
+	}
+	return source
 }
 
 type prewarmRequest struct {

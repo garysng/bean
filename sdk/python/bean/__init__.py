@@ -330,8 +330,18 @@ class _Images:
     def __init__(self, client: "BeanClient"):
         self._client = client
 
-    def list(self) -> List[Dict[str, Any]]:
-        return self._client._request("GET", "/v1/images")["images"] or []
+    def list(self, source: str = "") -> List[Dict[str, Any]]:
+        """List images visible to the caller.
+
+        source="built" narrows to images this platform produced, which is the
+        "what did I build" listing; "imported" narrows to refs pulled from
+        outside. The server scopes the result to the caller when the deployment
+        is behind an identity-aware layer.
+        """
+        path = "/v1/images"
+        if source:
+            path += "?" + urllib.parse.urlencode({"source": source})
+        return self._client._request("GET", path)["images"] or []
 
     def status(self, ref: str) -> Dict[str, Any]:
         q = urllib.parse.urlencode({"ref": ref})

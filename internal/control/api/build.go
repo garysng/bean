@@ -87,9 +87,11 @@ func (s *Server) handleBuild(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// The build's caller owns the result. This is the case ownership exists
+	// for: a caller asking "what did I build" is asking about exactly these.
 	img := &store.Image{
 		Ref: req.Tag, Source: store.ImageBuilt, State: store.ImageBuilding,
-		CreatedAt: time.Now(),
+		Owner: s.owner(r), CreatedAt: time.Now(),
 	}
 	if err := s.store.PutImage(img); err != nil {
 		writeErr(w, http.StatusInternalServerError, "INTERNAL", err.Error())
@@ -165,6 +167,12 @@ func (s *Server) runBuild(nodeID string, req buildRequest, contextTar []byte) {
 
 	// A built image needs no conversion — BuildKit's flat output is already the
 	// format the tier boots — so it goes straight to READY.
+	//
+	// READY overstates the reach of the artifact in a multi-node cluster: it
+	// exists only in the building node's ImageDir and is never uploaded, so no
+	// other node can start from it. Ownership is recorded regardless of where
+	// the bytes are, so the upload can land later without revisiting who the
+	// image belongs to.
 	if err := s.images.MarkReady(req.Tag, "", 0); err != nil {
 		slog.Error("cannot mark build ready", logging.KeyImage, req.Tag, logging.KeyError, err)
 	}

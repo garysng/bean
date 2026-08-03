@@ -35,8 +35,9 @@ type NodeCacheSource interface {
 
 // Service owns image metadata and prewarm jobs.
 type Service struct {
-	store *store.Store
-	cache NodeCacheSource
+	store  *store.Store
+	cache  NodeCacheSource
+	policy Policy
 
 	mu sync.Mutex
 }
@@ -44,6 +45,16 @@ type Service struct {
 func New(st *store.Store, cache NodeCacheSource) *Service {
 	return &Service{store: st, cache: cache}
 }
+
+// NewWithPolicy builds a service that refuses references an operator's policy
+// forbids. The zero Policy permits everything, so this is New plus a rule.
+func NewWithPolicy(st *store.Store, cache NodeCacheSource, policy Policy) *Service {
+	return &Service{store: st, cache: cache, policy: policy}
+}
+
+// Policy returns the configured policy, so a handler can report what it is
+// without holding a second copy that could drift.
+func (s *Service) Policy() Policy { return s.policy }
 
 // Resolve registers a reference if unseen and returns its metadata. It is
 // the entry point every sandbox create goes through, so an image record
@@ -54,6 +65,18 @@ func New(st *store.Store, cache NodeCacheSource) *Service {
 // fc tier. Until then an image stays PENDING, which the container/local
 // tiers can still run because they pull through the standard path.
 func (s *Service) Resolve(ref string) (*store.Image, error) {
+	return s.ResolveFor(ref, "")
+}
+
+// ResolveFor is Resolve on behalf of an identity: it applies the operator's
+// policy and attributes a first-seen reference to owner.
+//
+// Ownership is claimed only on first registration and never reassigned. A
+// shared base image would otherwise change hands with every caller that ran
+// it, and the last one to touch it is not a useful answer to "whose is this".
+// An empty owner leaves the image unowned, which is what a deployment with no
+// identity source produces and what every pre-existing image already is.
+func (s *Service) ResolveFor(ref, owner string) (*store.Image, error) {
 	if err := ValidateRef(ref); err != nil {
 		return nil, err
 	}
@@ -64,6 +87,14 @@ func (s *Service) Resolve(ref string) (*store.Image, error) {
 	if err != nil {
 		return nil, err
 	}
+	// The policy is checked against the record as it stands, including for a
+	// reference already registered: an operator who tightens the policy means
+	// it to apply to the next create, not only to refs nobody has run yet.
+	if s.policy.Enabled() {
+		if err := s.policy.Check(ref, img); err != nil {
+			return nil, err
+		}
+	}
 	if img != nil {
 		return s.withCacheCount(img), nil
 	}
@@ -71,6 +102,8 @@ func (s *Service) Resolve(ref string) (*store.Image, error) {
 	img = &store.Image{
 		Ref:       ref,
 		State:     store.ImagePending,
+		Source:    store.ImageImported,
+		Owner:     owner,
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
@@ -89,9 +122,17 @@ func (s *Service) Get(ref string) (*store.Image, error) {
 	return s.withCacheCount(img), nil
 }
 
-// List returns all known images, most recently updated first.
+// List returns every known image, most recently updated first. It is the
+// operator's view; a per-caller listing goes through ListFor.
 func (s *Service) List() ([]*store.Image, error) {
-	imgs, err := s.store.ListImages()
+	return s.ListFor("")
+}
+
+// ListFor returns the images an identity may see: its own plus the unowned
+// ones. An empty owner returns everything, which is both the operator's view
+// and what a deployment with no identity source can answer.
+func (s *Service) ListFor(owner string) ([]*store.Image, error) {
+	imgs, err := s.store.ListImages(owner)
 	if err != nil {
 		return nil, err
 	}

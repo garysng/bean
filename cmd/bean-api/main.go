@@ -59,6 +59,22 @@ func main() {
 			"held for a sandbox's lifetime and will not free themselves")
 	secretKey := flag.String("secret-key", os.Getenv("BEAN_SECRET_KEY"),
 		"master key encrypting persisted credentials (empty disables registry credentials)")
+	allowedImageSources := flag.String("allowed-image-sources", "",
+		"comma-separated image provenance allowlist: built,imported. Empty allows "+
+			"any, which is the default because refusing what previously ran would "+
+			"break a deployment for no gain. Set to \"built\" to accept only images "+
+			"this platform produced")
+	allowedRegistries := flag.String("allowed-registries", "",
+		"comma-separated registry host allowlist for imported images, e.g. "+
+			"index.docker.io,registry.example.com. Empty allows any. Images this "+
+			"platform built are not checked against it: their host is a push "+
+			"destination the operator chose, not one a caller asked to pull from")
+	ownerHeader := flag.String("owner-header", "",
+		"request header naming the caller an image is attributed to, e.g. "+
+			"X-Bean-Owner. Empty leaves every image unowned and every listing "+
+			"unfiltered. Only set this behind a trusted layer that authenticates "+
+			"callers and sets the header itself: bean does not verify it, so a "+
+			"client able to reach this API directly could name anyone")
 	snapshotDir := flag.String("snapshot-dir", "",
 		"directory holding snapshot blobs when no object store is configured (default: <db dir>/snapshots)")
 	s3Endpoint := flag.String("s3-endpoint", os.Getenv("BEAN_S3_ENDPOINT"),
@@ -151,7 +167,22 @@ func main() {
 	}
 
 	sched := scheduler.New(st, scheduler.DefaultWeights())
-	images := image.New(st, nodeCacheSource{store: st})
+
+	imagePolicy, err := image.ParsePolicy(*allowedImageSources, *allowedRegistries)
+	if err != nil {
+		log.Fatalf("image policy: %v", err)
+	}
+	if imagePolicy.Enabled() {
+		slog.Info("image policy active",
+			"allowedSources", *allowedImageSources, "allowedRegistries", *allowedRegistries)
+	}
+	images := image.NewWithPolicy(st, nodeCacheSource{store: st}, imagePolicy)
+
+	var identity api.IdentityFunc
+	if *ownerHeader != "" {
+		identity = api.OwnerFromHeader(*ownerHeader)
+		slog.Info("image ownership attributed from header", "header", *ownerHeader)
+	}
 
 	nodeSvc := nodesvc.New(st, sched, nodesvc.Options{
 		BootstrapToken: *bootstrapToken,
@@ -185,7 +216,7 @@ func main() {
 	srv := api.New(st, router, sched, api.Options{
 		Region: *region, APIKey: *apiKey, RuntimeTier: *runtimeTier,
 		Images: images, Secrets: secrets, Snapshots: blobs,
-		CreateWait: *createWait,
+		CreateWait: *createWait, Identity: identity,
 	})
 
 	httpSrv := &http.Server{

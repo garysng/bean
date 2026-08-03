@@ -79,6 +79,9 @@ type Server struct {
 	bus         *eventBus
 	metrics     *obs.Registry
 	mux         *http.ServeMux
+	// identity attributes an image to a caller. Nil means every image is
+	// unowned, which is what a deployment behind no identity-aware layer gets.
+	identity IdentityFunc
 	// createWait is how long a create may wait for create concurrency to drain
 	// before being refused. Zero refuses immediately.
 	createWait time.Duration
@@ -98,6 +101,11 @@ type Options struct {
 	Secrets *secret.Box
 	// Snapshots stores checkpoint blobs; nil disables snapshot endpoints.
 	Snapshots snapshot.Blobs
+	// Identity derives the owner to attribute an image to. Nil leaves every
+	// image unowned and every listing unfiltered, which is exactly the
+	// behaviour of a deployment from before ownership existed. See
+	// identity.go for what is assumed about the layer that supplies it.
+	Identity IdentityFunc
 	// CreateWait is how long a create waits for create concurrency to drain
 	// before being refused. Zero refuses immediately, which is the historical
 	// behaviour.
@@ -124,7 +132,7 @@ func New(st *store.Store, router Router, placer Placer, opts Options) *Server {
 		runtimeTier: tier, apiKey: opts.APIKey, images: opts.Images,
 		secrets: opts.Secrets, snapshots: opts.Snapshots,
 		bus: newEventBus(), metrics: obs.NewRegistry(), mux: http.NewServeMux(),
-		createWait: opts.CreateWait}
+		createWait: opts.CreateWait, identity: opts.Identity}
 	s.routes()
 	return s
 }
@@ -337,9 +345,19 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	// Register the image so its metadata (and later, digest and conversion
-	// state) exists for anything the platform has been asked to run.
+	// state) exists for anything the platform has been asked to run. This is
+	// also where an operator's image policy is applied, before any capacity is
+	// reserved: a refused image should cost the cluster nothing.
 	if s.images != nil && req.Image != "" {
-		if _, err := s.images.Resolve(req.Image); err != nil {
+		if _, err := s.images.ResolveFor(req.Image, s.owner(r)); err != nil {
+			// A policy refusal is a statement about what this deployment
+			// permits, so it is 403 with its own code: a caller can tell it
+			// apart from a malformed ref and knows retrying will not help.
+			if errors.Is(err, image.ErrPolicyDenied) {
+				outcome = "image_denied"
+				writeErr(w, http.StatusForbidden, "IMAGE_NOT_PERMITTED", err.Error())
+				return
+			}
 			outcome = "error"
 			writeErr(w, http.StatusBadRequest, "IMAGE_REF_INVALID", err.Error())
 			return

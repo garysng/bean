@@ -9,6 +9,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/garysng/bean/internal/control/image"
 	"github.com/garysng/bean/internal/control/secret"
 	"github.com/garysng/bean/internal/control/store"
 )
@@ -130,21 +131,11 @@ func (s *Server) RegistryAuth(imageRef string) (username, password string, err e
 	return cred.Username, plaintext, nil
 }
 
-// RegistryHostOf extracts the registry host from an OCI reference,
-// defaulting to Docker Hub when the reference omits one — the same rule
-// container runtimes apply, so "python:3.12" resolves as users expect.
+// RegistryHostOf extracts the registry host from an OCI reference. It
+// delegates to the image package so credential lookup and the policy
+// allowlist cannot disagree about which host a reference names — two copies of
+// this rule would mean a ref whose credential is found but whose registry is
+// refused, or the reverse.
 func RegistryHostOf(ref string) string {
-	first := ref
-	if i := strings.IndexByte(ref, '/'); i >= 0 {
-		first = ref[:i]
-	} else {
-		return "index.docker.io"
-	}
-	// A first segment is a registry only if it looks like a host: it has a
-	// dot, a port, or is localhost. Otherwise it is a Docker Hub namespace
-	// ("library/python").
-	if strings.ContainsAny(first, ".:") || first == "localhost" {
-		return first
-	}
-	return "index.docker.io"
+	return image.RegistryHost(ref)
 }

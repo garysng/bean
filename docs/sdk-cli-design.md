@@ -189,7 +189,8 @@ build --tag REF [--file Dockerfile] [CONTEXT]
 commit SBX --tag REF
 snapshot create SBX [--name N] [--no-keep-running] [--no-memory] [--base SNAP]
 snapshot ls [--label k=v] | snapshot rm SNAP
-image ls | image status REF | image prewarm REF... [--replicas N]
+image ls [--source built|imported] | image status REF
+image prewarm REF... [--replicas N]
 output: --json / --quiet    exit codes: 0 / 64 / 69 / 70 / 125
 ```
 
@@ -210,7 +211,8 @@ bean build  --tag REF [--file Dockerfile] [CONTEXT]   # build an image on the pl
 bean commit SBX --tag REF                             # freeze the filesystem into an image
 bean snapshot create SBX [--name N] [--no-keep-running]
 bean snapshot ls [--label k=v] / bean snapshot rm SNAP
-bean image ls | image status REF | image prewarm REF... [--replicas N]
+bean image ls [--source built|imported]               # --source built lists what you built
+bean image status REF | bean image prewarm REF... [--replicas N]
 bean version
 ```
 

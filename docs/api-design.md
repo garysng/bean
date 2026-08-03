@@ -180,14 +180,18 @@ DELETE /sandboxes/{id}/ports/{port}
 | `digest` | resolved by the platform | Resolved once from the tag and then fixed; scheduling, caching and reproducibility all key off the digest, so a moving tag cannot change the contents of a batch |
 | overlaybd artifact | **platform-internal** | The converted block-device form; invisible to the user and not selectable |
 | `state` | platform-internal | `PENDING → CONVERTING → READY \| FAILED` |
+| `source` | platform-recorded | `imported` (a ref the caller supplied) or `built` (produced by this platform). Answers "is this ours or something pulled from outside" |
+| `owner` | platform-recorded | Who the image is attributed to; empty means unowned, i.e. shared and visible to everyone |
 
 The `format` field tells the caller which tier can currently run the image: `oci`
 (unconverted, standard pull path) or `overlaybd` (converted, usable by the fc tier).
 
 ```
-GET  /images                      list
+GET  /images                      list, scoped to the caller when identity is configured
+GET  /images?source=built         only images this platform built ("what did I build")
 GET  /images/status?ref=<ref>     single-image status (ref goes in the query: it contains / and :)
-     → { ref, digest, state, format, cachedNodes, sizeBytes }
+     → { ref, digest, state, format, source, owner, baseRef, buildId,
+         cachedNodes, sizeBytes }
 POST /images/prewarm   { "refs": ["img:a"], "region": "ap-east-1",
                          "targetNodes": 10, "priority": "high" }
      → { jobId, refs, ready: {ref: nodeCount}, done }
@@ -199,6 +203,26 @@ CLI**: how many machines a replica landed on is a scheduling detail the user can
 on, and exposing it only makes people depend on the scheduling result, after which the
 scheduler can no longer migrate anything. The CLI side reports only ready / warming, and
 the corresponding parameter is called `--replicas`. See `docs/sdk-cli-design.md` §4.1.
+
+**Image origin policy** (operator-configured, default off): an operator can restrict what
+a create may run. `--allowed-image-sources=built` accepts only images this platform
+produced; `--allowed-registries=a.io,b.io` restricts where an imported ref may be pulled
+from. Both default to empty, which allows everything — refusing what previously ran would
+break existing deployments for no gain. A refusal is `403 IMAGE_NOT_PERMITTED`, and the
+image is not registered, so a declined ref does not appear in any listing.
+
+The registry allowlist applies only to imported refs. A built image's host is a push
+destination the operator chose, not somewhere a caller asked to pull from, so requiring
+every deployment to list its own registry would be noise.
+
+**Ownership**: `owner` is recorded, not enforced. Authentication here is a single shared
+API key, so this layer cannot distinguish callers on its own; an external platform layer
+is expected to authenticate and name the caller in a request header
+(`--owner-header=X-Bean-Owner`). Bean does not verify that header, so it must only be
+enabled behind a trusted layer. Ownership is claimed on first registration and never
+reassigned — a shared base image would otherwise change hands with every caller that ran
+it. Unowned images stay visible to everyone, which is what keeps shared bases listed after
+an upgrade. With no header configured, every listing is unfiltered, exactly as before.
 
 **Registry authentication** (private images): register the credential once per registry
 host, after which a private image is used exactly like a public one — you supply only a ref.
