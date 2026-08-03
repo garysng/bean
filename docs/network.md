@@ -181,6 +181,49 @@ not being reachable from outside. Exposing a port is the `bean-proxy` route
 (architecture.md), going through the control plane rather than giving every sandbox a host port —
 the latter would make port allocation another pool that has to be rebuilt after a restart.
 
+## 5a. What MASQUERADE reaches that it must not 📐
+
+The two rules above are what makes egress work. They are also, on their own, what makes a sandbox
+able to reach the node's internal network and the cloud metadata service — because those are not
+a separate capability, they are the **natural side effect of being able to route off the host**.
+
+Three documents already promise this is denied by default
+([architecture.md](architecture.md), [security-and-startup.md](security-and-startup.md) A4,
+[noded-design.md](noded-design.md) §5). §5 above described only the MASQUERADE rules, so an
+implementation faithful to it would ship a sandbox that can reach `169.254.169.254`, with every
+one of those promises quietly broken and the code looking finished. That omission is what
+[architecture.md](architecture.md) §0.1 exists to catch, and it was caught in review rather than
+by the design.
+
+So the filter is part of this feature, not a follow-up:
+
+```
+FORWARD -s <guest subnet> -d 169.254.0.0/16 -j DROP     # metadata, link-local
+FORWARD -s <guest subnet> -d 10.0.0.0/8     -j DROP     # RFC1918
+FORWARD -s <guest subnet> -d 172.16.0.0/12  -j DROP
+FORWARD -s <guest subnet> -d 192.168.0.0/16 -j DROP
+```
+
+Ordering is load-bearing: the DROP rules must be **inserted ahead of** whatever ACCEPT the host
+already has, and on a host running Docker there is such a rule. Appending them puts them after it
+and they never match. This is the failure mode to test for, because an appended rule and an
+inserted rule look identical in a diff and differ only in whether the feature works.
+
+Two consequences worth stating rather than discovering:
+
+- **The veth link subnet is inside `10/8`**, which those rules deny. The guest's traffic is
+  MASQUERADEd to the link address before it is forwarded, so the DROP must not match the
+  post-translation source. Getting this wrong breaks all egress rather than just the denied
+  destinations, which at least fails loudly.
+- **A node whose own control plane is on RFC1918 is still reachable from the host side.** These
+  rules constrain the guest, not the node. Sandbox-to-sandbox isolation follows from one netns per
+  sandbox with no route between them, which the address layout already gives.
+
+IPv6 is not addressed here. If the uplink has IPv6, the equivalent metadata address
+(`fd00:ec2::254`) is reachable and these v4 rules say nothing about it. Either the guest gets no
+IPv6 address at all — which is the current state and the safe one — or this section needs the v6
+half before that changes.
+
 ## 6. DNS 📐
 
 The guest's `/etc/resolv.conf` comes from the user's image, and what the image writes there could
