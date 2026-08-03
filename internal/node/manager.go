@@ -637,6 +637,12 @@ func (m *Manager) syncViaAgent(ctx context.Context, id string) error {
 }
 
 // BuildImage builds a base image on this node.
+//
+// Cancelling ctx stops the build: the runtime runs its builder under it, so the
+// context is the only handle a caller needs. That is also why the outcome label
+// distinguishes a cancelled build from a failed one — a rate of builds someone
+// stopped on purpose says nothing about whether this node's BuildKit is healthy,
+// and counting the two together is how a broken builder hides.
 func (m *Manager) BuildImage(ctx context.Context, req runtime.BuildRequest) (string, error) {
 	builder, ok := m.rt.(runtime.ImageBuilder)
 	if !ok {
@@ -647,8 +653,22 @@ func (m *Manager) BuildImage(ctx context.Context, req runtime.BuildRequest) (str
 	m.observePhase(ctx, "image_build", time.Since(start))
 	m.metrics.IncCounter("bean_node_image_builds_total",
 		"Image builds on this node.",
-		map[string]string{"outcome": boolOutcome(err == nil), "runtime": m.rt.Name()}, 1)
+		map[string]string{"outcome": buildOutcome(ctx, err), "runtime": m.rt.Name()}, 1)
 	return ref, err
+}
+
+// buildOutcome labels how a build ended. The context is consulted rather than
+// only the error because a killed subprocess reports an exit status, not a
+// cancellation: without this a stopped build counts as a failure.
+func buildOutcome(ctx context.Context, err error) string {
+	switch {
+	case err == nil:
+		return "success"
+	case ctx.Err() != nil:
+		return "cancelled"
+	default:
+		return "error"
+	}
 }
 
 // CachedImages reports the images this node holds, for the heartbeat.

@@ -8,6 +8,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -67,6 +68,9 @@ type BuildRequest struct {
 	BuildArgs map[string]string
 	// SizeMiB bounds the resulting filesystem; zero uses the builder default.
 	SizeMiB int64
+	// Logs receives BuildKit's output as it arrives. Nil discards it, which is
+	// what a caller with nobody watching passes.
+	Logs io.Writer
 }
 
 // Build runs a Dockerfile and writes the result as a base image.
@@ -113,7 +117,7 @@ func (b *Builder) Build(ctx context.Context, req BuildRequest) (path string, err
 	}
 
 	rootfsTar := filepath.Join(buildDir, "rootfs.tar")
-	if err := b.runBuildctl(ctx, contextDir, rootfsTar, req.BuildArgs); err != nil {
+	if err := b.runBuildctl(ctx, contextDir, rootfsTar, req.BuildArgs, req.Logs); err != nil {
 		return "", err
 	}
 
@@ -136,7 +140,7 @@ func (b *Builder) Build(ctx context.Context, req BuildRequest) (path string, err
 
 // runBuildctl invokes BuildKit, exporting a flat rootfs rather than an image.
 func (b *Builder) runBuildctl(ctx context.Context, contextDir, outTar string,
-	buildArgs map[string]string) error {
+	buildArgs map[string]string, logs io.Writer) error {
 
 	args := []string{
 		"--addr", b.Addr,
@@ -153,17 +157,40 @@ func (b *Builder) runBuildctl(ctx context.Context, contextDir, outTar string,
 		args = append(args, "--opt", "build-arg:"+k+"="+v)
 	}
 
+	// Cancelling ctx kills buildctl, which is the whole cancellation mechanism:
+	// buildctl closes its session and buildkitd abandons the solve. Nothing else
+	// on this path needs to know a build was cancelled -- the partial image was
+	// never published, since Build assembles under a temporary name.
 	cmd := exec.CommandContext(ctx, b.Buildctl, args...)
 	// BuildKit writes its progress to stderr; on failure that output names the
 	// failing step, which is the only useful thing to show a caller.
-	var output strings.Builder
-	cmd.Stdout = &output
-	cmd.Stderr = &output
+	//
+	// The tail is kept even when logs is streaming it: the stream and the error
+	// reach the caller by different routes, and a caller that only logged the
+	// error would otherwise get "exit status 1" with no step named.
+	tail := newTailBuffer(buildLogTailLines)
+	var sink io.Writer = tail
+	if logs != nil {
+		sink = io.MultiWriter(tail, logs)
+	}
+	cmd.Stdout = sink
+	cmd.Stderr = sink
 	if err := cmd.Run(); err != nil {
-		return fmt.Errorf("image: build failed: %w\n%s", err, tailLines(output.String(), 40))
+		// Cancellation is reported as cancellation rather than as a build
+		// failure: the build did not fail, someone stopped it, and BuildKit's
+		// output at that point describes a half-finished step and would read as
+		// a genuine error.
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return fmt.Errorf("image: build stopped: %w", ctxErr)
+		}
+		return fmt.Errorf("image: build failed: %w\n%s", err, tail.String())
 	}
 	return nil
 }
+
+// buildLogTailLines is how much of a failed build's output goes into its error.
+// It is the last lines because that is where BuildKit puts the failing step.
+const buildLogTailLines = 40
 
 // sizeForTar picks a filesystem size from the build output. The tar is already
 // uncompressed, so its size is the content size; the headroom is for the
@@ -197,13 +224,4 @@ func extractContext(contextTar []byte, dest string) error {
 		return fmt.Errorf("image: extract build context: %w", err)
 	}
 	return nil
-}
-
-// tailLines keeps the last n lines, which is where a build's error is.
-func tailLines(s string, n int) string {
-	lines := strings.Split(strings.TrimRight(s, "\n"), "\n")
-	if len(lines) <= n {
-		return strings.Join(lines, "\n")
-	}
-	return strings.Join(lines[len(lines)-n:], "\n")
 }

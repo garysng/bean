@@ -158,7 +158,11 @@ commands:
   logs SBX [--tail N]
   cp LOCAL sbx:SBX:/path | sbx:SBX:/path LOCAL
   events SBX | events -f [SBX] [--label k=v]    # -f follows the live stream
-  build --tag REF [--file Dockerfile] [CONTEXT] # build an image on the platform
+  build --tag REF [--file Dockerfile] [CONTEXT] [-f]
+                                                # build an image on the platform
+                                                # -f follows the build output
+  build logs REF                                # watch a build in progress
+  build cancel REF                              # stop a build; -f alone does not
   commit SBX --tag REF                          # freeze the filesystem as an image
   snapshot create SBX [--name N] [--no-keep-running] [--no-memory] [--base SNAP]
                                                 # --no-memory: filesystem only,
@@ -375,6 +379,18 @@ func cmdBuild(c *Client, args []string, stdout io.Writer) error {
 	// Long flags only: the shared parser treats short flags as boolean, which
 	// `events -f` depends on, so `-t REF` would silently lose its value.
 	flags, pos := parseFlags(args)
+	// logs and cancel are subcommands rather than sibling top-level commands so
+	// that everything about one build is reached by one word. They are dispatched
+	// on the positional arguments, not on args[0], so a leading --json still
+	// reaches them.
+	if len(pos) > 0 {
+		switch pos[0] {
+		case "logs":
+			return cmdBuildLogs(c, flags, pos[1:], stdout)
+		case "cancel":
+			return cmdBuildCancel(c, flags, pos[1:], stdout)
+		}
+	}
 	p := newPrinter(stdout, flags)
 	tag := flags["tag"]
 	if tag == "" {
@@ -419,13 +435,93 @@ func cmdBuild(c *Client, args []string, stdout io.Writer) error {
 	if err := c.doJSON("POST", "/v1/images/build", body, &out); err != nil {
 		return err
 	}
+
+	// --follow prints the build's output and waits for it. It is opt-in rather
+	// than the default because the accepted response is the contract a script
+	// depends on, and because Ctrl-C on a followed build stops watching without
+	// stopping the build — `bean build cancel` is what stops it.
+	if flags["follow"] == "true" || flags["f"] == "true" {
+		if err := p.result(out.ImageRef, field{"state", out.State}); err != nil {
+			return err
+		}
+		return streamBuildLogs(c, out.ImageRef, stdout)
+	}
+
 	if err := p.result(out.ImageRef, field{"state", out.State}); err != nil {
 		return err
 	}
 	// A build takes minutes, so the next step is worth naming — but only for a
 	// person: a script already knows what it is going to poll.
-	p.note("follow with: bean image status %s", out.ImageRef)
+	p.note("follow with: bean build logs %s", out.ImageRef)
 	return nil
+}
+
+// streamBuildLogs prints a build's output until it finishes.
+//
+// The body is copied through rather than parsed: it is a log, and the server's
+// trailing "build failed: ..." line is meant for the same eyes as the rest of it.
+func streamBuildLogs(c *Client, ref string, stdout io.Writer) error {
+	resp, err := c.do("GET", "/v1/images/build/logs?ref="+url.QueryEscape(ref), nil)
+	if err != nil {
+		return err
+	}
+	defer resp.Body.Close()
+	if resp.StatusCode >= 400 {
+		data, _ := io.ReadAll(resp.Body)
+		return fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(data)))
+	}
+	// Copied in small reads so output appears as the build produces it; io.Copy's
+	// buffer would hold a partial line back until the next flush filled it.
+	buf := make([]byte, 4096)
+	var tail strings.Builder
+	for {
+		n, rerr := resp.Body.Read(buf)
+		if n > 0 {
+			if _, werr := stdout.Write(buf[:n]); werr != nil {
+				return werr
+			}
+			tail.Write(buf[:n])
+		}
+		if rerr == io.EOF {
+			break
+		}
+		if rerr != nil {
+			return rerr
+		}
+	}
+	// A failed build has to exit non-zero, or `bean build --follow && deploy`
+	// would deploy from an image that was never produced. The outcome is in the
+	// body because the status line was sent before it was known.
+	if strings.Contains(tail.String(), "\nbuild failed:") {
+		return &apiError{Code: "BUILD_FAILED", Message: "build " + ref + " failed",
+			Status: http.StatusInternalServerError}
+	}
+	return nil
+}
+
+// cmdBuildLogs prints a build's retained output, following by default: someone
+// asking for a running build's logs is asking to watch it.
+func cmdBuildLogs(c *Client, _ map[string]string, pos []string, stdout io.Writer) error {
+	if len(pos) < 1 {
+		return usagef("usage: bean build logs REF")
+	}
+	return streamBuildLogs(c, pos[0], stdout)
+}
+
+// cmdBuildCancel stops a running build.
+func cmdBuildCancel(c *Client, flags map[string]string, pos []string, stdout io.Writer) error {
+	if len(pos) < 1 {
+		return usagef("usage: bean build cancel REF")
+	}
+	var out struct {
+		ImageRef string `json:"imageRef"`
+		State    string `json:"state"`
+	}
+	if err := c.doJSON("POST", "/v1/images/build/cancel?ref="+url.QueryEscape(pos[0]),
+		nil, &out); err != nil {
+		return err
+	}
+	return newPrinter(stdout, flags).result(out.ImageRef, field{"state", out.State})
 }
 
 // needsContext reports whether a Dockerfile references the build context. COPY
