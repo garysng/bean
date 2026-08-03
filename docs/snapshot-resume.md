@@ -5,13 +5,58 @@
 > The status-marker convention is defined in [architecture.md](architecture.md) §0; the state machine is in architecture.md §4.3. fc is the default main tier and the snapshot main path is FC-native
 > snapshot; the container tier's (runc/runsc) checkpoint path serves the degraded/GPU scenarios.
 
+> **Read §0 first.** Resume, restore and fork name three different operations, and the
+> rest of this document assumes the distinction.
+
+## 0. Resume, restore and fork are three different things
+
+**Resume brings back the same sandbox. Restore creates a different one.** Everything
+below follows from that sentence, and getting it wrong has cost real explanations more
+than once.
+
+| | **resume** | **restore** | **fork** |
+|---|---|---|---|
+| Starts from | a live firecracker process whose vCPUs are frozen | a snapshot blob on disk / in S3 | a *running* sandbox |
+| Produces | the **same** sandbox, same id | a **new** sandbox, new id | N new sandboxes, new ids |
+| Guest memory | never left host RAM | served on fault from the unpacked image (UFFD) | same as restore |
+| Persistent object | none | a `snap_...` that outlives every sandbox made from it | none produced (use snapshot if you want one kept) |
+| Cost | milliseconds — one `PATCH /vm {Resumed}` | **392 ms** on a node-local cache hit | restore's cost, minus the packing and transfer |
+| Survives noded restart | ❌ the process dies with it | ✅ the blob is the state | ❌ derives from a live process |
+| Crosses machines | ❌ bound to the process's host | ✅ that is the point | ❌ same node; cross-node goes through snapshot+restore |
+| Fan-out (1 → N) | ❌ there is only ever one | ✅ **N independent sandboxes from one snapshot** | ✅ by construction |
+| Constraint | none beyond "the process is still there" | pinned to the CPU vendor+family the memory was captured on | as restore |
+| Pairs with | `pause` | `snapshot` | — |
+
+### Why the distinction matters
+
+**Fan-out is only possible with restore.** One snapshot restored N times gives N
+independent sandboxes, and that is the core evaluation workload: set up an environment
+once, then run N experiments against it that must not see each other's writes. Resume
+cannot do this at all — a paused sandbox is one sandbox, and resuming it gives you that
+one sandbox back. Reference counting reflects exactly this: `ref_count` on a snapshot is
+a **counter, not a flag**, because several restores of one snapshot are a normal
+occurrence rather than a conflict (`AcquireSnapshot`, `store.go`).
+
+**Pause/resume is a cost mechanism, not a scaling one.** It exists so an idle sandbox
+stops burning CPU while staying instantly available. It frees no memory — the scheduler
+still accounts for the full allocation (§2) — so it trades CPU for latency, and nothing
+else.
+
+**Conflating them makes every performance number incoherent.** The competitive
+"~100 ms start" claims in [competitive-analysis.md](competitive-analysis.md) refer to
+**restore**. They are not create (a real boot: 952 ms and 5 CPU-seconds,
+[status.md](status.md)) and they are not resume (which is a vCPU unfreeze and therefore
+faster than any of them, while doing far less). Quoting a resume latency against a
+competitor's restore latency compares an unfreeze to a machine build.
+
 ## 1. Capability Tiers
 
 | Capability | Semantics | Implementation | Status |
 |---|---|---|---|
 | **pause/resume (same node)** | freeze execution, keep memory and state | fc: pause vCPU | ✅ |
 | **snapshot** | full state persisted to S3, the sandbox can be destroyed | fc: memory + CoW extent list | ✅ three variants |
-| **restore (cross-node)** | rebuild from a snapshot on any node | UFFD page serving + CoW backfill | ⚠️ see below |
+| **restore (cross-node)** | rebuild a **new** sandbox from a snapshot on any node | UFFD page serving + CoW backfill | ⚠️ see below |
+| **fork (millisecond clone)** | one parent many children, agent branch exploration | shares restore's mechanism; only the API is missing | ⚠️ see §4.5 |
 | **container-tier checkpoint** | CRIU / gVisor save | — | 📐 unimplemented |
 
 ⚠️ **Cross-node restore is unmeasured**: there is only one fc machine. Logically it holds
@@ -20,7 +65,6 @@ vendor+family), and a 409 has been verified to come back correctly by "rewriting
 snapshot record to pose as GenuineIntel" — but "same family, different model really does
 restore" has no empirical backing, and that is exactly why
 `--cpu-template portable` exists. See `docs/decisions.md` §3.6.
-| **fork (millisecond clone)** | one parent many children, agent branch exploration | FC diff snapshot + CoW (fc tier only) | P4 |
 
 > Phases all refer to the fc main path; the container-tier implementations in the table (freezer/CRIU/gVisor save) arrive with the P5 container tier.
 
@@ -142,9 +186,11 @@ diverge the moment either writes.
 Measured restore ~950ms (1617ms the first time, paying the unpack cost). The remaining cost
 is transferring the bundle from the gateway and gunzipping it just to get that one rootfs
 member — unoptimised.
-- fork 📐 **unimplemented** (separate API: `POST /sandboxes/{id}/fork {count}`): an
-  instantaneous CoW snapshot + N LoadSnapshot calls → one parent many children, producing no
-  persistent snapshot object (use /snapshot if you want one kept).
+- fork ⚠️ **the mechanism ships, the API does not** (§4.5). The intended surface is
+  `POST /sandboxes/{id}/fork {count}`: an instantaneous CoW snapshot + N LoadSnapshot calls
+  → one parent many children, producing no persistent snapshot object (use /snapshot if you
+  want one kept). Until it exists, `snapshot create` + N × `run --snapshot` has the same
+  semantics through a persistent object.
   Every host-side resource for a child instance is allocated fresh: tap device, vsock CID,
   writable-layer CoW clone, new sandbox-id/token; the MAC/IP inside the guest is
   reconfigured by the agent. The optimal implementation of "set up the environment once,
@@ -261,8 +307,8 @@ interface — space that counts against no allocation should at least be visible
 ### 3.6 Lifecycle (common to both tiers) ⚠️
 
 - A snapshot is an independent object with an independent quota (total bytes per key); TTL is optional, with S3 lifecycle as the backstop
-- Reference counting: a snapshot with a RESTORING in flight cannot be deleted
-- The same snapshot can be restored many times → naturally supports "set up the environment, snapshot once, fan out N experiments" — the core value point in eval scenarios
+- Reference counting: a snapshot with a RESTORING in flight cannot be deleted. The count is a **counter, not a flag**, precisely because concurrent restores of one snapshot are the expected case
+- The same snapshot can be restored many times, each producing an independent sandbox → this is the fan-out that "set up the environment, snapshot once, run N experiments" needs, and the core value point in eval scenarios. Resume cannot substitute: it returns one sandbox, the one that was paused
 
 ## 4. Comparing the two tiers, and the unified interface ⚠️
 
@@ -270,32 +316,63 @@ interface — space that counts against no allocation should at least be visible
 |---|---|---|
 | Consistency | Process-level, external state best-effort | Whole-machine (memory + devices + vCPU) |
 | Speed | Minutes (large memory) | pause in hundreds of ms; diff snapshot incremental |
-| resume | Rebuild the process tree | load snapshot + resume vCPUs, hundreds of ms |
+| restore | Rebuild the process tree | load snapshot + resume vCPUs, hundreds of ms |
 | fork clone | Not supported | CoW memory → one parent many children (AgentENV demonstrated 16 children on a single node) |
 
 Unified interface (invisible to the user):
 
 - The Runtime interface's Checkpoint/Restore signatures are common to both tiers (io.Reader/Writer streaming)
 - The manifest's `runtime` field distinguishes the format, and restore scheduling matches node capability by format
-- The snapshot API semantics are identical; the tier difference shows up only in speed and in whether fork is available
+- The snapshot API semantics are identical; the tier difference shows up only in speed and in whether fork-style fan-out is available
 
-## 4.5 fork design 📐
+## 4.5 fork: the mechanism exists, the API surface does not ⚠️
 
-> **Unimplemented.** This section is design; it is written down because fork's feasibility
-> has already been proven by the existing code — every mechanism it needs is there, and what
-> is missing is the orchestration.
+> **What is missing is one API call, not a capability.** Restore already *is* fork:
+> `snapshot create` followed by `run --snapshot` run N times gives N independent
+> sandboxes sharing one memory image. Every mechanism a fork needs is shipped and
+> measured. What does not exist is a single call against a running sandbox that does
+> both steps and skips the round trip through a persistent object.
 
-### The essential difference between fork and restore
+### Restore is already fork/clone semantics ✅
 
-restore rebuilds one sandbox from a **persistent object**. fork derives N from **a living
-sandbox** and produces no persistent object. Use snapshot if you want one kept.
+Three properties together are the definition of a fork, and all three are in the code:
 
-To the user it is "set up the environment once, fan out N experiments"; to the implementation
-it is "skip the packing and the transfer".
+| Property | Where | Evidence |
+|---|---|---|
+| The immutable part is **shared** | `uffd_linux.go` | The memory image is mapped `PROT_READ \| MAP_SHARED`, "so several VMs restored from one snapshot use one page cache copy rather than one per VM" |
+| The mutable part is **copied per instance** | `fc_lifecycle_linux.go` | `snapshotState`: "The writable layer is always extracted... because it cannot be shared: two sandboxes restored from one checkpoint diverge as soon as either writes" |
+| The result is **N independent instances** | `store.go` | `ref_count` is a counter, not a flag; `AcquireSnapshot` increments it and its comment speaks of restores in the plural |
+
+Sharing what is immutable while privately copying what is mutable, yielding instances
+that cannot observe one another, is what a fork is.
+
+Verified empirically, not just by reading: `hack/restore-repeat-check.sh` restores one
+snapshot several times and, **after `drop_caches`**, each restored sandbox reads back its
+own marker (the drop matters — a page-cache read passes even against a device serving the
+base image, [decisions.md](decisions.md) §3.0). The unpack cache's eviction check makes
+the same assertion across six restores ([tech-stack.md](tech-stack.md) §3.2).
+
+The node-local path is built for this shape rather than merely tolerating it. `snapCache`
+merges a chain once per node and every later restore of that leaf skips it; the comment on
+that branch calls the case by name — "this is what makes a fan-out cheap".
+
+### What a fork API would actually add
+
+Not sharing, and not independence — those exist. Only these:
+
+- **One call instead of two.** `POST /sandboxes/{id}/fork {count: N}` in place of
+  `snapshot create` then N × `run --snapshot`.
+- **No persistent object.** A fork produces no `snap_...` to name, quota, reference-count
+  or reclaim. Today the intermediate snapshot has to be created and then deleted.
+- **No pack/transfer round trip.** The parent is on this node and its memory is already
+  resident, so a same-node fork can skip bundling to S3 and reading it back.
+
+Everything below in this section is about that surface, and about the two numbers worth
+measuring before it ships.
 
 ### Why one memory image can be shared by N child instances ✅ (the mechanism is verified)
 
-This is the entire reason fork is cheap, and it has already been verified inside snapCache:
+This is the entire reason fork is cheap, and it is already load-bearing inside snapCache:
 
 ```
 UFFD handler:  mmap(PROT_READ | MAP_SHARED)     ← we only read
@@ -379,11 +456,18 @@ POST   /v1/sandboxes/{id}/snapshot           ✅
 GET    /v1/snapshots?label=...&state=...     ✅
 GET    /v1/snapshots/{id}                    ✅
 DELETE /v1/snapshots/{id}                    ✅  409 SNAPSHOT_IN_USE when it has descendants
-POST   /v1/sandboxes { "snapshot": "snap_..." }  ✅  409 INCOMPATIBLE_CPU on an incompatible CPU
-POST   /v1/sandboxes/{id}/fork               📐  unimplemented
+POST   /v1/sandboxes { "snapshot": "snap_..." }  ✅  restore: a NEW sandbox, new id.
+                                                    409 INCOMPATIBLE_CPU on an incompatible CPU.
+                                                    Call it N times for a fan-out of N
+POST   /v1/sandboxes/{id}/fork               ⚠️  no API; the mechanism is the two calls
+                                                 above (§4.5)
 ```
 
+Note that `pause`/`resume` act on `{id}` and return the same sandbox, while restore is a
+`POST /v1/sandboxes` — a creation — and returns a different one. The URL shapes say so.
+
 CLI: `bean snapshot create SBX [--name N] [--no-memory] [--base SNAP] [--no-keep-running]`,
-`bean snapshot ls|rm`, `bean run --snapshot SNAP`.
+`bean snapshot ls|rm`, `bean run --snapshot SNAP` (restore: a new sandbox each time),
+`bean pause SBX` / `bean resume SBX` (the same sandbox). There is no `bean fork`.
 
 The SDK shape is in [sdk-cli-design.md](sdk-cli-design.md).

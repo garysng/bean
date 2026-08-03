@@ -111,6 +111,11 @@ type Runtime interface {
 }
 ```
 
+`Resume` 收一个 `id`、什么都不返回:它作用在本进程已经持有的那台 VM 上,还回来的是
+同一台。`Restore` 收一整个 `*Spec`、返回一个新的 `*Handle`,因为它造出的 sandbox
+本来不存在 —— 这也是为什么一份快照可以驱动任意多个并发的 `Restore`。签名本身就带着
+这个区分,见 [snapshot-resume.md](snapshot-resume.md) §0。
+
 与早先设计的三处差异,都是实现过程中发现原设计不对:
 
 - **`Create` 不收 rootfs**。image provider 是 runtime 的字段而非参数 ——

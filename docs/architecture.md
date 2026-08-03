@@ -33,45 +33,6 @@ One self-imposed rule: a 📐 section does not say "our approach is", it says
 "the plan is". The former reads as established fact, and that is precisely
 where this went wrong before.
 
-### 0.1 Sequencing Claims Must Name What Is Given Up
-
-A second rule, added after it was broken. The status markers above catch a claim
-that something is *built* when it is not. They do nothing about a claim that
-something is *not worth building yet*, and that failure looks like this:
-
-> overlaybd's value is first-use latency, and prewarm already shadows that path,
-> so it can wait.
-
-Each clause is true. The conclusion is wrong, because overlaybd also preserves
-layer structure — which prewarm cannot help with at all. Flattening every image
-into one ext4 loses layer sharing, so a set of images that are one common base
-plus a small patch each costs a full copy each. It also means `commit` produces
-an ext4 rather than an OCI layer, so a built image cannot be published.
-
-Nothing in a build, a test or a delivery review catches this. Those verify that an
-implementation matches its design; this was an error *in* the design, and it
-produced no code and no test to fail. It survived until a reader challenged it.
-
-So: **any claim of the form "A already solves B, therefore C can wait" must list
-each thing C provides that A does not, and for every one of them point at where in
-the code A solves it.** Applied to the claim above:
-
-| C provides | Does A solve it? | Where |
-|---|---|---|
-| first-use latency | yes | `PullingProvider.ensure` dedupes and prefetches |
-| storage from shared layers | **no location** | — |
-| an OCI layer from `commit` | **no location** | — |
-
-The requirement to cite a location is what does the work. It converts a summary
-that can be waved through into a check that can fail — the same reason a test is
-only evidence once you have watched it fail.
-
-The underlying mistake is worth naming too: the evidence was already in the
-repository. `applyLayer` in `internal/node/image/convert_linux.go` flattens layers
-into a single filesystem, and `image-pipeline.md` says so in a sentence written
-for this project. A general impression was allowed to stand in for a specific fact
-that was already to hand.
-
 ## 1. Background and Goals
 
 ### 1.1 The Problem
@@ -262,7 +223,7 @@ complexity inside the guest.
 | Node cache | Local NVMe as a block-chunk LRU on top of S3; bare metal (big disks) and cloud VMs (small disks) differ only in hit rate, the architecture is the same |
 | Eval artifacts | agent/noded push straight to S3 via presigned URL (issued by the control plane; nodes hold no long-lived credentials) |
 | Large downloads | The API returns a presigned URL redirect rather than proxying through the gateway |
-| Snapshots (P3–P4) | FC memory snapshot / rootfs diff land in S3, enabling cross-node resume |
+| Snapshots (P3–P4) | FC memory snapshot / rootfs diff land in S3, enabling cross-node **restore** (a new sandbox on any node; resume is same-process and same-node, see snapshot-resume.md §0) |
 | Volumes | shared-fs volume backend (JuiceFS on S3) mounted on the host and exported over nfsd (see D10); dataset volumes reserved |
 
 overlaybd (block-level, DADI/Alibaba, already validated by AgentENV in the FC
@@ -468,13 +429,20 @@ PENDING → SCHEDULED → PULLING → STARTING → RUNNING → STOPPING → STOP
                                     │          │
                                     └── FAILED ┘        RUNNING ─(lease lost)→ LOST
 
-RUNNING ─pause→ PAUSED ─resume→ RUNNING
+RUNNING ─pause→ PAUSED ─resume→ RUNNING      ← the same sandbox, same id
 RUNNING/PAUSED ─snapshot→ SNAPSHOTTING → (back to previous state)
 (from snapshot) PENDING → SCHEDULED → RESTORING → RUNNING
+                             ↑ restore is a *new* sandbox with its own id, and one
+                               snapshot can drive N of these at once
 
 A snapshot object has its own state machine: CREATING → READY → DELETING
-(not deletable while referenced by a RESTORING refcount)
+(not deletable while any RESTORING holds a refcount — a count, not a flag, since
+concurrent restores of one snapshot are the normal case)
 ```
+
+Resume and restore are different operations on different subjects: resume moves one
+existing sandbox back to RUNNING, restore builds another one. See
+[snapshot-resume.md](snapshot-resume.md) §0.
 
 `DELETE /sandboxes/{id}` returns 202 and then goes STOPPING → STOPPED
 asynchronously (the terminal record is kept for 30 days and then archived, see

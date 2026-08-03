@@ -16,7 +16,7 @@ guest kernel 6.1.102, Alpine 3.20.
 
 | Area | | Notes |
 |---|---|---|
-| Lifecycle | ✅ | create → exec → cp → pause → resume → snapshot → restore → destroy |
+| Lifecycle | ✅ | create → exec → cp → pause → resume → snapshot → restore → destroy. Resume wakes **this** sandbox; restore builds a **new** one from the snapshot, and N restores of one snapshot are N independent sandboxes ([snapshot-resume.md](snapshot-resume.md) §0) |
 | Images | ✅ | OCI pull and conversion to ext4, private registries (AES-256-GCM at rest), prewarm with image-affinity scheduling |
 | Rootfs | ✅ | Shared read-only base + per-sandbox copy-on-write through device-mapper. **44 KiB of actual disk per sandbox** (see the note below on why other figures were quoted) |
 | Snapshots | ✅ | Three kinds with different semantics — see below |
@@ -55,11 +55,11 @@ guest kernel 6.1.102, Alpine 3.20.
 
 ### Snapshots are three kinds, not three sizes
 
-| Kind | Flag | Size | Restore | Portability |
+| Kind | Flag | Size | What a restore produces | Portability |
 |---|---|---|---|---|
-| full | *(default)* | 15.5 MB | resumes; process tree survives | pinned to CPU vendor + family |
-| filesystem-only | `--no-memory` | 6109 B | boots fresh, files intact | **any CPU** |
-| incremental | `--base SNAP` | 298 KB | resumes | pinned to CPU vendor + family |
+| full | *(default)* | 15.5 MB | a new sandbox continuing the captured guest; process tree survives | pinned to CPU vendor + family |
+| filesystem-only | `--no-memory` | 6109 B | a new sandbox that boots fresh, files intact | **any CPU** |
+| incremental | `--base SNAP` | 298 KB | a new sandbox continuing the captured guest | pinned to CPU vendor + family |
 
 Guest memory records what the CPU it booted on offered, and vendor/family cannot
 be masked away — so a memory snapshot only restores on a compatible CPU, and the

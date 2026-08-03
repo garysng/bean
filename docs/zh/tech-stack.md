@@ -151,7 +151,11 @@ fc 档就得用 virtiofs。它作为(未实现的)容器档的备选保留。
 
 ---
 
-## 3. 快照与恢复
+## 3. 快照与 restore
+
+> 本节讲的全部是 **restore** —— 从盘上的快照造出一个新 sandbox。resume(给一个从未
+> 停止运行的进程解冻 vCPU)与这里的任何机制都无关。见
+> [snapshot-resume.md](snapshot-resume.md) §0。
 
 ### 3.1 UFFD(userfaultfd)做内存恢复 ✅
 

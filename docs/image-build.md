@@ -93,8 +93,8 @@ thing**, and conflating them makes a mess of both the data model and the user's 
 |---|---|---|
 | Contents | filesystem **+ memory/device state** (fc tier) | filesystem only |
 | Across runtime tiers | ❌ the format is bound to the tier that produced it | ✅ it is just an image layer |
-| Purpose | restore **this one** sandbox (including process state) | serve as **someone else's** base image |
-| Identifier | `snap_...`, reclaimed by reference count + TTL | `ref` + digest, referenced like any image |
+| Purpose | clone **one** sandbox's exact state, process tree included, into any number of new sandboxes | serve as **someone else's** base image |
+| Identifier | `snap_...`, reclaimed by reference count + TTL (a count, since one snapshot can be restored many times at once) | `ref` + digest, referenced like any image |
 | Typical scenario | "set up the environment → fan out N experiments" | "the eval base image a team shares" |
 
 ## 5. Build Plan: the unified intermediate representation ⚠️

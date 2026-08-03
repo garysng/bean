@@ -24,6 +24,8 @@
 ✅ Sandbox.snapshot(name, labels, keep_running, include_memory, base)
 ✅ Sandbox.commit(tag) / events() / refresh() / context manager
 ✅ Snapshot.resumes_guest / base_id / chain_depth
+   (`resumes_guest` means "a sandbox restored from this continues the captured guest
+   rather than booting" — it is a property of restore, not of the resume verb)
 ✅ images.list|status|prewarm|prewarm_status
 ✅ Error tiering: BeanAPIError / BeanConnectionError
 
@@ -102,11 +104,13 @@ vol = client.volumes.create(name="alice-ws", type="shared-fs", quota_mib=51200)
 client.volumes.list(labels={...}); vol.delete()
 
 # —— snapshot ——
-sbx.pause(); sbx.resume()
+sbx.pause(); sbx.resume()                                  # the SAME sandbox, frozen and woken
 snap = sbx.snapshot(name="after-setup", keep_running=True)
 client.snapshots.list(); snap.delete()
-sbx2 = client.sandboxes.create(snapshot=snap.id)           # rebuild from a persistent snapshot
-children = sbx.fork(count=8)                               # separate API: instantaneous CoW clone fan-out
+sbx2 = client.sandboxes.create(snapshot=snap.id)           # restore: a NEW sandbox from the snapshot
+kids = [client.sandboxes.create(snapshot=snap.id) for _ in range(8)]   # fan-out of 8, all independent
+children = sbx.fork(count=8)                               # 📐 sugar for the line above, without the
+                                                           #    persistent snapshot (snapshot-resume.md 4.5)
 ```
 
 ### 2.2 The async twin 📐
@@ -189,8 +193,7 @@ build --tag REF [--file Dockerfile] [CONTEXT]
 commit SBX --tag REF
 snapshot create SBX [--name N] [--no-keep-running] [--no-memory] [--base SNAP]
 snapshot ls [--label k=v] | snapshot rm SNAP
-image ls [--source built|imported] | image status REF
-image prewarm REF... [--replicas N]
+image ls | image status REF | image prewarm REF... [--replicas N]
 output: --json / --quiet    exit codes: 0 / 64 / 69 / 70 / 125
 ```
 
@@ -206,13 +209,13 @@ bean cp   ./local sbx:SBX:/path  |  sbx:SBX:/path ./local
 bean logs SBX [--tail N]
 bean events SBX             # history; `-f [SBX] [--label k=v]` follows the live stream (SSE)
 bean kill SBX [--force]
-bean pause SBX / bean resume SBX
+bean pause SBX / bean resume SBX   # freeze and wake the same sandbox
+bean run --snapshot SNAP           # restore: a new sandbox each time it is called
 bean build  --tag REF [--file Dockerfile] [CONTEXT]   # build an image on the platform
 bean commit SBX --tag REF                             # freeze the filesystem into an image
 bean snapshot create SBX [--name N] [--no-keep-running]
 bean snapshot ls [--label k=v] / bean snapshot rm SNAP
-bean image ls [--source built|imported]               # --source built lists what you built
-bean image status REF | bean image prewarm REF... [--replicas N]
+bean image ls | image status REF | image prewarm REF... [--replicas N]
 bean version
 ```
 

@@ -90,7 +90,11 @@ POST   /sandboxes/{id}/start                 → 拉起原 entrypoint（autoStar
 POST   /sandboxes/{id}/fork     { "count": 3, "labels": {...} }    // 独立 API（fc 档,P4）
        → 202 { "sandboxes": [ ...N 个新 sandbox... ] }
        // 语义：对运行中 sandbox 做瞬时 CoW 快照并克隆 N 个独立实例（不产生
-       // 持久 snapshot 对象;要留存用 /snapshot）。容器档返回 501
+       // 持久 snapshot 对象;要留存用 /snapshot）。容器档返回 501。
+       // 注意:这是 snapshot+restore 这对操作的便利封装,不是一项新能力。
+       // 今天 POST /snapshot 再 N 次 POST /sandboxes{snapshot} 已经能得到 N 个
+       // 互相独立的 sandbox;fork 省掉的是那个持久对象和那一圈往返。
+       // 见 snapshot-resume.md 4.5
 ```
 
 sandbox 详情返回 `runtime: fc|runsc|runc`（实际档位，排障用）。
@@ -244,12 +248,19 @@ POST   /sandboxes/{id}/snapshot  { "name": "after-setup", "labels": {},
 GET    /snapshots?label=k%3Dv&state=READY   → 列表
 GET    /snapshots/{id}
 DELETE /snapshots/{id}      // RefCount>0 或有子代 → 409 SNAPSHOT_IN_USE
-POST   /sandboxes    { "snapshot": "snap_..." }   // 从 snapshot 创建
+POST   /sandboxes    { "snapshot": "snap_..." }   // restore:一个**新的** sandbox、新 id,
+                                                  // 不是把被快照的那个救回来。
+                                                  // 调 N 次就是一份快照出 N 个独立 sandbox
                                                   // image 与 snapshot 互斥
                      // CPU 不兼容 → 409 INCOMPATIBLE_CPU
 ```
 
-- `includeMemory` 默认 **true**,即快照一直以来的含义(restore 会 resume guest)。
+restore 是 `POST /sandboxes` —— 一次创建 —— 而 `resume` 是打在已存在的
+`/sandboxes/{id}` 上的 POST。两者是作用在不同对象上的不同操作,见
+[snapshot-resume.md](snapshot-resume.md) §0。
+
+- `includeMemory` 默认 **true**,即快照一直以来的含义(restore 出的 sandbox 接着被采集
+  的那个 guest 跑,而不是重新开机)。
   设成 false 只抓文件系统:restore 重新 boot,但**可以落在任意 CPU 上** ——
   guest 内存把快照钉死在兼容的 vendor+family 上。实测 6109 B 对全量 15.5 MB。
   **用指针类型**(`*bool`)区分「缺省」与「显式 false」:老快照没有这个字段,

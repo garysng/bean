@@ -116,7 +116,7 @@ resource billing basis after a pause is correct.
   named image (the same as Tensorlake) — the shortest path for "set up the environment once, reuse
   in bulk"
 
-**Acceptance**: a "set up the environment → snapshot → fan out 50 instances" demo; fc-tier resume P50 < 500ms.
+**Acceptance**: a "set up the environment → snapshot → fan out 50 instances" demo (50 restores of one snapshot, 50 independent sandboxes); fc-tier **restore** P50 < 500ms — restore, not resume: the number being promised is the cost of building a new sandbox.
 
 ## P5+ — Reserve items
 

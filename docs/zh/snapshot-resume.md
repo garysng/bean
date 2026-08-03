@@ -3,20 +3,59 @@
 > 状态标注约定见 [architecture.md](architecture.md) §0;状态机见 architecture.md §4.3。fc 为默认主档，snapshot 主路径是 FC 原生
 > snapshot;容器档（runc/runsc）的 checkpoint 路径服务降级/GPU 场景。
 
+> **先读 §0。** resume、restore、fork 是三个不同的操作,本文其余部分都假定读者已经
+> 分清了它们。
+
+## 0. resume、restore、fork 是三件不同的事
+
+**resume 把同一个 sandbox 唤回来,restore 造出另一个。** 下面所有内容都从这一句
+推出,而把它搞混已经不止一次需要口头解释。
+
+| | **resume** | **restore** | **fork** |
+|---|---|---|---|
+| 起点 | 一个 vCPU 被冻住、进程仍活着的 firecracker | 磁盘 / S3 上的一份快照 blob | 一个**正在运行**的 sandbox |
+| 产出 | **同一个** sandbox,同一个 id | **新的** sandbox,新 id | N 个新 sandbox,各自新 id |
+| guest 内存 | 从未离开宿主 RAM | 由 UFFD 从解包后的镜像按缺页供给 | 同 restore |
+| 持久对象 | 无 | 一个 `snap_...`,比由它造出的任何 sandbox 都活得久 | 不产生(要留就用 snapshot) |
+| 开销 | 毫秒级 —— 一次 `PATCH /vm {Resumed}` | 节点本地缓存命中 **392 ms** | restore 的开销,减去打包与传输 |
+| 熬得过 noded 重启 | ❌ 进程一死就没了 | ✅ blob 本身就是状态 | ❌ 派生自一个活进程 |
+| 能跨机器 | ❌ 绑在那个进程的宿主上 | ✅ 这正是它的用途 | ❌ 同节点;跨节点走 snapshot+restore |
+| 扇出(1 → N) | ❌ 从头到尾只有一个 | ✅ **一份快照造出 N 个互相独立的 sandbox** | ✅ 天生如此 |
+| 约束 | 除「进程还在」之外没有 | 钉死在采集内存时那颗 CPU 的 vendor+family 上 | 同 restore |
+| 配对操作 | `pause` | `snapshot` | — |
+
+### 为什么这个区分重要
+
+**扇出只有 restore 做得到。** 一份快照 restore N 次得到 N 个互相独立的 sandbox,
+这正是 eval 的核心负载:环境只装一次,然后跑 N 个实验,而它们不能看见彼此的写入。
+resume 根本做不到这件事 —— 一个 paused sandbox 就是一个 sandbox,resume 它得到的
+就是那一个。引用计数恰好反映了这点:快照上的 `ref_count` 是**计数器而不是标志位**,
+因为同一份快照被同时 restore 好几次是常态而非冲突(`AcquireSnapshot`,`store.go`)。
+
+**pause/resume 是省成本的手段,不是扩容手段。** 它的存在是让闲置 sandbox 停止烧
+CPU、同时保持随时可用。它不释放内存 —— 调度器仍按整份额度记账(§2)—— 所以它只是
+拿 CPU 换延迟,别无其他。
+
+**混淆两者会让所有性能数字失去意义。**
+[competitive-analysis.md](competitive-analysis.md) 里各家「~100 ms 启动」指的都是
+**restore**。它既不是 create(真开机:952 ms、5 CPU 秒,见 [status.md](status.md)),
+也不是 resume(那只是解冻 vCPU,因此比两者都快,但做的事也少得多)。拿 resume 的延迟
+去对标别人的 restore 延迟,等于把「解冻」和「造一台机器」放在一起比。
+
 ## 1. 能力分级
 
 | 能力 | 语义 | 实现 | 状态 |
 |---|---|---|---|
 | **pause/resume（本节点）** | 冻结执行，保留内存与状态 | fc:pause vCPU | ✅ |
 | **snapshot** | 完整状态持久化到 S3，sandbox 可销毁 | fc:memory + CoW extent 列表 | ✅ 三种形态 |
-| **restore（跨节点）** | 从 snapshot 在任意节点重建 | UFFD 供页 + CoW 回填 | ⚠️ 见下 |
+| **restore（跨节点）** | 从 snapshot 在任意节点重建出一个**新的** sandbox | UFFD 供页 + CoW 回填 | ⚠️ 见下 |
+| **fork（毫秒级克隆）** | 一母多子、agent 分支探索 | 与 restore 共用同一套机制;缺的只有 API | ⚠️ 见 §4.5 |
 | **容器档 checkpoint** | CRIU / gVisor save | — | 📐 未实现 |
 
 ⚠️ **跨节点 restore 未实测**:只有一台 fc 机器。逻辑上是通的(快照记录产出它的
 CPU,调度器按 vendor+family 硬过滤),且已用「改写快照记录冒充 GenuineIntel」验证过
 409 会正确返回 —— 但「同 family 跨 model 真的能恢复」没有实证,
 `--cpu-template portable` 存在的理由正是这个。见 `docs/decisions.md` §3.6。
-| **fork（毫秒级克隆）** | 一母多子、agent 分支探索 | FC diff snapshot + CoW（仅 fc 档） | P4 |
 
 > Phase 均指 fc 主路径;表中容器档实现（freezer/CRIU/gVisor save）随 P5 容器档引入。
 
@@ -117,8 +156,10 @@ memory 文件是 `MAP_PRIVATE`(实测 guest 写 64MB 后宿主文件 md5 不变)
 
 实测 restore ~950ms(首次 1617ms,付 unpack 代价)。剩余成本是把 bundle
 从 gateway 传过来并解 gzip,只为取 rootfs 那个 member —— 未优化。
-- fork 📐 **未实现**(独立 API:`POST /sandboxes/{id}/fork {count}`):瞬时 CoW 快照 + N 次
+- fork ⚠️ **机制已实装,API 未实现**(见 §4.5)。计划的表面是
+  `POST /sandboxes/{id}/fork {count}`:瞬时 CoW 快照 + N 次
   LoadSnapshot → 一母多子,不产生持久 snapshot 对象（要留存用 /snapshot）。
+  在它出现之前,`snapshot create` + N 次 `run --snapshot` 有完全相同的语义,只是绕了持久对象一圈。
   子实例宿主侧资源全部新分配：tap 设备、vsock CID、可写层 CoW 克隆、新
   sandbox-id/token;guest 内 MAC/IP 由 agent 重配。「装环境一次 fan-out N
   实验」的最优实现;首期本节点 fork,跨节点走 snapshot+restore
@@ -221,8 +262,8 @@ POST /sandboxes { "snapshot": "snap_...", ... }
 ### 3.6 生命周期（两档共通）⚠️
 
 - snapshot 独立对象、独立配额（总字节数 per key）；TTL 可选，S3 lifecycle 兜底
-- 引用计数：有 RESTORING 进行中的 snapshot 不可删
-- 同一 snapshot 可多次 restore → 天然支持「装好环境 snapshot 一次，fan-out N 个实验」——eval 场景的核心价值点
+- 引用计数：有 RESTORING 进行中的 snapshot 不可删。这个计数是**计数器而非标志位**,正因为同一快照被并发 restore 才是预期情形
+- 同一 snapshot 可多次 restore、每次产出一个独立 sandbox → 这就是「装好环境 snapshot 一次,跑 N 个实验」所需要的扇出,也是 eval 场景的核心价值点。resume 替代不了:它只会还你被 pause 的那一个
 
 ## 4. 两档对比与接口统一 ⚠️
 
@@ -230,30 +271,60 @@ POST /sandboxes { "snapshot": "snap_...", ... }
 |---|---|---|
 | 一致性 | 进程级，外部状态尽力而为 | 整机级（内存+设备+vCPU） |
 | 速度 | 分钟级（大内存） | pause 百 ms;diff snapshot 增量 |
-| resume | 重建进程树 | load snapshot + resume vCPU，百 ms 级 |
+| restore | 重建进程树 | load snapshot + resume vCPU，百 ms 级 |
 | fork 克隆 | 不支持 | CoW memory → 一母多子（AgentENV 单节点 16 子实证） |
 
 接口统一（用户无感）：
 
 - Runtime 接口 Checkpoint/Restore 签名两档通用（io.Reader/Writer 流式）
 - manifest 的 `runtime` 字段区分格式，restore 调度按格式匹配节点能力
-- snapshot API 语义一致，档位差异只体现在速度与 fork 可用性
+- snapshot API 语义一致，档位差异只体现在速度与 fork 式扇出是否可用
 
-## 4.5 fork 设计 📐
+## 4.5 fork:机制已经在了,缺的是 API 表面 ⚠️
 
-> **未实现。** 这一节是设计,写出来是因为 fork 的可行性已经被现有代码证明了 ——
-> 它需要的机制都在,缺的是编排。
+> **缺的是一个 API 调用,不是一项能力。** restore 本身**就是** fork:
+> `snapshot create` 之后跑 N 次 `run --snapshot`,得到的就是 N 个共用一份内存镜像
+> 的独立 sandbox。fork 需要的每一项机制都已实装并实测。不存在的只是「对着一个运行
+> 中的 sandbox 一次调用就完成这两步、并省掉绕持久对象那一圈」。
 
-### fork 与 restore 的本质区别
+### restore 已经是 fork/clone 语义 ✅
 
-restore 从**持久对象**重建一个 sandbox。fork 从**一个活着的 sandbox**派生 N 个,
-不产生持久对象。要留存就用 snapshot。
+三条性质合起来就是 fork 的定义,而三条都在代码里:
 
-对用户是「装环境一次,fan-out N 个实验」;对实现是「跳过打包与传输」。
+| 性质 | 位置 | 依据 |
+|---|---|---|
+| 不可变部分**共享** | `uffd_linux.go` | 内存镜像以 `PROT_READ \| MAP_SHARED` 映射,注释写明「让从同一快照恢复的多个 VM 共用一份 page cache 而不是每 VM 一份」 |
+| 可变部分**每实例私有拷贝** | `fc_lifecycle_linux.go` | `snapshotState`:「可写层总是解包出来……因为它无法共享:从同一个 checkpoint 恢复的两个 sandbox 一旦有一方写入就分叉」 |
+| 结果是 **N 个互相独立的实例** | `store.go` | `ref_count` 是计数器而非标志位;`AcquireSnapshot` 递增它,其注释用的是复数的 restore |
+
+共享不可变的、私有拷贝可变的,产出彼此观察不到的实例 —— 这就是 fork。
+
+不只是读代码,还有实证:`hack/restore-repeat-check.sh` 把同一份快照 restore 若干次,
+并在 **`drop_caches` 之后**让每个 sandbox 各自读回自己的 marker(drop 很关键 ——
+走 page cache 的读即便设备在供 base image 也会通过,见 [decisions.md](decisions.md)
+§3.0)。解包缓存的回收检查在六次 restore 上做了同样的断言
+(见 [tech-stack.md](tech-stack.md) §3.2)。
+
+节点本地这条路是**为这个形态设计的**,不只是恰好能用。`snapCache` 让一条链在每个
+节点只合并一次,该叶子之后的每次 restore 都跳过合并;那个分支的注释直接点名了这个
+场景 —— 「这就是扇出便宜的原因」。
+
+### 一个 fork API 真正会带来什么
+
+不是共享,也不是独立性 —— 这两样已经有了。只有这些:
+
+- **一次调用而不是两次。** 用 `POST /sandboxes/{id}/fork {count: N}` 取代
+  `snapshot create` 加 N 次 `run --snapshot`。
+- **不产生持久对象。** fork 不会造出一个需要命名、计配额、引用计数、回收的
+  `snap_...`。今天那个中间快照必须先创建再删除。
+- **省掉打包/传输这一圈。** 母体就在本节点、内存也已经驻留,所以同节点 fork 可以
+  跳过打包上 S3 再读回来。
+
+这一节后面的内容都是关于那层表面,以及上线前值得先测的两个数。
 
 ### 为什么内存镜像可以被 N 个子实例共享 ✅(机制已验证)
 
-这是 fork 便宜的全部原因,而它已经在 snapCache 里被验证过:
+这是 fork 便宜的全部原因,而它在 snapCache 里已经是承重的:
 
 ```
 UFFD handler:  mmap(PROT_READ | MAP_SHARED)     ← 我们只读
@@ -331,11 +402,17 @@ POST   /v1/sandboxes/{id}/snapshot           ✅
 GET    /v1/snapshots?label=...&state=...     ✅
 GET    /v1/snapshots/{id}                    ✅
 DELETE /v1/snapshots/{id}                    ✅  有子代时 409 SNAPSHOT_IN_USE
-POST   /v1/sandboxes { "snapshot": "snap_..." }  ✅  不兼容 CPU 时 409 INCOMPATIBLE_CPU
-POST   /v1/sandboxes/{id}/fork               📐  未实现
+POST   /v1/sandboxes { "snapshot": "snap_..." }  ✅  restore:一个**新的** sandbox、新 id。
+                                                    不兼容 CPU 时 409 INCOMPATIBLE_CPU。
+                                                    调 N 次就是 N 路扇出
+POST   /v1/sandboxes/{id}/fork               ⚠️  无 API;机制就是上面那两个调用(§4.5)
 ```
 
+注意 `pause`/`resume` 作用在 `{id}` 上、还你同一个 sandbox,而 restore 是
+`POST /v1/sandboxes` —— 一次创建 —— 还你另一个。URL 的形状已经说明了这件事。
+
 CLI:`bean snapshot create SBX [--name N] [--no-memory] [--base SNAP] [--no-keep-running]`,
-`bean snapshot ls|rm`,`bean run --snapshot SNAP`。
+`bean snapshot ls|rm`,`bean run --snapshot SNAP`(restore:每次调用产出一个新 sandbox),
+`bean pause SBX` / `bean resume SBX`(同一个 sandbox)。没有 `bean fork`。
 
 SDK 形态见 [sdk-cli-design.md](sdk-cli-design.md)。

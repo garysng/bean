@@ -160,6 +160,15 @@ Built for Kimi K3's agentic RL training, and its target scenario (batches of het
 | Vercel | Firecracker | ✅ but must push to their registry | seconds | ✅ FS snapshot | ❌ | ❌ single region |
 | **bean (target)** | **FC as the default tier (runc for GPU / gVisor as the degraded tier, reserved internally for P5)** | **✅ overlaybd zero conversion, S3 lazy-pull** | **<2s on a hit / <10s cold** | **FC-native snapshot/fork (P3–P4)** | **in-house, self-hosted** | **✅ a first-class scenario (multi-node scheduling / prewarm / quota at the core)** |
 
+> **What "cold start" means in this column.** Nearly every figure quoted above,
+> whatever each vendor calls it, is the cost of **restoring** a new sandbox from a
+> prepared snapshot or template — not of booting a guest, and not of resuming a
+> paused one. Bean's comparable measured numbers are **392 ms** for a restore on a
+> node-local cache hit against **952 ms** for a real create
+> ([status.md](status.md)); a resume is a vCPU unfreeze and is faster than both while
+> doing far less, so it is not the number to compare. Three distinct operations,
+> three different costs — [snapshot-resume.md](snapshot-resume.md) §0.
+
 ## 3. Conclusion: bean's differentiated position
 
 1. **The technical route is already validated, and the competitive focus is engineering

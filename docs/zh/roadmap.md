@@ -99,7 +99,9 @@ curl DELETE → 资源清零（FC 进程/tap/ublk 设备/挂载无残留）
 - **镜像即快照**：`POST /images:register {snapshot}` 把任意 sandbox 快照注册为
   命名镜像（Tensorlake 同款）——「装环境一次、批量复用」的最短路径
 
-**验收**：「装环境 → snapshot → fan-out 50 实例」演示;fc 档 resume P50 < 500ms。
+**验收**：「装环境 → snapshot → fan-out 50 实例」演示(一份快照 restore 50 次、50 个
+互相独立的 sandbox);fc 档 **restore** P50 < 500ms —— 是 restore 不是 resume:
+承诺的这个数是「造出一个新 sandbox」的开销。
 
 ## P5+ — 储备项
 

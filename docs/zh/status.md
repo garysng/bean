@@ -106,6 +106,9 @@ destroy **214ms**(曾是 5.25s)。原先销毁前用 ACPI 请 guest 关机并等
 (可写层与 sandbox 写入一致),而且是确认而非假设。
 
 snapshot:checkpoint 1.5s、bundle 约 16-20 MiB。
+restore 每次产出的是一个**新的** sandbox(新 id),同一份快照 restore N 次就是 N 个
+互相独立的 sandbox —— 这与 resume(把同一个 sandbox 唤回来)是两件事,见
+[snapshot-resume.md](snapshot-resume.md) §0。
 restore ~950ms(同一快照首次 1617ms,要付 unpack 代价);
 其中 FC `/snapshot/load` 只占 7ms —— guest 内存按需供页(UFFD),
 不再把整个内存镜像读进来。剩下的成本是解 bundle。
@@ -173,7 +176,8 @@ alpine:3.20:
 **所以吞吐上限约 2.3 creates/s,由「每次 boot 5 CPU-秒 ÷ 核数」决定。**
 降低单次延迟必须减少每 boot 的 CPU 消耗(内核裁剪、更少的 guest 初始化),
 而不是加大并发窗口。**从快照 restore 是绕开这 5 CPU-秒的正解** ——
-这也是 restore 相对 create 的真实价值。
+这也是 restore 相对 create 的真实价值(是 restore 而非 resume:它造出一个新
+sandbox,所以才能替代 create)。
 
 #### 创建排队:30 并发从 16 成功变成 30 成功 ✅
 
@@ -270,7 +274,7 @@ loop device 全部归零 —— loop 泄漏的修复(#16)在并发下成立。
 |---|---|
 | build image：声明式 steps（Modal 风格链式 API） | ⛔ 未开始;Dockerfile 路径已通,steps 只是另一个前端编译到同一个 plan（`docs/image-build.md` §3.2、§5） |
 | overlaybd lazy-pull | ⚠️ **能力已实测跑通,尚未接入代码**。当前生产路径是「拉全量 + 转换 + CoW 共享」（每 sandbox 44 KiB）。overlaybd 侧已在验证机上验证:挂载 7ms、只传 19.6% 的层字节就能挂载并读文件、8 个 HTTP 206、可写上层实占 40 KiB（`docs/decisions.md` §3.1）。剩下的是写 `OverlaybdProvider` 接进 `image.Provider` |
-| diff snapshot（增量） | ✅ `--base SNAP` 只存自 base 以来改动的 guest 内存。实测 base 15.5 MB → diff 298 KB(52×);深度 2 的链恢复后文件全在且 `uptime 57`(resume 非重启)。合并在 restore 时物化成平坦镜像,**UFFD 缺页路径零改动**;链深超 8 自动转 full;删 base 有子代时返回 409。需 `--track-dirty-pages`(默认关,boot 前生效) |
+| diff snapshot（增量） | ✅ `--base SNAP` 只存自 base 以来改动的 guest 内存。实测 base 15.5 MB → diff 298 KB(52×);深度 2 的链 restore 后文件全在且 `uptime 57`(载入内存态而非重新开机 —— 新 sandbox 接着被采集那个 guest 的 uptime 走)。合并在 restore 时物化成平坦镜像,**UFFD 缺页路径零改动**;链深超 8 自动转 full;删 base 有子代时返回 409。需 `--track-dirty-pages`(默认关,boot 前生效) |
 | fork / shared-fs 卷 / proxy 端口暴露 | ⛔ P3–P4 范围,未开始 |
 | OTel trace | ✅ **已实装并实测**。一次 create/exec 是一棵跨进程 span 树(下方「可观测」段有实测树)。`--otlp-endpoint` 为空则装 no-op provider,埋点无需条件判断。**限制**:beand 在 guest 内无出网路径,只采纳 trace id 写进自己的日志、不导出 span;而 guest 的 stderr 只在 `--debug-console` 下经串口出来,所以默认配置看不到那条日志 |
 | 资源超卖 | ✅ `--overcommit-cpu` / `--overcommit-memory`,节点侧算,上报已含系数。实测 `--cpu 8 --overcommit-cpu 3` → allocatable 24。CPU 超了只是变慢,内存超了是被杀,所以内存默认 1.0 —— 抬高它需要先实测 FC 按需供页的富余(#18)并给 VMM 进程加 cgroup(#20) |

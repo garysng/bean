@@ -190,7 +190,12 @@ virtiofs. It is kept as a fallback for the (unimplemented) container tier.
 
 ---
 
-## 3. Snapshot and resume
+## 3. Snapshot and restore
+
+> Everything in this section is **restore** — building a new sandbox from a snapshot
+> on disk. Resume, which unfreezes the vCPUs of a process that never stopped running,
+> shares none of this machinery. See
+> [snapshot-resume.md](snapshot-resume.md) §0.
 
 ### 3.1 UFFD (userfaultfd) for memory restore ✅
 

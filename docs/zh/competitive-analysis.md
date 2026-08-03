@@ -135,6 +135,13 @@ Orchestrate（`@application`/`@function` serverless 编排,每 function 独占 s
 | Vercel | Firecracker | ✅ 但须推其 registry | 秒级 | ✅ FS 快照 | ❌ | ❌ 单区域 |
 | **bean（目标）** | **FC 默认档（runc GPU/gVisor 降级为 P5 内部预留）** | **✅ overlaybd 零转换，S3 lazy-pull** | **命中<2s/冷<10s** | **FC 原生 snapshot/fork（P3–P4）** | **自研自托管** | **✅ 一等场景（多节点调度/prewarm/配额为核心）** |
 
+> **这一列的「冷启动」指的是什么。** 上表引用的绝大多数数字,不管各家自己怎么叫,
+> 量的都是从一份准备好的快照/模板 **restore** 出一个新 sandbox 的开销 —— 既不是开机,
+> 也不是唤醒一个 paused 的 sandbox。bean 可比的实测数是节点本地缓存命中时 restore
+> **392 ms**,对比真 create 的 **952 ms**(见 [status.md](status.md));resume 只是解冻
+> vCPU,比两者都快但做的事也少得多,所以它不是用来对标的那个数。三种操作、三种开销 ——
+> 见 [snapshot-resume.md](snapshot-resume.md) §0。
+
 ## 3. 结论：bean 的差异化定位
 
 1. **技术路线已被验证，竞争焦点在工程完成度**：AgentENV 证明了「overlaybd 直挂

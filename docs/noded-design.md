@@ -121,6 +121,12 @@ type Runtime interface {
 }
 ```
 
+`Resume` takes an `id` and returns nothing: it acts on a VM this process already
+holds, and hands back the same one. `Restore` takes a whole `*Spec` and returns a
+new `*Handle`, because it builds a sandbox that did not exist — which is also why
+one snapshot can drive any number of concurrent `Restore` calls. The signatures
+carry the distinction; see [snapshot-resume.md](snapshot-resume.md) §0.
+
 Three differences from the earlier design, all of them cases where the original
 design turned out to be wrong during implementation:
 

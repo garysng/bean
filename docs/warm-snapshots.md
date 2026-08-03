@@ -22,6 +22,12 @@ caller of `CreateSandbox` lives under `packages/orchestrator/pkg/template/build/
 The user-facing gRPC handler calls `ResumeSandbox`. Real boot happens only when a
 template is built.
 
+Their `ResumeSandbox` is what bean calls **restore**: it does `PUT /snapshot/load`
+and produces a new sandbox. It is not resume in bean's sense (unfreezing the vCPUs
+of a live process), and the borrowed name is worth watching for when reading their
+code. This document uses bean's vocabulary throughout —
+[snapshot-resume.md](snapshot-resume.md) §0.
+
 Three details worth taking:
 
 - They **boot twice**. Provision runs a BusyBox init executing only the provision

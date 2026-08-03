@@ -259,7 +259,7 @@ Firecracker 的 diff 内存文件**不自包含** —— 是稀疏文件,必须�
 **我们选 flatten,理由不止「跟多数」:**
 
 我们有 E2B 没有的结构优势 —— `snapCache` 已按 snapshot id 缓存解包结果。
-E2B 每次 resume 自己走链;我们只在**某个 leaf 首次在某节点恢复时**付一次合并,
+E2B 每次 restore(他们代码里叫 `ResumeSandbox`)自己走链;我们只在**某个 leaf 首次在某节点 restore 时**付一次合并,
 之后该节点所有 restore 复用。fan-out 正是「同一 leaf 恢复很多次」,合并被完全摊掉。
 
 更重要的是 **UFFD 缺页路径零改动**。`fill()` 是全系统最热、出错最隐蔽的代码 ——
@@ -292,7 +292,8 @@ diff #1           298,778 B   depth 1   ← 52×
 diff #2           241,917 B   depth 2
 ```
 
-深度 2 的链恢复后 a/b/c 三个文件全在,`uptime 57` 说明是 resume 而非重启。
+深度 2 的链 restore 后 a/b/c 三个文件全在,`uptime 57` 说明载入的是内存态而非重新开机
+(新 sandbox 接着被采集那个 guest 的 uptime 继续走)。
 
 ### 3.1 overlaybd lazy-pull:已在 tcmu 后端实测跑通
 
@@ -459,7 +460,8 @@ CPUID leaf 0 的 vendor 字符串和 family 都无法掩,guest 内核要据此�
 真正的杠杆是**减少每次 boot 的 CPU**,或者**不 boot**:
 
 - 从快照 restore 跳过内核初始化,这是 restore 相对 create 的真实价值
-  (也是 e2b/Morph 都把 resume 当主路径的原因)
+  (也是 e2b/Morph 都把 restore 而非 boot 当作启动 sandbox 主路径的原因 ——
+  是 restore 不是 resume:它产出的是一个新 sandbox,见 snapshot-resume.md §0)
 - guest 内核裁剪能降低这 5 秒,但需要自建编译流程(§1.3 决定不做)
 
 **推论**:`max_creates` 的正确语义是「排队深度」而不是「拒绝阈值」。

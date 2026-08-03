@@ -199,7 +199,7 @@ disk-diff 直接取宿主 overlaybd 可写层、guest 内零 union 复杂度。
 | 节点缓存 | 本地 NVMe 作为 S3 之上的块 chunk LRU 缓存；裸金属（大盘）与云 VM（小盘）仅命中率差异，架构统一 |
 | eval 产物 | agent/noded 经 presigned URL 直推 S3（control plane 签发，节点不持长期凭证） |
 | 大文件下载 | API 返回 presigned URL 重定向，不过 gateway 转发 |
-| 快照（P3–P4） | FC memory snapshot / rootfs diff 落 S3，支持跨节点 resume |
+| 快照（P3–P4） | FC memory snapshot / rootfs diff 落 S3，支持跨节点 **restore**（在任意节点造出一个新 sandbox;resume 是同进程同节点的,见 snapshot-resume.md §0） |
 | 卷 | shared-fs 卷后端（JuiceFS on S3）宿主挂载 + nfsd 导出（见 D10）;dataset 卷预留 |
 
 选 overlaybd（块级，DADI/阿里，AgentENV 已在 FC 场景验证）而非 Nydus（文件级）的关键原因：**块设备链路同时服务容器档（overlaybd-snapshotter → overlayfs）与 microVM 档（virtio-blk 直挂 guest），一条镜像链路通吃全部 runtime 档位**；Nydus 的文件系统语义进不了 microVM，FC 档需另走 virtiofs（FC 支持弱）。Nydus 保留为容器档备选。
@@ -387,12 +387,18 @@ PENDING → SCHEDULED → PULLING → STARTING → RUNNING → STOPPING → STOP
                                     │          │
                                     └── FAILED ┘        RUNNING ─(租约丢失)→ LOST
 
-RUNNING ─pause→ PAUSED ─resume→ RUNNING
+RUNNING ─pause→ PAUSED ─resume→ RUNNING      ← 同一个 sandbox、同一个 id
 RUNNING/PAUSED ─snapshot→ SNAPSHOTTING → (回原状态)
 (from snapshot) PENDING → SCHEDULED → RESTORING → RUNNING
+                             ↑ restore 产出的是一个**新** sandbox、自己的 id,
+                               而一份快照可以同时驱动 N 个这样的流程
 
-snapshot 对象独立状态机：CREATING → READY → DELETING（RESTORING 引用计数期间不可删）
+snapshot 对象独立状态机：CREATING → READY → DELETING（任一 RESTORING 持有引用计数
+期间不可删 —— 是计数而非标志位,因为同一快照被并发 restore 是常态）
 ```
+
+resume 与 restore 是作用在不同对象上的不同操作:resume 把一个已存在的 sandbox 送回
+RUNNING,restore 造出另一个。见 [snapshot-resume.md](snapshot-resume.md) §0。
 
 `DELETE /sandboxes/{id}` 返回 202 后异步走 STOPPING → STOPPED（终态记录保留
 30 天后归档,见 noded-design GC）;`?force=true` 跳过 graceful 直接 kill。

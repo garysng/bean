@@ -95,7 +95,11 @@ POST   /sandboxes/{id}/fork     { "count": 3, "labels": {...} }    // separate A
        → 202 { "sandboxes": [ ...N new sandboxes... ] }
        // Semantics: take an instantaneous CoW snapshot of a running sandbox and clone N
        // independent instances (no persistent snapshot object is produced; use /snapshot
-       // if you want one kept). The container tier returns 501
+       // if you want one kept). The container tier returns 501.
+       // NOTE: this is a convenience over the snapshot+restore pair, not a new capability.
+       // POST /snapshot then N x POST /sandboxes{snapshot} already yields N independent
+       // sandboxes today; fork saves the persistent object and the round trip.
+       // See snapshot-resume.md 4.5
 ```
 
 The sandbox detail response carries `runtime: fc|runsc|runc` (the actual tier, for troubleshooting).
@@ -180,18 +184,14 @@ DELETE /sandboxes/{id}/ports/{port}
 | `digest` | resolved by the platform | Resolved once from the tag and then fixed; scheduling, caching and reproducibility all key off the digest, so a moving tag cannot change the contents of a batch |
 | overlaybd artifact | **platform-internal** | The converted block-device form; invisible to the user and not selectable |
 | `state` | platform-internal | `PENDING → CONVERTING → READY \| FAILED` |
-| `source` | platform-recorded | `imported` (a ref the caller supplied) or `built` (produced by this platform). Answers "is this ours or something pulled from outside" |
-| `owner` | platform-recorded | Who the image is attributed to; empty means unowned, i.e. shared and visible to everyone |
 
 The `format` field tells the caller which tier can currently run the image: `oci`
 (unconverted, standard pull path) or `overlaybd` (converted, usable by the fc tier).
 
 ```
-GET  /images                      list, scoped to the caller when identity is configured
-GET  /images?source=built         only images this platform built ("what did I build")
+GET  /images                      list
 GET  /images/status?ref=<ref>     single-image status (ref goes in the query: it contains / and :)
-     → { ref, digest, state, format, source, owner, baseRef, buildId,
-         cachedNodes, sizeBytes }
+     → { ref, digest, state, format, cachedNodes, sizeBytes }
 POST /images/prewarm   { "refs": ["img:a"], "region": "ap-east-1",
                          "targetNodes": 10, "priority": "high" }
      → { jobId, refs, ready: {ref: nodeCount}, done }
@@ -203,26 +203,6 @@ CLI**: how many machines a replica landed on is a scheduling detail the user can
 on, and exposing it only makes people depend on the scheduling result, after which the
 scheduler can no longer migrate anything. The CLI side reports only ready / warming, and
 the corresponding parameter is called `--replicas`. See `docs/sdk-cli-design.md` §4.1.
-
-**Image origin policy** (operator-configured, default off): an operator can restrict what
-a create may run. `--allowed-image-sources=built` accepts only images this platform
-produced; `--allowed-registries=a.io,b.io` restricts where an imported ref may be pulled
-from. Both default to empty, which allows everything — refusing what previously ran would
-break existing deployments for no gain. A refusal is `403 IMAGE_NOT_PERMITTED`, and the
-image is not registered, so a declined ref does not appear in any listing.
-
-The registry allowlist applies only to imported refs. A built image's host is a push
-destination the operator chose, not somewhere a caller asked to pull from, so requiring
-every deployment to list its own registry would be noise.
-
-**Ownership**: `owner` is recorded, not enforced. Authentication here is a single shared
-API key, so this layer cannot distinguish callers on its own; an external platform layer
-is expected to authenticate and name the caller in a request header
-(`--owner-header=X-Bean-Owner`). Bean does not verify that header, so it must only be
-enabled behind a trusted layer. Ownership is claimed on first registration and never
-reassigned — a shared base image would otherwise change hands with every caller that ran
-it. Unowned images stay visible to everyone, which is what keeps shared bases listed after
-an upgrade. With no header configured, every listing is unfiltered, exactly as before.
 
 **Registry authentication** (private images): register the credential once per registry
 host, after which a private image is used exactly like a public one — you supply only a ref.
@@ -278,13 +258,21 @@ POST   /sandboxes/{id}/snapshot  { "name": "after-setup", "labels": {},
 GET    /snapshots?label=k%3Dv&state=READY   → list
 GET    /snapshots/{id}
 DELETE /snapshots/{id}      // RefCount>0 or has descendants → 409 SNAPSHOT_IN_USE
-POST   /sandboxes    { "snapshot": "snap_..." }   // create from a snapshot
+POST   /sandboxes    { "snapshot": "snap_..." }   // restore: a NEW sandbox with a new id,
+                                                  // not a revival of the one snapshotted.
+                                                  // Call it N times for N independent
+                                                  // sandboxes from one snapshot
                                                   // image and snapshot are mutually exclusive
                      // incompatible CPU → 409 INCOMPATIBLE_CPU
 ```
 
-- `includeMemory` defaults to **true**, which is what a snapshot has always meant (restore
-  resumes the guest). Setting it false captures only the filesystem: restore boots afresh,
+Restore is a `POST /sandboxes` — a creation — while `resume` is a `POST` on an existing
+`/sandboxes/{id}`. The two are different operations on different subjects; see
+[snapshot-resume.md](snapshot-resume.md) §0.
+
+- `includeMemory` defaults to **true**, which is what a snapshot has always meant (the
+  restored sandbox continues the captured guest rather than booting). Setting it false
+  captures only the filesystem: restore boots afresh,
   but **it can land on any CPU** — guest memory pins a snapshot to a compatible
   vendor+family. Measured at 6109 B against 15.5 MB for the full variant.
   **Use a pointer type** (`*bool`) to tell "absent" from "explicitly false": old snapshots

@@ -224,7 +224,7 @@ Firecracker's diff memory file is **not self-contained** — it is a sparse file
 **We chose flatten, and the reason is more than "go with the majority":**
 
 We have a structural advantage E2B does not — `snapCache` already caches unpacked results by snapshot id.
-E2B walks the chain itself on every resume; we pay the merge once, **the first time a given leaf is restored on a given node**, and every restore on that node afterwards reuses it. Fan-out is precisely "the same leaf restored many times", so the merge is amortised away entirely.
+E2B walks the chain itself on every restore (which their code calls `ResumeSandbox`); we pay the merge once, **the first time a given leaf is restored on a given node**, and every restore on that node afterwards reuses it. Fan-out is precisely "the same leaf restored many times", so the merge is amortised away entirely.
 
 More importantly, **the UFFD page-fault path does not change at all**. `fill()` is the hottest and most insidiously error-prone code in the whole system —
 a bug there is one page of wrong memory, with no error signal of any kind. The full snapshot path runs the same code.
@@ -254,7 +254,7 @@ diff #1           298,778 B   depth 1   ← 52×
 diff #2           241,917 B   depth 2
 ```
 
-After restoring the depth-2 chain all three files a/b/c are present, and `uptime 57` confirms it was a resume rather than a reboot.
+After restoring the depth-2 chain all three files a/b/c are present, and `uptime 57` confirms the memory state was loaded rather than the guest rebooted (the new sandbox continues the captured guest's uptime).
 
 ### 3.1 overlaybd lazy-pull: verified working on the tcmu backend
 
@@ -421,7 +421,8 @@ Raising `max_creates` only makes each request slower without raising throughput 
 The real levers are **reducing CPU per boot**, or **not booting**:
 
 - restoring from a snapshot skips kernel init, which is the real value of restore relative to create
-  (and the reason both e2b and Morph treat resume as the primary path)
+  (and the reason both e2b and Morph treat restore rather than boot as the primary way to start a
+  sandbox — restore, not resume: it produces a new sandbox, see snapshot-resume.md §0)
 - trimming the guest kernel would reduce those 5 seconds, but requires our own compile pipeline (§1.3 decided against it)
 
 **Inference**: the correct semantics for `max_creates` is "queue depth", not "rejection threshold".
