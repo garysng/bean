@@ -99,6 +99,21 @@ func TestGuestDNSOverwritesAFilesystemThatAlreadyHasOne(t *testing.T) {
 	}
 }
 
+// TestLoopbackGuestDNSFailsTheSandboxRatherThanBooting is the second line of
+// defence behind noded's startup check. If a loopback resolver ever reaches a
+// runtime -- a caller that skipped validation, a future config path -- the
+// sandbox must fail to come up. The alternative is a guest that boots, routes,
+// pings a literal address and resolves nothing, which reads as a broken network
+// rather than a typo in one flag.
+func TestLoopbackGuestDNSFailsTheSandboxRatherThanBooting(t *testing.T) {
+	m := newDNSTestManager(t, "127.0.0.53")
+
+	if _, err := m.Create(context.Background(), spec("dns-loopback")); err == nil {
+		t.Fatal("a sandbox came up with a loopback resolver; it would resolve " +
+			"nothing while every layer below DNS tests clean")
+	}
+}
+
 // TestNoGuestDNSLeavesImageFileAlone is the deployment that has no networking
 // configured. It must behave exactly as it did before --guest-dns existed, so
 // the agent must not create the file at all.
