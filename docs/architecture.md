@@ -33,6 +33,45 @@ One self-imposed rule: a 📐 section does not say "our approach is", it says
 "the plan is". The former reads as established fact, and that is precisely
 where this went wrong before.
 
+### 0.1 Sequencing Claims Must Name What Is Given Up
+
+A second rule, added after it was broken. The status markers above catch a claim
+that something is *built* when it is not. They do nothing about a claim that
+something is *not worth building yet*, and that failure looks like this:
+
+> overlaybd's value is first-use latency, and prewarm already shadows that path,
+> so it can wait.
+
+Each clause is true. The conclusion is wrong, because overlaybd also preserves
+layer structure — which prewarm cannot help with at all. Flattening every image
+into one ext4 loses layer sharing, so a set of images that are one common base
+plus a small patch each costs a full copy each. It also means `commit` produces
+an ext4 rather than an OCI layer, so a built image cannot be published.
+
+Nothing in a build, a test or a delivery review catches this. Those verify that an
+implementation matches its design; this was an error *in* the design, and it
+produced no code and no test to fail. It survived until a reader challenged it.
+
+So: **any claim of the form "A already solves B, therefore C can wait" must list
+each thing C provides that A does not, and for every one of them point at where in
+the code A solves it.** Applied to the claim above:
+
+| C provides | Does A solve it? | Where |
+|---|---|---|
+| first-use latency | yes | `PullingProvider.ensure` dedupes and prefetches |
+| storage from shared layers | **no location** | — |
+| an OCI layer from `commit` | **no location** | — |
+
+The requirement to cite a location is what does the work. It converts a summary
+that can be waved through into a check that can fail — the same reason a test is
+only evidence once you have watched it fail.
+
+The underlying mistake is worth naming too: the evidence was already in the
+repository. `applyLayer` in `internal/node/image/convert_linux.go` flattens layers
+into a single filesystem, and `image-pipeline.md` says so in a sentence written
+for this project. A general impression was allowed to stand in for a specific fact
+that was already to hand.
+
 ## 1. Background and Goals
 
 ### 1.1 The Problem
