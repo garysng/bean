@@ -11,7 +11,7 @@
   OCI 拉取转换、commit、BuildKit 构建、OTel trace 全链路
 - ✅ **已提前做完 P3/P4 的快照部分**:pause/resume、full / `--no-memory` /
   `--base` 增量三种快照、UFFD 按需供页、CPU template 与调度器 CPU 过滤
-- ⚠️ **P0 里说的 overlaybd ublk 直驱没做**:走的是 dm-snapshot(每 sandbox 8 KiB)。
+- ⚠️ **P0 里说的 overlaybd ublk 直驱没做**:走的是 dm-snapshot(每 sandbox 44 KiB)。
   overlaybd 能力已实测但未接入 —— 它变成了优化项而非基础
 - ⚠️ **P0 里说的 jailer 没做**:noded 直接 exec firecracker
 - 📐 **P0/P1 里说的网络完全没做**:无 tap/bridge/NAT,sandbox 没有网络。

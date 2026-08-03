@@ -22,7 +22,7 @@
 | `bean-api` REST gateway | ✅ | sandboxes CRUD、exec、files、logs、events、pause/resume、snapshot、image、metrics;API key 鉴权、配额位、请求体限流、超时钳制 |
 | `scheduler` | ✅ | 两级放置（region → 节点）、硬过滤（runtime 能力/labels/承诺量/创建并发）、打分（镜像亲和/装箱/NVMe/spread）;**承诺量落库**,事务内条件更新,多副本不会重复放置、重启不丢账 |
 | `nodesvc` | ✅ | Register（bootstrap token 校验 + 签发 node token）、Heartbeat 双向流续租、SyncState、租约过期回调 |
-| `store` | ✅ | SQLite（Postgres 接口已抽象）:sandbox / snapshot / image / prewarm job / 节点与预留 |
+| `store` | ✅ | SQLite:sandbox / snapshot / image / prewarm job / 节点与预留。**没有 `Store` 接口**,各调用点用的都是具体类型 `*store.Store`;真正成立的是 SQL 边界收在一个包里(`database/sql` 与驱动 import 只出现在 `internal/control/store`) |
 | 事件 | ✅ | 状态机统一发件 → 持久化 + SSE 实时订阅（按 sandbox/label 过滤,慢订阅者丢弃计数） |
 | image API | ✅ | ref/digest/overlaybd 产物三层语义、状态机、prewarm job;registry 凭证 AES-256-GCM 加密存储 |
 | snapshot | ✅ | 创建/列表/删除/引用计数、从 snapshot 创建;**blob 存 S3**（本地目录为 dev 默认） |
@@ -37,7 +37,7 @@
 | `Registrar` | ✅ | 出向注册（无需入站）、SyncState 对账销毁孤儿、心跳带状态与承诺量、指数退避重连 |
 | `beand`（sandbox 内） | ✅ | 双档 listener（unix socket / **AF_VSOCK**）、**microVM 内作 PID 1**（挂伪文件系统 → pivot 用户镜像）、exec（超时/截断/进程组 kill）、文件（os.Root 防逃逸、原子写）、logs 环形缓冲 |
 | `FCRuntime` | ✅ | **真 Firecracker microVM**:VMM 进程管理、agent 盘为 root device + 用户镜像为第二盘、vsock、pause/resume、full snapshot / restore、销毁清理 |
-| `image.Provider` | ✅ | `DevMapperProvider`（**共享只读基础镜像 + 每 sandbox CoW,一个 sandbox 只占 8 KiB**）、`FileProvider`（全量拷贝,兜底）、`PullingProvider`（首次使用时拉取转换,并发去重） |
+| `image.Provider` | ✅ | `DevMapperProvider`（**共享只读基础镜像 + 每 sandbox CoW,一个 sandbox 只占 44 KiB**）、`FileProvider`（全量拷贝,兜底）、`PullingProvider`（首次使用时拉取转换,并发去重） |
 | OCI 镜像拉取与转换 | ✅ | 节点直接说 distribution API（不依赖 docker/containerd）:manifest / 多平台 index / token 挑战 / **layer 断点续传**;whiteout 语义、路径逃逸防护;转换产物带 sidecar 记录 ref |
 | prewarm | ✅ | 控制面后台调 `PrewarmImage`,节点拉取转换;节点心跳上报 `cachedImages`,**镜像亲和打分与 prewarm 进度因此才真正生效**（之前从未被填充） |
 | commit | ✅ | 把 sandbox 文件系统封成 base image（`CommitSandbox` RPC）。**先 sync guest 再 pause**——只 pause 的话 guest page cache 还是脏的,读块设备会丢掉刚写的东西 |
@@ -246,6 +246,12 @@ loop device 全部归零 —— loop 泄漏的修复(#16)在并发下成立。
 `bean_node_creates_refused_total{reason="disk_pressure"}` 递增。
 换成现实水位(5 GiB / 5%)后 6 并发全部成功、无泄漏。
 
+**关于每 sandbox 的占用:统一引用 44 KiB。** 文档里此前还出现过 8 KiB 和 80 KiB,
+三者并不是对同一次测量的分歧 —— 它们的测量点在 sandbox 生命周期的不同位置:
+8 KiB 是刚组装好、还没写过的 CoW 层;44 KiB 是已经启动并写过的 sandbox;
+80 KiB 是代码注释里某一次具体小写入的结果。有意义的对照是
+`FileProvider` 每 sandbox 拷一份完整 base 镜像,在那个量级上三个数说的是同一件事。
+
 ### 验证覆盖
 
 - **microVM 全链路**（真 KVM 机器,经 Manager 与 CLI 两层）：create → exec →
@@ -263,12 +269,12 @@ loop device 全部归零 —— loop 泄漏的修复(#16)在并发下成立。
 | 项 | 状态 |
 |---|---|
 | build image：声明式 steps（Modal 风格链式 API） | ⛔ 未开始;Dockerfile 路径已通,steps 只是另一个前端编译到同一个 plan（`docs/image-build.md` §3.2、§5） |
-| overlaybd lazy-pull | ⚠️ **能力已实测跑通,尚未接入代码**。当前生产路径是「拉全量 + 转换 + CoW 共享」（每 sandbox 8 KiB）。overlaybd 侧已在验证机上验证:挂载 7ms、只传 19.6% 的层字节就能挂载并读文件、8 个 HTTP 206、可写上层实占 40 KiB（`docs/decisions.md` §3.1）。剩下的是写 `OverlaybdProvider` 接进 `image.Provider` |
+| overlaybd lazy-pull | ⚠️ **能力已实测跑通,尚未接入代码**。当前生产路径是「拉全量 + 转换 + CoW 共享」（每 sandbox 44 KiB）。overlaybd 侧已在验证机上验证:挂载 7ms、只传 19.6% 的层字节就能挂载并读文件、8 个 HTTP 206、可写上层实占 40 KiB（`docs/decisions.md` §3.1）。剩下的是写 `OverlaybdProvider` 接进 `image.Provider` |
 | diff snapshot（增量） | ✅ `--base SNAP` 只存自 base 以来改动的 guest 内存。实测 base 15.5 MB → diff 298 KB(52×);深度 2 的链恢复后文件全在且 `uptime 57`(resume 非重启)。合并在 restore 时物化成平坦镜像,**UFFD 缺页路径零改动**;链深超 8 自动转 full;删 base 有子代时返回 409。需 `--track-dirty-pages`(默认关,boot 前生效) |
 | fork / shared-fs 卷 / proxy 端口暴露 | ⛔ P3–P4 范围,未开始 |
 | OTel trace | ✅ **已实装并实测**。一次 create/exec 是一棵跨进程 span 树(下方「可观测」段有实测树)。`--otlp-endpoint` 为空则装 no-op provider,埋点无需条件判断。**限制**:beand 在 guest 内无出网路径,只采纳 trace id 写进自己的日志、不导出 span;而 guest 的 stderr 只在 `--debug-console` 下经串口出来,所以默认配置看不到那条日志 |
 | 资源超卖 | ✅ `--overcommit-cpu` / `--overcommit-memory`,节点侧算,上报已含系数。实测 `--cpu 8 --overcommit-cpu 3` → allocatable 24。CPU 超了只是变慢,内存超了是被杀,所以内存默认 1.0 —— 抬高它需要先实测 FC 按需供页的富余(#18)并给 VMM 进程加 cgroup(#20) |
-| Postgres | ⚠️ 接口已抽象,当前 SQLite |
+| Postgres | ⚠️ 当前 SQLite。**没有 `Store` 接口**,各调用点都是具体类型 `*store.Store`;成立的是 SQL 边界收在 `internal/control/store` 一个包内,换引擎是改这个包,而不是把它从调用方里抽出来 |
 | 创建阶段指标 network | ⚠️ 埋点位已留,等网络实装 |
 
 ## 3. 节点前提

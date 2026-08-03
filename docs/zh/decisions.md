@@ -166,7 +166,7 @@ publish 用「写临时目录 + rename」,所以中断的 unpack 不会留下残
 | VMM | fork 了 firecracker(私有,加 gdb feature) | 上游 FC | 未公开 | 上游 FC 1.15.1 |
 | guest 内核 | 自己 config + patch,源码取 `amazonlinux/linux`,**不 fork** | prebuilt(R2 站) | 未公开 | **FC CI prebuilt + config 入库** |
 | 内存恢复 | UFFD(`uffd/` + `prefetch/`,cgo) | UFFD(`uffd-core/`,Rust) | 未公开细节,声称 sub-second | **UFFD(已实测 7ms load)** |
-| rootfs 按需 | 未见 | UFFD 后端接 overlaybd | 磁盘快照 O(changed bytes),单文件改动 167ms | dm-snapshot CoW(8 KiB/sandbox),**lazy-pull 未做** |
+| rootfs 按需 | 未见 | UFFD 后端接 overlaybd | 磁盘快照 O(changed bytes),单文件改动 167ms | dm-snapshot CoW(44 KiB/sandbox),**lazy-pull 未做** |
 | 磁盘快照增量 | 未见 | 未见 | **有**(他们的差异化点) | 无(full snapshot) |
 
 **从对照里得到的三个判断:**
@@ -185,7 +185,7 @@ publish 用「写临时目录 + rename」,所以中断的 unpack 不会留下残
 
 ## 3. rootfs:dm-snapshot 而非 overlaybd/TCMU
 
-**已实测**:每 sandbox 磁盘成本 8 KiB(共享只读 base + 每 sandbox CoW)。
+**已实测**:每 sandbox 磁盘成本 44 KiB(共享只读 base + 每 sandbox CoW)。
 
 TCMU 需要每 sandbox 一套 SCSI fabric(loopback nexus),脆弱且慢;
 dm-snapshot 只要 `dm_snapshot` 模块。
@@ -360,7 +360,10 @@ POST /v1/sandboxes            bean-api   1196.0ms
 beand 只有一条入向 vsock,没有出网路径。给它加一条反向通道要么破坏
 「入站零暴露」,要么需要在 noded 里做一层 OTLP 中继 —— 后者可行但
 不是现在的瓶颈。所以选择是:beand 采纳调用方的 trace id 写进自己的日志,
-**并刻意不链 OTel SDK**(`go list -deps ./cmd/beand` 为 0)。理由是
+**并刻意不链 OTel SDK**。`go list -deps ./cmd/beand` 会列出 12 个 OTel 包,
+但全部是 API 与传播侧(`otel/trace`、`otel/propagation`、`otel/attribute`、`otel/baggage`、
+`otel/codes`、`otel/semconv` 及其 internal)—— 这些正是解析并透传 `traceparent` 所需的。
+SDK 包为 0,exporter 为 0。理由是
 agent 盘挂在每一个 microVM 上,体积按 boot 次数计价,而那份 SDK 服务的
 遥测数据根本出不了 guest。
 
@@ -602,14 +605,18 @@ pin 是计数的,因为并发 restore 会同时持有同一个 leaf;
   默认关,因为 KVM 脏页记账的代价没量过。需要同镜像同内核、开/关各跑 N 次,
   对比 boot-to-agent 与一个 CPU-bound + 一个 memory-bound 的 exec 吞吐。
   回归 < 2% 就改默认开。
-- **日志与 CLI 输出标准化**:日志全是 `log.Printf`(71 处),无结构化、
-  无级别、不带 request_id。CLI exit code 只有 0 和 125,无 `--json`。
 - **稀疏 CoW 层写满时 guest 内部看到什么**:宿主侧已实测(§3.7:EIO +
   dm-snapshot 转 `Invalid` + `write()` 仍返回成功但数据全丢),但**没有从
   microVM 里面观察过**。宿主侧的结论足够定接单水位,但 guest 内的表现
   (ext4 转只读?还是继续假装成功?)决定我们要不要主动把这种 sandbox 标成
   FAILED —— 如果 guest 自己不报错,调用方会拿到一个看起来健康、实际在丢数据的
   sandbox,那是比拒绝创建糟糕得多的结果。
+
+**这份清单写下之后已关闭的**:日志与 CLI 输出标准化 ✅(已修)。日志已全面改为
+`slog`(92 处调用;只剩 1 处 `log.Printf`,在 dev 工具 `hack/tracedump` 里),
+有级别、有 text/json handler 开关,request id 随 context 传递(`internal/logging`)。
+CLI 有了 `--json`、`--quiet`,exit code 从 2 个变成 5 个
+(0 成功、64 not found、69 unavailable、70 failed、125 usage —— `cli/exit.go`)。
 
 ## 5. 启动优化总账
 

@@ -127,16 +127,19 @@ func safeJoin(root, name string) (string, error) {
 先 `Clean("/" + name)` 再 join 是关键:它把 `..` 在**绝对路径语义下**归约掉,
 之后的前缀检查才有意义。
 
-### gzip 判定不信 media type ✅
+### 用 magic bytes 而非 media type 判定 gzip 📐
+
+代码只按 `layer.MediaType` 分支(`convert_linux.go` 的 `applyLayer`),整个包里没有任何
+嗅探逻辑。那里的注释描述的是从未实现的意图:
 
 ```go
 // Most layers are gzipped; the media type says so, but some registries are
 // loose about it, so the magic bytes decide.
 ```
 
-有些 registry 的 media type 与实际内容不一致。信 media type 的后果是
-把 gzip 流当 tar 解(立刻失败)或反之。用 magic bytes 判定是防御性的,
-成本是读几个字节。
+计划是改成用 magic bytes 判定。有些 registry 的 media type 与实际内容不一致,
+信 media type 的后果是把 gzip 流当 tar 解(立刻失败)或反之。嗅探是防御性的,
+成本是读几个字节。要不要做是另一个决定,这里不下结论。
 
 ## 3. 并发去重 ✅
 
@@ -201,7 +204,7 @@ alpine    2m45s(网络不稳时)
 | | 当前(dm-snapshot) | 目标(overlaybd) |
 |---|---|---|
 | 首次使用 | 拉全量 + 转换,分钟级 | 按需读块,挂载 7ms |
-| 每 sandbox 成本 | 8 KiB(已实测) | 相当,CoW 都只存改动 |
+| 每 sandbox 成本 | 44 KiB(已实测) | 相当,CoW 都只存改动 |
 | 层格式 | 转成单个 ext4,丢掉层结构 | 保留 LSMT 层,可直接 seal |
 | commit | 读出全量 ext4 | seal 可写层,零转换 |
 

@@ -153,10 +153,10 @@ CID 3 是 guest 可用的最小值(0–2 被协议保留)。
   这是快照能捕获 CoW 层并在别处重放的前提。`N`(non-persistent)只活在内存里
 - **`8`** = chunk size,单位 sector,即 4 KiB。选它是因为够小:
   一次单块写只 copy 4 KiB 而不是几十 KiB。代价是 exception table 条目更多,
-  但实测每 sandbox 只占 8 KiB,没到需要权衡的量级
+  但实测每 sandbox 只占 44 KiB,没到需要权衡的量级
 
 **base 是共享的**:一个只读 loop device 服务节点上所有用该镜像的 sandbox。
-这是「每 sandbox 8 KiB」的来源 —— 对比 `FileProvider` 的每 sandbox 全量拷贝。
+这是「每 sandbox 44 KiB」的来源 —— 对比 `FileProvider` 的每 sandbox 全量拷贝。
 
 引用计数活在进程内存里,所以重启后要**接管**已有的 loop device 而不是新建
 (否则每次重启泄漏一个,已修,见 GitHub #16)。

@@ -100,7 +100,7 @@ The table below is the plan:
 | GPU | NVML enumeration | GPU resource profile + nvidia runtime injection |
 | cgroup v2 | `/sys/fs/cgroup/cgroup.controllers` | v2 is mandatory; v1 refuses to start |
 | ublk/tcmu | /dev/ublk-control, target_core_user | overlaybd backend choice; neither present → the fc capability is not reported (fc depends on a block device) |
-| Kernel version / erofs | `uname` + /proc/filesystems | Agent disk (erofs); overlayfs is container-tier only, P5 |
+| Kernel version / ext4 | `uname` + /proc/filesystems | Agent disk (ext4); overlayfs is container-tier only, P5 |
 
 Probe results → reported via `Register`, and re-reported afterwards only when
 they change.
@@ -322,7 +322,7 @@ fetched to local disk by version when noded starts:
 | Artifact | Contents | Build | Versioning |
 |---|---|---|---|
 | Guest kernel | 6.x LTS, a trimmed config with virtio/vsock/nfs/overlayfs and the other essentials built in, bzImage | Kernel source + config in the repo, reproducibly built by CI | Its own version number; recorded in the manifest, and snapshot restore verifies it matches |
-| Agent disk | An erofs read-only image: the static beand binary + busybox-level tools | Packaged by CI, released with the same version as noded | Follows the noded version; older versions are kept until nothing running references them |
+| Agent disk | An ext4 read-only image: the static beand binary + busybox-level tools | Packaged by CI, released with the same version as noded | Follows the noded version; older versions are kept until nothing running references them |
 
 - Storage: `s3://bean/artifacts/{kernel,agent-disk}/<version>/` + sha256 verification
 - noded's configuration declares the version (defaulting to the noded release), cached locally under `/var/lib/bean/artifacts/`

@@ -120,7 +120,7 @@ microVM（见 D9）——两种形态共享同一条镜像链路，用户无感�
 ### D2. overlaybd 直驱,无 containerd 热路径 ⚠️
 
 > **「无 containerd」已达成,「overlaybd 直驱」未达成。** 当前后端是 dm-snapshot:
-> 拉全量 + 转换 + 共享只读 base + 每 sandbox CoW(实测 8 KiB/sandbox)。
+> 拉全量 + 转换 + 共享只读 base + 每 sandbox CoW(实测 44 KiB/sandbox)。
 > overlaybd 能力已在 tcmu 后端实测跑通但未接入 `image.Provider`。
 
 fc 主路径**不引入 containerd**（AgentENV 同款,其源码已在本地 /Users/mac/project/agentenv
@@ -205,8 +205,9 @@ disk-diff 直接取宿主 overlaybd 可写层、guest 内零 union 复杂度。
 选 overlaybd（块级，DADI/阿里，AgentENV 已在 FC 场景验证）而非 Nydus（文件级）的关键原因：**块设备链路同时服务容器档（overlaybd-snapshotter → overlayfs）与 microVM 档（virtio-blk 直挂 guest），一条镜像链路通吃全部 runtime 档位**；Nydus 的文件系统语义进不了 microVM，FC 档需另走 virtiofs（FC 支持弱）。Nydus 保留为容器档备选。
 
 热状态（sandbox 元数据、租约、调度状态）落关系库,不进 S3。⚠️ **当前是 SQLite**
-(`modernc.org/sqlite`,纯 Go 无 cgo,`SetMaxOpenConns(1)` 单写)。接口已抽象,
-Postgres 尚未实现 —— 多副本控制面需要它,单机部署不需要。
+(`modernc.org/sqlite`,纯 Go 无 cgo,`SetMaxOpenConns(1)` 单写)。**没有 store 接口** ——
+调用方持有的是具体类型 `*store.Store`;被收住的是 SQL 本身,只出现在
+`internal/control/store` 包内。Postgres 尚未实现 —— 多副本控制面需要它,单机部署不需要。
 
 ### D5. Agent 注入：init/PID1 override（不进用户镜像）✅
 
@@ -214,7 +215,7 @@ eval 镜像任意、不可假设内含工具链。注入方式按档位：
 
 | 档 | 注入 | 通信 |
 |---|---|---|
-| fc（默认） | **agent 盘**：含 beand 的只读小盘（erofs）作为附加 virtio-blk，guest 内核 init=盘内 agent | vsock + gRPC |
+| fc（默认） | **agent 盘**：含 beand 的只读小盘（ext4）作为附加 virtio-blk，guest 内核 init=盘内 agent | vsock + gRPC |
 | 容器档 | bind mount 只读挂入 + entrypoint override，agent 作 PID1 | unix socket + gRPC |
 
 共同点：用户镜像零修改;原 entrypoint/cmd/env/user/workdir 序列化进 spec，

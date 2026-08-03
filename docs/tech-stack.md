@@ -98,10 +98,11 @@ and replaying it elsewhere; `8` sectors of chunk size, i.e. 4 KiB, so a single
 block write copies 4 KiB instead of tens.
 
 **Measured: 44 KiB of actual disk per sandbox** against a 20 GiB nominal
-request. (`decisions.md` §3 quotes 8 KiB and `devmapper_linux.go` quotes 80 KiB
-after a small write; the three differ because they measure at different points
-in a sandbox's life. `status.md` at 44 KiB is the authoritative figure, and the
-order of magnitude is the point.) Fanning out a hundred clones of one image
+request. (Earlier revisions quoted 8 KiB in some places and 80 KiB in a code
+comment; those measured at different points in a sandbox's life — an empty CoW
+layer versus one after the sandbox has run and written. 44 KiB is the figure to
+use, and the order of magnitude is the point — `status.md` has the detail.)
+Fanning out a hundred clones of one image
 costs a hundred sparse files, which is the batch-evaluation case the platform
 exists for.
 
@@ -659,8 +660,9 @@ Today that is `modernc.org/sqlite`: **pure Go, no cgo**, which matters because
 `CGO_ENABLED=0` is a requirement elsewhere in the build and a cgo SQLite would
 split the toolchain story. `SetMaxOpenConns(1)` enforces the single writer.
 
-**⚠️ The Postgres claim needs qualifying.** `status.md` records it as "interface
-abstracted, SQLite in use." In the code, `*store.Store` is a concrete type
+**⚠️ The Postgres claim needs qualifying.** Older revisions recorded it as
+"interface abstracted, SQLite in use"; `status.md` no longer says that, and this
+is why. In the code, `*store.Store` is a concrete type
 threaded through the api server, scheduler, nodesvc and image service; there is
 no `Store` interface for a second backend to satisfy. What is abstracted is the
 *boundary* — all SQL is inside `internal/control/store/`, so callers do not build

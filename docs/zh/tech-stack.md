@@ -78,9 +78,9 @@ macOS 上的开发与 CI 能在没有 KVM 的情况下跑通同一套 agent gRPC
 够小,所以单块写只 copy 4 KiB 而不是几十 KiB。
 
 **实测:每 sandbox 实占 44 KiB**,对应的名义申请是 20 GiB。
-(`decisions.md` §3 写的是 8 KiB,`devmapper_linux.go` 写的是「小写入后 80 KiB」;
-三者不同是因为测量点在 sandbox 生命周期的不同位置。`status.md` 的 44 KiB 是权威值,
-而重点是数量级。)一个镜像 fan-out 一百份的成本就是一百个稀疏文件 ——
+(早先的版本有些地方写 8 KiB、代码注释里写 80 KiB;那些测量点在 sandbox
+生命周期的不同位置 —— 空的 CoW 层 vs sandbox 跑起来写过之后。44 KiB 是应该引用的值,
+重点是数量级,细节见 `status.md`。)一个镜像 fan-out 一百份的成本就是一百个稀疏文件 ——
 这正是平台存在的批量 eval 场景。
 
 Provider 是分层而不是揉在一起:`PullingProvider` 包住任意一个内层块设备后端,
@@ -542,7 +542,8 @@ GET / PUT / DELETE / HEAD 加分片上传 —— 五个操作。
 `CGO_ENABLED=0`,而一个 cgo 版 SQLite 会把工具链故事劈成两半。
 `SetMaxOpenConns(1)` 强制单写者。
 
-**⚠️ Postgres 这个说法需要限定。** `status.md` 记的是「接口已抽象,在用 SQLite」。
+**⚠️ Postgres 这个说法需要限定。** 早先的版本记的是「接口已抽象,在用 SQLite」;
+`status.md` 现在已经不这么写了,原因就在这里。
 在代码里,`*store.Store` 是具体类型,被穿进 api server、scheduler、nodesvc、
 image service;**没有**一个 `Store` 接口供第二个后端实现。抽象的是**边界** ——
 所有 SQL 都在 `internal/control/store/` 里面,调用方不拼查询 ——
