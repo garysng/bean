@@ -5,6 +5,8 @@ import (
 	"context"
 	"io"
 	"time"
+
+	"github.com/garysng/bean/internal/node/network"
 )
 
 // State mirrors the sandbox state machine (subset owned by the node).
@@ -36,6 +38,20 @@ type Spec struct {
 	Env          map[string]string
 	Cmd          []string
 	AutoStartCmd bool
+
+	// Network is the addressing this sandbox was assigned, or nil on a node with
+	// no networking configured.
+	//
+	// Nil has to keep working: sandboxes ran without any interface at all before
+	// this existed, and a node that cannot set up namespaces should still start
+	// them rather than refuse every create. So this is a pointer and the absence
+	// of one means no interface is registered, not a zero-valued one.
+	//
+	// It rides on the spec rather than on runtime configuration because the slot
+	// is per-sandbox: the host end of the veth pair is derived from an index, and
+	// only the caller that reserved that index knows which one this sandbox got.
+	// Everything else here is per-sandbox for the same reason.
+	Network *network.Layout
 }
 
 // Handle represents a created sandbox instance.

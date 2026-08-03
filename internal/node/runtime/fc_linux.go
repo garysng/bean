@@ -33,6 +33,13 @@ const guestCID = 3
 // registered first.
 const guestRootfsDevice = "/dev/vdb"
 
+// guestIfaceID names the sandbox's only network interface. Like the vsock CID it
+// is a constant because there is nothing to collide with: the id is internal to
+// Firecracker, one per machine, and it is the key a network_overrides entry would
+// have to match on restore. Deriving it from the sandbox would make that key
+// depend on which sandbox took the snapshot.
+const guestIfaceID = "eth0"
+
 // FCRuntime runs each sandbox as a Firecracker microVM.
 //
 // The isolation boundary is a virtual machine rather than a namespace, which is
@@ -486,6 +493,31 @@ func (r *FCRuntime) configureAndBoot(ctx context.Context, vm *fcVM, spec *Spec) 
 		GuestCID: guestCID, UDSPath: vsockName,
 	}); err != nil {
 		return err
+	}
+
+	// The interface has to exist before InstanceStart, the same constraint the
+	// CPU mask has: Firecracker rejects a network device on a running machine
+	// (the endpoint is pre-boot only, and PATCH afterwards only swaps rate
+	// limiters). A guest started without one has no NIC for the rest of its life,
+	// and the symptom is not an error anywhere on this path -- it is pip and git
+	// failing inside the sandbox much later.
+	//
+	// A nil layout means this node has no networking configured, which stays the
+	// pre-existing behaviour of no interface at all rather than a boot failure.
+	if spec.Network != nil {
+		if err := vm.client.put(ctx, "/network-interfaces/"+guestIfaceID,
+			fcNetworkInterface{
+				IfaceID: guestIfaceID,
+				// Not made relative like the drives and the vsock UDS. This is a
+				// device name resolved in the VMM's network namespace rather than a
+				// path resolved from its working directory, and it is portable for a
+				// different reason: the name is identical in every namespace, so a
+				// snapshot finds the device it recorded without an override.
+				HostDevName: spec.Network.TapName,
+			}); err != nil {
+			return fmt.Errorf("register network interface on tap %s: %w",
+				spec.Network.TapName, err)
+		}
 	}
 
 	return vm.client.put(ctx, "/actions", fcAction{ActionType: "InstanceStart"})
