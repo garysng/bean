@@ -281,7 +281,7 @@ func (f *failingRuntime) Destroy(context.Context, string, bool) error { return n
 func (f *failingRuntime) Checkpoint(context.Context, string, io.Writer, runtime.CheckpointOptions) error {
 	return errors.New("synthetic checkpoint failure")
 }
-func (f *failingRuntime) Restore(context.Context, *runtime.Spec, []runtime.SnapshotLayer) (*runtime.Handle, error) {
+func (f *failingRuntime) Fork(context.Context, *runtime.Spec, []runtime.SnapshotLayer) (*runtime.Handle, error) {
 	return nil, errors.New("synthetic restore failure")
 }
 func (f *failingRuntime) Pause(context.Context, string) error    { return nil }
@@ -379,7 +379,7 @@ func TestManagerMetricsCountDestroyAndIdleActions(t *testing.T) {
 	}
 }
 
-func TestSnapshotAndRestoreRoundTrip(t *testing.T) {
+func TestSnapshotAndForkRoundTrip(t *testing.T) {
 	m := newTestManager(t)
 	ctx := context.Background()
 	if _, err := m.Create(ctx, spec("src")); err != nil {
@@ -424,7 +424,7 @@ func TestSnapshotAndRestoreRoundTrip(t *testing.T) {
 	}
 
 	// Restore into a new sandbox and verify the file came along.
-	restored, err := m.RestoreSandbox(ctx, spec("dst"), []runtime.SnapshotLayer{{ID: "snap_test", Data: &buf}})
+	restored, err := m.ForkSandbox(ctx, spec("dst"), []runtime.SnapshotLayer{{ID: "snap_test", Data: &buf}})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -499,20 +499,20 @@ func TestSnapshotFailureLeavesSandboxRunning(t *testing.T) {
 	}
 }
 
-func TestRestoreDuplicateRejected(t *testing.T) {
+func TestForkDuplicateRejected(t *testing.T) {
 	m := newTestManager(t)
 	ctx := context.Background()
 	if _, err := m.Create(ctx, spec("dup")); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := m.RestoreSandbox(ctx, spec("dup"), []runtime.SnapshotLayer{{ID: "snap_test", Data: bytes.NewReader(nil)}}); err == nil {
+	if _, err := m.ForkSandbox(ctx, spec("dup"), []runtime.SnapshotLayer{{ID: "snap_test", Data: bytes.NewReader(nil)}}); err == nil {
 		t.Error("expected duplicate rejection")
 	}
 }
 
-func TestRestoreCorruptCheckpointFails(t *testing.T) {
+func TestForkCorruptCheckpointFails(t *testing.T) {
 	m := newTestManager(t)
-	_, err := m.RestoreSandbox(context.Background(), spec("bad"),
+	_, err := m.ForkSandbox(context.Background(), spec("bad"),
 		[]runtime.SnapshotLayer{{ID: "snap_bad", Data: bytes.NewReader([]byte("not a checkpoint"))}})
 	if err == nil {
 		t.Fatal("expected restore failure")

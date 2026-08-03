@@ -1,6 +1,7 @@
 package api
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -73,6 +74,44 @@ func (s *Server) handleCreateSnapshot(w http.ResponseWriter, r *http.Request) {
 	if req.KeepRunning != nil {
 		keepRunning = *req.KeepRunning
 	}
+
+	nodeClient, err := s.nodeClientFor(rec)
+	if err != nil {
+		writeErr(w, http.StatusServiceUnavailable, "NODE_UNREACHABLE", err.Error())
+		return
+	}
+	snap, err := s.captureSnapshot(r.Context(), rec, nodeClient, &req)
+	if err != nil {
+		writeFault(w, err)
+		return
+	}
+
+	if !keepRunning {
+		if _, err := nodeClient.DestroySandbox(r.Context(),
+			&nodev1.DestroySandboxRequest{SandboxId: rec.ID}); err != nil {
+			slog.Error("cannot destroy snapshot source sandbox", logging.KeySnapshot, snap.ID, logging.KeyError, err)
+		} else {
+			rec.State = store.SandboxStopped
+			_ = s.store.PutSandbox(rec)
+			s.releasePlacement(rec)
+			s.emit(rec.ID, "sandbox.lifecycle.stopped", nil)
+		}
+	}
+
+	writeJSON(w, http.StatusAccepted, map[string]any{
+		"snapshotId": snap.ID,
+		"snapshot":   snap,
+	})
+}
+
+// captureSnapshot checkpoints a running sandbox and stores the result, leaving
+// the source untouched. Stopping the source, if the caller wants that, is the
+// caller's own step: a fork must not do it, and keeping it out here is what
+// makes the two callers unable to drift on the point.
+//
+// Errors are returned rather than written so a fan-out can attribute them.
+func (s *Server) captureSnapshot(ctx context.Context, rec *store.Sandbox,
+	nodeClient nodev1.SandboxServiceClient, req *snapshotRequest) (*store.Snapshot, error) {
 	includeMemory := true
 	if req.IncludeMemory != nil {
 		includeMemory = *req.IncludeMemory
@@ -87,28 +126,23 @@ func (s *Server) handleCreateSnapshot(w http.ResponseWriter, r *http.Request) {
 			// layer is already proportional to what changed, so a diff of a
 			// memoryless checkpoint would save nothing and would still pin its
 			// ancestors.
-			writeErr(w, http.StatusBadRequest, "INVALID_ARGUMENT",
+			return nil, faultf(http.StatusBadRequest, "INVALID_ARGUMENT",
 				"base requires includeMemory: a filesystem-only checkpoint is already incremental")
-			return
 		}
 		base, err := s.store.GetSnapshot(req.Base)
 		if err != nil {
-			writeErr(w, http.StatusInternalServerError, "INTERNAL", err.Error())
-			return
+			return nil, faultf(http.StatusInternalServerError, "INTERNAL", "%s", err.Error())
 		}
 		if base == nil {
-			writeErr(w, http.StatusNotFound, "SNAPSHOT_NOT_FOUND", "base snapshot not found")
-			return
+			return nil, faultf(http.StatusNotFound, "SNAPSHOT_NOT_FOUND", "base snapshot not found")
 		}
 		if base.State != store.SnapshotReady {
-			writeErr(w, http.StatusConflict, "SNAPSHOT_NOT_READY",
-				fmt.Sprintf("base snapshot %s is %s", base.ID, base.State))
-			return
+			return nil, faultf(http.StatusConflict, "SNAPSHOT_NOT_READY",
+				"base snapshot %s is %s", base.ID, base.State)
 		}
 		if !base.HasMemory() {
-			writeErr(w, http.StatusBadRequest, "INVALID_ARGUMENT",
+			return nil, faultf(http.StatusBadRequest, "INVALID_ARGUMENT",
 				"base snapshot carries no guest memory, so there is nothing to capture a difference against")
-			return
 		}
 		// Past the limit the checkpoint is taken in full and becomes a new root.
 		// Refusing instead would make callers manage depth, and silently
@@ -116,12 +150,6 @@ func (s *Server) handleCreateSnapshot(w http.ResponseWriter, r *http.Request) {
 		if base.ChainDepth+1 <= maxDiffChain {
 			baseID, chainDepth = base.ID, base.ChainDepth+1
 		}
-	}
-
-	nodeClient, err := s.nodeClientFor(rec)
-	if err != nil {
-		writeErr(w, http.StatusServiceUnavailable, "NODE_UNREACHABLE", err.Error())
-		return
 	}
 
 	snapID := store.NewID(store.PrefixSnapshot)
@@ -144,18 +172,16 @@ func (s *Server) handleCreateSnapshot(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	if err := s.store.PutSnapshot(snap); err != nil {
-		writeErr(w, http.StatusInternalServerError, "INTERNAL", err.Error())
-		return
+		return nil, faultf(http.StatusInternalServerError, "INTERNAL", "%s", err.Error())
 	}
 
 	blobW, err := s.snapshots.Writer(snapID)
 	if err != nil {
 		s.failSnapshot(snap, err)
-		writeErr(w, http.StatusInternalServerError, "INTERNAL", err.Error())
-		return
+		return nil, faultf(http.StatusInternalServerError, "INTERNAL", "%s", err.Error())
 	}
 
-	stream, err := nodeClient.SnapshotSandbox(r.Context(),
+	stream, err := nodeClient.SnapshotSandbox(ctx,
 		&nodev1.SnapshotSandboxRequest{
 			SandboxId: rec.ID, IncludeMemory: includeMemory,
 			// Diff follows baseID rather than the request: a request that asked for
@@ -166,8 +192,7 @@ func (s *Server) handleCreateSnapshot(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		snapshot.AbortWrite(s.snapshots, snapID, blobW)
 		s.failSnapshot(snap, err)
-		grpcToHTTP(w, err)
-		return
+		return nil, grpcFault(err)
 	}
 
 	var written int64
@@ -179,48 +204,28 @@ func (s *Server) handleCreateSnapshot(w http.ResponseWriter, r *http.Request) {
 		if rerr != nil {
 			snapshot.AbortWrite(s.snapshots, snapID, blobW)
 			s.failSnapshot(snap, rerr)
-			grpcToHTTP(w, rerr)
-			return
+			return nil, grpcFault(rerr)
 		}
 		n, werr := blobW.Write(chunk.Data)
 		written += int64(n)
 		if werr != nil {
 			snapshot.AbortWrite(s.snapshots, snapID, blobW)
 			s.failSnapshot(snap, werr)
-			writeErr(w, http.StatusInternalServerError, "INTERNAL", werr.Error())
-			return
+			return nil, faultf(http.StatusInternalServerError, "INTERNAL", "%s", werr.Error())
 		}
 	}
 	if err := blobW.Close(); err != nil {
 		s.failSnapshot(snap, err)
-		writeErr(w, http.StatusInternalServerError, "INTERNAL", err.Error())
-		return
+		return nil, faultf(http.StatusInternalServerError, "INTERNAL", "%s", err.Error())
 	}
 
 	snap.State = store.SnapshotReady
 	snap.SizeBytes = written
 	if err := s.store.PutSnapshot(snap); err != nil {
-		writeErr(w, http.StatusInternalServerError, "INTERNAL", err.Error())
-		return
+		return nil, faultf(http.StatusInternalServerError, "INTERNAL", "%s", err.Error())
 	}
 	s.emit(rec.ID, "sandbox.snapshot.ready", map[string]string{"snapshotId": snapID})
-
-	if !keepRunning {
-		if _, err := nodeClient.DestroySandbox(r.Context(),
-			&nodev1.DestroySandboxRequest{SandboxId: rec.ID}); err != nil {
-			slog.Error("cannot destroy snapshot source sandbox", logging.KeySnapshot, snapID, logging.KeyError, err)
-		} else {
-			rec.State = store.SandboxStopped
-			_ = s.store.PutSandbox(rec)
-			s.releasePlacement(rec)
-			s.emit(rec.ID, "sandbox.lifecycle.stopped", nil)
-		}
-	}
-
-	writeJSON(w, http.StatusAccepted, map[string]any{
-		"snapshotId": snapID,
-		"snapshot":   snap,
-	})
+	return snap, nil
 }
 
 // failSnapshot records a failed snapshot so a caller sees why, rather than
@@ -307,6 +312,24 @@ func (s *Server) createFromSnapshot(w http.ResponseWriter, r *http.Request,
 		}
 	}()
 
+	if err := s.launchFromSnapshot(r.Context(), snap, spec, rec); err != nil {
+		writeFault(w, err)
+		return
+	}
+	writeJSON(w, http.StatusCreated, map[string]any{"sandbox": rec})
+}
+
+// launchFromSnapshot places a sandbox and streams a checkpoint chain into it,
+// mutating rec to reflect where it landed and what state it reached.
+//
+// The caller owns the snapshot reference: this may be invoked many times against
+// one acquired snapshot, which is what lets a fork of N children checkpoint once
+// and stream the same chain N times.
+//
+// Errors are returned rather than written, so a fan-out can report which child
+// failed and why instead of collapsing every outcome into one status line.
+func (s *Server) launchFromSnapshot(ctx context.Context, snap *store.Snapshot,
+	spec *nodev1.SandboxSpec, rec *store.Sandbox) error {
 	// The restored sandbox inherits the snapshot's image so its rootfs base
 	// matches what the checkpoint was taken from.
 	rec.Image = snap.Image
@@ -335,26 +358,27 @@ func (s *Server) createFromSnapshot(w http.ResponseWriter, r *http.Request,
 		if errors.Is(err, scheduler.ErrIncompatibleCPU) {
 			// 409, not 503: waiting will not help, and a client retrying on
 			// 503 would loop until its own deadline.
-			writeErr(w, http.StatusConflict, "INCOMPATIBLE_CPU", err.Error())
-			return
+			//
+			// A fork inherits its source's CPU constraint, so a cluster with no
+			// compatible node fails every child this same way. Saying so per child
+			// is the only place the reason is visible; a bare "no capacity" would
+			// send the reader looking at resource limits.
+			return faultf(http.StatusConflict, "INCOMPATIBLE_CPU", "%s", err.Error())
 		}
-		writeErr(w, http.StatusServiceUnavailable, "NO_CAPACITY", err.Error())
-		return
+		return faultf(http.StatusServiceUnavailable, "NO_CAPACITY", "%s", err.Error())
 	}
 	rec.NodeID = nodeID
 	if err := s.store.PutSandbox(rec); err != nil {
 		_ = s.placer.FinishCreate(nodeID)
 		_ = s.placer.Release(rec.ID)
-		writeErr(w, http.StatusInternalServerError, "INTERNAL", err.Error())
-		return
+		return faultf(http.StatusInternalServerError, "INTERNAL", "%s", err.Error())
 	}
 	s.emit(rec.ID, "sandbox.lifecycle.created", map[string]string{"snapshotId": snap.ID})
 
 	nodeClient, err := s.nodeClientFor(rec)
 	if err != nil {
 		s.failCreate(rec, err)
-		writeErr(w, http.StatusServiceUnavailable, "NODE_UNREACHABLE", err.Error())
-		return
+		return faultf(http.StatusServiceUnavailable, "NODE_UNREACHABLE", "%s", err.Error())
 	}
 
 	// The whole chain travels, base first: a diff holds only what changed since
@@ -365,11 +389,9 @@ func (s *Server) createFromSnapshot(w http.ResponseWriter, r *http.Request,
 	if err != nil {
 		s.failCreate(rec, err)
 		if errors.Is(err, store.ErrNotFound) {
-			writeErr(w, http.StatusNotFound, "SNAPSHOT_BASE_MISSING", err.Error())
-			return
+			return faultf(http.StatusNotFound, "SNAPSHOT_BASE_MISSING", "%s", err.Error())
 		}
-		writeErr(w, http.StatusInternalServerError, "INTERNAL", err.Error())
-		return
+		return faultf(http.StatusInternalServerError, "INTERNAL", "%s", err.Error())
 	}
 	// Declared on the spec rather than discovered from the stream: the node has to
 	// create one reader per layer before reading any of them, since each layer is
@@ -379,18 +401,18 @@ func (s *Server) createFromSnapshot(w http.ResponseWriter, r *http.Request,
 		spec.SnapshotChain[i] = link.ID
 	}
 
-	stream, err := nodeClient.RestoreSandbox(r.Context())
+	// The proto RPC keeps its name: it is a published interface, and renaming it
+	// would break every deployed node for a change that adds a verb.
+	stream, err := nodeClient.RestoreSandbox(ctx)
 	if err != nil {
 		s.failCreate(rec, err)
-		grpcToHTTP(w, err)
-		return
+		return grpcFault(err)
 	}
 	if err := stream.Send(&nodev1.RestoreSandboxFrame{
 		Frame: &nodev1.RestoreSandboxFrame_Spec{Spec: spec},
 	}); err != nil {
 		s.failCreate(rec, err)
-		grpcToHTTP(w, err)
-		return
+		return grpcFault(err)
 	}
 
 	buf := make([]byte, 1<<20)
@@ -402,18 +424,15 @@ func (s *Server) createFromSnapshot(w http.ResponseWriter, r *http.Request,
 				Frame: &nodev1.RestoreSandboxFrame_LayerEnd{LayerEnd: true},
 			}); serr != nil {
 				s.failCreate(rec, serr)
-				grpcToHTTP(w, serr)
-				return
+				return grpcFault(serr)
 			}
 		}
 		if err := s.sendSnapshotBlob(stream, link.ID, buf); err != nil {
 			s.failCreate(rec, err)
 			if errors.Is(err, snapshot.ErrBlobNotFound) {
-				writeErr(w, http.StatusNotFound, "SNAPSHOT_DATA_MISSING", err.Error())
-				return
+				return faultf(http.StatusNotFound, "SNAPSHOT_DATA_MISSING", "%s", err.Error())
 			}
-			grpcToHTTP(w, err)
-			return
+			return grpcFault(err)
 		}
 	}
 
@@ -421,14 +440,13 @@ func (s *Server) createFromSnapshot(w http.ResponseWriter, r *http.Request,
 	_ = s.placer.FinishCreate(nodeID)
 	if err != nil {
 		s.failCreate(rec, err)
-		grpcToHTTP(w, err)
-		return
+		return grpcFault(err)
 	}
 
 	rec.State = store.SandboxState(resp.Status.State)
 	_ = s.store.PutSandbox(rec)
 	s.emit(rec.ID, "sandbox.lifecycle.running", nil)
-	writeJSON(w, http.StatusCreated, map[string]any{"sandbox": rec})
+	return nil
 }
 
 // sendSnapshotBlob streams one layer's bundle into an open restore stream.

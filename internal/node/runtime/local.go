@@ -61,16 +61,19 @@ func (r *LocalRuntime) Checkpoint(ctx context.Context, id string, w io.Writer, _
 	return tarDirectory(sb.root, w)
 }
 
-// Restore recreates a sandbox and unpacks a checkpoint over its rootfs.
-// Restore recreates a sandbox from a checkpoint.
+// Fork creates a sandbox and unpacks a checkpoint over its rootfs.
 //
 // This tier has no memory state, so a chain has nothing to layer: each layer is a
 // tar of the whole filesystem, and the leaf already holds everything its
 // ancestors did. Earlier layers are drained and discarded, which keeps the sender
 // from blocking on a stream nobody reads.
-func (r *LocalRuntime) Restore(ctx context.Context, spec *Spec, layers []SnapshotLayer) (*Handle, error) {
+//
+// Each sandbox unpacks into its own directory, so siblings from one checkpoint
+// are independent here for the same reason they are on the microVM tier, just
+// by copying rather than by copy-on-write.
+func (r *LocalRuntime) Fork(ctx context.Context, spec *Spec, layers []SnapshotLayer) (*Handle, error) {
 	if len(layers) == 0 {
-		return nil, errors.New("local: restore needs at least one snapshot layer")
+		return nil, errors.New("local: fork needs at least one snapshot layer")
 	}
 	for _, layer := range layers[:len(layers)-1] {
 		if _, err := io.Copy(io.Discard, layer.Data); err != nil {

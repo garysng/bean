@@ -204,6 +204,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /v1/registries", s.handleListRegistries)
 	s.mux.HandleFunc("DELETE /v1/registries/{host}", s.handleDeleteRegistry)
 	s.mux.HandleFunc("POST /v1/sandboxes/{id}/snapshot", s.handleCreateSnapshot)
+	s.mux.HandleFunc("POST /v1/sandboxes/{id}/fork", s.handleFork)
 	s.mux.HandleFunc("POST /v1/sandboxes/{id}/commit", s.handleCommit)
 	s.mux.HandleFunc("GET /v1/snapshots", s.handleListSnapshots)
 	s.mux.HandleFunc("GET /v1/snapshots/{id}", s.handleGetSnapshot)
@@ -272,25 +273,66 @@ func (s *Server) place(ctx context.Context, req *scheduler.Request) (string, err
 	return q.ScheduleWait(ctx, req, scheduler.WaitOptions{Timeout: s.createWait})
 }
 
-func grpcToHTTP(w http.ResponseWriter, err error) {
+// fault is an error that already knows how it should be reported.
+//
+// It exists because some operations produce several independently failing
+// results in one request -- forking N children, say -- so the mapping from
+// cause to status code has to be decided where the cause is known and carried
+// back, rather than written to the ResponseWriter on the spot. A single-result
+// handler unwraps it with writeFault and gets exactly what it would have
+// written itself.
+type fault struct {
+	status int
+	code   string
+	msg    string
+}
+
+func (f *fault) Error() string { return f.code + ": " + f.msg }
+
+func faultf(status int, code, format string, args ...any) *fault {
+	return &fault{status: status, code: code, msg: fmt.Sprintf(format, args...)}
+}
+
+// asFault maps any error onto a reportable one, so a caller never has to decide
+// what an unclassified error means.
+func asFault(err error) *fault {
+	var f *fault
+	if errors.As(err, &f) {
+		return f
+	}
+	return grpcFault(err)
+}
+
+func writeFault(w http.ResponseWriter, err error) {
+	f := asFault(err)
+	writeErr(w, f.status, f.code, f.msg)
+}
+
+// grpcFault translates a node's gRPC status into the gateway's vocabulary.
+func grpcFault(err error) *fault {
 	st, _ := status.FromError(err)
 	switch st.Code() {
 	case codes.NotFound:
-		writeErr(w, http.StatusNotFound, "SANDBOX_NOT_FOUND", st.Message())
+		return &fault{http.StatusNotFound, "SANDBOX_NOT_FOUND", st.Message()}
 	case codes.InvalidArgument:
-		writeErr(w, http.StatusBadRequest, "INVALID_ARGUMENT", st.Message())
+		return &fault{http.StatusBadRequest, "INVALID_ARGUMENT", st.Message()}
 	case codes.FailedPrecondition:
-		writeErr(w, http.StatusConflict, "SANDBOX_NOT_RUNNING", st.Message())
+		return &fault{http.StatusConflict, "SANDBOX_NOT_RUNNING", st.Message()}
 	case codes.DeadlineExceeded:
-		writeErr(w, http.StatusGatewayTimeout, "TIMEOUT", st.Message())
+		return &fault{http.StatusGatewayTimeout, "TIMEOUT", st.Message()}
 	case codes.ResourceExhausted:
 		// A node declining work for want of capacity is the same answer the
 		// scheduler gives when it can place nothing, so it gets the same code: 503
 		// tells a client to retry, where 500 tells it to report a bug.
-		writeErr(w, http.StatusServiceUnavailable, "NO_CAPACITY", st.Message())
+		return &fault{http.StatusServiceUnavailable, "NO_CAPACITY", st.Message()}
 	default:
-		writeErr(w, http.StatusInternalServerError, "INTERNAL", st.Message())
+		return &fault{http.StatusInternalServerError, "INTERNAL", st.Message()}
 	}
+}
+
+func grpcToHTTP(w http.ResponseWriter, err error) {
+	f := grpcFault(err)
+	writeErr(w, f.status, f.code, f.msg)
 }
 
 // ---- sandbox lifecycle ----

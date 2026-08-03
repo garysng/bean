@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"strings"
 	"testing"
+	"time"
 )
 
 // TestSnapshotRestoreEndToEnd is the flow the design exists for: set an
@@ -246,5 +247,45 @@ func TestSnapshotDisabledWithoutStorage(t *testing.T) {
 	code, _ := env.do("POST", "/v1/sandboxes/"+id+"/snapshot", nil)
 	if code.StatusCode != http.StatusNotImplemented {
 		t.Errorf("status = %d, want 501", code.StatusCode)
+	}
+}
+
+// Snapshotting an already-paused sandbox must not wait for its agent.
+//
+// This asserts on elapsed time, which is normally a bad idea, because no
+// assertion on state can catch the bug. Reconnecting to the agent after a
+// checkpoint is right for a sandbox that is running again, but an agent in a
+// sandbox that was PAUSED to begin with is not scheduled to answer a health
+// check -- so the reconnect burned the full agentReadyTimeout and then logged a
+// failure for a sandbox that was behaving correctly. Every assertion still
+// passed: the snapshot is valid, the source is still paused, the children are
+// usable. Only the clock showed it.
+//
+// The bound is far below the 20s timeout and far above the ~100ms this takes, so
+// it fails on the regression and not on a slow machine.
+func TestSnapshotOfPausedSandboxDoesNotWaitForItsAgent(t *testing.T) {
+	env := startEnv(t, envOpts{})
+	id := env.sandboxID(map[string]any{"image": "base:1"})
+	if resp, _ := env.do("POST", "/v1/sandboxes/"+id+"/pause", nil); resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("pause: %d", resp.StatusCode)
+	}
+
+	start := time.Now()
+	resp, body := env.do("POST", "/v1/sandboxes/"+id+"/snapshot", nil)
+	elapsed := time.Since(start)
+	if resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("snapshot: %d %v", resp.StatusCode, body)
+	}
+	if elapsed > 5*time.Second {
+		t.Errorf("snapshot of a paused sandbox took %s; it is waiting for an "+
+			"agent that cannot answer while the guest is stopped", elapsed)
+	}
+
+	// The snapshot has to be real, or the speed means nothing.
+	if resp, _ := env.do("POST", "/v1/sandboxes/"+id+"/resume", nil); resp.StatusCode != http.StatusAccepted {
+		t.Fatalf("resume: %d", resp.StatusCode)
+	}
+	if st := env.state(id); st != "RUNNING" {
+		t.Errorf("state after resume = %q, want RUNNING", st)
 	}
 }

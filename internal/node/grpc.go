@@ -319,8 +319,13 @@ func (c *chunkWriter) Write(p []byte) (int, error) {
 }
 
 // RestoreSandbox consumes a spec frame followed by checkpoint data. The
-// checkpoint is piped straight into the runtime so a large restore does not
-// have to be buffered in memory.
+// checkpoint is piped straight into the runtime so a large one does not have to
+// be buffered in memory.
+//
+// The RPC keeps its name because it is a published interface: the method name is
+// on the wire, and renaming it would break every deployed node and client for a
+// change that adds a verb rather than altering one. What it delegates to is
+// ForkSandbox, which is the operation this has always been.
 func (s *GRPCServer) RestoreSandbox(stream nodev1.SandboxService_RestoreSandboxServer) error {
 	first, err := stream.Recv()
 	if err != nil {
@@ -336,7 +341,7 @@ func (s *GRPCServer) RestoreSandbox(stream nodev1.SandboxService_RestoreSandboxS
 		return status.Errorf(codes.InvalidArgument, "%v", err)
 	}
 
-	sb, err := s.mgr.RestoreSandbox(stream.Context(), spec, layers)
+	sb, err := s.mgr.ForkSandbox(stream.Context(), spec, layers)
 	// Closing matters: an early runtime failure would otherwise leave the sender
 	// blocked writing into a pipe nobody reads.
 	closeLayers(err)

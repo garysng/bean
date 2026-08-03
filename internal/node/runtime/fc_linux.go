@@ -214,16 +214,21 @@ func (r *FCRuntime) Create(ctx context.Context, spec *Spec) (*Handle, error) {
 	return r.create(ctx, spec, nil)
 }
 
-// Restore boots a VM from a Firecracker snapshot. The guest resumes with its
-// memory intact, so a restored sandbox keeps running processes and open files —
-// the property that makes resume cheap compared to a cold start.
+// Fork boots a VM from a Firecracker snapshot. The guest resumes with its
+// memory intact, so the new sandbox keeps running processes and open files —
+// the property that makes this cheap compared to a cold start.
+//
+// One checkpoint can be forked repeatedly and concurrently. The unpacked memory
+// image is mapped read-only and shared between them, while the writable rootfs
+// layer is extracted per sandbox, so siblings diverge the moment either writes
+// and neither can observe the other.
 //
 // Layers are the checkpoint's chain, base first. One layer is the common case;
 // more than one means the leaf is incremental and its memory has to be
 // reassembled from its ancestors before the guest can run.
-func (r *FCRuntime) Restore(ctx context.Context, spec *Spec, layers []SnapshotLayer) (*Handle, error) {
+func (r *FCRuntime) Fork(ctx context.Context, spec *Spec, layers []SnapshotLayer) (*Handle, error) {
 	if len(layers) == 0 {
-		return nil, errors.New("fc: restore needs at least one snapshot layer")
+		return nil, errors.New("fc: fork needs at least one snapshot layer")
 	}
 	return r.create(ctx, spec, layers)
 }

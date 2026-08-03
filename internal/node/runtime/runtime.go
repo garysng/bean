@@ -63,14 +63,21 @@ type Runtime interface {
 	// tiers, which is why a snapshot records the runtime that produced it.
 	Checkpoint(ctx context.Context, id string, w io.Writer, opts CheckpointOptions) error
 
-	// Restore creates a sandbox from checkpoints previously written by the same
+	// Fork creates a sandbox from checkpoints previously written by the same
 	// runtime. The spec supplies identity and resources; the checkpoints supply
 	// the filesystem (and, for microVMs, memory).
 	//
+	// Named for what it does rather than for what it is usually called: one
+	// checkpoint can be the source of any number of these, each getting its own
+	// copy-on-write layer over shared read-only state, so the result is an
+	// independent instance rather than the recovery of a particular one. Calling
+	// it "restore" invited the assumption that a checkpoint is consumed, and it
+	// is not.
+	//
 	// Layers are ordered base-first and read in order. A self-contained
 	// checkpoint is a single layer; an incremental one is its whole chain, since
-	// a diff holds only what changed since its base and cannot be restored alone.
-	Restore(ctx context.Context, spec *Spec, layers []SnapshotLayer) (*Handle, error)
+	// a diff holds only what changed since its base and cannot be used alone.
+	Fork(ctx context.Context, spec *Spec, layers []SnapshotLayer) (*Handle, error)
 }
 
 // SnapshotLayer is one checkpoint in a restore chain.
