@@ -1,322 +1,233 @@
-# 实现状态
+# What is actually built
 
-> 快照日期：2026-08-02。CI 全绿（lint / race 单测 / e2e / SDK / proto drift），
-> 覆盖率 80.5%。控制面与节点面均在 Linux x86_64 上验证过，无 darwin 平台假设。
+> 中文版:[zh/status.md](zh/status.md)
+> Section status convention: [architecture.md](architecture.md) §0.
 >
-> **microVM 档已实装并在真 KVM 机器上跑通**：alpine 创建 952ms、
-> host 经 vsock exec 拿到输出、snapshot 16-20 MiB、restore 950ms。
->
-> 启动优化的归因过程与被否掉的方案见 `docs/decisions.md` —— 那里是
-> 「为什么这么选」的权威记录,本文只记「做到哪一步了」。
->
-> 实现细节分三篇:`vm-assembly.md`(microVM 怎么组起来,含两处不能动的顺序约束)、
-> `image-pipeline.md`(OCI ref 怎么变成块设备)、`s3-storage.md`(自实现 SigV4 与
-> Blobs 抽象)。
+> **Authority order: code > this file > [decisions.md](decisions.md) > design docs.**
+> When they disagree, the one on the left is right and the others are stale.
 
-## 1. 已完成
+Every number here was measured on hardware. Where something is projected rather
+than measured, it says so.
 
-### 控制面
+Measurement host unless noted: AMD EPYC 7542 (Zen 2), 16 physical cores, 24 GB,
+guest kernel 6.1.102, Alpine 3.20.
 
-| 组件 | 状态 | 说明 |
+## Delivered
+
+| Area | | Notes |
 |---|---|---|
-| `bean-api` REST gateway | ✅ | sandboxes CRUD、exec、files、logs、events、pause/resume、snapshot、image、metrics;API key 鉴权、配额位、请求体限流、超时钳制 |
-| `scheduler` | ✅ | 两级放置（region → 节点）、硬过滤（runtime 能力/labels/承诺量/创建并发）、打分（镜像亲和/装箱/NVMe/spread）;**承诺量落库**,事务内条件更新,多副本不会重复放置、重启不丢账 |
-| `nodesvc` | ✅ | Register（bootstrap token 校验 + 签发 node token）、Heartbeat 双向流续租、SyncState、租约过期回调 |
-| `store` | ✅ | SQLite（Postgres 接口已抽象）:sandbox / snapshot / image / prewarm job / 节点与预留 |
-| 事件 | ✅ | 状态机统一发件 → 持久化 + SSE 实时订阅（按 sandbox/label 过滤,慢订阅者丢弃计数） |
-| image API | ✅ | ref/digest/overlaybd 产物三层语义、状态机、prewarm job;registry 凭证 AES-256-GCM 加密存储 |
-| snapshot | ✅ | 创建/列表/删除/引用计数、从 snapshot 创建;**blob 存 S3**（本地目录为 dev 默认） |
-| S3 存储层 | ✅ | 标准库自实现 SigV4（不引 AWS SDK）、分片上传、range 读;集成测试在 CI 里打真 MinIO |
-| 路由 | ✅ | `NodeRouter` per-node 连接池,数据面按记录里的 nodeID 解析 |
+| Lifecycle | ✅ | create → exec → cp → pause → resume → snapshot → restore → destroy |
+| Images | ✅ | OCI pull and conversion to ext4, private registries (AES-256-GCM at rest), prewarm with image-affinity scheduling |
+| Rootfs | ✅ | Shared read-only base + per-sandbox copy-on-write through device-mapper. **44 KiB of actual disk per sandbox** |
+| Snapshots | ✅ | Three kinds with different semantics — see below |
+| Scheduler | ✅ | Two-level placement, hard filters, scoring, **commitments persisted** so replicas cannot double-place and a restart does not lose the ledger |
+| Create queueing | ✅ | A burst larger than a node's create concurrency waits instead of being refused |
+| Snapshot blobs on S3 | ✅ | SigV4 against the standard library, no AWS SDK; multipart upload and range reads |
+| Tracing | ✅ | OpenTelemetry with W3C `traceparent` across gateway → noded → in-sandbox agent |
+| Builds | ✅ | Dockerfile through BuildKit, and `commit` to freeze a running sandbox into a base image |
+| Snapshot cache eviction | ✅ | High/low watermarks with LRU, and the cache's size is reported |
+| Disk pressure | ✅ | Actual occupancy reported; a node stops admitting sandboxes below a floor |
 
-### 节点面
+## Not delivered
 
-| 组件 | 状态 | 说明 |
+| | | |
 |---|---|---|
-| `noded` | ✅ | Manager（创建/销毁/pause/resume/snapshot/restore、透明唤醒、本地 idle 回收、in-flight 保护）、SandboxService gRPC、node token 鉴权、metrics |
-| `Registrar` | ✅ | 出向注册（无需入站）、SyncState 对账销毁孤儿、心跳带状态与承诺量、指数退避重连 |
-| `beand`（sandbox 内） | ✅ | 双档 listener（unix socket / **AF_VSOCK**）、**microVM 内作 PID 1**（挂伪文件系统 → pivot 用户镜像）、exec（超时/截断/进程组 kill）、文件（os.Root 防逃逸、原子写）、logs 环形缓冲 |
-| `FCRuntime` | ✅ | **真 Firecracker microVM**:VMM 进程管理、agent 盘为 root device + 用户镜像为第二盘、vsock、pause/resume、full snapshot / restore、销毁清理 |
-| `image.Provider` | ✅ | `DevMapperProvider`（**共享只读基础镜像 + 每 sandbox CoW,一个 sandbox 只占 8 KiB**）、`FileProvider`（全量拷贝,兜底）、`PullingProvider`（首次使用时拉取转换,并发去重） |
-| OCI 镜像拉取与转换 | ✅ | 节点直接说 distribution API（不依赖 docker/containerd）:manifest / 多平台 index / token 挑战 / **layer 断点续传**;whiteout 语义、路径逃逸防护;转换产物带 sidecar 记录 ref |
-| prewarm | ✅ | 控制面后台调 `PrewarmImage`,节点拉取转换;节点心跳上报 `cachedImages`,**镜像亲和打分与 prewarm 进度因此才真正生效**（之前从未被填充） |
-| commit | ✅ | 把 sandbox 文件系统封成 base image（`CommitSandbox` RPC）。**先 sync guest 再 pause**——只 pause 的话 guest page cache 还是脏的,读块设备会丢掉刚写的东西 |
-| build image（Dockerfile） | ✅ | `bean build --tag REF .`,BuildKit 在节点上执行。**导出 `type=tar` 扁平 rootfs**,不组装层也不过 registry,和拉取路径共用同一个 image writer |
-| `LocalRuntime` | ✅ | 进程级 sandbox（dev/CI，含 darwin），跑真 beand 二进制,验证与 fc 档相同的 agent gRPC 面 |
+| **Networking** | 📐 | **Sandboxes have no network at all.** The `vsock` link to the agent is a control channel, not data. Design in [network.md](network.md); the address pool is built, the plumbing is not. **Largest gap** — SWE-bench-style tasks need `pip install` |
+| jailer / host cgroups | 📐 | The VMM runs as root in the host mount namespace. Hardware virtualisation is the boundary; defence in depth is thinner than it should be |
+| Container tiers (runc/gVisor) | 📐 | microVM, plus a no-isolation `local` tier for development, are the only options |
+| Volumes, port exposure, `fork` | 📐 | |
+| Host resource reconciliation | 📐 | A crashed noded leaves dm mappings and sandbox directories behind |
+| Postgres | ⚠️ | Interface abstracted, SQLite in use |
+| Build logs and cancellation | ⚠️ | A build reports no progress and cannot be stopped |
+| overlaybd lazy-pull | ⚠️ | **Verified working** (7 ms mount, 19.6% of layer bytes transferred to read a file) but not wired into the image provider — dm-snapshot is the live path |
 
-### 客户端
+## Measured latency
 
-Python SDK（create/exec/files/pause/resume/kill、snapshot、images、events 订阅、
-context manager、错误分层）、Go CLI（run [--image|--snapshot]/ls/exec/cp/logs/kill/
-pause/resume/events -f/snapshot/**commit**/image）。
+| Operation | Measured | Breakdown |
+|---|---|---|
+| create (image cached) | **952 ms** | 234 ms runtime + 770 ms to a reachable agent |
+| create (cold image) | 5–10 s busybox … 2 m 45 s alpine on poor network | Almost entirely network. This is why prewarm is required rather than an optimisation |
+| destroy | **214 ms** | Was 5.25 s — [decisions.md](decisions.md) §1 |
+| snapshot (full) | 1.5 s, 15.5 MB | |
+| snapshot (filesystem only) | **6109 B** | `--no-memory` |
+| snapshot (incremental) | **298 KB** | `--base SNAP`, 52× smaller than full |
+| restore | ~950 ms | `/snapshot/load` is 7 ms of it; the rest is unpacking |
 
-Python SDK 也有 `sandbox.commit(tag)`。
+### Snapshots are three kinds, not three sizes
 
-### 可观测
+| Kind | Flag | Size | Restore | Portability |
+|---|---|---|---|---|
+| full | *(default)* | 15.5 MB | resumes; process tree survives | pinned to CPU vendor + family |
+| filesystem-only | `--no-memory` | 6109 B | boots fresh, files intact | **any CPU** |
+| incremental | `--base SNAP` | 298 KB | resumes | pinned to CPU vendor + family |
 
-`bean-api /metrics`：创建结果与延迟、exec 延迟、各状态 sandbox 数、事件计数与订阅数。
-`noded /metrics`：创建阶段耗时、创建/销毁/idle/snapshot 计数、节点 sandbox 状态与 in-flight。
+Guest memory records what the CPU it booted on offered, and vendor/family cannot
+be masked away — so a memory snapshot only restores on a compatible CPU, and the
+scheduler enforces that as a hard filter (`409 INCOMPATIBLE_CPU`) rather than
+placing it and letting the guest misbehave afterwards.
 
-日志走 `log/slog`,字段化 + 分级,`--log-format json` 给采集器、
-`--log-level` 控制粒度。字段名是共享常量(`internal/logging`),
-否则按 sandbox 聚合会因为各组件拼写不同而失效。
-context 里带 request id,便于跨组件关联同一次请求。
+Chain depth is capped at 8; past that a checkpoint silently becomes full, which
+bounds restore cost and lets ancestors be reclaimed.
 
-trace 走 OTel,`--otlp-endpoint` 指向 OTLP/gRPC collector(空则关闭,
-装 no-op provider —— 埋点处不做条件判断)。request id **就是 trace id**,
-不是另一套编号:两套 id 意味着每次关联都要 join,而它们必然在
-跨进程那一跳上分叉。
+## Scale testing (2026-08-03)
 
-实测(真机,`hack/tracedump` 收 span):
+Tools: `hack/stress-fc.sh` and `hack/phase-delta.py`. The second exists because a
+cumulative histogram's `_sum/_count` gives a lifetime average, which cannot
+attribute a single run — 26 fast creates hide 16 slow ones. Differencing two
+scrapes gives the average over just the interval.
 
-```
-POST /v1/sandboxes                 bean-api   1196.0ms
-  SandboxService/CreateSandbox     noded      1110.2ms
-    node.Create                    noded      1110.1ms   events=[phase.*]
-      runtime.Create               noded       324.2ms
-      agent.WaitHealthy            noded       785.8ms
-
-POST /v1/sandboxes/{id}/exec       bean-api     18.6ms
-  SandboxService/Exec              noded        17.4ms
-    (beand 日志 request=283a333e…)  guest         8.0ms
-```
-
-第一棵树立刻给出一个此前没有任何指标覆盖的数字:gateway 与 noded
-之间差 **86ms**(1196 − 1110),那是调度 + 落库的开销。
-
-**beand 只采纳 trace id,不导出 span**,而且刻意不链 OTel SDK
-(`go list -deps` 验证过为 0):它在 guest 内没有到 collector 的路径,
-且 agent 盘的体积按每次 boot 计价。它把调用方的 trace id 写进自己的
-日志,所以「慢在 guest 内」可以被核对而不是猜测。
-**但 guest 的 stderr 只在 `--debug-console` 下经串口出来** ——
-默认关串口(省 493ms)的代价就是那条日志默认不可见。
-guest 内日志的常规出口还没做。
-
-阶段耗时的 metric 与 span event 由**同一次调用**产生
-(`Manager.observePhase`),所以不会出现某个阶段只进了直方图、
-在 trace 里却是一段空白。
-
-fc 档实测(镜像已缓存):`runtime_create` ~234ms(起 VMM)、
-`agent_ready` ~770ms(内核启动 + pivot + listen)、`total` ~952ms。
-裸 Firecracker 到 agent 可连是 606ms,所以上层开销已基本挤干。
-
-destroy **214ms**(曾是 5.25s)。原先销毁前用 ACPI 请 guest 关机并等它退出,
-但 guest 内核没编 `CONFIG_ACPI_BUTTON`、beand 又是没有信号处理的 PID 1 ——
-那 5 秒**每次必然超时**。改成经 agent 执行 `sync`:达成的是同一个目的
-(可写层与 sandbox 写入一致),而且是确认而非假设。
-
-snapshot:checkpoint 1.5s、bundle 约 16-20 MiB。
-restore ~950ms(同一快照首次 1617ms,要付 unpack 代价);
-其中 FC `/snapshot/load` 只占 7ms —— guest 内存按需供页(UFFD),
-不再把整个内存镜像读进来。剩下的成本是解 bundle。
-
-`--no-memory` 只存文件系统:实测 bundle **6109 字节**对全量 15.5 MB(2550×),
-restore 重新 boot 但保留文件(`uptime 0` 且 marker 在),可落任意 CPU。
-
-`--base SNAP` 走增量:只存自 base 以来 guest 写过的内存页。实测 298 KB 对
-15.5 MB(52×)。恢复时按链从根到叶物化成平坦镜像再交给现有 UFFD handler ——
-不在缺页路径上分层,因为那是全系统最热、出错最隐蔽的代码。合并结果按 leaf id
-进 snapCache,所以 fan-out 场景每节点只付一次。链深超 8 自动转 full。
-需要节点带 `--track-dirty-pages` 启动(默认关);没开的 guest 请求 diff 明确报错
-而不降级,详见 `docs/decisions.md` §3.0.1。
-
-**restore 曾经会静默损坏文件系统**,已修:dm-snapshot 在设备激活时就把
-exception table 读进内核,而 restore 是在那之后才把 extents 写进 `cow.img` ——
-内核不认,设备继续供 base image。full snapshot 上这不可见,因为读命中的是
-内存快照带回的 page cache;`drop_caches` 之后同一个文件读出 9 个 `\0`,
-而 `ls` 仍显示 size=9、无 EIO、无 dmesg。现在 CoW 在组装设备**之前**恢复,
-两条路径都实测过 drop_caches 后仍正确。详见 `docs/decisions.md` §3.0。
-
-**内存快照绑 CPU**,所以 restore 是受约束的:节点上报 vendor/family/template,
-快照记下产出它的那三项,调度器按此硬过滤,不兼容返回 409 `INCOMPATIBLE_CPU`
-而不是放置后让 guest 崩。`--cpu-template portable` 掩掉宽向量特征
-(实测 `avx avx2 fma f16c` 消失,`sse2`/`xsave` 保留)让快照能跨 CPU 型号,
-但 vendor 与 family 掩不掉 —— 详见 `docs/decisions.md` §3.6。
-
-镜像首次拉取转换:busybox 5-10s,alpine 在网络不稳时 2m45s ——
-所以 prewarm 是必需的,不是优化。
-
-### 规模压测(2026-08-03)⚠️
-
-`hack/stress-fc.sh` + `hack/phase-delta.py`(差分两次 metrics 抓取,
-把单次压测的相位耗时从累计直方图里分离出来)。Zen 2 / **16 物理核** / 24 GB,
-alpine:3.20:
-
-| 并发 | p50 | agent_ready | runtime_create |
+| Concurrency | p50 | agent_ready | runtime_create |
 |---|---|---|---|
-| 1 | 938ms | 627ms | 241ms |
-| 2 | 1228ms | | |
-| 4 | 2010ms | | |
-| 8 | 3803ms | 2920ms | 272ms |
-| 12 | 5556ms | | |
-| 16 | 6805ms | 5710ms | 369ms |
+| 1 | 938 ms | 627 ms | 241 ms |
+| 2 | 1228 ms | | |
+| 4 | 2010 ms | | |
+| 8 | 3803 ms | 2920 ms | 272 ms |
+| 12 | 5556 ms | | |
+| 16 | 6805 ms | 5710 ms | 369 ms |
 
-#### 结论:瓶颈是 guest boot 抢 CPU,不是我们的代码 ✅(已归因)
+### The bottleneck is guest boot competing for cores, not our code
 
-**`agent_ready` 占 94%**(6079ms 里的 5710ms),而 `runtime_create`
-(dm-snapshot 组装 + VMM spawn)从 241ms 只涨到 369ms —— **几乎不随并发变化**。
-所以 dmsetup/losetup/稀疏文件那条链不是瓶颈,`DevMapperProvider.mu`
-也不是(它只包 map 操作,里面那次 `losetup` 是每镜像一次而非每 sandbox 一次)。
+`agent_ready` is 94% of a create (5710 ms of 6079 ms), while `runtime_create` —
+device-mapper assembly plus VMM spawn — goes from 241 ms to only 369 ms. So the
+dmsetup/losetup/sparse-file chain is not the bottleneck, and neither is
+`DevMapperProvider.mu`: it wraps map operations only, and the one `losetup` inside
+it runs once per image rather than once per sandbox.
 
-压测中 `vmstat` 的读数是决定性的:
+`vmstat` during the run is decisive:
 
 ```
  r  b   bi    bo    in     cs    us sy id wa
-16  0   0     20   5030   2048   62 38  0  0     ← 16 runnable / 16 核 / id=0
+16  0   0     20   5030   2048   62 38  0  0     ← 16 runnable / 16 cores / id=0
 ```
 
-`r=16`、`id=0`、`us+sy=100%`、`wa≈0`、`b=0`:**16 个可运行线程占满 16 个核,
-且没有 IO 等待**。逐进程确认:每个 firecracker 在 21s wall 里烧了
-**5 CPU-秒**,16 × 5 = 80 CPU-秒挤进 16 核 → 每个 boot 被拉长约 5 倍。
-且 21s→53s 之间 CPU 时间**停在 5s 不动**,说明这 5s 全是 boot,idle guest 不耗 CPU。
+16 runnable threads on 16 cores, no I/O wait, no blocked tasks. Per-process
+confirmation: each firecracker burns **5 CPU-seconds** in 21 s of wall time, so
+16 × 5 = 80 CPU-seconds compressed into 16 cores stretches every boot about 5×.
+CPU time then stays at exactly 5 s between 21 s and 53 s elapsed, which shows the
+5 s is all boot — an idle guest costs nothing.
 
-**所以吞吐上限约 2.3 creates/s,由「每次 boot 5 CPU-秒 ÷ 核数」决定。**
-降低单次延迟必须减少每 boot 的 CPU 消耗(内核裁剪、更少的 guest 初始化),
-而不是加大并发窗口。**从快照 restore 是绕开这 5 CPU-秒的正解** ——
-这也是 restore 相对 create 的真实价值。
+**Throughput is therefore ≈ cores ÷ 5 CPU-seconds, about 2.3 creates/s.** Lowering
+create latency means reducing the CPU each boot costs (a trimmed guest kernel) or
+not booting at all. **Restoring from a snapshot is the way around those 5
+CPU-seconds** — which is the real value of restore over create.
 
-#### 创建排队:30 并发从 16 成功变成 30 成功 ✅
+### Create queueing: 16/30 became 30/30
 
-`--create-wait 60s`(网关,默认 0 即立即拒绝)。同一台机器同一个压测:
+`--create-wait 60s` on the gateway, off by default. Same host, same test:
 
-| | 成功 | 失败 | wall | p50 | p95 |
+| | Succeeded | Failed | Wall | p50 | p95 |
 |---|---|---|---|---|---|
-| 拒绝(之前) | 16/30 | 14 | 8s | 6805ms | 7497ms |
-| 排队(现在) | **30/30** | **0** | 13s | 7550ms | 13213ms |
+| Refuse (before) | 16/30 | 14 | 8 s | 6805 ms | 7497 ms |
+| Queue (now) | **30/30** | **0** | 13 s | 7550 ms | 13213 ms |
 
-**这正好验证了吞吐分析**:wall 从 8s 涨到 13s 而成功数从 16 到 30 ——
-吞吐没变(仍是 ≈2.3 creates/s),排队只是把拒绝换成了延迟。
-所以这不是性能优化,是**把「调用方自己重试」换成「可预测的等待」**:
-批量 eval 拿到 503 之后只会再来一波 burst,而重试风暴让情况更糟。
+This confirms the throughput analysis rather than contradicting it: wall time went
+8 s → 13 s while successes went 16 → 30, so throughput held at ≈2.3 creates/s.
+**Queueing does not raise throughput — it converts rejections into latency.** An
+evaluation batch is a burst by construction, and a rejected caller retries as
+another burst, so what queueing buys is a predictable answer instead of a retry
+storm.
 
-**只对创建并发排队,不对 CPU/内存/磁盘排队。** 区别是时长而非严重程度:
-创建并发几秒就自己空出来(那 16 个约 7 秒排完),而 CPU/内存/磁盘的承诺量
-是按 sandbox 整个生命周期持有的 —— 等十秒还是不够,等待只会把一个快速清晰的
-拒绝变成一个缓慢的、内容完全相同的拒绝。
+**Only create concurrency is waited on.** The distinction is duration, not
+severity: those 16 creates drained in about seven seconds, whereas CPU, memory and
+disk commitments are held for a sandbox's entire life. Waiting on those would
+return the same rejection later, having also held a client.
 
-超时返回 **504 `QUEUE_TIMEOUT`** 而非 503:请求本身是可接纳的,只是节点忙得
-超过了调用方愿意等的时间。503 会让人以为集群不够大。
+A timeout answers **504 `QUEUE_TIMEOUT`**, not 503: the request was admissible and
+the node was merely busy for longer than the caller would wait. 503 would suggest
+the cluster is too small.
 
-**一个只有真机能发现的 bug**:第一版实现在 30 并发下只到 24/30,剩下 6 个报
-`createConcurrency blocked 1/1` —— 恰好是该排队的情况。原因是我把「已经没有
-节点被阻塞」当成了停止等待的理由,而这个判断跑在一次失败的 `Schedule` 之后,
-burst 期间 in-flight 计数经常正好在这中间掉下来。已补单测。
+### `max_creates=16` was never the real limit
 
-#### `max_creates=16` 从来不是真正的限制器 ⚠️(GitHub #19)
+Three configurations, same 30-concurrent burst. The limiter moves to whichever
+resource is accounted most coarsely:
 
-三次压测暴露了限制器会随配置迁移,而**先撞上的总是记账最粗的那个资源**:
-
-| 节点配置 | 30 并发成功数 | 真正的限制器 |
+| Node configuration | Succeeded | Actual limiter |
 |---|---|---|
-| disk 100 GiB, cpu 8 | **5** | `102400 / 20480` = 磁盘名义记账 |
-| disk 100 GiB, cpu 8, 请求 2 GiB 盘 | **8** | `cpuAllocatable 8 / 1 vCPU` |
-| disk 1 TiB, cpu 32 | **16** | 这才是 `max_creates` |
+| disk 100 GiB, cpu 8 | **5** | `102400 / 20480` = nominal disk accounting |
+| same, requesting 2 GiB disk | **8** | `cpuAllocatable 8 / 1 vCPU` |
+| disk 1 TiB, cpu 32 | **16** | this one really is `max_creates` |
 
-**默认配置下先撞的是磁盘,不是 `max_creates`。** 之前把「成功 16 个」
-归因给 `max_creates` 是巧合 —— 那台机器恰好 16 核。
-`max_creates=16` 是 `store.go:112` 的硬编码默认值,与核数无关。
+**Under default configuration disk binds first.** Attributing the earlier "16
+succeeded" to `max_creates` was a coincidence — that host happened to have 16
+cores. This is why a rejection now names the resource that ran out, how many nodes
+it blocked, and how far short the closest node was.
 
-**磁盘按名义大小记账,高估约 47 万倍**(GitHub #24):CoW 实际 44 KiB,
-记账 20 GiB。eval 负载几乎不写盘,所以这把节点密度压到实际能力的几百分之一。
+### Disk: actual occupancy, and a floor on admission
 
-**没有泄漏**:每轮压测后 dm 映射、firecracker 进程、持有已删除文件的
-loop device 全部归零 —— loop 泄漏的修复(#16)在并发下成立。
+The gap between commitment and reality is now visible from both sides — measured
+on one node, `diskCommittedMiB: 0` while `diskUsedMiB: 76200`. **That gap is the
+blind spot**: the ledger says the node is empty while 76 GB is in use by base
+images, the snapshot cache, and other services sharing the volume.
 
-### 磁盘:实际占用上报 + 低空间停止接单 ✅
+No overcommit factor. A factor asks an operator to guess a multiplier, and the
+nominal size of a sparse file was never a sound basis for accounting. Instead
+`statfs` measures real occupancy and reports it three ways:
+`bean_node_disk_{free,used}_bytes`, heartbeat `disk_used_mib`, and `diskUsedMiB`
+on `/v1/nodes`.
 
-承诺量与真实占用的差距现在两边都可见 —— 实测同一节点
-`diskCommittedMiB: 0` 而 `diskUsedMiB: 76200`。**这个差距本身就是那个盲区**:
-承诺量说节点空着,而盘上已经用掉 76 GB(base 镜像、快照缓存、别的服务)。
+**Placement still uses the commitment ledger.** A ledger cannot be oversold by a
+burst, whereas measured occupancy lags — placing against a lagging number puts a
+batch into a wall when they all start writing. The real defence is on the node:
+`--min-free-disk-mib` / `--min-free-disk-percent`, off by default.
 
-**不做超卖系数**:那是让运维猜一个倍数,而稀疏文件的名义大小本来就不该是记账依据。
-改为 `statfs` 测真实占用并上报(`bean_node_disk_{free,used}_bytes` +
-心跳 `disk_used_mib` + `/v1/nodes` 的 `diskUsedMiB`)。
+That defence is not optional, because the failure mode was measured
+([decisions.md](decisions.md) §3.7) and it is unrecoverable: when the host
+filesystem fills, dm-snapshot marks the target `Invalid`, **the guest's `write()`
+calls keep returning success while the data is lost**, and the filesystem cannot
+be remounted. There is nothing to salvage afterwards. The shared base image
+survives, so the blast radius is one sandbox — which is what makes "refuse the
+create" the obviously cheaper trade.
 
-**放置仍然走承诺量账本**,没有改成按真实水位判断 —— 账本不会被突发写满超卖,
-而真实占用是滞后的。真正的防线放在节点侧:`--min-free-disk-mib` /
-`--min-free-disk-percent`(两者取大者,默认关)。
+Verified: an unmeetable floor returns **503 `NO_CAPACITY`** with the path, current
+free space, the floor and the consequence, leaving no VM, mapping or directory
+behind; a realistic floor (5 GiB / 5%) admits 6 concurrent creates with no leaks.
 
-理由是实测出来的失败模式(decisions §3.7):宿主盘满时 dm-snapshot 转 `Invalid`,
-**guest 侧的 `write()` 仍然返回成功但数据全丢**,remount 直接读不出 superblock。
-**盘满之后没有补救可做** —— 那时 sandbox 已不可恢复。好在共享 base 完好,
-爆炸半径是单个 sandbox,所以「宁可拒绝新建」这个取舍是明确划算的。
+### No leaks
 
-真机验证:不可能满足的水位下 create 返回 **503 `NO_CAPACITY`**(不是 500),
-消息带上路径、当前空闲、地板值和后果;没有留下 VM、dm 映射或目录;
-`bean_node_creates_refused_total{reason="disk_pressure"}` 递增。
-换成现实水位(5 GiB / 5%)后 6 并发全部成功、无泄漏。
+After every stress round, dm mappings, firecracker processes and loop devices
+holding deleted files all return to their baseline. The loop-device leak fix
+(GitHub #16) holds under concurrency.
 
-### 验证覆盖
+## Verification coverage
 
-- **microVM 全链路**（真 KVM 机器,经 Manager 与 CLI 两层）：create → exec →
-  cp 双向 → pause → 透明唤醒 → snapshot → 从 snapshot 创建 → 验证时点语义
-  （快照后写入不出现在克隆里）→ 克隆间互相独立 → destroy 无残留
-- 单节点 / 多节点 e2e：真进程 gateway + noded + CLI（local 档）
-- scheduler 持久化属性：两副本并发放置恰好 N 个成功、重启不丢承诺量、
-  LOST 跨副本只报一次、孤儿预留可回收
-- S3：真 MinIO 上分片上传、abort 不留可读对象、range 读、含空格的 key
-- 安全回归：symlink 逃逸阻断、setuid 位剥离、host env 不泄漏、孤儿孙进程不挂起
-- vsock：CONNECT 握手不过读、Close 唤醒阻塞的 Accept、端口可重绑
+- **microVM end to end** on real KVM hardware, through both the Manager and the
+  CLI: create → exec → bidirectional cp → pause → transparent wake → snapshot →
+  create from snapshot → point-in-time semantics
+- **Snapshot correctness through the real persistence layer**: assertions run
+  after `echo 3 > /proc/sys/vm/drop_caches`, because a read served from the page
+  cache passes against a corrupted device
+- **Scheduler durability**: two replicas placing concurrently yield exactly N
+  successes; a restart does not lose commitments
+- **S3 against a real MinIO** in CI, not a fake server — `ErrBlobNotFound`
+  mapping, abort leaving no object, and range-read boundaries are server
+  behaviours
 
-## 2. 与设计的差距
+### Two testing rules earned the hard way
 
-| 项 | 状态 |
-|---|---|
-| build image：声明式 steps（Modal 风格链式 API） | ⛔ 未开始;Dockerfile 路径已通,steps 只是另一个前端编译到同一个 plan（`docs/image-build.md` §3.2、§5） |
-| overlaybd lazy-pull | ⚠️ **能力已实测跑通,尚未接入代码**。当前生产路径是「拉全量 + 转换 + CoW 共享」（每 sandbox 8 KiB）。overlaybd 侧已在验证机上验证:挂载 7ms、只传 19.6% 的层字节就能挂载并读文件、8 个 HTTP 206、可写上层实占 40 KiB（`docs/decisions.md` §3.1）。剩下的是写 `OverlaybdProvider` 接进 `image.Provider` |
-| diff snapshot（增量） | ✅ `--base SNAP` 只存自 base 以来改动的 guest 内存。实测 base 15.5 MB → diff 298 KB(52×);深度 2 的链恢复后文件全在且 `uptime 57`(resume 非重启)。合并在 restore 时物化成平坦镜像,**UFFD 缺页路径零改动**;链深超 8 自动转 full;删 base 有子代时返回 409。需 `--track-dirty-pages`(默认关,boot 前生效) |
-| fork / shared-fs 卷 / proxy 端口暴露 | ⛔ P3–P4 范围,未开始 |
-| OTel trace | ✅ **已实装并实测**。一次 create/exec 是一棵跨进程 span 树(下方「可观测」段有实测树)。`--otlp-endpoint` 为空则装 no-op provider,埋点无需条件判断。**限制**:beand 在 guest 内无出网路径,只采纳 trace id 写进自己的日志、不导出 span;而 guest 的 stderr 只在 `--debug-console` 下经串口出来,所以默认配置看不到那条日志 |
-| 资源超卖 | ✅ `--overcommit-cpu` / `--overcommit-memory`,节点侧算,上报已含系数。实测 `--cpu 8 --overcommit-cpu 3` → allocatable 24。CPU 超了只是变慢,内存超了是被杀,所以内存默认 1.0 —— 抬高它需要先实测 FC 按需供页的富余(#18)并给 VMM 进程加 cgroup(#20) |
-| Postgres | ⚠️ 接口已抽象,当前 SQLite |
-| 创建阶段指标 network | ⚠️ 埋点位已留,等网络实装 |
+**Verify through the real persistence layer.** When state exists in both memory
+and on disk, a test that reads memory proves nothing. The silent
+filesystem-corruption bug passed three layers of tests: unit tests checked the tar
+round-trip (correct — the data *was* written), end-to-end tests read the file from
+inside the guest (page-cache hit), and `dmsetup status` inspected the wrong
+device. None read the restored block device.
 
-## 3. 节点前提
+**Then break the fix and confirm the test fails.** For that bug every file-level
+assertion was green against the broken implementation, so this was the only way to
+know the new test was worth anything. Applied since to the loop-device leak, the
+merge ordering, snapshot cache pinning, and the queue's transient-vs-lifetime
+distinction.
 
-fc 档需要：
+## Open gaps worth naming
 
-- `/dev/kvm`（Intel VT-x 或 AMD SVM）
-- Firecracker 二进制、guest 内核镜像、agent 盘（`hack/build-assets.sh` 构建;
-  `kernel` 子命令下载 Firecracker CI 的 `vmlinux-6.1.102` 及其 config）
-- **userfaultfd**（`CONFIG_USERFAULTFD=y`）：restore 靠它按需供页。
-  5.15 走 `userfaultfd` syscall,6.1+ 走 `/dev/userfaultfd`;
-  `unprivileged_userfaultfd=0` 也可以,因为 noded 以 root 运行。
-- **AMD 主机需 `kvm.ignore_msrs=Y`**：Firecracker 保存快照时读 Intel 专有的
-  MSR 0x3a,AMD 上 KVM 会拒绝。`NewFCTier` 启动时检查并给出修复命令,
-  而不是等到快照失败才暴露。
-
-overlaybd 需要 ublk（内核 ≥ 6.0)或 tcmu 后端。当前验证机是 Ubuntu 20.04 +
-内核 5.15,无 `/dev/ublk-control`,所以走 **tcmu**（`target_core_user` +
-`tcm_loop` 模块）—— **已实测功能完备**,ublk 只是性能更好,不是前提。
-
-tcmu 路径另需注意宿主上的 `multipathd`:TCMU 设备默认无唯一序列号,
-multipathd 会把多个 overlaybd 设备合并成一条 multipath,
-**读到的是别的镜像的数据**。必须给每个 backstore 写 `wwn/vpd_unit_serial`。
-
-## 4. 下一步
-
-1. **overlaybd 接入 `image.Provider`**:能力已在验证机上实测跑通
-   (tcmu 后端,`docs/decisions.md` §3.1),不再是「能不能用」的问题。
-   要写的是 `OverlaybdProvider`:configfs 编排(**LUN 必须在 nexus 之后建、
-   必须设唯一 `vpd_unit_serial`**,两个坑都会静默失败)、
-   转换产物推 registry、设备生命周期与释放。
-   CoW 已经解决「每 sandbox 的成本」,overlaybd 解决的是
-   「首次使用一个大镜像的等待时间」。
-2. **build 的构建日志与取消**：现在 build 是「起了就等」,失败只能从 image state
-   看到 FAILED。日志落存储 + 可流式查看 + `cancel` 才算完整（`docs/image-build.md` §6）。
-3. **guest 内日志的出口**:beand 已把 trace id 写进日志,但默认关串口
-   意味着那条日志没有出口(只有 `--debug-console` 能看到)。
-   应该走 vsock 把 guest 日志收到节点侧,而不是靠串口 ——
-   串口既慢(493ms/boot)又只能在调试时开。
-4. **restore 剩下的 ~950ms**：命中 unpack 缓存后,仍要把整个 bundle 从
-   gateway 传过来并解 gzip,只为取出 rootfs 那一个 member。
-   要么命中时让节点告诉控制面「别发了」,要么把 rootfs 拆成独立对象。
-5. **`--track-dirty-pages` 的开销未实测**:diff snapshot 需要它,但它默认关,
-   因为 KVM 记账的代价没量过。Firecracker 文档只说「CPU cycles」外加
-   「negates most of the benefits of huge pages」(我们没用 huge pages,不适用)。
-   E2B 常开是先例,但先例不等于在我们的负载上可忽略 —— 要对比开/关的
-   boot-to-agent 与 exec 吞吐才能决定要不要改成默认开。
-6. **AVX-512 掩码与跨型号 restore 未实测**:验证机是 Zen 2,
-   没有 AVX-512,也只有一台 fc 机器 —— 所以 CPU template 的
-   「跨型号可移植」这个核心目的没有实证,只有逻辑推导。
-   `hack/cpu-template-probe.sh` 会报告本机缺哪些特征。
+- **Guest-side ENOSPC behaviour is unverified.** The host side is measured, but
+  nobody has watched what a guest sees when its layer cannot allocate. If the
+  guest does not report an error, a caller gets a sandbox that looks healthy while
+  losing data — worse than a refused create.
+- **`--track-dirty-pages` overhead is unmeasured**, so it defaults off even though
+  incremental snapshots are implemented.
+- **AVX-512 masking is unverified**: the test host is Zen 2 and has none, so five
+  mask bits are correct per the CPUID spec but never exercised.
+- **Cross-model restore within a family is unverified** — there is only one fc
+  host, which is precisely what the CPU template exists to make possible.
+- **Logging and CLI output are not standardised**: 71 `log.Printf` calls, no
+  request ids, and CLI exit codes are only 0 and 125.
