@@ -31,7 +31,10 @@ func ValidateResolver(addr string) error {
 	if ip == nil {
 		return fmt.Errorf("resolver %q is not an IP address; /etc/resolv.conf takes literal addresses", addr)
 	}
-	_ = ip
+	if ip.IsLoopback() {
+		return fmt.Errorf("resolver %s is loopback, which from inside a guest points at the guest itself; "+
+			"give the upstream resolver the host forwards to", addr)
+	}
 	return nil
 }
 
