@@ -97,17 +97,32 @@ func (rec *fcRecorder) indexOf(path string) int {
 	return -1
 }
 
-func (rec *fcRecorder) bodyOf(t *testing.T, path string) []byte {
-	t.Helper()
+// bodyOf returns the body sent to a path, or false if it was never requested.
+//
+// The lock is released before reporting, because the report wants the request
+// list and paths() takes the same lock. Written as a lookup returning false
+// rather than one that fails in place: the first version called t.Fatalf while
+// holding the mutex and self-deadlocked, so the suite hung for the full test
+// timeout instead of naming the missing NIC.
+func (rec *fcRecorder) bodyOf(path string) ([]byte, bool) {
 	rec.mu.Lock()
 	defer rec.mu.Unlock()
 	for _, r := range rec.reqs {
 		if r.path == path {
-			return r.body
+			return r.body, true
 		}
 	}
-	t.Fatalf("no request to %s; got %v", path, rec.paths())
-	return nil
+	return nil, false
+}
+
+// requireBody fails with the recorded sequence when a path was never requested.
+func (rec *fcRecorder) requireBody(t *testing.T, path string) []byte {
+	t.Helper()
+	body, ok := rec.bodyOf(path)
+	if !ok {
+		t.Fatalf("no request to %s; got %v", path, rec.paths())
+	}
+	return body
 }
 
 // bootVMAgainst runs configureAndBoot with layout, returning the recorder.
@@ -163,7 +178,7 @@ func TestConfigureAndBootRegistersNICBeforeStart(t *testing.T) {
 	}
 
 	var got fcNetworkInterface
-	if err := json.Unmarshal(rec.bodyOf(t, nicPath), &got); err != nil {
+	if err := json.Unmarshal(rec.requireBody(t, nicPath), &got); err != nil {
 		t.Fatalf("decode NIC request: %v", err)
 	}
 	if got.HostDevName != layout.TapName {
@@ -183,7 +198,7 @@ func TestConfigureAndBootOmitsMACAndMTU(t *testing.T) {
 	rec := bootVMAgainst(t, testLayout(t))
 
 	var raw map[string]any
-	body := rec.bodyOf(t, "/network-interfaces/"+guestIfaceID)
+	body := rec.requireBody(t, "/network-interfaces/"+guestIfaceID)
 	if err := json.Unmarshal(body, &raw); err != nil {
 		t.Fatalf("decode NIC request: %v", err)
 	}
