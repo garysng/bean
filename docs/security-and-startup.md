@@ -198,7 +198,7 @@ userfaultfd, and FC's `/snapshot/load` accounts for only 7ms.
 
 **The capability is measured working on the verification machine but is not wired into the
 code yet.** The current production path is dm-snapshot: pull the whole thing + convert +
-share a read-only base + one CoW per sandbox (measured at 8 KiB per sandbox).
+share a read-only base + one CoW per sandbox (measured at 44 KiB per sandbox).
 Measured on the overlaybd side: 7ms to mount, only 19.6% of the layer bytes transferred
 before it mounts and files can be read, 8 HTTP 206s, and the writable upper layer occupying
 40 KiB in practice (`docs/decisions.md` §3.1). What remains is writing an

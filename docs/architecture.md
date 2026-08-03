@@ -136,7 +136,7 @@ one image path, and the user never notices the difference.
 
 > **"No containerd" is achieved; "overlaybd driven directly" is not.** The
 > current backend is dm-snapshot: pull the whole image, convert it, share a
-> read-only base, one CoW per sandbox (measured at 8 KiB/sandbox). The
+> read-only base, one CoW per sandbox (measured at 44 KiB/sandbox). The
 > overlaybd capability has been measured working on a tcmu backend but is not
 > wired into `image.Provider`.
 
@@ -236,9 +236,11 @@ Nydus is kept as a fallback option for the container tier.
 
 Hot state (sandbox metadata, leases, scheduling state) lands in a relational
 database, not in S3. ⚠️ **Today that is SQLite** (`modernc.org/sqlite`, pure Go
-with no cgo, `SetMaxOpenConns(1)` for single-writer). The interface is already
-abstracted; Postgres is not yet implemented — a multi-replica control plane
-needs it, a single-machine deployment does not.
+with no cgo, `SetMaxOpenConns(1)` for single-writer). There is no store
+interface — callers hold the concrete `*store.Store`; what is contained is the
+SQL itself, which appears only inside `internal/control/store`. Postgres is not
+yet implemented — a multi-replica control plane needs it, a single-machine
+deployment does not.
 
 ### D5. Agent injection: init/PID1 override (nothing enters the user image) ✅
 
@@ -247,7 +249,7 @@ injection method depends on the tier:
 
 | Tier | Injection | Communication |
 |---|---|---|
-| fc (default) | **Agent disk**: a small read-only disk (erofs) containing beand, attached as an extra virtio-blk; the guest kernel's init is the agent on that disk | vsock + gRPC |
+| fc (default) | **Agent disk**: a small read-only disk (ext4) containing beand, attached as an extra virtio-blk; the guest kernel's init is the agent on that disk | vsock + gRPC |
 | Container tier | Read-only bind mount + entrypoint override, agent runs as PID1 | unix socket + gRPC |
 
 What they share: zero modification to the user image; the original

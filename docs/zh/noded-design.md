@@ -91,7 +91,7 @@ network:                 # 📐 无网络栈
 | GPU | NVML 枚举 | GPU 资源画像 + nvidia 运行时注入 |
 | cgroup v2 | `/sys/fs/cgroup/cgroup.controllers` | 强制要求 v2，v1 直接拒绝启动 |
 | ublk/tcmu | /dev/ublk-control、target_core_user | overlaybd 后端选择;两者皆无 → 不上报 fc 能力（fc 依赖块设备） |
-| 内核版本/erofs | `uname` + /proc/filesystems | agent 盘（erofs）;overlayfs 仅容器档 P5 |
+| 内核版本/ext4 | `uname` + /proc/filesystems | agent 盘（ext4）;overlayfs 仅容器档 P5 |
 
 探测结果 → `Register` 上报，之后仅在变化时重报。
 
@@ -307,7 +307,7 @@ fc 档两个平台工件,均由 CI 构建、S3 分发、noded 启动时按版本
 | 工件 | 内容 | 构建 | 版本策略 |
 |---|---|---|---|
 | guest 内核 | 6.x LTS,内嵌 virtio/vsock/nfs/overlayfs 等必需项的精简 config,bzImage | 内核源码 + config 入库,CI 复现构建 | 独立版本号;manifest 记录,snapshot restore 校验一致性 |
-| agent 盘 | erofs 只读镜像:beand 静态二进制 + busybox 级工具 | CI 打包,与 noded 同版本发布 | 随 noded 版本;旧版本保留至无运行中引用 |
+| agent 盘 | ext4 只读镜像:beand 静态二进制 + busybox 级工具 | CI 打包,与 noded 同版本发布 | 随 noded 版本;旧版本保留至无运行中引用 |
 
 - 存放：`s3://bean/artifacts/{kernel,agent-disk}/<version>/` + sha256 校验
 - noded 配置声明版本（默认跟随 noded 发布版），本地缓存 `/var/lib/bean/artifacts/`

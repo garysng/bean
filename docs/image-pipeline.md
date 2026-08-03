@@ -141,16 +141,20 @@ cannot be left to a later stage.
 Doing `Clean("/" + name)` before the join is the key part: it reduces the `..` away **under
 absolute-path semantics**, which is what makes the prefix check that follows meaningful.
 
-### The gzip decision does not trust the media type ✅
+### Deciding gzip by magic bytes rather than the media type 📐
+
+The code branches on `layer.MediaType` alone (`convert_linux.go`, `applyLayer`); nothing in the
+package sniffs the stream. The comment there describes an intent that was never implemented:
 
 ```go
 // Most layers are gzipped; the media type says so, but some registries are
 // loose about it, so the magic bytes decide.
 ```
 
-Some registries' media types do not match the actual content. Trusting the media type ends in
-unpacking a gzip stream as tar (an immediate failure) or the reverse. Deciding by magic bytes
-is defensive, and it costs a few bytes of reading.
+The plan is to decide by magic bytes instead. Some registries' media types do not match the actual
+content, and trusting the media type ends in unpacking a gzip stream as tar (an immediate failure)
+or the reverse. Sniffing would be defensive at the cost of reading a few bytes. Whether to do it is
+a separate decision and is not taken here.
 
 ## 3. Concurrency deduplication ✅
 
@@ -223,7 +227,7 @@ between the current state and the target form:
 | | Current (dm-snapshot) | Target (overlaybd) |
 |---|---|---|
 | First use | pull the whole thing + convert, minutes | read blocks on demand, 7ms to mount |
-| Per-sandbox cost | 8 KiB (measured) | comparable, CoW stores only changes in both |
+| Per-sandbox cost | 44 KiB (measured) | comparable, CoW stores only changes in both |
 | Layer format | converted into one ext4, layer structure lost | LSMT layers retained, sealable directly |
 | commit | read out a full ext4 | seal the writable layer, zero conversion |
 

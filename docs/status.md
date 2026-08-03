@@ -18,7 +18,7 @@ guest kernel 6.1.102, Alpine 3.20.
 |---|---|---|
 | Lifecycle | ✅ | create → exec → cp → pause → resume → snapshot → restore → destroy |
 | Images | ✅ | OCI pull and conversion to ext4, private registries (AES-256-GCM at rest), prewarm with image-affinity scheduling |
-| Rootfs | ✅ | Shared read-only base + per-sandbox copy-on-write through device-mapper. **44 KiB of actual disk per sandbox** |
+| Rootfs | ✅ | Shared read-only base + per-sandbox copy-on-write through device-mapper. **44 KiB of actual disk per sandbox** (see the note below on why other figures were quoted) |
 | Snapshots | ✅ | Three kinds with different semantics — see below |
 | Scheduler | ✅ | Two-level placement, hard filters, scoring, **commitments persisted** so replicas cannot double-place and a restart does not lose the ledger |
 | Create queueing | ✅ | A burst larger than a node's create concurrency waits instead of being refused |
@@ -37,7 +37,7 @@ guest kernel 6.1.102, Alpine 3.20.
 | Container tiers (runc/gVisor) | 📐 | microVM, plus a no-isolation `local` tier for development, are the only options |
 | Volumes, port exposure, `fork` | 📐 | |
 | Host resource reconciliation | 📐 | A crashed noded leaves dm mappings and sandbox directories behind |
-| Postgres | ⚠️ | Interface abstracted, SQLite in use |
+| Postgres | ⚠️ | SQLite in use. There is no `Store` interface — `*store.Store` is a concrete type at every call site. What is true is that `database/sql` and the driver import appear only inside `internal/control/store`, so the SQL boundary is contained in one package; swapping the engine means changing that package, not extracting it from callers |
 | Build logs and cancellation | ⚠️ | A build reports no progress and cannot be stopped |
 | overlaybd lazy-pull | ⚠️ | **Verified working** (7 ms mount, 19.6% of layer bytes transferred to read a file) but not wired into the image provider — dm-snapshot is the live path |
 
@@ -182,6 +182,14 @@ Verified: an unmeetable floor returns **503 `NO_CAPACITY`** with the path, curre
 free space, the floor and the consequence, leaving no VM, mapping or directory
 behind; a realistic floor (5 GiB / 5%) admits 6 concurrent creates with no leaks.
 
+**On the per-sandbox figure: 44 KiB is the number to quote.** The docs previously
+carried 8 KiB and 80 KiB as well, and the three are not disagreements about the
+same measurement — they were taken at different points in a sandbox's life. 8 KiB
+is a freshly assembled CoW layer that has not been written to yet; 44 KiB is a
+sandbox that has booted and written; 80 KiB was one specific small-write case in a
+code comment. The useful comparison is against `FileProvider` copying the whole
+base image per sandbox, and at that scale all three say the same thing.
+
 ### No leaks
 
 After every stress round, dm mappings, firecracker processes and loop devices
@@ -229,5 +237,8 @@ distinction.
   mask bits are correct per the CPUID spec but never exercised.
 - **Cross-model restore within a family is unverified** — there is only one fc
   host, which is precisely what the CPU template exists to make possible.
-- **Logging and CLI output are not standardised**: 71 `log.Printf` calls, no
-  request ids, and CLI exit codes are only 0 and 125.
+
+Logging and CLI output standardisation used to be on this list and is now done: `slog` throughout
+(92 call sites; the one remaining `log.Printf` is in `hack/tracedump`, a dev tool), levels, a
+text/json handler switch, request ids on the context, and CLI `--json`, `--quiet` plus five exit
+codes instead of two.

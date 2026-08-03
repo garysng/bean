@@ -149,7 +149,7 @@ purely to extract the rootfs member. The right fix is for the node to tell the c
 | VMM | forked firecracker (private, added gdb feature) | upstream FC | not public | upstream FC 1.15.1 |
 | guest kernel | own config + patch, source from `amazonlinux/linux`, **no fork** | prebuilt (R2 site) | not public | **FC CI prebuilt + config checked in** |
 | memory restore | UFFD (`uffd/` + `prefetch/`, cgo) | UFFD (`uffd-core/`, Rust) | details not public, claims sub-second | **UFFD (measured 7ms load)** |
-| rootfs on demand | not seen | UFFD backend wired to overlaybd | disk snapshots O(changed bytes), single-file change 167ms | dm-snapshot CoW (8 KiB/sandbox), **lazy-pull not done** |
+| rootfs on demand | not seen | UFFD backend wired to overlaybd | disk snapshots O(changed bytes), single-file change 167ms | dm-snapshot CoW (44 KiB/sandbox), **lazy-pull not done** |
 | disk snapshot deltas | not seen | not seen | **yes** (their differentiator) | none (full snapshot) |
 
 **Three judgements out of that comparison:**
@@ -168,7 +168,7 @@ purely to extract the rootfs member. The right fix is for the node to tell the c
 
 ## 3. rootfs: dm-snapshot rather than overlaybd/TCMU
 
-**Measured**: 8 KiB of disk per sandbox (shared read-only base + per-sandbox CoW).
+**Measured**: 44 KiB of disk per sandbox (shared read-only base + per-sandbox CoW).
 
 TCMU needs a whole SCSI fabric per sandbox (loopback nexus), which is fragile and slow;
 dm-snapshot only needs the `dm_snapshot` module.
@@ -322,7 +322,10 @@ what it exposes is **the segment nobody thought to measure**.
 beand has only one inbound vsock and no outbound path. Adding a reverse channel would either break
 "zero inbound exposure" or require an OTLP relay inside noded — the latter is feasible but
 not the current bottleneck. So the choice is: beand adopts the caller's trace id and writes it into its own logs,
-and **deliberately does not link the OTel SDK** (`go list -deps ./cmd/beand` returns 0). The reasoning is that the
+and **deliberately does not link the OTel SDK**. `go list -deps ./cmd/beand` returns 12 OTel packages, and all
+of them are the API and propagation side (`otel/trace`, `otel/propagation`, `otel/attribute`, `otel/baggage`,
+`otel/codes`, `otel/semconv` and their internals) — which is what parsing and forwarding a `traceparent` needs.
+Zero SDK packages and zero exporters. The reasoning is that the
 agent disk is attached to every single microVM, so its size is priced per boot, and the telemetry that SDK would serve
 cannot leave the guest at all.
 
@@ -564,14 +567,18 @@ Deliberately short-circuiting the pin check turned two tests red immediately —
   off by default, because the cost of KVM dirty-page accounting has never been quantified. It needs the same image and same kernel,
   N runs each with it on and off, comparing boot-to-agent plus the exec throughput of one CPU-bound and one memory-bound workload.
   Default flips to on if the regression is < 2%.
-- **Standardising logging and CLI output**: logging is all `log.Printf` (71 sites), unstructured,
-  no levels, no request_id. CLI exit codes are only 0 and 125, and there is no `--json`.
 - **What the inside of the guest sees when the sparse CoW layer fills up**: the host side is measured (§3.7: EIO +
   dm-snapshot turning `Invalid` + `write()` still returning success while all data is lost), but it has **never been
   observed from inside the microVM**. The host-side conclusion is enough to set the accept watermark, but the behaviour inside the guest
   (does ext4 go read-only? or keep pretending to succeed?) determines whether we should proactively mark such a sandbox
   FAILED — if the guest does not report an error itself, the caller gets a sandbox that looks healthy while actually losing data,
   which is a far worse outcome than refusing the create.
+
+**Closed since this list was written**: standardising logging and CLI output ✅ (fixed). Logging is
+`slog` throughout (92 call sites, one `log.Printf` left and it is in `hack/tracedump`, a dev tool),
+with levels, a text/json handler switch and a request id carried on the context
+(`internal/logging`). The CLI has `--json`, `--quiet`, and five exit codes rather than two
+(0 ok, 64 not found, 69 unavailable, 70 failed, 125 usage — `cli/exit.go`).
 
 ## 5. Boot optimisation ledger
 

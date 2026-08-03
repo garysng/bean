@@ -170,10 +170,10 @@ the cmdline identical before and after a snapshot, one fewer thing to line up at
   replaying it elsewhere. `N` (non-persistent) lives only in memory
 - **`8`** = chunk size in sectors, i.e. 4 KiB. It is chosen for being small enough: a single-block
   write copies 4 KiB rather than tens of KiB. The cost is more exception-table entries, but the
-  measured cost is only 8 KiB per sandbox, which is not at the scale where a trade-off is needed
+  measured cost is only 44 KiB per sandbox, which is not at the scale where a trade-off is needed
 
 **The base is shared**: one read-only loop device serves every sandbox on the node using that
-image. That is where "8 KiB per sandbox" comes from — compare `FileProvider`'s full copy per
+image. That is where "44 KiB per sandbox" comes from — compare `FileProvider`'s full copy per
 sandbox.
 
 The reference count lives in process memory, so after a restart the existing loop device has to

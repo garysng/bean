@@ -27,7 +27,7 @@ agent, CLI, SDK — with no Kubernetes and no containerd on the hot path.
 | e2b | Firecracker + per-image template build | one template build per image, minutes each — unusable at 2000 images |
 | Modal | own container runtime + lazy-loading FS | not self-hostable |
 | K8s + Pod | container per task | no VM boundary for untrusted code; scheduling and network stack are heavy |
-| **bean** | Firecracker + shared base image with per-sandbox CoW | **8 KiB of disk per sandbox**, 952 ms to a reachable agent |
+| **bean** | Firecracker + shared base image with per-sandbox CoW | **44 KiB of disk per sandbox**, 952 ms to a reachable agent |
 
 The pivot is that a sandbox does not get its own copy of the image. One
 read-only base is loop-mounted per node and shared; each sandbox gets a sparse
@@ -97,7 +97,7 @@ bean run --snapshot snap_...
 | jailer / host cgroups | 📐 The VMM runs as root in the host mount namespace. Hardware virtualisation is the boundary; defence-in-depth is thinner than it should be. |
 | Container tiers (runc/gVisor) | 📐 microVM, plus a no-isolation `local` tier for development, are the only options |
 | Volumes, port exposure, `fork` | 📐 |
-| Postgres | ⚠️ interface abstracted, SQLite in use |
+| Postgres | ⚠️ SQLite in use. No `Store` interface — all SQL is contained in one package, but callers hold the concrete type |
 | Build logs and cancellation | ⚠️ a build reports no progress and cannot be stopped |
 | overlaybd lazy-pull | ⚠️ **verified working** (7 ms mount, 19.6% of layer bytes transferred to read a file) but not wired into the image provider — dm-snapshot is the live path |
 

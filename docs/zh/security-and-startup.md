@@ -180,7 +180,7 @@ FC `/snapshot/load` 只占 7ms。
 ### B2. overlaybd lazy-pull from S3 ⚠️
 
 **能力已在验证机实测跑通,但尚未接入代码**。当前生产路径是 dm-snapshot:
-拉全量 + 转换 + 共享只读 base + 每 sandbox CoW(实测每 sandbox 8 KiB)。
+拉全量 + 转换 + 共享只读 base + 每 sandbox CoW(实测每 sandbox 44 KiB)。
 overlaybd 侧实测:挂载 7ms、只传 19.6% 的层字节就能挂载并读文件、8 个 HTTP 206、
 可写上层实占 40 KiB(`docs/decisions.md` §3.1)。剩下的是写 `OverlaybdProvider`
 接进 `image.Provider`。

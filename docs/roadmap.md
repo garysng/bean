@@ -17,7 +17,7 @@ points:
   snapshot variants (full / `--no-memory` / `--base` incremental), UFFD on-demand page serving,
   CPU templates and scheduler CPU filtering
 - ⚠️ **The overlaybd ublk direct drive P0 talks about is not done**: it runs on dm-snapshot
-  (8 KiB per sandbox). The overlaybd capability is measured but not wired in — it has become an
+  (44 KiB per sandbox). The overlaybd capability is measured but not wired in — it has become an
   optimisation rather than a foundation
 - ⚠️ **The jailer P0 talks about is not done**: noded execs firecracker directly
 - 📐 **The networking P0/P1 talk about is entirely undone**: no tap/bridge/NAT, and sandboxes have
