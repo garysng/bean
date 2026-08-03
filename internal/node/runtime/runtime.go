@@ -176,6 +176,14 @@ type BuildRequest struct {
 	ContextTar []byte
 	BuildArgs  map[string]string
 	SizeMiB    int64
+	// Logs receives the builder's output as it is produced. Nil discards it.
+	//
+	// A writer rather than a returned buffer because the point is to see a build
+	// while it runs: a build takes minutes, and output that arrives only at the
+	// end cannot tell anyone which layer is stuck. Writes happen on the
+	// builder's goroutine, so an implementation that blocks here slows the
+	// build down.
+	Logs io.Writer
 }
 
 // SandboxCommitter is implemented by runtimes that can turn a sandbox's

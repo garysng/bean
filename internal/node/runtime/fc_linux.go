@@ -204,6 +204,7 @@ func (r *FCRuntime) BuildImage(ctx context.Context, req BuildRequest) (string, e
 		ContextTar: req.ContextTar,
 		BuildArgs:  req.BuildArgs,
 		SizeMiB:    req.SizeMiB,
+		Logs:       req.Logs,
 	}); err != nil {
 		return "", err
 	}

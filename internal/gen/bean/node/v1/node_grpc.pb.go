@@ -249,7 +249,13 @@ type SandboxServiceClient interface {
 	CommitSandbox(ctx context.Context, in *CommitSandboxRequest, opts ...grpc.CallOption) (*CommitSandboxResponse, error)
 	// BuildImage builds a base image from a Dockerfile. The build runs on the
 	// node, where BuildKit and the image cache already are.
-	BuildImage(ctx context.Context, in *BuildImageRequest, opts ...grpc.CallOption) (*BuildImageResponse, error)
+	//
+	// The reply streams BuildKit's progress as it happens and ends with the
+	// result. Streaming rather than a unary call buys two things: a build takes
+	// minutes and its output is the only way to see which layer is slow or
+	// broken, and cancelling the call is what stops the build -- the node runs
+	// buildctl under this call's context, so an aborted call kills it.
+	BuildImage(ctx context.Context, in *BuildImageRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[BuildImageEvent], error)
 	// Data plane passthrough to AgentService.
 	Exec(ctx context.Context, in *v1.ExecRequest, opts ...grpc.CallOption) (*v1.ExecResponse, error)
 	StreamExec(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[v1.StreamExecFrame, v1.StreamExecFrame], error)
@@ -380,15 +386,24 @@ func (c *sandboxServiceClient) CommitSandbox(ctx context.Context, in *CommitSand
 	return out, nil
 }
 
-func (c *sandboxServiceClient) BuildImage(ctx context.Context, in *BuildImageRequest, opts ...grpc.CallOption) (*BuildImageResponse, error) {
+func (c *sandboxServiceClient) BuildImage(ctx context.Context, in *BuildImageRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[BuildImageEvent], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	out := new(BuildImageResponse)
-	err := c.cc.Invoke(ctx, SandboxService_BuildImage_FullMethodName, in, out, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &SandboxService_ServiceDesc.Streams[2], SandboxService_BuildImage_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
-	return out, nil
+	x := &grpc.GenericClientStream[BuildImageRequest, BuildImageEvent]{ClientStream: stream}
+	if err := x.ClientStream.SendMsg(in); err != nil {
+		return nil, err
+	}
+	if err := x.ClientStream.CloseSend(); err != nil {
+		return nil, err
+	}
+	return x, nil
 }
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type SandboxService_BuildImageClient = grpc.ServerStreamingClient[BuildImageEvent]
 
 func (c *sandboxServiceClient) Exec(ctx context.Context, in *v1.ExecRequest, opts ...grpc.CallOption) (*v1.ExecResponse, error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
@@ -402,7 +417,7 @@ func (c *sandboxServiceClient) Exec(ctx context.Context, in *v1.ExecRequest, opt
 
 func (c *sandboxServiceClient) StreamExec(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[v1.StreamExecFrame, v1.StreamExecFrame], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &SandboxService_ServiceDesc.Streams[2], SandboxService_StreamExec_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &SandboxService_ServiceDesc.Streams[3], SandboxService_StreamExec_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -415,7 +430,7 @@ type SandboxService_StreamExecClient = grpc.BidiStreamingClient[v1.StreamExecFra
 
 func (c *sandboxServiceClient) ReadFile(ctx context.Context, in *v1.ReadFileRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[v1.FileChunk], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &SandboxService_ServiceDesc.Streams[3], SandboxService_ReadFile_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &SandboxService_ServiceDesc.Streams[4], SandboxService_ReadFile_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -434,7 +449,7 @@ type SandboxService_ReadFileClient = grpc.ServerStreamingClient[v1.FileChunk]
 
 func (c *sandboxServiceClient) WriteFile(ctx context.Context, opts ...grpc.CallOption) (grpc.ClientStreamingClient[v1.WriteFileFrame, v1.WriteFileResponse], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &SandboxService_ServiceDesc.Streams[4], SandboxService_WriteFile_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &SandboxService_ServiceDesc.Streams[5], SandboxService_WriteFile_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -467,7 +482,7 @@ func (c *sandboxServiceClient) ListDir(ctx context.Context, in *v1.ListDirReques
 
 func (c *sandboxServiceClient) GetLogs(ctx context.Context, in *v1.GetLogsRequest, opts ...grpc.CallOption) (grpc.ServerStreamingClient[v1.LogChunk], error) {
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
-	stream, err := c.cc.NewStream(ctx, &SandboxService_ServiceDesc.Streams[5], SandboxService_GetLogs_FullMethodName, cOpts...)
+	stream, err := c.cc.NewStream(ctx, &SandboxService_ServiceDesc.Streams[6], SandboxService_GetLogs_FullMethodName, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -516,7 +531,13 @@ type SandboxServiceServer interface {
 	CommitSandbox(context.Context, *CommitSandboxRequest) (*CommitSandboxResponse, error)
 	// BuildImage builds a base image from a Dockerfile. The build runs on the
 	// node, where BuildKit and the image cache already are.
-	BuildImage(context.Context, *BuildImageRequest) (*BuildImageResponse, error)
+	//
+	// The reply streams BuildKit's progress as it happens and ends with the
+	// result. Streaming rather than a unary call buys two things: a build takes
+	// minutes and its output is the only way to see which layer is slow or
+	// broken, and cancelling the call is what stops the build -- the node runs
+	// buildctl under this call's context, so an aborted call kills it.
+	BuildImage(*BuildImageRequest, grpc.ServerStreamingServer[BuildImageEvent]) error
 	// Data plane passthrough to AgentService.
 	Exec(context.Context, *v1.ExecRequest) (*v1.ExecResponse, error)
 	StreamExec(grpc.BidiStreamingServer[v1.StreamExecFrame, v1.StreamExecFrame]) error
@@ -565,8 +586,8 @@ func (UnimplementedSandboxServiceServer) PrewarmImage(context.Context, *PrewarmI
 func (UnimplementedSandboxServiceServer) CommitSandbox(context.Context, *CommitSandboxRequest) (*CommitSandboxResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method CommitSandbox not implemented")
 }
-func (UnimplementedSandboxServiceServer) BuildImage(context.Context, *BuildImageRequest) (*BuildImageResponse, error) {
-	return nil, status.Error(codes.Unimplemented, "method BuildImage not implemented")
+func (UnimplementedSandboxServiceServer) BuildImage(*BuildImageRequest, grpc.ServerStreamingServer[BuildImageEvent]) error {
+	return status.Error(codes.Unimplemented, "method BuildImage not implemented")
 }
 func (UnimplementedSandboxServiceServer) Exec(context.Context, *v1.ExecRequest) (*v1.ExecResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Exec not implemented")
@@ -772,23 +793,16 @@ func _SandboxService_CommitSandbox_Handler(srv interface{}, ctx context.Context,
 	return interceptor(ctx, in, info, handler)
 }
 
-func _SandboxService_BuildImage_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
-	in := new(BuildImageRequest)
-	if err := dec(in); err != nil {
-		return nil, err
+func _SandboxService_BuildImage_Handler(srv interface{}, stream grpc.ServerStream) error {
+	m := new(BuildImageRequest)
+	if err := stream.RecvMsg(m); err != nil {
+		return err
 	}
-	if interceptor == nil {
-		return srv.(SandboxServiceServer).BuildImage(ctx, in)
-	}
-	info := &grpc.UnaryServerInfo{
-		Server:     srv,
-		FullMethod: SandboxService_BuildImage_FullMethodName,
-	}
-	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
-		return srv.(SandboxServiceServer).BuildImage(ctx, req.(*BuildImageRequest))
-	}
-	return interceptor(ctx, in, info, handler)
+	return srv.(SandboxServiceServer).BuildImage(m, &grpc.GenericServerStream[BuildImageRequest, BuildImageEvent]{ServerStream: stream})
 }
+
+// This type alias is provided for backwards compatibility with existing code that references the prior non-generic stream type by name.
+type SandboxService_BuildImageServer = grpc.ServerStreamingServer[BuildImageEvent]
 
 func _SandboxService_Exec_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(v1.ExecRequest)
@@ -920,10 +934,6 @@ var SandboxService_ServiceDesc = grpc.ServiceDesc{
 			Handler:    _SandboxService_CommitSandbox_Handler,
 		},
 		{
-			MethodName: "BuildImage",
-			Handler:    _SandboxService_BuildImage_Handler,
-		},
-		{
 			MethodName: "Exec",
 			Handler:    _SandboxService_Exec_Handler,
 		},
@@ -946,6 +956,11 @@ var SandboxService_ServiceDesc = grpc.ServiceDesc{
 			StreamName:    "RestoreSandbox",
 			Handler:       _SandboxService_RestoreSandbox_Handler,
 			ClientStreams: true,
+		},
+		{
+			StreamName:    "BuildImage",
+			Handler:       _SandboxService_BuildImage_Handler,
+			ServerStreams: true,
 		},
 		{
 			StreamName:    "StreamExec",

@@ -132,30 +132,52 @@ func (s *GRPCServer) CommitSandbox(ctx context.Context, req *nodev1.CommitSandbo
 	return &nodev1.CommitSandboxResponse{ImageRef: req.Tag}, nil
 }
 
-// BuildImage builds a base image from a Dockerfile on this node.
+// BuildImage builds a base image from a Dockerfile on this node, streaming
+// BuildKit's output as it is produced.
 //
-// The call blocks for the build's duration, which can be minutes. That is the
-// right shape here: the control plane runs it in the background and reports
-// progress, so an intermediate polling protocol between the two would add a
-// state machine without adding information.
-func (s *GRPCServer) BuildImage(ctx context.Context, req *nodev1.BuildImageRequest) (*nodev1.BuildImageResponse, error) {
+// The call lasts the build's duration, which can be minutes. Holding the call
+// open is what makes cancellation work: the build runs under this stream's
+// context, so a caller that aborts the call kills buildctl. A unary call plus a
+// separate cancel RPC would need the node to track builds by name and would
+// leave a build running whenever the control plane restarted mid-build.
+func (s *GRPCServer) BuildImage(req *nodev1.BuildImageRequest,
+	stream nodev1.SandboxService_BuildImageServer) error {
+
 	if req.Tag == "" {
-		return nil, status.Error(codes.InvalidArgument, "tag required")
+		return status.Error(codes.InvalidArgument, "tag required")
 	}
 	if req.Dockerfile == "" {
-		return nil, status.Error(codes.InvalidArgument, "dockerfile required")
+		return status.Error(codes.InvalidArgument, "dockerfile required")
 	}
-	ref, err := s.mgr.BuildImage(ctx, runtime.BuildRequest{
+
+	logs := newBuildLogSender(stream)
+	defer logs.close()
+
+	ref, err := s.mgr.BuildImage(stream.Context(), runtime.BuildRequest{
 		Tag:        req.Tag,
 		Dockerfile: req.Dockerfile,
 		ContextTar: req.ContextTar,
 		BuildArgs:  req.BuildArgs,
 		SizeMiB:    req.SizeMib,
+		Logs:       logs,
 	})
 	if err != nil {
-		return nil, status.Errorf(codes.Internal, "build %s: %v", req.Tag, err)
+		// A cancelled build is reported as Canceled rather than Internal: the
+		// control plane distinguishes "someone stopped this" from "this node
+		// cannot build", and only the second is worth alerting on.
+		if cerr := stream.Context().Err(); cerr != nil {
+			return status.Errorf(codes.Canceled, "build %s stopped: %v", req.Tag, cerr)
+		}
+		return status.Errorf(codes.Internal, "build %s: %v", req.Tag, err)
 	}
-	return &nodev1.BuildImageResponse{ImageRef: ref}, nil
+	// Flushed before the result so a caller reading frames in order has the
+	// whole log by the time it learns the build finished.
+	logs.close()
+	return stream.Send(&nodev1.BuildImageEvent{
+		Event: &nodev1.BuildImageEvent_Result{
+			Result: &nodev1.BuildImageResponse{ImageRef: ref},
+		},
+	})
 }
 
 // ---- data plane passthrough ----

@@ -41,7 +41,13 @@ service SandboxService {
   rpc CommitSandbox(CommitSandboxRequest) returns (CommitSandboxResponse);
   // BuildImage builds a base image from a Dockerfile. The build runs on the
   // node, where BuildKit and the image cache already are.
-  rpc BuildImage(BuildImageRequest) returns (BuildImageResponse);
+  //
+  // The reply streams BuildKit's progress as it happens and ends with the
+  // result. Streaming rather than a unary call buys two things: a build takes
+  // minutes and its output is the only way to see which layer is slow or
+  // broken, and cancelling the call is what stops the build -- the node runs
+  // buildctl under this call's context, so an aborted call kills it.
+  rpc BuildImage(BuildImageRequest) returns (stream BuildImageEvent);
   // Data plane passthrough to AgentService.
   rpc Exec(bean.common.v1.ExecRequest) returns (bean.common.v1.ExecResponse);
   rpc StreamExec(stream bean.common.v1.StreamExecFrame) returns (stream bean.common.v1.StreamExecFrame);
@@ -293,4 +299,20 @@ message BuildImageRequest {
 
 message BuildImageResponse {
   string image_ref = 1;
+}
+
+// BuildImageEvent is one frame of a build's progress. Log frames arrive as
+// BuildKit produces them; exactly one result frame ends a successful build.
+//
+// A failure is not a frame: it is the stream's error status, so a caller that
+// only checks Recv's error cannot mistake a failed build for a finished one.
+message BuildImageEvent {
+  oneof event {
+    // log is raw BuildKit output, forwarded rather than parsed. BuildKit's
+    // progress format is its own and changes between versions; the bytes are
+    // what a person reads to find the failing step either way.
+    bytes log = 1;
+    // result closes a successful build.
+    BuildImageResponse result = 2;
+  }
 }

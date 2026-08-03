@@ -77,8 +77,14 @@ type Server struct {
 	snapshots   snapshot.Blobs
 	secrets     *secret.Box
 	bus         *eventBus
-	metrics     *obs.Registry
-	mux         *http.ServeMux
+	// builds holds in-flight and recently finished builds, which is what the
+	// build log and cancel endpoints address. It is per-replica, unlike
+	// everything else here: a build's log is only reachable from the gateway that
+	// started it, and moving it to the store would mean writing a stream of bytes
+	// through SQLite on the build's hot path.
+	builds  *buildTracker
+	metrics *obs.Registry
+	mux     *http.ServeMux
 	// identity attributes an image to a caller. Nil means every image is
 	// unowned, which is what a deployment behind no identity-aware layer gets.
 	identity IdentityFunc
@@ -131,7 +137,8 @@ func New(st *store.Store, router Router, placer Placer, opts Options) *Server {
 	s := &Server{store: st, router: router, placer: placer, region: region,
 		runtimeTier: tier, apiKey: opts.APIKey, images: opts.Images,
 		secrets: opts.Secrets, snapshots: opts.Snapshots,
-		bus: newEventBus(), metrics: obs.NewRegistry(), mux: http.NewServeMux(),
+		bus: newEventBus(), builds: newBuildTracker(),
+		metrics: obs.NewRegistry(), mux: http.NewServeMux(),
 		createWait: opts.CreateWait, identity: opts.Identity}
 	s.routes()
 	return s
@@ -199,6 +206,10 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /v1/images/status", s.handleImageStatus)
 	s.mux.HandleFunc("POST /v1/images/prewarm", s.handlePrewarm)
 	s.mux.HandleFunc("POST /v1/images/build", s.handleBuild)
+	// ref goes in a query param for the same reason as image status: it contains
+	// slashes, which a path segment cannot carry.
+	s.mux.HandleFunc("GET /v1/images/build/logs", s.handleBuildLogs)
+	s.mux.HandleFunc("POST /v1/images/build/cancel", s.handleBuildCancel)
 	s.mux.HandleFunc("GET /v1/images/prewarm/{jobId}", s.handlePrewarmStatus)
 	s.mux.HandleFunc("PUT /v1/registries", s.handlePutRegistry)
 	s.mux.HandleFunc("GET /v1/registries", s.handleListRegistries)
