@@ -43,6 +43,10 @@ type Registrar struct {
 	// list of resources.
 	BaseDir  string
 	ImageDir string
+	// StatusInterval is how often the node's inventory is resent in full. Zero
+	// takes the default. Exposed so a test does not have to wait a minute for the
+	// periodic report it is asserting on.
+	StatusInterval time.Duration
 
 	mgr *Manager
 
@@ -137,6 +141,21 @@ func (r *Registrar) session(ctx context.Context, client nodev1.NodeServiceClient
 	if err != nil {
 		return fmt.Errorf("open heartbeat: %w", err)
 	}
+
+	// The node's inventory goes up on its own schedule and, importantly, on its
+	// own goroutine. See UpdateNodeStatus in node.proto for why the two reports
+	// are separate messages; this is why they are also separate execution.
+	//
+	// UpdateNodeStatus is a unary call that blocks until the control plane
+	// answers. Sharing this goroutine with the heartbeat would mean a control
+	// plane that is slow to answer -- a GC pause, a lock, a slow query -- stalls
+	// the heartbeat too, and the node loses its lease and has its sandboxes
+	// reclaimed. That is a lease failure caused by an inventory report, which is
+	// exactly the coupling splitting them was meant to remove.
+	statusCtx, stopStatus := context.WithCancel(ctx)
+	defer stopStatus()
+	go r.reportStatusLoop(statusCtx, client)
+
 	t := time.NewTicker(r.interval)
 	defer t.Stop()
 	for {
@@ -149,10 +168,6 @@ func (r *Registrar) session(ctx context.Context, client nodev1.NodeServiceClient
 				NodeToken: r.nodeToken,
 				Sandboxes: r.mgr.Statuses(),
 				Usage:     r.usage(),
-				// The node is the authority on what it holds, so it reports its
-				// image cache rather than the control plane inferring it. Image
-				// affinity and prewarm progress both read this.
-				CachedImages: r.mgr.CachedImages(),
 			}); err != nil {
 				return fmt.Errorf("heartbeat send: %w", err)
 			}
@@ -160,6 +175,75 @@ func (r *Registrar) session(ctx context.Context, client nodev1.NodeServiceClient
 				return fmt.Errorf("heartbeat recv: %w", err)
 			}
 		}
+	}
+}
+
+// statusInterval is how often the full inventory is resent.
+//
+// Deliberately much slower than the heartbeat: this is a floor that bounds how
+// stale the control plane's view can get, not the mechanism for keeping it
+// current.
+func (r *Registrar) statusInterval() time.Duration {
+	if r.StatusInterval > 0 {
+		return r.StatusInterval
+	}
+	return 60 * time.Second
+}
+
+// reportStatusLoop sends the inventory until ctx is done.
+//
+// One report at a time, by construction: this loop is the only caller and it
+// blocks on each one. A design that fired reports from a timer without waiting
+// could stack them up behind a slow control plane, and the newest -- the only one
+// whose contents are still true -- would be last in the queue.
+func (r *Registrar) reportStatusLoop(ctx context.Context, client nodev1.NodeServiceClient) {
+	// Sent before the first tick so a freshly registered node is placeable for
+	// image-affinity purposes immediately rather than a minute later.
+	r.reportStatus(ctx, client)
+
+	t := time.NewTicker(r.statusInterval())
+	defer t.Stop()
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			r.reportStatus(ctx, client)
+		}
+	}
+}
+
+// reportStatus sends what this node holds, and swallows the error after logging.
+//
+// The node is the authority on its own caches, so it reports rather than the
+// control plane inferring. Only categories that have something to say are set:
+// an absent category means "unchanged", so a runtime with no image cache -- the
+// local tier -- sends nothing rather than an empty map that would read as "this
+// node has dropped every image".
+func (r *Registrar) reportStatus(ctx context.Context, client nodev1.NodeServiceClient) {
+	req := &nodev1.UpdateNodeStatusRequest{
+		NodeId:    r.NodeID,
+		NodeToken: r.nodeToken,
+	}
+	if cached := r.mgr.CachedImages(); cached != nil {
+		images := make(map[string]*nodev1.CachedImage, len(cached))
+		for ref, img := range cached {
+			images[ref] = &nodev1.CachedImage{
+				SizeBytes: img.SizeBytes,
+				Digest:    img.Digest,
+			}
+		}
+		req.Images = &nodev1.ImageInventory{Images: images}
+	}
+	if req.Images == nil {
+		// Nothing to say. Sending an empty request would cost a round trip to
+		// tell the control plane nothing it does not already know.
+		return
+	}
+	if _, err := client.UpdateNodeStatus(ctx, req); err != nil {
+		slog.Warn("node status report failed; image affinity and warm-snapshot "+
+			"lookups use a stale view until the next one",
+			logging.KeyNode, r.NodeID, logging.KeyError, err)
 	}
 }
 

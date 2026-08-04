@@ -11,6 +11,23 @@ service NodeService {
   rpc Register(RegisterRequest) returns (RegisterResponse);
   rpc Heartbeat(stream HeartbeatRequest) returns (stream HeartbeatResponse);
   rpc SyncState(SyncStateRequest) returns (SyncStateResponse);
+  // UpdateNodeStatus carries what a node *holds and can do*, as opposed to how
+  // it is currently doing -- which is Heartbeat's job.
+  //
+  // The two are separate because they have nothing in common but a destination.
+  // A heartbeat renews a lease: small, fixed size, every few seconds. This
+  // carries lists whose size grows with the node's caches and which barely
+  // change between reports. Carrying them on the heartbeat meant an eval-scale
+  // node with thousands of images re-sent, re-serialised and re-wrote an
+  // unchanged map every few seconds. The cache in
+  // internal/node/image/cached.go exists specifically to blunt the cost of
+  // rescanning for that, which is a design smell rather than an optimisation.
+  //
+  // Sent when something changes, plus a periodic full report so a dropped one
+  // cannot leave the control plane permanently stale. Staleness costs affinity
+  // accuracy and warm-snapshot hit rate, never correctness: a miss boots, which
+  // is what a node without the entry does anyway.
+  rpc UpdateNodeStatus(UpdateNodeStatusRequest) returns (UpdateNodeStatusResponse);
 }
 
 // SandboxService: implemented by beand; control plane / gateway call it
@@ -103,8 +120,57 @@ message HeartbeatRequest {
   // the authority on what it holds, so it reports rather than the control
   // plane inferring; the scheduler uses it for image affinity and prewarm
   // progress.
-  map<string, int64> cached_images = 5;
+  // Deprecated: moved to ReportInventory. Still accepted so a node and a control
+  // plane of different versions interoperate during a rollout -- a node that
+  // stops sending this before the control plane learns to read the new RPC would
+  // make every node look like it holds no images, which silently disables image
+  // affinity rather than failing.
+  map<string, int64> cached_images = 5 [deprecated = true];
 }
+
+// CachedImage is one image a node holds.
+message CachedImage {
+  // size_bytes is the apparent size of the prepared image file.
+  int64 size_bytes = 1;
+  // digest is the manifest digest the reference resolved to when it was
+  // prepared, or empty for an image with no manifest -- a build's output or a
+  // commit of a sandbox's filesystem.
+  //
+  // Reported because it is the only identity that survives a tag moving, and it
+  // is the key a warm snapshot has to be found by: a tag is not enough, since
+  // serving a snapshot captured from the image a tag used to name is a silent
+  // failure -- the wrong environment restores successfully.
+  string digest = 2;
+}
+
+// ImageInventory is the set of images a node holds.
+//
+// Always the node's complete set, never a delta. A delta protocol would need
+// both sides to agree on a base version and to recover when they did not, for a
+// message of a few hundred bytes per image; sending the whole set makes a
+// dropped report self-correcting.
+message ImageInventory {
+  map<string, CachedImage> images = 1;
+}
+
+message UpdateNodeStatusRequest {
+  string node_id = 1;
+  string node_token = 2;
+
+  // Each category is optional, and an absent one means "unchanged" rather than
+  // "empty". That distinction is why these are messages rather than bare maps:
+  // a node reporting only what moved must not be read as a node that has
+  // dropped everything else. Getting it wrong in the obvious direction would
+  // clear the control plane's view of a node's images every time an unrelated
+  // category was reported, which shows up as image affinity that works only
+  // sometimes.
+  //
+  // Adding a category is a new optional field here rather than a new RPC, so
+  // this stays the single path for "what this node holds".
+  optional ImageInventory images = 3;
+}
+
+message UpdateNodeStatusResponse {}
 
 message NodeUsage {
   double cpu_committed = 1;

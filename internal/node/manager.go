@@ -20,6 +20,7 @@ import (
 	commonv1 "github.com/garysng/bean/internal/gen/bean/common/v1"
 	nodev1 "github.com/garysng/bean/internal/gen/bean/node/v1"
 	"github.com/garysng/bean/internal/logging"
+	"github.com/garysng/bean/internal/node/image"
 	"github.com/garysng/bean/internal/node/network"
 	"github.com/garysng/bean/internal/node/runtime"
 	"github.com/garysng/bean/internal/obs"
@@ -768,12 +769,13 @@ func buildOutcome(ctx context.Context, err error) string {
 	}
 }
 
-// CachedImages reports the images this node holds, for the heartbeat.
+// CachedImages reports the images this node holds, with the size and digest of
+// each.
 //
 // A runtime with no image cache returns nothing rather than an error: the local
-// tier runs a host binary, so there is genuinely nothing cached, and a heartbeat
-// should not fail over it.
-func (m *Manager) CachedImages() map[string]int64 {
+// tier runs a host binary, so there is genuinely nothing cached, and a status
+// report should not fail over it.
+func (m *Manager) CachedImages() map[string]image.CachedImage {
 	lister, ok := m.rt.(runtime.ImageLister)
 	if !ok {
 		return nil

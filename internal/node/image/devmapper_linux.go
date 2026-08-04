@@ -191,7 +191,7 @@ func (p *DevMapperProvider) Prewarm(ctx context.Context, imageRef string) error 
 }
 
 // Cached lists the base images present locally.
-func (p *DevMapperProvider) Cached() (map[string]int64, error) {
+func (p *DevMapperProvider) Cached() (map[string]CachedImage, error) {
 	return p.cache.get(p.ImageDir)
 }
 

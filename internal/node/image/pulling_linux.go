@@ -47,7 +47,7 @@ func NewPullingProvider(inner Provider, converter *Converter) *PullingProvider {
 func (p *PullingProvider) Name() string { return p.Inner.Name() + "+pull" }
 
 // Cached defers to the inner provider, which owns the image directory.
-func (p *PullingProvider) Cached() (map[string]int64, error) { return p.Inner.Cached() }
+func (p *PullingProvider) Cached() (map[string]CachedImage, error) { return p.Inner.Cached() }
 
 func (p *PullingProvider) Prepare(ctx context.Context, sandboxID, imageRef string, opts PrepareOptions) (*Rootfs, error) {
 	rootfs, err := p.Inner.Prepare(ctx, sandboxID, imageRef, opts)

@@ -140,7 +140,7 @@ func startEnv(t *testing.T, opts envOpts) *testEnv {
 			ID: id, Region: "local", Runtimes: []string{"local"},
 			CPUAllocatable: opts.CPUPerNode, MemoryAllocateMiB: opts.MemoryPerNode,
 			DiskAllocateMiB: 1 << 20, MaxCreates: 64,
-			CachedImages: map[string]int64{},
+			CachedImages: map[string]store.CachedImage{},
 			State:        scheduler.NodeReady, AdvertiseAddr: addr,
 			LastHeartbeat: time.Now(),
 		}); err != nil {

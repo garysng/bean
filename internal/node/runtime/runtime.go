@@ -6,6 +6,7 @@ import (
 	"io"
 	"time"
 
+	"github.com/garysng/bean/internal/node/image"
 	"github.com/garysng/bean/internal/node/network"
 )
 
@@ -155,8 +156,8 @@ type ImageWarmer interface {
 // reports this so the scheduler can prefer a node that already has an image, and
 // so a prewarm job can show progress.
 type ImageLister interface {
-	// CachedImages maps image reference to its size on this node.
-	CachedImages() (map[string]int64, error)
+	// CachedImages maps image reference to what this node knows about it.
+	CachedImages() (map[string]image.CachedImage, error)
 }
 
 // CacheReporter is implemented by runtimes that hold node-local caches whose size

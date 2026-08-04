@@ -41,11 +41,11 @@ func TestCachedImagesReportsRefsAndSizes(t *testing.T) {
 	}
 	// The reference has to survive the round trip: the filename encoding is not
 	// reversible, which is why the sidecar exists at all.
-	if got["alpine:3.20"] != 64<<20 {
-		t.Errorf("alpine size = %d, want %d", got["alpine:3.20"], 64<<20)
+	if got["alpine:3.20"].SizeBytes != 64<<20 {
+		t.Errorf("alpine size = %d, want %d", got["alpine:3.20"].SizeBytes, 64<<20)
 	}
-	if got["ghcr.io/owner/img:v1"] != 128<<20 {
-		t.Errorf("ghcr size = %d", got["ghcr.io/owner/img:v1"])
+	if got["ghcr.io/owner/img:v1"].SizeBytes != 128<<20 {
+		t.Errorf("ghcr size = %d", got["ghcr.io/owner/img:v1"].SizeBytes)
 	}
 }
 
@@ -183,7 +183,7 @@ func TestCachedRefsReturnsACopy(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	first["injected:1"] = 999
+	first["injected:1"] = CachedImage{SizeBytes: 999}
 	delete(first, "img:1")
 
 	second, err := c.get(dir)

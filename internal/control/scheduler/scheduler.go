@@ -281,7 +281,7 @@ func (s *Scheduler) score(n *store.NodeRecord, spread map[string]int, req *Reque
 
 	// Image affinity dominates: a node that already has the image skips the
 	// pull entirely, which is the largest term in cold-start latency.
-	if bytes, ok := n.CachedImages[req.Image]; ok && bytes > 0 {
+	if img, ok := n.CachedImages[req.Image]; ok && img.SizeBytes > 0 {
 		score += s.weights.ImageAffinity
 	}
 

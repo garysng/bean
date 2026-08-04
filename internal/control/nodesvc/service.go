@@ -144,17 +144,60 @@ func (s *Service) Heartbeat(stream nodev1.NodeService_HeartbeatServer) error {
 		if err := s.authNode(req.GetNodeId(), req.GetNodeToken()); err != nil {
 			return err
 		}
-		// The node's image cache is recorded from its own report, which is what
-		// makes the scheduler's image affinity and prewarm progress real rather
-		// than always empty.
-		if err := s.store.TouchNode(req.NodeId, req.CachedImages,
+		// Only the lease and the instantaneous usage. What the node holds arrives
+		// through UpdateNodeStatus, on its own schedule -- carrying it here meant
+		// re-serialising and rewriting an unchanged image list every few seconds.
+		if err := s.store.TouchNode(req.NodeId,
 			req.GetUsage().GetDiskUsedMib()); err != nil {
 			return status.Errorf(codes.Internal, "touch node: %v", err)
+		}
+		// Accepted from a node that has not learned UpdateNodeStatus yet, so a
+		// rollout in either order keeps image affinity working. Ignored once the
+		// node sends the new report, which is the case that overwrites this with the
+		// same data plus digests.
+		if len(req.GetCachedImages()) > 0 {
+			images := make(map[string]store.CachedImage, len(req.GetCachedImages()))
+			for ref, size := range req.GetCachedImages() {
+				images[ref] = store.CachedImage{SizeBytes: size}
+			}
+			if err := s.store.PutNodeImages(req.GetNodeId(), images); err != nil {
+				return status.Errorf(codes.Internal, "record node images: %v", err)
+			}
 		}
 		if err := stream.Send(&nodev1.HeartbeatResponse{LeaseOk: true}); err != nil {
 			return err
 		}
 	}
+}
+
+// UpdateNodeStatus records what a node holds. See UpdateNodeStatus in node.proto
+// for why this is not part of the heartbeat.
+//
+// An absent category leaves that category alone. The node sends only what it has
+// something to say about, so treating a missing field as an empty one would clear
+// the control plane's view of a node's images the first time an unrelated
+// category was reported on its own -- and the symptom would be image affinity
+// that works only sometimes, which is the hardest kind of scheduling bug to
+// attribute.
+func (s *Service) UpdateNodeStatus(ctx context.Context, req *nodev1.UpdateNodeStatusRequest) (
+	*nodev1.UpdateNodeStatusResponse, error) {
+
+	if err := s.authNode(req.GetNodeId(), req.GetNodeToken()); err != nil {
+		return nil, err
+	}
+	if inv := req.GetImages(); inv != nil {
+		images := make(map[string]store.CachedImage, len(inv.GetImages()))
+		for ref, img := range inv.GetImages() {
+			images[ref] = store.CachedImage{
+				SizeBytes: img.GetSizeBytes(),
+				Digest:    img.GetDigest(),
+			}
+		}
+		if err := s.store.PutNodeImages(req.GetNodeId(), images); err != nil {
+			return nil, status.Errorf(codes.Internal, "record node images: %v", err)
+		}
+	}
+	return &nodev1.UpdateNodeStatusResponse{}, nil
 }
 
 // SyncState returns the expected sandbox set so a restarted node can

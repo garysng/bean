@@ -79,10 +79,12 @@ type Provider interface {
 	// sandbox, so a later Prepare is fast. It is the node side of the
 	// control plane's prewarm job.
 	Prewarm(ctx context.Context, imageRef string) error
-	// Cached reports the images held locally and their sizes. The node reports
-	// this in its heartbeat, which is what lets the scheduler prefer a node
-	// that already has an image and lets a prewarm job show progress.
-	Cached() (map[string]int64, error)
+	// Cached reports the images held locally, with the size and digest of each.
+	// The node reports this to the control plane, which is what lets the scheduler
+	// prefer a node that already has an image, lets a prewarm job show progress,
+	// and lets a warm snapshot be found by the image's digest rather than by a tag
+	// that may since have moved.
+	Cached() (map[string]CachedImage, error)
 }
 
 // FileProvider backs each sandbox with a sparse file formatted as ext4. It
@@ -157,7 +159,7 @@ func (p *FileProvider) Prewarm(ctx context.Context, imageRef string) error {
 }
 
 // Cached lists the base images present locally.
-func (p *FileProvider) Cached() (map[string]int64, error) {
+func (p *FileProvider) Cached() (map[string]CachedImage, error) {
 	return p.cache.get(p.ImageDir)
 }
 

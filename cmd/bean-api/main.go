@@ -315,7 +315,7 @@ func (n nodeCacheSource) CachedNodeCount(ref string) int {
 	}
 	count := 0
 	for _, node := range nodes {
-		if bytes, ok := node.CachedImages[ref]; ok && bytes > 0 {
+		if img, ok := node.CachedImages[ref]; ok && img.SizeBytes > 0 {
 			count++
 		}
 	}

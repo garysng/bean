@@ -66,21 +66,34 @@ func recordRef(imageDir, imageRef, digest string) error {
 	return os.Rename(tmp, path)
 }
 
-// cachedImages lists the images in a directory with their apparent sizes.
+// CachedImage is what a node knows about one image it holds.
+//
+// The digest is carried alongside the size because both come from the same
+// sidecar read, and separating them would mean scanning the directory twice to
+// answer two questions about the same file.
+type CachedImage struct {
+	// SizeBytes is the apparent size of the prepared image file.
+	SizeBytes int64
+	// Digest is the manifest digest the reference resolved to, or "" for an image
+	// with no manifest -- a build's output, or a commit of a sandbox's filesystem.
+	Digest string
+}
+
+// cachedImages lists the images in a directory with their sizes and digests.
 //
 // An image without a sidecar is skipped rather than guessed at: reporting a
 // wrong reference would send the scheduler's affinity scoring after an image
 // that is not there.
-func cachedImages(imageDir string) (map[string]int64, error) {
+func cachedImages(imageDir string) (map[string]CachedImage, error) {
 	entries, err := os.ReadDir(imageDir)
 	if err != nil {
 		if os.IsNotExist(err) {
-			return map[string]int64{}, nil
+			return map[string]CachedImage{}, nil
 		}
 		return nil, err
 	}
 
-	out := map[string]int64{}
+	out := map[string]CachedImage{}
 	for _, e := range entries {
 		if e.IsDir() || !strings.HasSuffix(e.Name(), refSuffix) {
 			continue
@@ -91,6 +104,9 @@ func cachedImages(imageDir string) (map[string]int64, error) {
 		}
 		var rec struct {
 			Ref string `json:"ref"`
+			// Read here rather than through cachedDigest, which would re-open the
+			// same file this loop has already read, once per image.
+			Digest string `json:"digest"`
 		}
 		if err := json.Unmarshal(raw, &rec); err != nil || rec.Ref == "" {
 			continue
@@ -102,7 +118,7 @@ func cachedImages(imageDir string) (map[string]int64, error) {
 			// The sidecar outlived its image; nothing is cached.
 			continue
 		}
-		out[rec.Ref] = info.Size()
+		out[rec.Ref] = CachedImage{SizeBytes: info.Size(), Digest: rec.Digest}
 	}
 	return out, nil
 }
@@ -156,10 +172,10 @@ func cachedDigest(imageDir, imageRef string) (string, error) {
 type cachedRefs struct {
 	mu    sync.Mutex
 	stamp time.Time
-	refs  map[string]int64
+	refs  map[string]CachedImage
 }
 
-func (c *cachedRefs) get(imageDir string) (map[string]int64, error) {
+func (c *cachedRefs) get(imageDir string) (map[string]CachedImage, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
@@ -187,10 +203,9 @@ func (c *cachedRefs) get(imageDir string) (map[string]int64, error) {
 	return copyRefs(refs), nil
 }
 
-// copyRefs returns a copy, so a caller cannot mutate what later heartbeats
-// report.
-func copyRefs(refs map[string]int64) map[string]int64 {
-	out := make(map[string]int64, len(refs))
+// copyRefs returns a copy, so a caller cannot mutate what later reports carry.
+func copyRefs(refs map[string]CachedImage) map[string]CachedImage {
+	out := make(map[string]CachedImage, len(refs))
 	for k, v := range refs {
 		out[k] = v
 	}

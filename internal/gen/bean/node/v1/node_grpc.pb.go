@@ -20,9 +20,10 @@ import (
 const _ = grpc.SupportPackageIsVersion9
 
 const (
-	NodeService_Register_FullMethodName  = "/bean.node.v1.NodeService/Register"
-	NodeService_Heartbeat_FullMethodName = "/bean.node.v1.NodeService/Heartbeat"
-	NodeService_SyncState_FullMethodName = "/bean.node.v1.NodeService/SyncState"
+	NodeService_Register_FullMethodName         = "/bean.node.v1.NodeService/Register"
+	NodeService_Heartbeat_FullMethodName        = "/bean.node.v1.NodeService/Heartbeat"
+	NodeService_SyncState_FullMethodName        = "/bean.node.v1.NodeService/SyncState"
+	NodeService_UpdateNodeStatus_FullMethodName = "/bean.node.v1.NodeService/UpdateNodeStatus"
 )
 
 // NodeServiceClient is the client API for NodeService service.
@@ -34,6 +35,23 @@ type NodeServiceClient interface {
 	Register(ctx context.Context, in *RegisterRequest, opts ...grpc.CallOption) (*RegisterResponse, error)
 	Heartbeat(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[HeartbeatRequest, HeartbeatResponse], error)
 	SyncState(ctx context.Context, in *SyncStateRequest, opts ...grpc.CallOption) (*SyncStateResponse, error)
+	// UpdateNodeStatus carries what a node *holds and can do*, as opposed to how
+	// it is currently doing -- which is Heartbeat's job.
+	//
+	// The two are separate because they have nothing in common but a destination.
+	// A heartbeat renews a lease: small, fixed size, every few seconds. This
+	// carries lists whose size grows with the node's caches and which barely
+	// change between reports. Carrying them on the heartbeat meant an eval-scale
+	// node with thousands of images re-sent, re-serialised and re-wrote an
+	// unchanged map every few seconds. The cache in
+	// internal/node/image/cached.go exists specifically to blunt the cost of
+	// rescanning for that, which is a design smell rather than an optimisation.
+	//
+	// Sent when something changes, plus a periodic full report so a dropped one
+	// cannot leave the control plane permanently stale. Staleness costs affinity
+	// accuracy and warm-snapshot hit rate, never correctness: a miss boots, which
+	// is what a node without the entry does anyway.
+	UpdateNodeStatus(ctx context.Context, in *UpdateNodeStatusRequest, opts ...grpc.CallOption) (*UpdateNodeStatusResponse, error)
 }
 
 type nodeServiceClient struct {
@@ -77,6 +95,16 @@ func (c *nodeServiceClient) SyncState(ctx context.Context, in *SyncStateRequest,
 	return out, nil
 }
 
+func (c *nodeServiceClient) UpdateNodeStatus(ctx context.Context, in *UpdateNodeStatusRequest, opts ...grpc.CallOption) (*UpdateNodeStatusResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(UpdateNodeStatusResponse)
+	err := c.cc.Invoke(ctx, NodeService_UpdateNodeStatus_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
 // NodeServiceServer is the server API for NodeService service.
 // All implementations must embed UnimplementedNodeServiceServer
 // for forward compatibility.
@@ -86,6 +114,23 @@ type NodeServiceServer interface {
 	Register(context.Context, *RegisterRequest) (*RegisterResponse, error)
 	Heartbeat(grpc.BidiStreamingServer[HeartbeatRequest, HeartbeatResponse]) error
 	SyncState(context.Context, *SyncStateRequest) (*SyncStateResponse, error)
+	// UpdateNodeStatus carries what a node *holds and can do*, as opposed to how
+	// it is currently doing -- which is Heartbeat's job.
+	//
+	// The two are separate because they have nothing in common but a destination.
+	// A heartbeat renews a lease: small, fixed size, every few seconds. This
+	// carries lists whose size grows with the node's caches and which barely
+	// change between reports. Carrying them on the heartbeat meant an eval-scale
+	// node with thousands of images re-sent, re-serialised and re-wrote an
+	// unchanged map every few seconds. The cache in
+	// internal/node/image/cached.go exists specifically to blunt the cost of
+	// rescanning for that, which is a design smell rather than an optimisation.
+	//
+	// Sent when something changes, plus a periodic full report so a dropped one
+	// cannot leave the control plane permanently stale. Staleness costs affinity
+	// accuracy and warm-snapshot hit rate, never correctness: a miss boots, which
+	// is what a node without the entry does anyway.
+	UpdateNodeStatus(context.Context, *UpdateNodeStatusRequest) (*UpdateNodeStatusResponse, error)
 	mustEmbedUnimplementedNodeServiceServer()
 }
 
@@ -104,6 +149,9 @@ func (UnimplementedNodeServiceServer) Heartbeat(grpc.BidiStreamingServer[Heartbe
 }
 func (UnimplementedNodeServiceServer) SyncState(context.Context, *SyncStateRequest) (*SyncStateResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method SyncState not implemented")
+}
+func (UnimplementedNodeServiceServer) UpdateNodeStatus(context.Context, *UpdateNodeStatusRequest) (*UpdateNodeStatusResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method UpdateNodeStatus not implemented")
 }
 func (UnimplementedNodeServiceServer) mustEmbedUnimplementedNodeServiceServer() {}
 func (UnimplementedNodeServiceServer) testEmbeddedByValue()                     {}
@@ -169,6 +217,24 @@ func _NodeService_SyncState_Handler(srv interface{}, ctx context.Context, dec fu
 	return interceptor(ctx, in, info, handler)
 }
 
+func _NodeService_UpdateNodeStatus_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(UpdateNodeStatusRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(NodeServiceServer).UpdateNodeStatus(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: NodeService_UpdateNodeStatus_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(NodeServiceServer).UpdateNodeStatus(ctx, req.(*UpdateNodeStatusRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 // NodeService_ServiceDesc is the grpc.ServiceDesc for NodeService service.
 // It's only intended for direct use with grpc.RegisterService,
 // and not to be introspected or modified (even as a copy)
@@ -183,6 +249,10 @@ var NodeService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "SyncState",
 			Handler:    _NodeService_SyncState_Handler,
+		},
+		{
+			MethodName: "UpdateNodeStatus",
+			Handler:    _NodeService_UpdateNodeStatus_Handler,
 		},
 	},
 	Streams: []grpc.StreamDesc{

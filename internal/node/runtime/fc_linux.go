@@ -250,8 +250,9 @@ func (r *FCRuntime) SnapshotCacheBytes() (int64, error) {
 	return r.snapshots.Usage()
 }
 
-// CachedImages reports the images available on this node.
-func (r *FCRuntime) CachedImages() (map[string]int64, error) {
+// CachedImages reports the images available on this node, with the size and
+// digest of each.
+func (r *FCRuntime) CachedImages() (map[string]image.CachedImage, error) {
 	if r.Images == nil {
 		return nil, errors.New("fc: no image provider")
 	}

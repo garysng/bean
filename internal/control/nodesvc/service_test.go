@@ -252,3 +252,178 @@ func TestRegisterWithoutBootstrapTokenAllowsAny(t *testing.T) {
 		t.Errorf("err = %v", err)
 	}
 }
+
+// nodeImages reads back what the control plane recorded for a node.
+func nodeImages(t *testing.T, st *store.Store, nodeID string) map[string]store.CachedImage {
+	t.Helper()
+	nodes, err := st.LoadNodes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, n := range nodes {
+		if n.ID == nodeID {
+			return n.CachedImages
+		}
+	}
+	t.Fatalf("node %s not found", nodeID)
+	return nil
+}
+
+func TestUpdateNodeStatusRecordsImagesWithDigests(t *testing.T) {
+	c, st, _ := start(t, Options{BootstrapToken: "boot-tok"})
+	ctx := context.Background()
+	reg, err := c.Register(ctx, regReq("n1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	const digest = "sha256:2222222222222222222222222222222222222222222222222222222222222222"
+	if _, err := c.UpdateNodeStatus(ctx, &nodev1.UpdateNodeStatusRequest{
+		NodeId:    "n1",
+		NodeToken: reg.NodeToken,
+		Images: &nodev1.ImageInventory{Images: map[string]*nodev1.CachedImage{
+			"python:3.12": {SizeBytes: 1 << 30, Digest: digest},
+		}},
+	}); err != nil {
+		t.Fatalf("UpdateNodeStatus: %v", err)
+	}
+
+	got := nodeImages(t, st, "n1")
+	img, ok := got["python:3.12"]
+	if !ok {
+		t.Fatalf("image not recorded: %v", got)
+	}
+	if img.SizeBytes != 1<<30 {
+		t.Errorf("size = %d, want %d", img.SizeBytes, int64(1)<<30)
+	}
+	// The digest is the whole reason this RPC carries more than a size: a warm
+	// snapshot keyed on a tag would serve an environment captured from whatever the
+	// tag used to name.
+	if img.Digest != digest {
+		t.Errorf("digest = %q, want %q", img.Digest, digest)
+	}
+}
+
+// TestUpdateNodeStatusWithNoCategoryLeavesImagesAlone is the property the
+// optional fields exist for. A node reporting some other category on its own must
+// not read as a node that has dropped every image -- that would clear affinity
+// intermittently, which is the hardest kind of scheduling bug to attribute.
+func TestUpdateNodeStatusWithNoCategoryLeavesImagesAlone(t *testing.T) {
+	c, st, _ := start(t, Options{BootstrapToken: "boot-tok"})
+	ctx := context.Background()
+	reg, err := c.Register(ctx, regReq("n1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.UpdateNodeStatus(ctx, &nodev1.UpdateNodeStatusRequest{
+		NodeId:    "n1",
+		NodeToken: reg.NodeToken,
+		Images: &nodev1.ImageInventory{Images: map[string]*nodev1.CachedImage{
+			"keepme:1": {SizeBytes: 42},
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Images absent entirely, which is what a report about another category looks
+	// like.
+	if _, err := c.UpdateNodeStatus(ctx, &nodev1.UpdateNodeStatusRequest{
+		NodeId:    "n1",
+		NodeToken: reg.NodeToken,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := nodeImages(t, st, "n1"); len(got) != 1 || got["keepme:1"].SizeBytes != 42 {
+		t.Errorf("a report with no image category changed the inventory: %v", got)
+	}
+}
+
+// TestUpdateNodeStatusWithEmptyInventoryClearsImages is the other half. An empty
+// inventory is a node saying it holds nothing, which is different from saying
+// nothing -- and it has to be honoured or a node that evicted everything would
+// keep attracting work it has to pull for.
+func TestUpdateNodeStatusWithEmptyInventoryClearsImages(t *testing.T) {
+	c, st, _ := start(t, Options{BootstrapToken: "boot-tok"})
+	ctx := context.Background()
+	reg, err := c.Register(ctx, regReq("n1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.UpdateNodeStatus(ctx, &nodev1.UpdateNodeStatusRequest{
+		NodeId:    "n1",
+		NodeToken: reg.NodeToken,
+		Images: &nodev1.ImageInventory{Images: map[string]*nodev1.CachedImage{
+			"gone:1": {SizeBytes: 42},
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.UpdateNodeStatus(ctx, &nodev1.UpdateNodeStatusRequest{
+		NodeId:    "n1",
+		NodeToken: reg.NodeToken,
+		Images:    &nodev1.ImageInventory{},
+	}); err != nil {
+		t.Fatal(err)
+	}
+	if got := nodeImages(t, st, "n1"); len(got) != 0 {
+		t.Errorf("an empty inventory did not clear the images: %v", got)
+	}
+}
+
+func TestUpdateNodeStatusRejectsBadToken(t *testing.T) {
+	c, _, _ := start(t, Options{BootstrapToken: "boot-tok"})
+	ctx := context.Background()
+	if _, err := c.Register(ctx, regReq("n1")); err != nil {
+		t.Fatal(err)
+	}
+	_, err := c.UpdateNodeStatus(ctx, &nodev1.UpdateNodeStatusRequest{
+		NodeId:    "n1",
+		NodeToken: "wrong",
+	})
+	if status.Code(err) != codes.Unauthenticated {
+		t.Errorf("err = %v, want Unauthenticated", err)
+	}
+}
+
+// TestHeartbeatDoesNotClearTheInventory guards the split itself. The heartbeat no
+// longer carries images, and the failure to avoid is it writing an empty map over
+// the inventory every few seconds -- which would leave affinity working only in
+// the window between a status report and the next heartbeat.
+func TestHeartbeatDoesNotClearTheInventory(t *testing.T) {
+	c, st, _ := start(t, Options{BootstrapToken: "boot-tok"})
+	ctx := context.Background()
+	reg, err := c.Register(ctx, regReq("n1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.UpdateNodeStatus(ctx, &nodev1.UpdateNodeStatusRequest{
+		NodeId:    "n1",
+		NodeToken: reg.NodeToken,
+		Images: &nodev1.ImageInventory{Images: map[string]*nodev1.CachedImage{
+			"survives:1": {SizeBytes: 7},
+		}},
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	stream, err := c.Heartbeat(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 3; i++ {
+		if err := stream.Send(&nodev1.HeartbeatRequest{
+			NodeId: "n1", NodeToken: reg.NodeToken,
+			Usage: &nodev1.NodeUsage{DiskUsedMib: 10},
+		}); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := stream.Recv(); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	if got := nodeImages(t, st, "n1"); len(got) != 1 || got["survives:1"].SizeBytes != 7 {
+		t.Errorf("heartbeats clobbered the inventory: %v", got)
+	}
+}

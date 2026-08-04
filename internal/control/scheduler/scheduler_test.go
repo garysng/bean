@@ -25,7 +25,7 @@ func node(id string, cpu float64, memMiB int64, mut ...func(*store.NodeRecord)) 
 		ID: id, Region: "r1", Runtimes: []string{"fc"},
 		CPUAllocatable: cpu, MemoryAllocateMiB: memMiB,
 		DiskAllocateMiB: 1 << 20, GPUCount: 0,
-		CachedImages: map[string]int64{},
+		CachedImages: map[string]store.CachedImage{},
 		State:        NodeReady, LastHeartbeat: time.Now(),
 	}
 	for _, f := range mut {
@@ -198,7 +198,7 @@ func TestImageAffinityWins(t *testing.T) {
 	s, _ := newSched(t,
 		node("cold", 8, 8192),
 		node("warm", 8, 8192, func(n *store.NodeRecord) {
-			n.CachedImages = map[string]int64{"img:1": 1 << 30}
+			n.CachedImages = map[string]store.CachedImage{"img:1": {SizeBytes: 1 << 30}}
 		}),
 	)
 	got, err := s.Schedule(req("s1", 1, 512))
@@ -351,7 +351,7 @@ func TestLivenessTransitions(t *testing.T) {
 	}
 
 	// A heartbeat brings it back.
-	if err := st.TouchNode("n1", nil, 0); err != nil {
+	if err := st.TouchNode("n1", 0); err != nil {
 		t.Fatal(err)
 	}
 	got, _ = st.GetNode("n1")

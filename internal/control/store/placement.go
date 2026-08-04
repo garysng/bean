@@ -57,9 +57,13 @@ type NodeRecord struct {
 	CreateInFlight int `json:"createInFlight"`
 	MaxCreates     int `json:"maxCreates"`
 
-	// CachedImages maps image ref to cached bytes, for affinity scoring.
-	CachedImages map[string]int64 `json:"cachedImages,omitempty"`
-	NVMeCache    bool             `json:"nvmeCache"`
+	// CachedImages maps image ref to what the node reported about it: size for
+	// affinity scoring, digest for finding a warm snapshot.
+	//
+	// Reported by UpdateNodeStatus, not by the heartbeat. The node is the authority
+	// on its own caches.
+	CachedImages map[string]CachedImage `json:"cachedImages,omitempty"`
+	NVMeCache    bool                   `json:"nvmeCache"`
 
 	// CPUVendor, CPUFamily and CPUTemplate decide where a memory snapshot may be
 	// restored. A guest kernel branches on vendor and family, and no template can
@@ -195,8 +199,24 @@ func scanNode(sc rowScanner) (*NodeRecord, error) {
 	if err := unmarshalJSON(runtimes, &n.Runtimes); err != nil {
 		return nil, err
 	}
+	// Rows written before the value carried a digest hold a bare number where an
+	// object is now expected, so a failure to decode is repaired rather than
+	// returned. Refusing would make every node written by an older control plane
+	// unloadable, which takes the whole cluster's placement down on upgrade; the
+	// worst case here is one node's affinity being empty until its next report,
+	// which arrives within the status interval.
 	if err := unmarshalJSON(cached, &n.CachedImages); err != nil {
-		return nil, err
+		var sizes map[string]int64
+		if err2 := unmarshalJSON(cached, &sizes); err2 != nil {
+			return nil, err
+		}
+		n.CachedImages = make(map[string]CachedImage, len(sizes))
+		for ref, size := range sizes {
+			// No digest: this row predates the field. Left empty rather than guessed,
+			// so a warm-snapshot lookup misses and boots instead of matching on
+			// something invented here.
+			n.CachedImages[ref] = CachedImage{SizeBytes: size}
+		}
 	}
 	n.LastHeartbeat = time.UnixMilli(hb)
 	return &n, nil
@@ -353,28 +373,52 @@ func (s *Store) SetNodeState(nodeID, state string) (bool, error) {
 	return n > 0, err
 }
 
+// CachedImage is what a node reported about one image it holds.
+type CachedImage struct {
+	// SizeBytes drives the scheduler's image-affinity term.
+	SizeBytes int64 `json:"sizeBytes"`
+	// Digest identifies the content independently of the tag it arrived under, and
+	// is empty for an image with no manifest or one reported before this existed.
+	//
+	// It is what a warm snapshot must be keyed on: a tag that has moved names
+	// different content, and serving a snapshot captured from the old content
+	// restores successfully into the wrong environment.
+	Digest string `json:"digest,omitempty"`
+}
+
+// PutNodeImages replaces a node's image inventory.
+//
+// A full replacement rather than a merge, because the node sends its complete set
+// and is the authority on it: merging would keep an image the node has since
+// evicted, and the scheduler would keep sending work to a node that has to pull.
+//
+// Separate from TouchNode so a lease renewal and an inventory report cannot
+// interfere. They used to share the heartbeat, which meant this JSON blob was
+// re-serialised and rewritten every few seconds for a value that rarely changes.
+func (s *Store) PutNodeImages(nodeID string, images map[string]CachedImage) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	cached, err := marshalJSON(images)
+	if err != nil {
+		return err
+	}
+	_, err = s.db.Exec(`UPDATE nodes SET cached_images=? WHERE id=?`, cached, nodeID)
+	return err
+}
+
 // TouchNode records a heartbeat and clears a non-terminal doubt state.
 // diskUsedMiB is recorded from the same heartbeat, and a zero is written through
 // rather than skipped: a node that stops being able to measure itself should read
 // as "not reported" instead of holding its last known figure forever.
-func (s *Store) TouchNode(nodeID string, cachedImages map[string]int64, diskUsedMiB int64) error {
+//
+// The image inventory is deliberately not here; see PutNodeImages.
+func (s *Store) TouchNode(nodeID string, diskUsedMiB int64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	if cachedImages == nil {
-		_, err := s.db.Exec(`
+	_, err := s.db.Exec(`
 UPDATE nodes SET last_heartbeat=?, disk_used_mib=?,
   state = CASE WHEN state IN ('SUSPECT','LOST') THEN 'READY' ELSE state END
 WHERE id=?`, time.Now().UnixMilli(), diskUsedMiB, nodeID)
-		return err
-	}
-	cached, err := marshalJSON(cachedImages)
-	if err != nil {
-		return err
-	}
-	_, err = s.db.Exec(`
-UPDATE nodes SET last_heartbeat=?, cached_images=?, disk_used_mib=?,
-  state = CASE WHEN state IN ('SUSPECT','LOST') THEN 'READY' ELSE state END
-WHERE id=?`, time.Now().UnixMilli(), cached, diskUsedMiB, nodeID)
 	return err
 }
 
