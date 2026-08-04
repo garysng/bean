@@ -126,7 +126,13 @@ func (b *Builder) Build(ctx context.Context, req BuildRequest) (path string, err
 		size = b.sizeForTar(rootfsTar)
 	}
 
-	return writeBaseImage(b.ImageDir, b.WorkDir, req.Tag, "", size, func(root string) error {
+	// No config recorded: buildctl is asked for `type=tar`, a flat rootfs, which
+	// carries filesystem content and no image metadata -- so the Dockerfile's ENV
+	// and ENTRYPOINT are not available at this point. A sandbox from a built image
+	// therefore runs what the caller asks for and nothing implicit. Recovering them
+	// means exporting an OCI image from the builder rather than a tar, which changes
+	// how base images are assembled and is deliberately not bundled in here.
+	return writeBaseImage(b.ImageDir, b.WorkDir, req.Tag, "", nil, size, func(root string) error {
 		f, err := os.Open(rootfsTar)
 		if err != nil {
 			return fmt.Errorf("image: open build output: %w", err)

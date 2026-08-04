@@ -176,7 +176,8 @@ local 档跑宿主进程,没有「缓存镜像」这个概念,让它 stub 掉四
 
 | 项 | 兼容性 | 说明 |
 |---|---|---|
-| ENV/ENTRYPOINT/CMD/USER/WORKDIR | ✅ | agent 按 image config 复刻，与容器档同一份代码 |
+| ENV/ENTRYPOINT/CMD/WORKDIR | ✅ | 转换时记录在镜像旁，创建时与请求合并;规则见 [image-pipeline §5](image-pipeline.md) |
+| USER | 📐 | 已记录并携带，**未生效** —— 一切仍以 root 运行。需要在子进程里 fork-then-setuid，并读 guest 的 `/etc/passwd`，见 image-pipeline §5 |
 | 文件系统/权限/uid-gid | ✅ | 块设备原样挂载 |
 | /proc /sys /dev | ✅ | 真内核，比 gVisor 模拟更全 |
 | 动态链接/glibc/musl | ✅ | 用户态不变 |

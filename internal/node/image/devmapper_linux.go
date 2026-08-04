@@ -352,3 +352,8 @@ func run(name string, args ...string) error {
 func (p *DevMapperProvider) Digest(imageRef string) (string, error) {
 	return digestOf(p.ImageDir, imageRef)
 }
+
+// Config reports the image configuration this node recorded.
+func (p *DevMapperProvider) Config(imageRef string) (*Config, error) {
+	return cachedConfig(p.ImageDir, imageRef)
+}

@@ -66,7 +66,18 @@ func (c *Converter) Convert(ctx context.Context, imageRef string) (path string, 
 		return "", err
 	}
 
-	return writeBaseImage(c.ImageDir, c.WorkDir, imageRef, manifest.Digest, c.sizeFor(manifest),
+	// The config blob describes how to start the image -- ENV, ENTRYPOINT, CMD,
+	// WORKDIR -- and none of it lives in the layers, so flattening them loses it
+	// entirely. Fetched here and recorded beside the image because this is the only
+	// moment a registry is in reach: a later create reads a local file, and going
+	// back to the registry then would ask what the tag points at now rather than
+	// what this file was built from.
+	cfg, err := c.Registry.FetchConfig(ctx, ref, manifest)
+	if err != nil {
+		return "", err
+	}
+
+	return writeBaseImage(c.ImageDir, c.WorkDir, imageRef, manifest.Digest, cfg, c.sizeFor(manifest),
 		func(root string) error {
 			for i, layer := range manifest.Layers {
 				if err := c.applyLayer(ctx, ref, layer, root); err != nil {

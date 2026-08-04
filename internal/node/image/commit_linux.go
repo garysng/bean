@@ -39,13 +39,30 @@ type Committer struct {
 // not the copy-on-write store. Reading through it is what makes this correct
 // regardless of how the provider assembled it: a copy-on-write device, a plain
 // file, or something later.
-func (c *Committer) Commit(ctx context.Context, device, tag string) (path string, err error) {
+// sourceRef is the image the sandbox was started from, or "" if it is unknown. Its
+// recorded config is carried forward onto the commit, because committing changes a
+// filesystem and not the way the environment starts: an image committed from
+// python:3.12 should still know its PATH and its interpreter entrypoint. Losing it
+// would make `commit` quietly produce an image less usable than the one it came
+// from, and the difference would only show when something tried to start it.
+func (c *Committer) Commit(ctx context.Context, device, tag, sourceRef string) (path string, err error) {
 	if device == "" {
 		return "", errors.New("image: rootfs device required")
 	}
 	name, err := refToFilename(tag)
 	if err != nil {
 		return "", err
+	}
+
+	// A source whose config cannot be read is not fatal: the commit is still a
+	// usable image, just one that starts nothing implicitly. Failing the whole
+	// operation would lose the sandbox's filesystem over metadata.
+	var cfg *Config
+	if sourceRef != "" {
+		cfg, err = cachedConfig(c.ImageDir, sourceRef)
+		if err != nil {
+			return "", err
+		}
 	}
 
 	final := filepath.Join(c.ImageDir, name+imageSuffix)
@@ -87,7 +104,7 @@ func (c *Committer) Commit(ctx context.Context, device, tag string) (path string
 	if err = os.Rename(tmpPath, final); err != nil {
 		return "", fmt.Errorf("image: publish committed image: %w", err)
 	}
-	if err = recordRef(c.ImageDir, tag, ""); err != nil {
+	if err = recordRef(c.ImageDir, tag, "", cfg); err != nil {
 		return "", fmt.Errorf("image: record reference: %w", err)
 	}
 	return final, nil

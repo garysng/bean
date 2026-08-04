@@ -182,7 +182,8 @@ overlaybd 组装镜像块设备：base 层（lazy-pull S3）+ overlaybd 可写�
 disk-diff 直接取宿主 overlaybd 可写层、guest 内零 union 复杂度。
 
 - guest 内无容器层，"容器"只剩镜像格式；镜像零转换的承诺不变
-- 兼容性：ENV/ENTRYPOINT 等 config 语义由 agent 复刻（与容器档同一份代码）；
+- 兼容性：ENV/ENTRYPOINT/CMD/WORKDIR 在镜像转换时记录在镜像旁，启动用户进程时
+  与创建请求合并（规则见 [image-pipeline.md](image-pipeline.md) §5）；USER 已记录但尚未生效。
   guest 是完整真实 Linux 内核，兼容性优于 gVisor 模拟层。唯一差异：内核
   由平台统一打包提供（非宿主内核），对纯用户态 eval 负载无感。
   详见 noded-design.md fcRuntime 节

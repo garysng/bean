@@ -19,13 +19,15 @@ PullingProvider          缺镜像时触发转换,并发去重
 `PullingProvider` 包着任意一个内层实现,所以「首次使用时拉取」这个行为
 不需要在每个块设备后端里重复实现;换 overlaybd 后端时它也不用改。
 
-`Provider` 接口只有四个方法:
+`Provider` 接口很小 —— 组设备,加上上报节点持有什么:
 
 ```go
 Name() string
 Prepare(ctx, sandboxID, imageRef string, opts PrepareOptions) (*Rootfs, error)
 Prewarm(ctx, imageRef string) error
-Cached() (map[string]int64, error)
+Cached() (map[string]CachedImage, error)
+Config(imageRef string) (*Config, error)   // §5
+Digest(imageRef string) (string, error)
 ```
 
 `Cached()` 存在是因为**节点是它自己持有什么的唯一权威** —— 心跳上报这份清单,
@@ -186,7 +188,75 @@ alpine    2m45s(网络不稳时)
 镜像亲和调度是同一个问题的另一面:同一镜像的重复 eval run 应该落到已有它的节点上。
 这条已实装(`Cached()` → 心跳 → 调度打分)。
 
-## 5. commit:反向路径 ✅
+## 5. 镜像配置:ENV / ENTRYPOINT / CMD / WORKDIR ✅
+
+一个镜像是两样东西:层,以及描述「怎么启动这些层」的 config blob。上面的转换处理了前者、
+**丢掉了后者**——把层拍平成 ext4 不携带任何元数据。所以 config 必须走另一条路,
+而缺了这条路时,依赖自身 `ENV` 或 `WORKDIR` 的镜像会启动错误,且任何地方都不报错。
+
+这条路分两半,因为 registry 只在转换时可达、创建时不可达:
+
+```
+convert  FetchConfig(manifest.Config.Digest)  → Config{Env,Entrypoint,Cmd,WorkingDir,User}
+             │                                    写进 .ref sidecar
+             ▼
+create   Provider.Config(ref) → *Config    ┐
+         spec.Cmd / spec.Env               ├→ MergeConfig → Process{Argv,Env,Workdir,User}
+                                           ┘        │
+                                    StartUserProcessRequest → beand exec
+```
+
+写进与 ref、digest 同一个 `.ref` sidecar 而非另开文件:这样一次原子写就发布了节点关于
+这个镜像知道的全部信息,读者也不可能看到两者互相矛盾。
+
+### 字段对应关系
+
+| OCI config | 落到哪里 | 状态 |
+|---|---|---|
+| `Env` | 作为底,被请求的 env 按 key 覆盖 | ✅ |
+| `Entrypoint` | `Argv` 头部,**永远保留** | ✅ |
+| `Cmd` | `Argv` 尾部,请求带 cmd 时被替换 | ✅ |
+| `WorkingDir` | `Workdir`,请求未指定时使用 | ✅ |
+| `User` | 记录在 `Process` 上,**未生效** | 📐 |
+| `VOLUME` / `EXPOSE` / `HEALTHCHECK` | 忽略 / 仅元数据 / 不执行 | ➖ 与容器运行时一致 |
+
+### 合并规则,以及最容易搞错的那条
+
+```
+Argv     = Entrypoint ++ (request.Cmd 非空则用它,否则用 image.Cmd)
+Env      = image.Env 作底,request.Env 按 key 覆盖
+Workdir  = request.Workdir,否则 image.WorkingDir,否则 agent 默认值
+```
+
+**请求的命令替换 `Cmd`,但不动 `Entrypoint`。** 这正是
+`docker run python:3.12 -c 'print(1)'` 能把参数传给解释器、而不是去 exec `-c` 的原因。
+两个一起覆盖的写法,在所有 `Entrypoint` 为空的镜像上看起来都对——而那恰好是大家测试时
+最常用的那批——却会在声明了 `Entrypoint` 的镜像上出错。`config_test.go` 的表驱动测试
+专门钉住了这个 case。
+
+Env 按 key 合并而非整体替换,理由同源:镜像的 `PATH` 和调用方多加的一个变量都得活下来,
+不能要求调用方为了加一个变量就把镜像的整个环境重写一遍。
+
+### 不同镜像来源的 config
+
+| 来源 | config | 原因 |
+|---|---|---|
+| registry 拉取 | 来自 config blob | 转换时抓取 |
+| `commit` | 从源镜像继承 | commit 改的是文件系统,不是环境的启动方式 |
+| `build` | **没有** 📐 | buildctl 被要求导出 `type=tar` 扁平 rootfs,不含镜像元数据;要拿到 Dockerfile 的 `ENV`/`ENTRYPOINT` 得改成从 builder 导出 OCI 镜像 |
+
+没有 config 时读回来是 `nil`,而不是空的 `Config`;`nil` 的含义是「只按请求启动」——
+也就是记录 config 之前所有镜像的行为。区分两者有意义:空 `Config` 会声称
+「这个镜像确实没有 entrypoint」。
+
+### `User` 已记录但未生效 📐
+
+值存下来了、也到了 `Process`,但一切仍以 root 运行。它无法在其余字段生效的地方生效:
+beand 是 PID 1,降低自己的 uid 就会失去之后 exec 任何东西的能力——必须在子进程里做。
+而解析 `nobody` 这类名字还需要 guest 自己的 `/etc/passwd`,那要等 pivot 到镜像 rootfs
+之后才存在。所以这是一个独立改动,不是漏掉的一行。
+
+## 6. commit:反向路径 ✅
 
 `commit` 把运行中 sandbox 的文件系统封成新的 base 镜像。
 
@@ -197,7 +267,7 @@ alpine    2m45s(网络不稳时)
 代价:commit 产物是全量镜像而非增量。overlaybd 接入后可以改成
 `overlaybd-commit` seal LSMT 可写层 —— 那才是真正的零转换(image-build §2)。
 
-## 6. 与 overlaybd 的关系 ⚠️
+## 7. 与 overlaybd 的关系 ⚠️
 
 **能力已实测跑通,尚未接入代码。** 现状与目标形态的差别:
 
@@ -218,7 +288,7 @@ registry 推送、生命周期。两个只有真机能发现的陷阱记在 deci
 LUN 必须在 nexus 之后链接,以及每个 backstore 必须设唯一 `vpd_unit_serial`
 否则宿主 `multipathd` 会合并不同镜像的设备并**静默返回错误数据**。
 
-## 7. 还没有的 📐
+## 8. 还没有的 📐
 
 - **缓存回收**:`ImageDir` 里的 base 镜像不自动清理。设计里有镜像粒度 LRU +
   chunk LRU(noded-design §4.2),零实现。长期跑会填满磁盘

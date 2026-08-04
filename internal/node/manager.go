@@ -213,17 +213,66 @@ func (m *Manager) Create(ctx context.Context, spec *nodev1.SandboxSpec) (*Sandbo
 	outcome = "success"
 
 	if spec.AutoStartCmd {
-		// Fire-and-forget: replay of the image entrypoint. In localRuntime
-		// dev mode the image config is not resolved; spec.Cmd is used.
-		if len(spec.Cmd) > 0 {
-			_, err := agentv1.NewAgentServiceClient(conn).StartUserProcess(ctx,
-				&agentv1.StartUserProcessRequest{Cmd: spec.Cmd, Env: spec.Env})
-			if err != nil {
-				slog.Error("autoStartCmd failed", logging.KeySandbox, spec.SandboxId, logging.KeyError, err)
-			}
-		}
+		m.startUserProcess(ctx, conn, spec)
 	}
 	return sb, nil
+}
+
+// startUserProcess starts what the image and the request together say to run.
+//
+// The image's own configuration is the reason this is not simply a call with the
+// request's fields: an image declares ENV, ENTRYPOINT, CMD and WORKDIR, and an
+// image whose config is ignored starts in the wrong directory or without the PATH
+// its entrypoint expects. That failure is silent -- the process starts, and only
+// its behaviour is wrong -- so it is worth resolving even though nothing errors
+// when it is skipped.
+//
+// Fire-and-forget: a failure to start the user process is logged and does not fail
+// the create, because the sandbox itself is up and exec still works. That was the
+// behaviour before and callers depend on it.
+func (m *Manager) startUserProcess(ctx context.Context, conn *grpc.ClientConn, spec *nodev1.SandboxSpec) {
+	proc, err := m.resolveProcess(spec)
+	if err != nil {
+		slog.Error("autoStartCmd config unreadable", logging.KeySandbox, spec.SandboxId,
+			logging.KeyError, err)
+		return
+	}
+	// Nothing to start is not a failure. An image with no Entrypoint or Cmd and a
+	// request that names none is a sandbox meant to be driven by exec.
+	if len(proc.Argv) == 0 {
+		return
+	}
+
+	// Argv is sent as Cmd with Entrypoint empty rather than split back apart: the
+	// merge has already applied the rule that distinguishes them, and the agent
+	// concatenates the two in the same order (beand/server.go). Splitting here would
+	// mean two places had to agree on where the boundary fell.
+	_, err = agentv1.NewAgentServiceClient(conn).StartUserProcess(ctx,
+		&agentv1.StartUserProcessRequest{
+			Cmd:     proc.Argv,
+			Env:     proc.Env,
+			Workdir: proc.Workdir,
+		})
+	if err != nil {
+		slog.Error("autoStartCmd failed", logging.KeySandbox, spec.SandboxId, logging.KeyError, err)
+	}
+}
+
+// resolveProcess merges the image's recorded configuration with the request.
+//
+// A runtime that cannot report image configs -- the local dev tier, which runs a
+// host binary and has no image -- yields the request alone, which is what it did
+// before configs were recorded.
+func (m *Manager) resolveProcess(spec *nodev1.SandboxSpec) (image.Process, error) {
+	reader, ok := m.rt.(runtime.ImageConfigReader)
+	if !ok {
+		return image.MergeConfig(nil, spec.Cmd, spec.Env, ""), nil
+	}
+	cfg, err := reader.ImageConfig(spec.GetImage())
+	if err != nil {
+		return image.Process{}, err
+	}
+	return image.MergeConfig(cfg, spec.Cmd, spec.Env, ""), nil
 }
 
 func waitHealthy(ctx context.Context, conn *grpc.ClientConn, timeout time.Duration) error {
