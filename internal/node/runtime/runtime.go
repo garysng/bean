@@ -53,6 +53,16 @@ type Spec struct {
 	// only the caller that reserved that index knows which one this sandbox got.
 	// Everything else here is per-sandbox for the same reason.
 	Network *network.Layout
+
+	// AgentTokenHash is what the guest should expect from callers of its agent. It
+	// is published through the metadata service, which the sandbox's own root can
+	// read -- hence the hash rather than the token, which is enough to verify one
+	// that is presented and useless for constructing one.
+	//
+	// Empty leaves the agent unauthenticated, which is correct only where reaching
+	// it does not depend on a credential: the container runtime's agent listens on a
+	// Unix socket outside the sandbox's mount namespace.
+	AgentTokenHash string
 }
 
 // Handle represents a created sandbox instance.

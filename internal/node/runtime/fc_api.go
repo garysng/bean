@@ -143,6 +143,33 @@ type fcNetworkInterface struct {
 	MTU int `json:"mtu,omitempty"`
 }
 
+// fcMmdsConfig binds the metadata service to the interfaces that may reach it.
+//
+// This is boot configuration -- it has to be set before InstanceStart, and it is
+// carried inside a snapshot -- whereas the contents (fcMmds) can be written at any
+// time. The split matters on the restore path, which rejects boot-specific
+// configuration but still needs to hand a restored guest a fresh token.
+type fcMmdsConfig struct {
+	// V2 requires the guest to obtain a session token via PUT before it may read,
+	// which is what stops a stray GET from an unrelated process in the guest --
+	// including one following a redirect it did not choose -- from reading the
+	// metadata. V1 answers a bare GET.
+	Version string `json:"version"`
+	// Only the sandbox's own interface. MMDS is reachable from whatever is listed
+	// here, so listing more than the one interface would widen who can ask.
+	NetworkInterfaces []string `json:"network_interfaces"`
+}
+
+// fcMmds is the metadata document handed to the guest.
+//
+// It carries the *hash* of the agent's token, never the token itself: the guest can
+// read this document, so anything in it is readable by the sandbox's own root. A hash
+// is enough for the agent to verify a token presented to it by noded, and useless for
+// constructing one.
+type fcMmds struct {
+	AgentTokenHash string `json:"agentTokenHash,omitempty"`
+}
+
 type fcAction struct {
 	ActionType string `json:"action_type"`
 }

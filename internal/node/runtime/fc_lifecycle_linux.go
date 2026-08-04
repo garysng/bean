@@ -539,6 +539,24 @@ func (r *FCRuntime) loadSnapshot(ctx context.Context, vm *fcVM, spec *Spec, stag
 		return err
 	}
 	vm.dirtyPages = r.TrackDirtyPages
+
+	// Written after the load, and necessarily so: the snapshot carries whatever hash
+	// was published to the machine that produced it, and a restored sandbox is a
+	// different sandbox that must not accept its ancestor's token. This is the point
+	// of the split between /mmds/config (pre-boot, carried in the snapshot) and
+	// /mmds (contents, per restore).
+	//
+	// The guest is already running by the time this returns, because the load above
+	// resumes it. That is not a race, because the agent reads the hash when it is
+	// handed a token rather than at startup: a restored agent was started long ago,
+	// under a hash that no longer applies, so reading at startup would be reading
+	// the wrong value no matter when this write landed.
+	if spec.AgentTokenHash != "" {
+		if err := vm.client.put(ctx, "/mmds",
+			fcMmds{AgentTokenHash: spec.AgentTokenHash}); err != nil {
+			return fmt.Errorf("publish the agent token hash after restore: %w", err)
+		}
+	}
 	return nil
 }
 

@@ -463,8 +463,37 @@ noded → agent：vsock（fc 主路径;容器档 unix socket,P5）
 
 ## 6. bean-proxy（端口反代服务）📐
 
-> **整节未实现**,`cmd/bean-proxy` 不存在。它依赖 sandbox 有网络地址,
-> 而网络栈也未实现(noded-design §5)。下面是设计意图。
+> **整节未实现**,`cmd/bean-proxy` 不存在。它依赖的网络栈现在已经建好
+> (network.md),所以剩下的阻塞是这个 proxy 本身,而不是它下面的地址层。
+
+### 6.0 两件不同的事想用同一个二进制 ⚠️
+
+本节设计的是**端口暴露**:浏览器访问 sandbox 内的一个端口。
+[GitHub #27](https://github.com/garysng/bean/issues/27) 要的是另一件会住在同一进程里的事
+—— 把 **exec 与文件流量**移出控制面 —— 混淆两者已经导致过一次错误的方案,所以把区别记在这里。
+
+| | 端口暴露(本节) | 数据面(#27) |
+|---|---|---|
+| 谁在调用 | 浏览器,任意 HTTP | SDK 与 CLI |
+| 如何寻址 | `{sbxId}-{port}.{region}...` 域名 | 现有的 REST 路径 |
+| 终点 | sandbox 自己的 IP:port | noded,再由它转给 agent |
+| 存在理由 | 让端口可达 | 让批量字节离开调度器所在的进程 |
+
+**第二件事更强的理由不是负载。** `SandboxService` 把 `DestroySandbox`、
+`SnapshotSandbox`、`CommitSandbox` 和 `Exec`、`ReadFile`、`WriteFile` 放在同一个服务里,
+共用一个 `--node-token`。所以"让客户端直连 noded"不是一个带性能收益的路由改动 ——
+它会把"销毁节点上任何沙箱"的能力交给每一个调用方。一个持有该 token、且**只**转发数据面方法的
+proxy,才是收窄这个接口的办法;字节路径是次要收益。
+
+e2b 从另一个方向到了同一个形状:`packages/client-proxy` 把 sandbox 解析到它所在的 node 再转发,
+而且它携带 `trafficAccessToken` 与 `envdAccessToken` 两个**分开的**凭据,而不是一个集群密钥
+(`internal/proxy/proxy.go`)。他们的 orchestrator 也监听自己的 proxy 端口(5007),
+而不是把控制面 RPC 暴露给客户端。
+
+**noded 到底需不需要认证**,取决于它监听在哪 —— 而今天的答案与 dockerd 相同:
+`cmd/noded/main.go` 在非 loopback 地址上没有 token 就拒绝启动,在 loopback 上则什么都不要求。
+网络位置替代了认证,正如 unix socket 对 Docker daemon 所做的那样。只要 noded 不被客户端直连,
+这就是自洽的 —— 而那正是数据面不能破坏的不变量。
 
 
 独立无状态服务，可与 gateway 合部或水平扩展。

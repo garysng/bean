@@ -510,9 +510,45 @@ unwakeable states such as PULLING/STOPPING → 409 SANDBOX_NOT_RUNNING.
 
 ## 6. bean-proxy (port reverse-proxy service) 📐
 
-> **The entire section is unimplemented**; `cmd/bean-proxy` does not exist. It depends on
-> the sandbox having a network address, and the network stack is unimplemented too
-> (noded-design §5). What follows is design intent.
+> **The entire section is unimplemented**; `cmd/bean-proxy` does not exist. The network
+> stack it depends on is now built (network.md), so the remaining blocker is the proxy
+> itself rather than the addressing beneath it.
+
+### 6.0 Two different things want the same binary ⚠️
+
+This section designs **port exposure**: a browser reaching a port inside a sandbox.
+[GitHub #27](https://github.com/garysng/bean/issues/27) asks for something else that
+would live in the same process -- moving **exec and file traffic** off the control
+plane -- and conflating them has already produced one wrong plan, so the difference is
+recorded here.
+
+| | port exposure (this section) | data plane (#27) |
+|---|---|---|
+| Who calls | a browser, arbitrary HTTP | the SDK and CLI |
+| Addressed by | `{sbxId}-{port}.{region}...` hostname | the existing REST paths |
+| Terminates at | the sandbox's own IP:port | noded, which relays to the agent |
+| Exists to | make a port reachable at all | keep bulk bytes out of the scheduler's process |
+
+**The stronger reason for the second one is not load.** `SandboxService` puts
+`DestroySandbox`, `SnapshotSandbox` and `CommitSandbox` in the same service as
+`Exec`, `ReadFile` and `WriteFile`, behind one shared `--node-token`. So "let clients
+reach noded directly" is not a routing change with a performance benefit -- it would
+hand every caller the ability to destroy any sandbox on the node. A proxy holding that
+token and forwarding **only** the data-plane methods is how the interface gets narrowed;
+the byte path is the lesser gain.
+
+e2b arrives at the same shape from the other direction: `packages/client-proxy` resolves
+a sandbox to its node and forwards, and it carries `trafficAccessToken` and
+`envdAccessToken` as *separate* credentials rather than one cluster secret
+(`internal/proxy/proxy.go`). Their orchestrator also listens on its own proxy port
+(5007) rather than exposing the control RPCs to clients.
+
+**Whether noded needs authentication at all** depends on where it listens, and the
+answer today is the same one dockerd gives: `cmd/noded/main.go` refuses to start on a
+non-loopback address without a token, and requires nothing on loopback. Network position
+substitutes for authentication, exactly as a unix socket does for the Docker daemon. That
+is coherent as long as noded is not client-reachable -- which is the invariant a data
+plane must not break.
 
 
 A standalone stateless service, co-deployable with the gateway or scaled horizontally.

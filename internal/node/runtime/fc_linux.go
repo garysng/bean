@@ -767,6 +767,32 @@ func (r *FCRuntime) configureAndBoot(ctx context.Context, vm *fcVM, spec *Spec) 
 			return fmt.Errorf("register network interface on tap %s: %w",
 				spec.Network.TapName, err)
 		}
+
+		// Bound to this one interface, and configured here because the binding is
+		// pre-boot state that a snapshot carries -- unlike the metadata contents,
+		// which are written per restore. Splitting them is what lets a restored
+		// guest be handed a fresh token without reconfiguring a booted machine.
+		//
+		// Inside the sandbox's namespace 169.254.169.254 is Firecracker's own
+		// service, not a cloud provider's: the guest has no route off its /30
+		// except through the tap, and the host filter drops the metadata range
+		// (see network/rules.go), so this address cannot reach anything else.
+		if err := vm.client.put(ctx, "/mmds/config", fcMmdsConfig{
+			Version:           "V2",
+			NetworkInterfaces: []string{guestIfaceID},
+		}); err != nil {
+			return fmt.Errorf("configure the metadata service: %w", err)
+		}
+	}
+
+	// Written before the machine starts so the agent can read it during its own
+	// startup. The agent gates every request on this value, so a guest that began
+	// running before it existed would answer requests it cannot yet authenticate.
+	if spec.AgentTokenHash != "" {
+		if err := vm.client.put(ctx, "/mmds",
+			fcMmds{AgentTokenHash: spec.AgentTokenHash}); err != nil {
+			return fmt.Errorf("publish the agent token hash: %w", err)
+		}
 	}
 
 	return vm.client.put(ctx, "/actions", fcAction{ActionType: "InstanceStart"})
