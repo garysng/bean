@@ -695,11 +695,26 @@ func (r *FCRuntime) configureAndBoot(ctx context.Context, vm *fcVM, spec *Spec) 
 	// Panic reboots are disabled so a crashed guest stays inspectable rather
 	// than looping.
 	//
-	// "quiet" rather than a serial console: writing to the 8250 UART is
-	// synchronous, so every log line the kernel emits stalls the boot. See
-	// DebugConsole for recovering the output when a guest will not start.
-	console := "quiet"
+	// A console is attached even in the default configuration, at a loglevel that
+	// carries errors and nothing else.
+	//
+	// "quiet" alone was the earlier choice, to avoid the 8250 UART's synchronous
+	// writes stalling the boot -- every line the kernel emits costs time. But it
+	// attaches no console device at all, so a guest that dies during boot writes its
+	// reason nowhere. Measured: a failing boot produced zero explanatory lines under
+	// quiet and the cause under console=ttyS0, while noded reported only "agent not
+	// healthy after 20s" either way. The console log then held Firecracker's own
+	// output, which describes the VMM's reaction rather than the guest's failure and
+	// reads like a hardware fault -- misleading in a way that silence is not.
+	//
+	// loglevel=3 is KERN_ERR and above, which excludes the several hundred lines of
+	// initialisation that made a full console expensive while keeping panics, mount
+	// failures and anything init prints on its way out. Measured at 1108-1119ms for a
+	// cold create before this change; the check below re-measures it.
+	console := "console=ttyS0 loglevel=3"
 	if r.DebugConsole {
+		// Everything, including the initialisation chatter, for the case where a
+		// guest fails before it reaches the point of logging an error.
 		console = "console=ttyS0"
 	}
 	bootArgs := fmt.Sprintf(

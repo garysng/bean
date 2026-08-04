@@ -1237,6 +1237,16 @@ func (m *Manager) connectAgent(ctx context.Context, handle *runtime.Handle) (*gr
 	m.observePhase(ctx, "agent_ready", time.Since(healthStart))
 	if err != nil {
 		conn.Close()
+		// A timeout here names the symptom and no cause. Every way a guest can fail
+		// to finish booting produces this same error -- a kernel that found no root
+		// device, an agent that rejected its own arguments, a misconfigured vsock, or
+		// a sandbox that is merely slow -- and the evidence that separates them is in
+		// the guest console, which the cleanup below is about to delete.
+		if d, ok := m.rt.(runtime.BootDiagnoser); ok {
+			if tail := d.BootLogTail(handle.SandboxID, 6); tail != "" {
+				return nil, fmt.Errorf("agent health: %w (guest console: %s)", err, tail)
+			}
+		}
 		return nil, fmt.Errorf("agent health: %w", err)
 	}
 	return conn, nil

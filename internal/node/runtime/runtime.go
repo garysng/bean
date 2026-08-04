@@ -107,6 +107,29 @@ type Runtime interface {
 	Fork(ctx context.Context, spec *Spec, layers []SnapshotLayer) (*Handle, error)
 }
 
+// BootDiagnoser reports what a sandbox's console said, for runtimes that have one.
+//
+// It exists because of a specific failure that cost an afternoon: the agent was
+// passed a flag it did not recognise, exited immediately, and the guest kernel
+// panicked with "Attempted to kill init!". What noded reported was "agent not
+// healthy after 20s" -- the timeout is the *symptom* of any guest that never
+// finishes booting, and it names none of them. The cause was one line of
+// console.log, on disk, in a directory the failure path then deleted.
+//
+// So this is not a convenience. A boot failure that leaves no diagnosis in the
+// error is indistinguishable from a slow boot, a broken vsock, an unbootable image
+// and a wrong kernel, and every one of those has been mistaken for another.
+//
+// Optional because only the microVM tier has a console at all; the container
+// runtime's agent failures surface through the container's own logs.
+type BootDiagnoser interface {
+	// BootLogTail returns the last few lines of the guest console, or "" if there
+	// is nothing to report. Errors are not returned: this is called on a path that
+	// is already failing, and a diagnostic that can itself fail the create would
+	// replace one confusing error with another.
+	BootLogTail(id string, lines int) string
+}
+
 // SnapshotLayer is one checkpoint in a restore chain.
 //
 // Order is the caller's contract and cannot be recovered from the data: a diff's
