@@ -5,8 +5,10 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"log"
 	"log/slog"
+	"os"
 
 	"google.golang.org/grpc"
 
@@ -29,7 +31,25 @@ func main() {
 			"127.0.0.53, which inside a guest names the guest")
 	logFormat := flag.String("log-format", "text", "log format: text|json")
 	logLevel := flag.String("log-level", "info", "log level: debug|info|warn|error")
-	flag.Parse()
+
+	// An unrecognised flag must not be fatal, because this process is PID 1 in a
+	// microVM and its arguments come from a noded that may be newer than the agent
+	// image on disk. Go's default is to print usage and exit(2); as init that is an
+	// immediate "Attempted to kill init!" panic, and the sandbox surfaces as an agent
+	// that never answered rather than as a version mismatch.
+	//
+	// Continuing is the safe direction here. The flags this could skip configure the
+	// guest's resolver and its listen address -- degradations, not privileges -- and
+	// an agent that boots without one is diagnosable, while a guest that panicked is
+	// only diagnosable if someone reads its console. A flag that ever grants
+	// something must not be added to this set.
+	flag.CommandLine.Init(os.Args[0], flag.ContinueOnError)
+	if err := flag.CommandLine.Parse(os.Args[1:]); err != nil {
+		fmt.Fprintf(os.Stderr,
+			"beand: ignoring unusable arguments (%v); this agent image predates a "+
+				"flag noded passed it, so the sandbox may lack what that flag configures\n",
+			err)
+	}
 
 	logging.Setup(*logFormat, *logLevel)
 
