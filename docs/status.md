@@ -27,15 +27,19 @@ guest kernel 6.1.102, Alpine 3.20.
 | Builds | ✅ | Dockerfile through BuildKit, and `commit` to freeze a running sandbox into a base image |
 | Snapshot cache eviction | ✅ | High/low watermarks with LRU, and the cache's size is reported |
 | Disk pressure | ✅ | Actual occupancy reported; a node stops admitting sandboxes below a floor |
+| Sandbox networking | ✅ | Per-sandbox namespace, tap, NAT egress. Metadata and RFC1918 denied by default, verified by rule counters on a live guest. `pip install` works |
+| Port exposure and the data plane | ✅ | One mechanism, not two: `{port}-{sandbox}` in the Host reaches that port in that guest, whether it is a user's server or the agent. No registration call and no host-port pool — noded enters the namespace and connects |
+| Per-sandbox agent credential | ✅ | The agent is on TCP so one addressing scheme covers it, which means the sandbox can dial it. A per-sandbox token whose hash reaches the guest through MMDS is what replaces the vsock guarantee; verified on hardware that the readable hash is not usable as a token (security-and-startup.md A7) |
 
 ## Not delivered
 
 | | | |
 |---|---|---|
-| **Networking** | 📐 | **Sandboxes have no network at all.** The `vsock` link to the agent is a control channel, not data. Design in [network.md](network.md); the address pool is built, the plumbing is not. **Largest gap** — SWE-bench-style tasks need `pip install` |
+| Cross-node sandbox networking | 📐 | A non-goal, not a gap. Sandbox-to-sandbox traffic does not cross nodes |
+| Per-port access control | 📐 | Any port on a sandbox is reachable by anything that can reach bean-proxy. A sandbox must not be given a port it would not want its caller to see (api-design.md §3.4) |
 | jailer / host cgroups | 📐 | The VMM runs as root in the host mount namespace. Hardware virtualisation is the boundary; defence in depth is thinner than it should be |
 | Container tiers (runc/gVisor) | 📐 | microVM, plus a no-isolation `local` tier for development, are the only options |
-| Volumes, port exposure, `fork` | 📐 | |
+| Volumes | 📐 | |
 | Host resource reconciliation | 📐 | A crashed noded leaves dm mappings and sandbox directories behind |
 | Postgres | ⚠️ | SQLite in use. There is no `Store` interface — `*store.Store` is a concrete type at every call site. What is true is that `database/sql` and the driver import appear only inside `internal/control/store`, so the SQL boundary is contained in one package; swapping the engine means changing that package, not extracting it from callers |
 | Build logs and cancellation | ⚠️ | A build reports no progress and cannot be stopped |

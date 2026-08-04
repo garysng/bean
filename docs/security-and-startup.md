@@ -195,8 +195,21 @@ sandbox token (JWT): the signing key is held by the control plane, bound to sand
 
 ### A7. Controlling the agent's attack surface ✅
 
-- The only interface the agent exposes to processes inside the sandbox is the unix socket (container tier) / vsock (fc tier), both root-only (A5)
-- The agent runs as root (it has to setuid to the image's USER), but its API only accepts commands arriving from the noded-side socket — so even root inside the container can only invoke operations equivalent to its own privileges, with no privilege gain
+- **On a sandbox with no networking, the agent is unreachable from inside by construction.** The container tier's agent is on a unix socket outside the guest's mount namespace, and an fc sandbox without `--guest-subnet` is on vsock, which is a host-to-guest address family no guest process can dial. Neither depends on a credential.
+- **On a networked fc sandbox, that is no longer true, and a per-sandbox token is what replaces it.** The agent listens on TCP (`10001`) so that one addressing scheme covers both it and any port a user exposes — which is what makes port exposure and the data plane one mechanism. Any process in the sandbox can now connect: **measured**, a probe inside the guest reaches `127.0.0.1:10001` successfully.
+
+  What holds instead is a token minted per sandbox, whose **hash** is published to the guest through MMDS. Three properties matter, and all three were verified on hardware:
+
+  | Attempt from inside the sandbox | Result |
+  |---|---|
+  | No credential | `PermissionDenied` |
+  | A guessed credential | `PermissionDenied` |
+  | **The hash the guest can read from MMDS** | `PermissionDenied` |
+
+  The third row is the point: the guest can read `agentTokenHash` and still cannot construct a usable token. The token is per sandbox, so reading one out of a compromised sandbox yields nothing for any other sandbox or node.
+
+  Verification fails closed in all three directions — absent credential, unreadable metadata service, unpublished hash. The middle one matters most: a sandbox holding root can attempt to break its own metadata service with iptables, and treating "could not determine what to require" as "require nothing" would make that an attack rather than an outage.
+- The agent runs as root (it has to setuid to the image's USER), so even with the token, a caller can only invoke operations equivalent to the privileges the sandbox's occupant already holds — there is no privilege gain, only the loss of the structural guarantee above.
 - The agent binary is mounted read-only and cannot be replaced from inside the container
 - The noded side applies length/rate limits to agent responses, so a compromised agent cannot turn around and attack noded
 

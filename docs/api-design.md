@@ -2,7 +2,7 @@
 
 > 中文版:[zh/api-design.md](zh/api-design.md)
 
-> Corresponding components: `bean-api` (api-gateway, ✅), `bean-proxy` (port reverse proxy, 📐 unimplemented).
+> Corresponding components: `bean-api` (api-gateway, ✅), `bean-proxy` (reverse proxy into sandboxes, ✅).
 > The status-marker convention is defined in [architecture.md](architecture.md) §0.
 > Terminology and the state machine live in [architecture.md](architecture.md).
 
@@ -162,17 +162,34 @@ POST /sandboxes/{id}/files:downloadUrl {"path": "..."}
 DELETE /sandboxes/{id}/files?path=...
 ```
 
-### 3.4 Ports 📐
+### 3.4 Ports — no registration step ✅
 
-> Unimplemented; depends on the network stack and on bean-proxy.
+Reaching a port inside a sandbox works, and it takes **no API call at all**. The port
+travels in the Host header (`{port}-{sandbox}`, §6) and bean-proxy forwards to it. A
+process listening in the sandbox is reachable; one that is not returns 502.
 
+The design below was drafted first and is **not** built, deliberately:
 
 ```
-POST /sandboxes/{id}/ports    { "port": 8888, "auth": "token" }   // token|public
-→ { "url": "https://sbx-abc123-8888.<region>.sandbox.<domain>" }
+POST /sandboxes/{id}/ports    { "port": 8888, "auth": "token" }
 GET    /sandboxes/{id}/ports
 DELETE /sandboxes/{id}/ports/{port}
 ```
+
+It would be a second source of truth for something the guest already decides. Whether a
+port is open is a fact about a process inside the sandbox, and a registry of intended
+ports can only agree or disagree with it -- with the disagreement showing up as a URL
+that resolves to nothing, or a working port the platform says is closed. Allocating
+nothing means there is no pool to rebuild after a restart, which was the other reason
+given for avoiding host ports.
+
+What is genuinely missing is **per-port access control** (`"auth": "token"` above). Today
+any port on a sandbox is reachable by anything that can reach the proxy, so a sandbox
+must not be given a port it would not want its caller to see. The external auth layer
+(A7) gates access to the sandbox, not to individual ports within it.
+
+`10001` is reserved -- it is the agent -- and anything mapping ports on a user's behalf
+must refuse it.
 
 ### 3.5 Images ✅
 
@@ -508,26 +525,34 @@ State semantics: PAUSED → triggers a transparent wake, and the request blocks 
 (only past the wake deadline, 10s by default, does it return 502 + Retry-After);
 unwakeable states such as PULLING/STOPPING → 409 SANDBOX_NOT_RUNNING.
 
-## 6. bean-proxy (port reverse-proxy service) 📐
+## 6. bean-proxy (reverse proxy into sandboxes) ✅
 
-> **The entire section is unimplemented**; `cmd/bean-proxy` does not exist. The network
-> stack it depends on is now built (network.md), so the remaining blocker is the proxy
-> itself rather than the addressing beneath it.
+> Built: `cmd/bean-proxy`. Verified end to end on hardware -- a user's server and the
+> agent both reached through it, an unknown sandbox 404, a malformed Host 400.
 
-### 6.0 Two different things want the same binary ⚠️
+### 6.0 The two things turned out to be one ⚠️
 
-This section designs **port exposure**: a browser reaching a port inside a sandbox.
-[GitHub #27](https://github.com/garysng/bean/issues/27) asks for something else that
-would live in the same process -- moving **exec and file traffic** off the control
-plane -- and conflating them has already produced one wrong plan, so the difference is
-recorded here.
+This section originally designed **port exposure** (a browser reaching a port inside a
+sandbox) as separate from the **data plane** ([GitHub #27](https://github.com/garysng/bean/issues/27),
+moving exec and file traffic off the control plane), and warned that conflating them had
+already produced one wrong plan.
 
-| | port exposure (this section) | data plane (#27) |
+**The warning was right about the risk and wrong about the conclusion.** They are the
+same mechanism, and what unified them was moving the agent from vsock to a TCP port
+inside the guest: once the agent is *a port on the guest*, "reach the agent" and "reach
+the user's server on 8000" are the same request with a different number in the Host.
+
+| | as designed (two things) | as built (one thing) |
 |---|---|---|
-| Who calls | a browser, arbitrary HTTP | the SDK and CLI |
-| Addressed by | `{sbxId}-{port}.{region}...` hostname | the existing REST paths |
-| Terminates at | the sandbox's own IP:port | noded, which relays to the agent |
-| Exists to | make a port reachable at all | keep bulk bytes out of the scheduler's process |
+| Addressed by | hostname vs REST paths | `{port}-{sandbox}` for both |
+| Terminates at | the sandbox's IP:port vs noded relaying to the agent | the sandbox's IP:port, always |
+| Router must distinguish them | yes | **no** -- it forwards a port |
+
+The port order is `{port}-{sandbox}`, port first, matching e2b's `ParseHost`: a sandbox
+id is variable-length and may contain the separator, a port is neither.
+
+What the original reasoning got right is recorded below and still holds -- that the
+motivation is interface narrowing rather than load.
 
 **The stronger reason for the second one is not load.** `SandboxService` puts
 `DestroySandbox`, `SnapshotSandbox` and `CommitSandbox` in the same service as

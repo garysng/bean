@@ -176,10 +176,17 @@ Two layers because there are two address translations: guest segment → veth se
 MASQUERADE rules, and deleting one by mistake is catastrophic. So every rule matches precisely on
 `-s <this sandbox's /30>`, and deletion uses `-D` with the same arguments — never `-F`, not ever.
 
-**Ingress (DNAT) is not done.** What an eval task needs is egress (`pip install`, `git clone`),
-not being reachable from outside. Exposing a port is the `bean-proxy` route
-(architecture.md), going through the control plane rather than giving every sandbox a host port —
-the latter would make port allocation another pool that has to be rebuilt after a restart.
+**There is no DNAT, and ingress works anyway.** A port inside a sandbox is reachable from
+outside the node, but not by rewriting packet destinations: noded enters the sandbox's namespace
+and connects from there, so the guest address never has to be routable from anywhere else.
+
+That distinction is what avoids a cost. DNAT would need a rule per exposed port per sandbox plus
+a host-port pool to allocate from — another pool to rebuild after a restart, which is exactly
+what this design was trying not to add. Entering the namespace needs neither: the guest address
+is identical in every sandbox, and the namespace is what disambiguates.
+
+The route is `bean-proxy` → noded's forwarding port → the namespace → `172.31.0.2:{port}`, with
+`{port}` read from the Host header. See api-design.md §6.
 
 ## 5a. What MASQUERADE reaches that it must not 📐
 
