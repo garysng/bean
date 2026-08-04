@@ -27,6 +27,35 @@ NODE_METRICS_PORT=${NODE_METRICS_PORT:-17444}
 # a sandbox that is already running.
 NODED_FLAGS=${NODED_FLAGS:-}
 
+# Sandbox networking, off unless GUEST_SUBNET is set.
+#
+# Off by default because turning it on writes iptables rules into the host's own
+# tables, and this script is run on developer machines and shared hosts where that
+# is not a decision a convenience script should make silently.
+#
+# But off means sandboxes have no interface at all: no eth0, no routes, no egress.
+# Anything exercising the network path -- and anything reading the guest's resolver
+# or the metadata service -- passes locally for the wrong reason and is first
+# exercised on a real node. Set GUEST_SUBNET to a /30 (every sandbox sees the same
+# one, by design) and UPLINK to the interface holding the default route:
+#
+#   GUEST_SUBNET=172.31.0.0/30 UPLINK=eth0 ./hack/dev-fc-stack.sh
+#
+# noded refuses to start if the range is already routed on the host, so a collision
+# with Docker's bridges is a startup error rather than traffic quietly going to the
+# wrong place.
+GUEST_SUBNET=${GUEST_SUBNET:-}
+UPLINK=${UPLINK:-}
+GUEST_DNS=${GUEST_DNS:-}
+if [ -n "$GUEST_SUBNET" ]; then
+  if [ -z "$UPLINK" ]; then
+    echo "GUEST_SUBNET needs UPLINK: the MASQUERADE rule matches on it" >&2
+    exit 2
+  fi
+  NODED_FLAGS="$NODED_FLAGS --guest-subnet $GUEST_SUBNET --uplink $UPLINK"
+  [ -n "$GUEST_DNS" ] && NODED_FLAGS="$NODED_FLAGS --guest-dns $GUEST_DNS"
+fi
+
 # Extra gateway flags, e.g. API_FLAGS="--create-wait 60s" to queue a burst larger
 # than a node's create concurrency instead of rejecting the overflow.
 API_FLAGS=${API_FLAGS:-}
