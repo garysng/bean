@@ -55,6 +55,12 @@ type Sandbox struct {
 	lastActivity time.Time
 	inFlight     int // data-plane requests in progress; idle sweep skips these
 
+	// net is the addressing this sandbox was given, or nil on a node without
+	// networking. Retained because reaching any port inside the guest needs both
+	// halves -- the namespace and the address -- and the address alone is the same
+	// for every sandbox on the node.
+	net *network.Layout
+
 	// agentToken is the plaintext credential this node presents to the sandbox's
 	// agent. Only its hash is given to the guest, so this field is the only copy
 	// that can actually authenticate a call.
@@ -215,6 +221,7 @@ func (m *Manager) Create(ctx context.Context, spec *nodev1.SandboxSpec) (*Sandbo
 		m.mu.Lock()
 		if cur, ok := m.sandboxes[spec.SandboxId]; ok {
 			cur.agentToken = token
+			cur.net = layout
 		}
 		m.mu.Unlock()
 	}
@@ -1185,6 +1192,7 @@ func (m *Manager) ForkSandbox(ctx context.Context, spec *nodev1.SandboxSpec,
 		m.mu.Lock()
 		if cur, ok := m.sandboxes[spec.SandboxId]; ok {
 			cur.agentToken = token
+			cur.net = layout
 		}
 		m.mu.Unlock()
 	}

@@ -31,12 +31,21 @@ import (
 
 func main() {
 	if len(os.Args) < 2 {
-		fmt.Fprintln(os.Stderr, "usage: agent-auth-probe <host:port> [published-hash]")
+		fmt.Fprintln(os.Stderr, "usage: agent-auth-probe <host:port> [published-hash] [authority]")
 		os.Exit(2)
 	}
 	addr := os.Args[1]
 
-	conn, err := grpc.NewClient(addr, grpc.WithTransportCredentials(insecure.NewCredentials()))
+	opts := []grpc.DialOption{grpc.WithTransportCredentials(insecure.NewCredentials())}
+	// When the target is a Host-routed forwarder rather than the agent itself, the
+	// routing key is the authority -- gRPC's :authority header, which is what the
+	// forwarder reads as Host. Without it the request reaches the forwarder's
+	// unroutable-host path and the gRPC client reports a bad server preface, because
+	// what it is reading is an HTTP/1.1 error page.
+	if len(os.Args) > 3 {
+		opts = append(opts, grpc.WithAuthority(os.Args[3]))
+	}
+	conn, err := grpc.NewClient(addr, opts...)
 	if err != nil {
 		fmt.Println("dial:", err)
 		os.Exit(1)

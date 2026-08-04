@@ -20,6 +20,9 @@ import (
 
 	"github.com/garysng/bean/internal/beand"
 	nodev1 "github.com/garysng/bean/internal/gen/bean/node/v1"
+	"golang.org/x/net/http2"
+	"golang.org/x/net/http2/h2c"
+
 	"github.com/garysng/bean/internal/logging"
 	"github.com/garysng/bean/internal/node"
 	"github.com/garysng/bean/internal/node/network"
@@ -49,6 +52,14 @@ func main() {
 	diskAlloc := flag.Int64("disk-mib", 102400, "allocatable sandbox disk (MiB)")
 	labelsFlag := flag.String("labels", "", "comma-separated node labels, e.g. pool=nvme,zone=a")
 	metricsAddr := flag.String("metrics", "", "HTTP address for /metrics (empty = disabled)")
+	sandboxPortAddr := flag.String("sandbox-port-listen", "",
+		"HTTP address serving Host-routed access into sandboxes, as "+
+			"{port}-{sandboxID}.<anything>. One port covers both the agent's interface "+
+			"and any port a user's process listens on. Empty disables it. This is "+
+			"reached by bean-proxy, never by a user directly: it applies no "+
+			"user-level authorization, so anything that can connect to it can reach "+
+			"any sandbox on this node -- bind it to loopback or a private address, "+
+			"and let the proxy be what faces users")
 	fcBin := flag.String("firecracker-bin", "firecracker", "Firecracker binary (fc runtime)")
 	fcKernel := flag.String("kernel", "/var/lib/bean/assets/vmlinux",
 		"guest kernel image (fc runtime)")
@@ -199,6 +210,24 @@ func main() {
 
 	if *nodeToken == "" && !isLoopback(*listen) {
 		log.Fatalf("refusing to listen on %s without --node-token (or BEAN_NODE_TOKEN)", *listen)
+	}
+
+	// The forwarding port applies no user-level authorization: it resolves a sandbox
+	// id from a Host header and connects. Whoever reaches it reaches every sandbox on
+	// this node, including the agent's own interface, which runs commands as root.
+	//
+	// So it is refused on a public address the same way the control interface is
+	// refused without a token. The check is here rather than in a comment because the
+	// failure is silent -- the port works perfectly when bound to 0.0.0.0, and
+	// nothing surfaces until someone else is on the network.
+	//
+	// A private address is permitted: that is where bean-proxy reaches it in a real
+	// deployment, and requiring loopback would make multi-node impossible.
+	if *sandboxPortAddr != "" && isPubliclyRoutable(*sandboxPortAddr) {
+		log.Fatalf("refusing to serve --sandbox-port-listen on %s: it grants access "+
+			"to every sandbox on this node and applies no user authorization, so it "+
+			"must not be reachable from a public network. Bind it to loopback or a "+
+			"private address and put bean-proxy in front", *sandboxPortAddr)
 	}
 
 	// A misspelled template must stop the node rather than fall back to none:
@@ -432,6 +461,35 @@ func main() {
 		slog.Info("metrics listening", "addr", *metricsAddr)
 	}
 
+	// Host-routed forwarding into sandboxes: one port serving both the agent's
+	// interface and any port a user's process listens on.
+	if *sandboxPortAddr != "" {
+		fwdSrv := &http.Server{
+			Addr: *sandboxPortAddr,
+			// Wrapped for cleartext HTTP/2, because gRPC to the agent's port arrives
+			// here as h2c and a plain http.Server answers an HTTP/2 preface with
+			// "HTTP/1.1 400 Bad Request" -- which a gRPC client reports as a bad
+			// server preface, naming neither the port nor the protocol. Measured, not
+			// anticipated: sending a preface by hand returned exactly that 400.
+			//
+			// Both halves are needed and they are separate. This is the inbound side;
+			// the forwarder's own transport is the outbound side. Fixing only one
+			// leaves gRPC broken with a different error.
+			Handler: h2c.NewHandler(node.NewPortForwarder(mgr), &http2.Server{}),
+			// Deliberately no write or read deadline beyond the headers. What comes
+			// through here is a user's own application: a long poll, a websocket
+			// upgrade, a slow download. A timeout appropriate for an API call would cut
+			// those off, and the symptom would be blamed on their code.
+			ReadHeaderTimeout: 10 * time.Second,
+		}
+		go func() {
+			if err := fwdSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				slog.Error("sandbox port server stopped", logging.KeyError, err)
+			}
+		}()
+		slog.Info("sandbox port forwarding listening", "addr", *sandboxPortAddr)
+	}
+
 	// Multi-node mode: dial out to the control plane, register, then keep
 	// the heartbeat alive. Nodes need no inbound path for this.
 	if *controlPlane != "" {
@@ -517,6 +575,38 @@ func isLoopback(addr string) bool {
 	}
 	ip := net.ParseIP(strings.Trim(host, "[]"))
 	return ip != nil && ip.IsLoopback()
+}
+
+// isPubliclyRoutable reports whether addr binds somewhere reachable from outside the
+// operator's own network.
+//
+// Conservative in the direction that matters: an unparseable address, or a wildcard
+// bind, counts as public. A wildcard is the case worth naming -- 0.0.0.0 is what a
+// container image or a hastily written unit file uses, it works perfectly in testing,
+// and it puts an unauthenticated path into every sandbox on whatever network the host
+// happens to sit on.
+func isPubliclyRoutable(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return true
+	}
+	if host == "" {
+		// ":8080" -- every interface, including any public one.
+		return true
+	}
+	if host == "localhost" {
+		return false
+	}
+	ip := net.ParseIP(strings.Trim(host, "[]"))
+	if ip == nil {
+		// A hostname that has to be resolved. Refusing rather than resolving, because
+		// what it resolves to at startup is not necessarily what it resolves to later.
+		return true
+	}
+	if ip.IsUnspecified() {
+		return true
+	}
+	return !(ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast())
 }
 
 // derivedMaxCreates is how many creates a node with this many cores will run at

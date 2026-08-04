@@ -64,21 +64,6 @@ func agentDialAddr(vm *fcVM, spec *Spec) string {
 		spec.Network.GuestIP, AgentGuestPort)
 }
 
-// AgentGuestPort is the TCP port beand listens on inside a networked guest.
-//
-// The agent is reached the same way as any port a user exposes -- by connecting to
-// the guest's address on a port -- so a proxy in front needs one rule rather than a
-// special case for the agent. That is the whole reason this exists alongside the
-// vsock port.
-//
-// Fixed rather than allocated, like the vsock port and for the same reason: each
-// sandbox has its own namespace and its own guest, so there is nothing to collide
-// with, and a constant keeps the guest's command line independent of host state.
-//
-// It is reserved: a user exposing this port would be exposing the agent, so callers
-// that map ports must refuse it.
-const AgentGuestPort = 10001
-
 // guestCID is the context id assigned to every guest. Like the port, it is
 // per-VM and so needs no allocation. 3 is the lowest id available to guests —
 // 0 through 2 are reserved by the vsock protocol.

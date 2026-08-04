@@ -10,6 +10,23 @@ import (
 	"github.com/garysng/bean/internal/node/network"
 )
 
+// AgentGuestPort is the TCP port the agent listens on inside a networked guest.
+//
+// It exists so the agent is reached exactly the way any port a user exposes is
+// reached -- connect to the guest on a port -- which is what lets one router serve
+// both instead of a rule plus a special case.
+//
+// Fixed rather than allocated: each sandbox has its own namespace and its own guest,
+// so there is nothing to collide with, and a constant keeps the guest's command line
+// independent of host state.
+//
+// Reserved. A user exposing this port would be exposing the agent, so anything that
+// maps ports on a user's behalf must refuse it.
+//
+// Declared in the portable file rather than beside the microVM code because it is a
+// protocol constant that the forwarder and the proxy also need, on every platform.
+const AgentGuestPort = 10001
+
 // State mirrors the sandbox state machine (subset owned by the node).
 type State string
 
