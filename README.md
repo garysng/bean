@@ -1,5 +1,7 @@
 # bean
 
+> 中文版:[README.zh.md](README.zh.md)
+
 Firecracker microVM sandboxes for AI evaluation workloads — any OCI image, no
 template build step.
 
@@ -14,9 +16,9 @@ agent, CLI, SDK — with no Kubernetes and no containerd on the hot path.
 
 > **Status: working system, incomplete platform.** The microVM tier boots real
 > Firecracker VMs on real hardware, and every number below is measured rather
-> than projected. But **sandboxes have no network stack yet**, and the container
-> tiers (runc/gVisor) are unimplemented. Read [What works](#what-works) before
-> planning around it.
+> than projected. The container tiers (runc/gVisor) are unimplemented and the VMM
+> is not yet confined by a jailer. Read [What works](#what-works) before planning
+> around it.
 
 ---
 
@@ -52,7 +54,7 @@ create → exec → cp → pause → resume → snapshot → restore → destroy
 | create (cold image) | 5–10 s busybox … 2 m 45 s alpine on poor network | why prewarm is required, not an optimisation |
 | destroy | **214 ms** | was 5.25 s — [decisions §1](docs/decisions.md) |
 | snapshot (full) | 1.5 s, 15.5 MB | |
-| restore | ~950 ms | `/snapshot/load` is 7 ms of it; the rest is unpacking |
+| restore | **392 ms** on a node-local cache hit | `/snapshot/load` is 7 ms of it; a first restore pays ~950 ms to unpack, and every later one on that node does not |
 
 ### Snapshots — three kinds, different semantics
 
@@ -76,12 +78,39 @@ bean snapshot create $SBX --name step1 --base snap_...   # 298 KB, not 15.5 MB
 bean run --snapshot snap_...
 ```
 
+### Networking
+
+Each sandbox gets its own network namespace, a tap device and a `/30`, with two
+layers of NAT to the uplink. Egress works; the ranges a sandbox has no business
+reaching are denied by default.
+
+| from inside a booted guest | result |
+|---|---|
+| public address | reachable, 7.9 ms |
+| DNS | resolves |
+| cloud metadata `169.254.169.254` | denied |
+| the node's own address | denied |
+| the node's gateway | denied |
+
+The denials are only meaningful because the reachability checks pass in the same
+guest at the same instant — an unconfigured interface would make every denial
+"pass" while nothing worked at all, which is exactly the bug the end-to-end probe
+was written to catch. `hack/guest-egress-probe.sh` asserts all seven from inside a
+real microVM over `exec`; [docs/network.md](docs/network.md) §5a explains which
+of the two rule scopes actually denies what.
+
+Guest addresses are identical in every sandbox on purpose: a restored snapshot
+comes back with the address it was captured with, so a constant is what lets one
+checkpoint fan out to many sandboxes without collisions.
+
 ### Also working
 
 - **Images** — OCI pull and conversion, private registries (credentials
   AES-256-GCM at rest), prewarm with image-affinity scheduling
-- **Builds** — Dockerfile through BuildKit, and `commit` to freeze a running
-  sandbox's filesystem into a reusable base image
+- **Builds** — Dockerfile through BuildKit with streaming logs and cancellation,
+  and `commit` to freeze a running sandbox's filesystem into a reusable base image
+- **`fork`** — N independent sandboxes from one source, one checkpoint per batch,
+  the source left running
 - **Scheduling** — two-level placement; commitments persisted so replicas cannot
   double-place and a restart does not lose the ledger; configurable overcommit
 - **Snapshot blobs on S3** — SigV4 implemented against the standard library, no
@@ -93,12 +122,12 @@ bean run --snapshot snap_...
 
 | | |
 |---|---|
-| **Networking** | 📐 **No network stack at all.** Sandboxes cannot reach the internet. The `vsock` link to the agent is a control channel, not data. Largest gap. |
-| jailer / host cgroups | 📐 The VMM runs as root in the host mount namespace. Hardware virtualisation is the boundary; defence-in-depth is thinner than it should be. |
+| jailer / mount namespace | 📐 The VMM drops to an unprivileged uid and runs in a per-sandbox cgroup, but still sees the host filesystem. Hardware virtualisation is the boundary; `chroot` confinement is [#20](https://github.com/garysng/bean/issues/20) phase 2 |
 | Container tiers (runc/gVisor) | 📐 microVM, plus a no-isolation `local` tier for development, are the only options |
-| Volumes, port exposure, `fork` | 📐 |
+| Volumes, port exposure | 📐 |
+| Warm snapshots | 📐 The largest remaining throughput lever. A create still boots, costing ~5 CPU-seconds against a restore's near-zero — so the ceiling is `cores / 5` regardless of how fast one create is. [docs/warm-snapshots.md](docs/warm-snapshots.md) |
+| Data plane | 📐 `exec` and file transfer are relayed through the control plane rather than going node-direct |
 | Postgres | ⚠️ SQLite in use. No `Store` interface — all SQL is contained in one package, but callers hold the concrete type |
-| Build logs and cancellation | ⚠️ a build reports no progress and cannot be stopped |
 | overlaybd lazy-pull | ⚠️ **verified working** (7 ms mount, 19.6% of layer bytes transferred to read a file) but not wired into the image provider — dm-snapshot is the live path |
 
 ---
@@ -151,24 +180,35 @@ images need no modification).
 1. image provider assembles a rootfs block device
      shared read-only base (loop) + per-sandbox sparse CoW
      → dm-snapshot → /dev/mapper/bean-<id>
-2. noded execs firecracker
+2. network: a netns, a tap, a veth pair to the host, NAT and filter rules
+3. noded execs firecracker *inside that netns*
      virtio-blk: agent disk as root device, user image as /dev/vdb
-     vsock for the agent
-     init=/bean/beand
-3. beand as PID 1: mount matrix, then pivot into the user image
+     vsock for the agent, tap registered before InstanceStart
+     init=/bean/beand, with ip= so the kernel configures eth0
+4. beand as PID 1: mount matrix, then pivot into the user image
 ```
 
-Two ordering constraints in there are load-bearing, and both were found the hard
-way:
+Four ordering constraints in there are load-bearing, and every one was found the
+hard way:
 
 - A CPU template must be applied **before** `InstanceStart`. A guest reads CPUID
   once during early boot and caches it — glibc picks its string routines from it
   — so masking later masks features the guest already committed to using.
+- A NIC must be registered **before** `InstanceStart` too; the endpoint is
+  pre-boot only, and a guest that misses it runs its whole life without an
+  interface.
+- The VMM must be `exec`'d **inside** the sandbox's netns. `setns` is per-thread
+  and the Go runtime migrates goroutines at every blocking point, so this needs
+  `LockOSThread` around setns/Start/setns-back in one goroutine.
 - On restore, the CoW layer must be seeded **before** the dm-snapshot device is
   assembled. A dm-snapshot reads its exception table into kernel memory at
   activation and never re-reads it, so bytes written afterwards are invisible.
   The failure is *silent*: `ls` reports the right size, `cat` returns zeroes,
   `dmesg` says nothing. [decisions §3.0](docs/decisions.md).
+
+The last one is the shape to internalise: each of these is a step that *looks*
+done from every vantage point except the one that matters. The network stack had
+five correct layers and no address in the guest, and every assertion passed.
 
 ---
 
@@ -195,8 +235,9 @@ made networking and jailer look shipped. Convention in
 | [image-build.md](docs/image-build.md) | build and commit |
 | [security-and-startup.md](docs/security-and-startup.md) | threat model, hardening, cold-start budget |
 | [sdk-cli-design.md](docs/sdk-cli-design.md) | SDK and CLI |
-| [network.md](docs/network.md) | 📐 the netns-per-sandbox design, and why a restored snapshot keeps its address |
-| [competitive-analysis.md](docs/competitive-analysis.md) | e2b / Modal / Daytona / Morph / AgentENV |
+| [network.md](docs/network.md) | ✅ netns per sandbox, the two filter scopes, and why a restored snapshot keeps its address |
+| [warm-snapshots.md](docs/warm-snapshots.md) | 📐 booting once per image instead of once per sandbox |
+| [competitive-analysis.md](docs/competitive-analysis.md) | e2b / Modal / Daytona / Morph / AgentENV, including how each one does networking |
 | [roadmap.md](docs/roadmap.md) | phases, with actual progress noted |
 
 `decisions.md` is the one to read if you are evaluating the approach: it records
