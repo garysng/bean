@@ -31,7 +31,16 @@ import (
 )
 
 const (
-	maxInlineFileBytes    = 4 << 20 // 4 MiB
+	// fileChunkBytes is how much of an upload is held at once while it is forwarded
+	// to the node. It replaced a 4 MiB cap on the whole file: the gateway used to
+	// buffer the entire body, which meant N concurrent uploads cost N file sizes in
+	// the process that also runs the scheduler.
+	//
+	// 1 MiB because that is what the node's stream already used per frame, so this
+	// changes how much is resident rather than how the wire looks. Larger would buy
+	// fewer syscalls on an upload already bounded by the network; smaller would cost
+	// frames for no gain.
+	fileChunkBytes        = 1 << 20 // 1 MiB
 	maxExecTimeoutSeconds = 3600    // clamp: never hold a request for longer
 )
 
@@ -808,15 +817,6 @@ func (s *Server) handleWriteFile(w http.ResponseWriter, r *http.Request) {
 			mode = uint32(m)
 		}
 	}
-	body, err := io.ReadAll(io.LimitReader(r.Body, maxInlineFileBytes+1))
-	if err != nil {
-		writeErr(w, http.StatusBadRequest, "INVALID_ARGUMENT", err.Error())
-		return
-	}
-	if len(body) > maxInlineFileBytes {
-		writeErr(w, http.StatusRequestEntityTooLarge, "FILE_TOO_LARGE", "inline upload limited to 4MiB; use presigned flow")
-		return
-	}
 	ws, err := nodeClient.WriteFile(r.Context())
 	if err != nil {
 		grpcToHTTP(w, err)
@@ -828,13 +828,53 @@ func (s *Server) handleWriteFile(w http.ResponseWriter, r *http.Request) {
 		grpcToHTTP(w, err)
 		return
 	}
-	for off := 0; off < len(body); off += 1 << 20 {
-		end := min(off+1<<20, len(body))
-		if err := ws.Send(&commonv1.WriteFileFrame{Frame: &commonv1.WriteFileFrame_Data{Data: body[off:end]}}); err != nil {
-			grpcToHTTP(w, err)
+
+	// Streamed chunk by chunk rather than read whole and then forwarded.
+	//
+	// This used to be io.ReadAll into a byte slice, which put the entire upload in
+	// gateway memory before any of it reached the node. Two things were wrong with
+	// that, and only the second was visible:
+	//
+	//   - N concurrent uploads cost N times the file size in the gateway, which is
+	//     the process that also runs the scheduler. A burst of uploads and a burst of
+	//     creates contend for the same heap, so file traffic could make placement slow
+	//     -- and nothing in the create path would say why.
+	//   - It forced a size cap, because a request that buffers has to bound what it
+	//     buffers. The cap was 4 MiB and the error told the caller to "use presigned
+	//     flow", which does not exist anywhere in this codebase: an instruction to do
+	//     something impossible, which is worse than a bare limit.
+	//
+	// The read path already streamed (handleReadFile below, chunk by chunk with no
+	// accumulation). The asymmetry was the defect rather than the design.
+	//
+	// The cap is gone with the buffer. What bounds an upload now is the sandbox's own
+	// disk, enforced where the bytes land -- which is where it belongs, since the
+	// gateway has no basis for a figure and 4 MiB was small enough to reject an
+	// ordinary source tree.
+	buf := make([]byte, fileChunkBytes)
+	for {
+		n, rerr := r.Body.Read(buf)
+		if n > 0 {
+			if serr := ws.Send(&commonv1.WriteFileFrame{
+				Frame: &commonv1.WriteFileFrame_Data{Data: buf[:n]},
+			}); serr != nil {
+				grpcToHTTP(w, serr)
+				return
+			}
+		}
+		if rerr == io.EOF {
+			break
+		}
+		if rerr != nil {
+			// A client that hung up mid-upload leaves a partial file, which the node
+			// owns: the stream is abandoned rather than closed, so the node's own
+			// handler sees the failure and cleans up. Reporting here as a client error
+			// rather than a server one, because that is what it is.
+			writeErr(w, http.StatusBadRequest, "INVALID_ARGUMENT", rerr.Error())
 			return
 		}
 	}
+
 	resp, err := ws.CloseAndRecv()
 	if err != nil {
 		grpcToHTTP(w, err)
