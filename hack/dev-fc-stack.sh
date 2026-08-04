@@ -31,6 +31,14 @@ NODED_FLAGS=${NODED_FLAGS:-}
 # than a node's create concurrency instead of rejecting the overflow.
 API_FLAGS=${API_FLAGS:-}
 
+# Builds need buildctl on PATH and a buildkitd socket. Set BUILDKIT_ADDR= (empty) to
+# start without them, which a host that only runs sandboxes needs.
+#
+# Passed below as ${BUILDKIT_ADDR-default} rather than ${BUILDKIT_ADDR:-default}: the
+# colon form treats an empty value as unset and substitutes the default back, so
+# clearing it had no effect and a host without buildctl could not start the stack at
+# all. The colon-less form distinguishes "unset" from "deliberately empty".
+
 # Node capacity. Defaults suit a small development host; a stress run on a large
 # machine overrides them. These are what the node reports as allocatable, before
 # any overcommit factor.
@@ -65,9 +73,13 @@ mkdir -p "$RUN"
 # records that point at sandboxes from a previous run is only confusing.
 rm -f "$RUN/bean.db"
 
-BEAN_S3_ENDPOINT=${BEAN_S3_ENDPOINT:-http://127.0.0.1:9000} \
-BEAN_S3_ACCESS_KEY=${BEAN_S3_ACCESS_KEY:-beanadmin} \
-BEAN_S3_SECRET_KEY=${BEAN_S3_SECRET_KEY:-beansecret123} \
+# Colon-less defaults for the same reason as BUILDKIT_ADDR above: the gateway treats
+# an unreachable S3 endpoint as fatal and falls back to a local snapshot directory
+# only when no endpoint is set at all, so BEAN_S3_ENDPOINT= has to mean "no object
+# storage" rather than being replaced by the default.
+BEAN_S3_ENDPOINT=${BEAN_S3_ENDPOINT-http://127.0.0.1:9000} \
+BEAN_S3_ACCESS_KEY=${BEAN_S3_ACCESS_KEY-beanadmin} \
+BEAN_S3_SECRET_KEY=${BEAN_S3_SECRET_KEY-beansecret123} \
 nohup "$BIN/bean-api" \
   --listen 127.0.0.1:$API_PORT \
   --node-grpc 127.0.0.1:$NODE_GRPC_PORT \
@@ -101,7 +113,7 @@ nohup "$BIN/noded" \
   --cpu "$NODE_CPU" --memory-mib "$NODE_MEM_MIB" --disk-mib "$NODE_DISK_MIB" \
   --labels tier=fc \
   --metrics "127.0.0.1:$NODE_METRICS_PORT" \
-  --buildkit-addr "${BUILDKIT_ADDR:-unix:///run/bean/buildkitd.sock}" \
+  --buildkit-addr "${BUILDKIT_ADDR-unix:///run/bean/buildkitd.sock}" \
   ${NODED_FLAGS:-} \
   >"$RUN/noded.log" 2>&1 &
 
