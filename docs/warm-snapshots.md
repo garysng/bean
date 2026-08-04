@@ -164,11 +164,31 @@ therefore a different file ([image-pipeline.md](image-pipeline.md) §2) — the 
 must be the resolved digest, not the tag. Keying by tag would serve a stale
 environment after a tag moved, silently.
 
-**Storage grows with images times CPU generations.** Warm snapshots are full
-memory images, so this is roughly guest-memory-size per entry per generation.
-Reclaim needs an owner: unlike a user's snapshot, nothing refers to a warm one, so
-it will not be deleted by anything that exists today. The node-local unpacked cache
-already has watermark eviction; the S3-side blobs do not.
+**Storage grows with images times CPU generations.** ⚠️ Bounded, opt-in. Warm
+snapshots are full memory images, so growth is roughly guest-memory-size per entry
+per generation, and nothing refers to a warm one the way a sandbox refers to a
+user's snapshot — so nothing would ever delete it. `--warm-snapshot-high-mib`
+bounds the store and evicts least-recently-*restored* entries down to a low mark.
+
+Three things about that eviction are not obvious, and each was a decision rather
+than a default:
+
+- **A separate budget from the snapshot cache**, not a second caller of its
+  sweeper. A cache entry is a derived copy that can be re-unpacked from its blob, so
+  evicting one costs an unpack; a warm bundle is the only copy of itself, so evicting
+  one costs a boot. Sharing a budget would let a burst of restores evict the very
+  thing that makes creates cheap.
+- **Ordered by last restore, not by age.** A warm bundle is written once and read for
+  weeks, so age-since-creation says nothing about whether it earns its space —
+  ordering by it would evict a node's busiest bundle as soon as it became the oldest.
+- **The entry just written is protected.** Found on hardware, not in review: with a
+  10 MiB low mark and 15 MB bundles, a prewarm stored its snapshot and the following
+  sweep removed it along with everything else, leaving an empty store and a prewarm
+  that logged success. Any low mark below one bundle's size reaches that, and an
+  operator cannot know a bundle's size before the first one exists.
+
+Still unreclaimed: the S3-side blobs, which warm snapshots do not use today (a warm
+bundle never leaves the node that made it).
 
 **A restore that fails must fall back.** If a warm snapshot is corrupt or its blob
 is missing, a create must boot rather than fail. The failure mode to avoid is one

@@ -90,14 +90,25 @@ func (r *FCRuntime) WarmLookup(imageRef string) (SnapshotLayer, func(), bool) {
 	if !ok {
 		return SnapshotLayer{}, nil, false
 	}
+	// Held before opening, so a sweep running concurrently cannot unlink it between
+	// the two. Unlinking an open file succeeds on Linux, so the restore would work
+	// and the bundle would silently vanish -- the node goes cold for that image with
+	// nothing reporting why.
+	unhold := r.warm.hold(key.filename())
 	f, err := os.Open(path)
 	if err != nil {
+		unhold()
 		slog.Warn("warm snapshot present but unreadable; booting instead",
 			logging.KeyImage, imageRef, logging.KeyError, err)
 		return SnapshotLayer{}, nil, false
 	}
+	// Marks the bundle as recently used, which is what eviction orders by. Done at
+	// lookup rather than on success: a restore that fails still says this image is
+	// one creates are asking for, and demoting it for failing would evict the entry
+	// whose failure most wants investigating.
+	r.warm.Touch(key)
 	return SnapshotLayer{ID: key.snapshotID(), Data: f},
-		func() { _ = f.Close() }, true
+		func() { _ = f.Close(); unhold() }, true
 }
 
 // WarmStore checkpoints a running sandbox as the warm snapshot for an image.
@@ -147,6 +158,29 @@ func (r *FCRuntime) WarmStore(ctx context.Context, imageRef, sandboxID string) e
 	}
 	slog.Info("warm snapshot stored", logging.KeyImage, imageRef,
 		logging.KeySnapshot, key.snapshotID())
+
+	// Swept after adding rather than before. Refusing a prewarm because the store is
+	// full would mean the first N images a node ever prewarms are the only ones it can
+	// ever have, and which N depends on the order requests happened to arrive.
+	// Evicting something colder instead keeps the set of warm images tracking what
+	// creates actually ask for.
+	//
+	// The bundle just written is passed as keep, so this sweep cannot remove it.
+	// Without that, a low mark below one bundle's size evicts the entry this call was
+	// asked to produce -- measured on a node with a 10 MiB low mark and 15 MB
+	// bundles, which emptied the store and still logged the prewarm as successful.
+	//
+	// Failure is logged, not returned: the bundle this call was asked to produce
+	// exists, and reporting a sweep error as a failed warm would make an operator
+	// think the image is cold when it is not.
+	if freed, evicted, serr := r.warm.Sweep(r.WarmEviction, r.warm.inUse,
+		key.filename()); serr != nil {
+		slog.Warn("warm store sweep incomplete", logging.KeyError, serr,
+			"freedBytes", freed, "evicted", evicted)
+	} else if evicted > 0 {
+		slog.Info("evicted warm snapshots to stay under the disk bound",
+			"evicted", evicted, "freedBytes", freed)
+	}
 	return nil
 }
 
