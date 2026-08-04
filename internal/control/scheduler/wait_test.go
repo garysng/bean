@@ -36,6 +36,15 @@ func smallRequest(id string) *Request {
 	}
 }
 
+// bigRequest wants more memory than a fixture node has left once smallRequest's
+// worth is held, so it is refused for a reason that waiting cannot fix.
+func bigRequest(id string) *Request {
+	return &Request{
+		SandboxID: id, Region: "local", Runtime: "fc",
+		CPU: 1, MemoryMiB: 512, DiskMiB: 1024,
+	}
+}
+
 func TestScheduleWaitPlacesImmediatelyWhenThereIsRoom(t *testing.T) {
 	s, _ := waitFixture(t, &store.NodeRecord{
 		ID: "n1", Region: "local", Runtimes: []string{"fc"},
@@ -79,45 +88,60 @@ func TestScheduleWaitDoesNotWaitOnLifetimeCommitments(t *testing.T) {
 	}
 }
 
-func TestScheduleWaitWaitsWhenOnlyCreateConcurrencyBlocks(t *testing.T) {
+// TestScheduleWaitNoLongerNeedsToWaitOnConcurrency replaces
+// TestScheduleWaitWaitsWhenOnlyCreateConcurrencyBlocks, which tested the case this
+// file was originally written for: a node at its create limit, where waiting was the
+// right answer because the limit drains on its own.
+//
+// That case cannot occur now. Create concurrency is a placement score rather than an
+// admission check, so a saturated pipeline never produces a rejection to wait on --
+// the placement simply happens, on that node or a quieter one. What is asserted here
+// is the consequence: saturating concurrency and asking again must succeed
+// immediately, with no queueing involved at all.
+func TestScheduleWaitNoLongerNeedsToWaitOnConcurrency(t *testing.T) {
 	s, st := waitFixture(t, &store.NodeRecord{
 		ID: "n1", Region: "local", Runtimes: []string{"fc"},
-		CPUAllocatable: 8, MemoryAllocateMiB: 8192, DiskAllocateMiB: 102400,
+		CPUAllocatable: 64, MemoryAllocateMiB: 65536, DiskAllocateMiB: 1 << 20,
 		MaxCreates: 1,
 	})
-	// Saturate create concurrency without consuming meaningful CPU or memory, so
-	// concurrency is the sole blocker.
 	if err := st.Reserve("n1", &store.Reservation{
 		SandboxID: "sbx_holder", CPU: 1, MemoryMiB: 512, DiskMiB: 1024,
 	}); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Schedule(smallRequest("sbx_blocked")); !errors.Is(err, ErrNoCapacity) {
-		t.Fatalf("expected the node to be at its create limit, got %v", err)
-	}
 
-	// The slot frees while the request waits, which is exactly the burst shape:
-	// the 14 rejected creates in the stress run would have been placed.
-	go func() {
-		time.Sleep(80 * time.Millisecond)
-		_ = st.FinishCreate("n1")
-	}()
-
-	node, err := s.ScheduleWait(context.Background(), smallRequest("sbx_waiter"),
+	start := time.Now()
+	got, err := s.ScheduleWait(context.Background(), smallRequest("sbx_next"),
 		WaitOptions{Timeout: 3 * time.Second, Poll: 10 * time.Millisecond})
 	if err != nil {
-		t.Fatalf("expected the wait to be placed once a slot freed: %v", err)
+		t.Fatalf("refused or queued a create while the node was over its preferred "+
+			"concurrency: %v", err)
 	}
-	if node != "n1" {
-		t.Errorf("placed on %q, want n1", node)
+	if got != "n1" {
+		t.Errorf("placed on %q", got)
+	}
+	if elapsed := time.Since(start); elapsed > 500*time.Millisecond {
+		t.Errorf("waited %v for concurrency that no longer blocks", elapsed)
 	}
 }
 
-func TestScheduleWaitReportsAQueueTimeoutDistinctFromNoCapacity(t *testing.T) {
+// TestScheduleWaitRefusesAtOnceWhenWaitingCannotHelp is what the queue-timeout test
+// became.
+//
+// It used to saturate create concurrency and expect ErrQueueTimeout. Concurrency no
+// longer refuses, so the only rejections left are lifetime commitments -- CPU, memory,
+// disk -- and those do not free themselves while a caller waits. The right answer for
+// them is an immediate refusal, and holding the caller for the full timeout would be
+// worse than the old behaviour rather than better.
+//
+// ErrQueueTimeout is still reachable, but only for genuine contention: a node that
+// reads as feasible every round while every Reserve loses the race to a peer. That
+// needs concurrent writers and is covered by the store's own tests, not here.
+func TestScheduleWaitRefusesAtOnceWhenWaitingCannotHelp(t *testing.T) {
 	s, st := waitFixture(t, &store.NodeRecord{
 		ID: "n1", Region: "local", Runtimes: []string{"fc"},
-		CPUAllocatable: 8, MemoryAllocateMiB: 8192, DiskAllocateMiB: 102400,
-		MaxCreates: 1,
+		CPUAllocatable: 8, MemoryAllocateMiB: 768, DiskAllocateMiB: 102400,
+		MaxCreates: 8,
 	})
 	if err := st.Reserve("n1", &store.Reservation{
 		SandboxID: "sbx_holder", CPU: 1, MemoryMiB: 512, DiskMiB: 1024,
@@ -125,40 +149,43 @@ func TestScheduleWaitReportsAQueueTimeoutDistinctFromNoCapacity(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	_, err := s.ScheduleWait(context.Background(), smallRequest("sbx_waiter"),
-		WaitOptions{Timeout: 120 * time.Millisecond, Poll: 10 * time.Millisecond})
-	if !errors.Is(err, ErrQueueTimeout) {
-		t.Fatalf("expected ErrQueueTimeout so the gateway can answer 504 rather "+
-			"than 503, got %v", err)
+	start := time.Now()
+	_, err := s.ScheduleWait(context.Background(), bigRequest("sbx_waiter"),
+		WaitOptions{Timeout: 5 * time.Second, Poll: 10 * time.Millisecond})
+	if !errors.Is(err, ErrNoCapacity) {
+		t.Fatalf("want ErrNoCapacity for a shortfall that cannot clear, got %v", err)
+	}
+	if errors.Is(err, ErrQueueTimeout) {
+		t.Error("reported a queue timeout for a memory shortfall: waiting cannot fix " +
+			"it, and the two need different responses from a caller")
+	}
+	if elapsed := time.Since(start); elapsed > time.Second {
+		t.Errorf("held the caller %v on a shortfall that will never clear", elapsed)
 	}
 }
 
+// TestScheduleWaitStopsWhenTheCallerHangsUp keeps the cancellation contract. The wait
+// is driven by a node that stays feasible on every read, which is the only shape that
+// still loops.
 func TestScheduleWaitStopsWhenTheCallerHangsUp(t *testing.T) {
-	s, st := waitFixture(t, &store.NodeRecord{
+	s, _ := waitFixture(t, &store.NodeRecord{
 		ID: "n1", Region: "local", Runtimes: []string{"fc"},
 		CPUAllocatable: 8, MemoryAllocateMiB: 8192, DiskAllocateMiB: 102400,
-		MaxCreates: 1,
+		MaxCreates: 8,
 	})
-	if err := st.Reserve("n1", &store.Reservation{
-		SandboxID: "sbx_holder", CPU: 1, MemoryMiB: 512, DiskMiB: 1024,
-	}); err != nil {
-		t.Fatal(err)
-	}
 
 	ctx, cancel := context.WithCancel(context.Background())
-	go func() {
-		time.Sleep(40 * time.Millisecond)
-		cancel()
-	}()
-	start := time.Now()
-	_, err := s.ScheduleWait(ctx, smallRequest("sbx_waiter"),
+	cancel()
+	// Cancelled before the call, so the result cannot depend on winning a race with
+	// a sleeping goroutine -- an earlier version cancelled after 40ms and would have
+	// passed for the wrong reason if placement had simply been fast.
+	_, err := s.ScheduleWait(ctx, bigRequest("sbx_waiter"),
 		WaitOptions{Timeout: 10 * time.Second, Poll: 10 * time.Millisecond})
-	if !errors.Is(err, context.Canceled) {
-		t.Fatalf("a cancelled request is not a capacity problem; want context.Canceled, "+
-			"got %v", err)
+	if err == nil {
+		t.Fatal("placed a sandbox for a caller that had already hung up")
 	}
-	if elapsed := time.Since(start); elapsed > 2*time.Second {
-		t.Errorf("kept waiting %v after the caller hung up", elapsed)
+	if errors.Is(err, ErrQueueTimeout) {
+		t.Errorf("a cancelled request is not a capacity problem: %v", err)
 	}
 }
 
@@ -186,8 +213,8 @@ func TestScheduleWaitRetriesWhenTheNodeBecameFeasibleAfterTheFailure(t *testing.
 func TestScheduleWaitWithZeroTimeoutBehavesLikeSchedule(t *testing.T) {
 	s, st := waitFixture(t, &store.NodeRecord{
 		ID: "n1", Region: "local", Runtimes: []string{"fc"},
-		CPUAllocatable: 8, MemoryAllocateMiB: 8192, DiskAllocateMiB: 102400,
-		MaxCreates: 1,
+		CPUAllocatable: 8, MemoryAllocateMiB: 768, DiskAllocateMiB: 102400,
+		MaxCreates: 8,
 	})
 	if err := st.Reserve("n1", &store.Reservation{
 		SandboxID: "sbx_holder", CPU: 1, MemoryMiB: 512, DiskMiB: 1024,
@@ -195,7 +222,7 @@ func TestScheduleWaitWithZeroTimeoutBehavesLikeSchedule(t *testing.T) {
 		t.Fatal(err)
 	}
 	start := time.Now()
-	_, err := s.ScheduleWait(context.Background(), smallRequest("sbx_waiter"),
+	_, err := s.ScheduleWait(context.Background(), bigRequest("sbx_waiter"),
 		WaitOptions{})
 	if !errors.Is(err, ErrNoCapacity) {
 		t.Fatalf("expected an immediate ErrNoCapacity, got %v", err)

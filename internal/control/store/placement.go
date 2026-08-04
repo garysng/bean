@@ -108,6 +108,15 @@ func (s *Store) UpsertNode(n *NodeRecord) error {
 	if err != nil {
 		return err
 	}
+	// Only when the node did not say. A node built before max_creates existed
+	// reports zero, and 16 is what it was given before -- so an old node keeps its
+	// old behaviour instead of becoming unbounded, which would let a burst start
+	// more boots than the host can carry.
+	//
+	// A node that does report overrides this, and its figure is derived from its own
+	// core count. The quantity is a local physical fact and the control plane has no
+	// better basis for it: the CPU it knows about has already been multiplied by the
+	// node's --overcommit-cpu.
 	if n.MaxCreates <= 0 {
 		n.MaxCreates = 16
 	}
@@ -248,8 +257,23 @@ WHERE id = ?
   AND cpu_committed + ? <= cpu_alloc
   AND mem_committed + ? <= mem_alloc
   AND disk_committed + ? <= disk_alloc
-  AND gpu_committed + ? <= gpu_count
-  AND (max_creates <= 0 OR create_in_flight < max_creates)`,
+  -- create_in_flight is counted but deliberately NOT a condition. The four guards
+  -- above are correctness: overselling memory kills a process, overselling disk
+  -- destroys a copy-on-write layer, and neither recovers on its own. Concurrent
+  -- creates are not that -- they drain in a few hundred milliseconds, and exceeding
+  -- a preferred level means boots contend and each finishes later, which is a
+  -- performance question.
+  --
+  -- Refusing here made it a correctness question. A single-node cluster with a full
+  -- pipeline reported NO_CAPACITY for work it could have taken moments later, and
+  -- because the refusal happened at commit rather than in the filter, it did so even
+  -- after the scheduler had judged the node feasible.
+  --
+  -- So concurrency is now entirely the scheduler's policy: Weights.CreatePressure
+  -- penalises a busy node so a fleet spreads without anyone deciding to, and a lone
+  -- busy node still takes the work. Same shape as e2b, which folds in-progress
+  -- placements into a placement score and has no per-node admission limit at all.
+  AND 1 = 1`,
 		res.CPU, res.MemoryMiB, res.DiskMiB, res.GPU, nodeID,
 		res.CPU, res.MemoryMiB, res.DiskMiB, res.GPU)
 	if err != nil {

@@ -110,6 +110,16 @@ func main() {
 			"and RHEL 9+ already are); a v1 node refuses to start rather than run "+
 			"unlimited, because v1 cannot cap swap and so cannot stop a guest at its "+
 			"ceiling instead of letting it thrash the host")
+	maxCreatesFlag := flag.Int("max-creates", 0,
+		"how many creates this node will have in flight at once; 0 derives it from "+
+			"the host's core count. A create is mostly a guest kernel boot, which is "+
+			"CPU-bound, so the derived value scales with cores -- the previous fixed "+
+			"default of 16 left a 128-core host idle on most of its cores while "+
+			"refusing work. Raising this does not raise throughput past what the CPU "+
+			"can do; it stops the limit being the binding constraint before the CPU "+
+			"is. Exhaustion makes the scheduler wait rather than refuse (see "+
+			"--create-wait), so a value that is too low costs latency under burst "+
+			"rather than failed creates")
 	fcWarmSnapshots := flag.Bool("fc-warm-snapshots", false,
 		"boot one guest per image during prewarm and checkpoint it, so later creates "+
 			"of that image restore instead of booting (fc runtime). This is the "+
@@ -240,6 +250,17 @@ func main() {
 	if err != nil {
 		log.Fatalf("--cpu-template: %v", err)
 	}
+
+	// Derived from the host's cores, not from --cpu: the latter has already been
+	// multiplied by --overcommit-cpu, and folding an oversubscription factor into a
+	// physical concurrency limit would let an operator raise one and silently change
+	// the other.
+	maxCreates := *maxCreatesFlag
+	if maxCreates <= 0 {
+		maxCreates = derivedMaxCreates(runtime2.NumCPU())
+	}
+	slog.Info("create concurrency", "maxCreates", maxCreates,
+		"cores", runtime2.NumCPU(), "derived", *maxCreatesFlag <= 0)
 
 	// Checked at startup rather than at the first create, and fatally. An
 	// operator deriving this from the host's /etc/resolv.conf gets 127.0.0.53 on
@@ -434,6 +455,7 @@ func main() {
 				CpuVendor:            cpuVendor,
 				CpuFamily:            cpuFamily,
 				CpuTemplate:          string(tmpl),
+				MaxCreates:           int32(maxCreates),
 			})
 		reg.Advertise = adv
 
@@ -495,4 +517,33 @@ func isLoopback(addr string) bool {
 	}
 	ip := net.ParseIP(strings.Trim(host, "[]"))
 	return ip != nil && ip.IsLoopback()
+}
+
+// derivedMaxCreates is how many creates a node with this many cores will run at
+// once when an operator has not said.
+//
+// A create is dominated by a guest kernel boot, measured at roughly 0.62 CPU-seconds
+// of host CPU on an AMD EPYC host. So concurrency that scales with cores is the
+// right shape, and the question is only the divisor.
+//
+// Four per core, which is deliberately above one-boot-per-core: a boot is not
+// CPU-saturated end to end -- it waits on disk for the rootfs and on the agent's
+// vsock handshake -- so a core can carry more than one in flight without either
+// finishing later than it would alone. It is a starting point rather than a measured
+// optimum, and the measurement that would refine it is a throughput run across
+// several concurrency levels on one host (GitHub #29).
+//
+// The floor exists because the derivation is meaningless on a small host: 4 on a
+// single-core machine is already more than it can boot, and going below that would
+// serialise creates for no gain. The previous behaviour was a fixed 16, which this
+// keeps for a 4-core host and raises everywhere above it.
+func derivedMaxCreates(cores int) int {
+	const (
+		perCore = 4
+		floor   = 16
+	)
+	if n := cores * perCore; n > floor {
+		return n
+	}
+	return floor
 }
