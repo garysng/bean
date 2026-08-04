@@ -59,6 +59,45 @@ create(ref):
 Every primitive here exists. This is orchestration plus one data-model decision,
 which is why the design note is short and the risks section is long.
 
+## 2a. Which side does what 📐
+
+Prewarm already exists and is already split across the two sides, so the question
+is not where to put the work but which half grows.
+
+| | today | with warm snapshots |
+|---|---|---|
+| **Control plane** (`runPrewarmJob`, `internal/control/api/images.go`) | picks READY nodes in the region, calls `PrewarmImage` per image with a 30-minute deadline, logs failures | unchanged |
+| **Node** (`PrewarmImage` → `Images.Prewarm`) | prepares the image file: pull and convert to ext4 | **also boots once, waits for the agent, checkpoints with memory** |
+| **Reporting** | node reports what it holds; the control plane does not record success | node also reports which `(digest, vendor, family, template)` it has warmed |
+
+The existing code states the reporting rule and the reason for it
+(`images.go:196`): success is not recorded by the control plane because *the node
+reports what it holds, and that is the authority. Writing it from this side would
+let the two disagree after a node loses its disk.* That rule carries over
+unchanged — a warm snapshot is a file on a node's disk, and a node that lost the
+disk must be able to say so by simply not reporting it.
+
+So the execution belongs to the node, and it already does. What the node cannot
+decide alone is *which* image to warm, because that follows from placement and
+demand, which only the control plane sees. The division is therefore:
+
+- **the control plane decides what to warm**, as it already does for images
+- **the node does the warming and owns the artifact**, as it already does for images
+- **the node reports the result**, and the control plane treats that as the truth
+
+The one genuinely new thing is that the reported unit is no longer a bare image
+reference. A warm snapshot is only usable on a compatible CPU (§3), so what the
+node reports is a tuple, and the scheduler's existing `CPUConstraint` filter is
+what consumes it. The digest half of that tuple is why images now report their
+digest at all — see `UpdateNodeStatus` in `proto/bean/node/v1/node.proto`.
+
+**What prewarm does *not* buy today, and this is the whole point of the feature.**
+Preparing the image file removes the pull. It does not remove the boot: a create
+against a fully prewarmed image still runs `configureAndBoot` and still costs the
+~5 CPU-seconds that set the throughput ceiling at `cores / 5`. Prewarm as it
+stands attacks latency on a cold node; it does nothing for throughput on a warm
+one.
+
 ## 3. The data model: a warm snapshot is per image *and per CPU* 📐
 
 This is the part that will be got wrong if it is not stated plainly.

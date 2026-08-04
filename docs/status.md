@@ -51,7 +51,7 @@ guest kernel 6.1.102, Alpine 3.20.
 | snapshot (full) | 1.5 s, 15.5 MB | |
 | snapshot (filesystem only) | **6109 B** | `--no-memory` |
 | snapshot (incremental) | **298 KB** | `--base SNAP`, 52× smaller than full |
-| restore | ~950 ms | `/snapshot/load` is 7 ms of it; the rest is unpacking |
+| restore | **392 ms** on a node-local cache hit | `/snapshot/load` is 7 ms of it. A first restore pays ~950 ms to unpack the bundle; the node keeps the unpacked form, so every later restore of that snapshot skips it — which is what makes fan-out cheap |
 
 ### Snapshots are three kinds, not three sizes
 

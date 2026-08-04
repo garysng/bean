@@ -1,5 +1,6 @@
 # jailer: what it costs, what it breaks, and what to do first
 
+> 中文版:[zh/jailer.md](zh/jailer.md)
 > The status-marker convention is defined in [architecture.md](architecture.md) §0.
 > Implementation: nothing yet. `grep -rn jailer --include='*.go'` returns 1 hit, a comment.
 > Related: `internal/node/runtime/fc_linux.go` (startVMM, drive/vsock registration),
