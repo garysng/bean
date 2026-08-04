@@ -27,6 +27,58 @@ import (
 // independent of host state.
 const agentVsockPort = 1024
 
+// agentListenArg renders the address the guest's agent binds, and agentDialAddr
+// below renders the address noded reaches it on. They are a pair and must agree;
+// keeping them adjacent is the only thing enforcing that.
+//
+// A sandbox with no networking keeps vsock. Not for compatibility -- for isolation:
+// on vsock no process inside the guest can dial the agent at all, because the
+// address family is host-to-guest. That is a stronger guarantee than any credential,
+// and it is available for free whenever the sandbox has no interface, so it is kept.
+//
+// A networked sandbox uses TCP, which gives that up in exchange for one addressing
+// scheme covering both the agent and any user port. What replaces it is the token
+// the agent requires on that transport.
+func agentListenArg(spec *Spec) string {
+	if spec.Network == nil {
+		return fmt.Sprintf("vsock:%d", agentVsockPort)
+	}
+	// 0.0.0.0 rather than the guest's own address: the address is assigned by the
+	// kernel's ip= parameter during boot, and binding a specific one races that.
+	// Inside the guest there is one interface and one loopback, so the difference is
+	// whether a process in the sandbox can reach it over loopback -- and it can
+	// either way, since it could equally dial the interface address.
+	return fmt.Sprintf("tcp:0.0.0.0:%d", AgentGuestPort)
+}
+
+// agentDialAddr renders the address noded connects to. The result is handed to
+// dialAgentAddr, which dispatches on the prefix.
+func agentDialAddr(vm *fcVM, spec *Spec) string {
+	if spec.Network == nil {
+		return vsock.Addr{SocketPath: vm.vsockHostPath(), Port: agentVsockPort}.Target()
+	}
+	// Reachable only from inside the sandbox's namespace, which is why the dialer
+	// enters it. The guest address is identical in every sandbox by design, so this
+	// string alone does not identify a sandbox -- the namespace does.
+	return fmt.Sprintf("netns:%s|%s:%d", netnsPathFor(spec),
+		spec.Network.GuestIP, AgentGuestPort)
+}
+
+// AgentGuestPort is the TCP port beand listens on inside a networked guest.
+//
+// The agent is reached the same way as any port a user exposes -- by connecting to
+// the guest's address on a port -- so a proxy in front needs one rule rather than a
+// special case for the agent. That is the whole reason this exists alongside the
+// vsock port.
+//
+// Fixed rather than allocated, like the vsock port and for the same reason: each
+// sandbox has its own namespace and its own guest, so there is nothing to collide
+// with, and a constant keeps the guest's command line independent of host state.
+//
+// It is reserved: a user exposing this port would be exposing the agent, so callers
+// that map ports must refuse it.
+const AgentGuestPort = 10001
+
 // guestCID is the context id assigned to every guest. Like the port, it is
 // per-VM and so needs no allocation. 3 is the lowest id available to guests —
 // 0 through 2 are reserved by the vsock protocol.
@@ -525,7 +577,7 @@ func (r *FCRuntime) create(ctx context.Context, spec *Spec, layers []SnapshotLay
 
 	return &Handle{
 		SandboxID:  spec.SandboxID,
-		AgentAddr:  vsock.Addr{SocketPath: vm.vsockHostPath(), Port: agentVsockPort}.Target(),
+		AgentAddr:  agentDialAddr(vm, spec),
 		StartedAt:  time.Now(),
 		PID:        vm.cmd.Process.Pid,
 		RuntimeTag: r.Name(),
@@ -718,8 +770,8 @@ func (r *FCRuntime) configureAndBoot(ctx context.Context, vm *fcVM, spec *Spec) 
 		console = "console=ttyS0"
 	}
 	bootArgs := fmt.Sprintf(
-		"%s reboot=k panic=-1 pci=off%s init=/bean/beand -- --listen vsock:%d --pivot %s%s",
-		console, guestIPBootArg(spec.Network), agentVsockPort, guestRootfsDevice,
+		"%s reboot=k panic=-1 pci=off%s init=/bean/beand -- --listen %s --pivot %s%s",
+		console, guestIPBootArg(spec.Network), agentListenArg(spec), guestRootfsDevice,
 		GuestDNSBootArgs(r.GuestDNS))
 	if err := vm.client.put(ctx, "/boot-source", fcBootSource{
 		KernelImagePath: r.KernelPath, BootArgs: bootArgs,

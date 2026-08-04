@@ -18,6 +18,18 @@ func dialAgentAddr(ctx context.Context, target string) (net.Conn, error) {
 	// gRPC strips a registered scheme but passes through the rest, so the
 	// address arrives with or without the prefix depending on the target form.
 	switch {
+	// netns:<path>|<host>:<port> -- a TCP address that only exists inside one
+	// sandbox's network namespace. The namespace is part of the address because the
+	// host:port half is identical for every sandbox on the node: dialling it from the
+	// host namespace would reach nothing, or another sandbox.
+	case strings.HasPrefix(target, "netns:"):
+		rest := strings.TrimPrefix(target, "netns:")
+		nsPath, addr, ok := strings.Cut(rest, "|")
+		if !ok || nsPath == "" || addr == "" {
+			return nil, fmt.Errorf("agent dial: malformed netns target %q", target)
+		}
+		return dialInNetns(ctx, nsPath, addr)
+
 	case strings.HasPrefix(target, vsock.Scheme+":"):
 		addr, err := vsock.ParseAddr(target)
 		if err != nil {

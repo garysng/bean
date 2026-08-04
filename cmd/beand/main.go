@@ -9,6 +9,7 @@ import (
 	"log"
 	"log/slog"
 	"os"
+	"strings"
 
 	"google.golang.org/grpc"
 
@@ -95,12 +96,37 @@ func main() {
 		log.Fatalf("listen %s: %v", *listenAddr, err)
 	}
 
+	unary := []grpc.UnaryServerInterceptor{beand.UnaryTraceLogging()}
+	stream := []grpc.StreamServerInterceptor{beand.StreamTraceLogging()}
+
+	// Authentication is required by the transport, not by a flag.
+	//
+	// A TCP listener is reachable from inside the sandbox: any process there can
+	// dial it, and this agent runs as root and will setuid to whatever the image
+	// asks for. So a token check is not hardening on that transport, it is the only
+	// thing separating noded from the sandbox's own root.
+	//
+	// Deriving it from the address rather than accepting a --require-auth flag means
+	// the unauthenticated combination cannot be produced by a caller at all. A flag
+	// would eventually be omitted by a script, and the result would be a sandbox
+	// that works -- and hands its own occupant the agent API.
+	//
+	// vsock and Unix sockets need none: the first is a host-to-guest address family
+	// no guest process can dial, and the second is a path outside the guest's mount
+	// namespace.
+	if authRequired := strings.HasPrefix(*listenAddr, "tcp:"); authRequired {
+		auth := beand.NewAuthenticator()
+		unary = append(unary, auth.Unary())
+		stream = append(stream, auth.Stream())
+	}
+
 	srv := grpc.NewServer(
-		grpc.ChainUnaryInterceptor(beand.UnaryTraceLogging()),
-		grpc.ChainStreamInterceptor(beand.StreamTraceLogging()),
+		grpc.ChainUnaryInterceptor(unary...),
+		grpc.ChainStreamInterceptor(stream...),
 	)
 	agentv1.RegisterAgentServiceServer(srv, beand.NewServer(version, *rootDir))
-	slog.Info("beand listening", "version", version, "addr", *listenAddr, "root", *rootDir)
+	slog.Info("beand listening", "version", version, "addr", *listenAddr, "root", *rootDir,
+		"authenticated", strings.HasPrefix(*listenAddr, "tcp:"))
 	if err := srv.Serve(lis); err != nil {
 		log.Fatal(err)
 	}

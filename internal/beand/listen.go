@@ -27,6 +27,23 @@ func Listen(addr string) (net.Listener, error) {
 		return listenVsock(uint32(n))
 	}
 
+	// A TCP address, which is what makes one addressing scheme cover both the agent
+	// and any port a user exposes: a proxy in front resolves {port}-{sandbox} to a
+	// port inside the guest and does not need to know that one of those ports is the
+	// agent's.
+	//
+	// It is also what gives up the isolation vsock provided for free -- a process
+	// inside the sandbox can now dial this -- which is why Authenticator gates every
+	// method and why a hash is published through the metadata service before the
+	// guest starts. Serving this without that check would put an unauthenticated
+	// root-equivalent API inside every sandbox.
+	if hostPort, ok := strings.CutPrefix(addr, "tcp:"); ok {
+		if _, _, err := net.SplitHostPort(hostPort); err != nil {
+			return nil, fmt.Errorf("beand: tcp address %q: %w", hostPort, err)
+		}
+		return net.Listen("tcp", hostPort)
+	}
+
 	// A stale socket from a previous run would make bind fail; the sandbox
 	// owns this path, so removing it is safe.
 	if err := os.MkdirAll(filepath.Dir(addr), 0o755); err != nil {
