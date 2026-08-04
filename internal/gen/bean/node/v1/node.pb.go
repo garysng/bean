@@ -218,7 +218,22 @@ type NodeResources struct {
 	// cpu_template is the masking policy this node boots guests under ("none" or
 	// "portable"). A memory snapshot is only portable across CPU generations if
 	// it was taken under a template, so restore has to know which one produced it.
-	CpuTemplate   string `protobuf:"bytes,7,opt,name=cpu_template,json=cpuTemplate,proto3" json:"cpu_template,omitempty"`
+	CpuTemplate string `protobuf:"bytes,7,opt,name=cpu_template,json=cpuTemplate,proto3" json:"cpu_template,omitempty"`
+	// max_creates is how many creates this node will have in flight at once. Zero
+	// leaves the control plane's default, which is what a node built before this
+	// field existed reports.
+	//
+	// Reported by the node rather than configured centrally because the quantity is
+	// a local physical fact: how many guests can boot at once without slowing each
+	// other down, which follows from cores, KVM and disk. The control plane's view
+	// of a node's CPU has already been multiplied by --overcommit-cpu, so deriving
+	// this from it would fold an oversubscription factor into a concurrency limit.
+	//
+	// It bounds a transient, not a capability: unlike CPU or memory, in-flight
+	// creates drain on their own. The scheduler treats exhaustion as a reason to
+	// wait rather than to refuse -- see scheduler.worthWaiting -- so this being too
+	// low costs latency under burst, not failures, provided --create-wait is set.
+	MaxCreates    int32 `protobuf:"varint,8,opt,name=max_creates,json=maxCreates,proto3" json:"max_creates,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -300,6 +315,13 @@ func (x *NodeResources) GetCpuTemplate() string {
 		return x.CpuTemplate
 	}
 	return ""
+}
+
+func (x *NodeResources) GetMaxCreates() int32 {
+	if x != nil {
+		return x.MaxCreates
+	}
+	return 0
 }
 
 type HeartbeatRequest struct {
@@ -2359,7 +2381,7 @@ const file_bean_node_v1_node_proto_rawDesc = "" +
 	"node_token\x18\x01 \x01(\tR\tnodeToken\x12<\n" +
 	"\x1aheartbeat_interval_seconds\x18\x02 \x01(\x03R\x18heartbeatIntervalSeconds\".\n" +
 	"\x10NodeCapabilities\x12\x1a\n" +
-	"\bruntimes\x18\x01 \x03(\tR\bruntimes\"\x9a\x02\n" +
+	"\bruntimes\x18\x01 \x03(\tR\bruntimes\"\xbb\x02\n" +
 	"\rNodeResources\x12'\n" +
 	"\x0fcpu_allocatable\x18\x01 \x01(\x01R\x0ecpuAllocatable\x124\n" +
 	"\x16memory_allocatable_mib\x18\x02 \x01(\x03R\x14memoryAllocatableMib\x12,\n" +
@@ -2369,7 +2391,9 @@ const file_bean_node_v1_node_proto_rawDesc = "" +
 	"cpu_vendor\x18\x05 \x01(\tR\tcpuVendor\x12\x1d\n" +
 	"\n" +
 	"cpu_family\x18\x06 \x01(\x05R\tcpuFamily\x12!\n" +
-	"\fcpu_template\x18\a \x01(\tR\vcpuTemplate\"\xd0\x02\n" +
+	"\fcpu_template\x18\a \x01(\tR\vcpuTemplate\x12\x1f\n" +
+	"\vmax_creates\x18\b \x01(\x05R\n" +
+	"maxCreates\"\xd0\x02\n" +
 	"\x10HeartbeatRequest\x12\x17\n" +
 	"\anode_id\x18\x01 \x01(\tR\x06nodeId\x12\x1d\n" +
 	"\n" +

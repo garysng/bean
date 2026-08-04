@@ -109,6 +109,21 @@ message NodeResources {
   // "portable"). A memory snapshot is only portable across CPU generations if
   // it was taken under a template, so restore has to know which one produced it.
   string cpu_template = 7;
+  // max_creates is how many creates this node will have in flight at once. Zero
+  // leaves the control plane's default, which is what a node built before this
+  // field existed reports.
+  //
+  // Reported by the node rather than configured centrally because the quantity is
+  // a local physical fact: how many guests can boot at once without slowing each
+  // other down, which follows from cores, KVM and disk. The control plane's view
+  // of a node's CPU has already been multiplied by --overcommit-cpu, so deriving
+  // this from it would fold an oversubscription factor into a concurrency limit.
+  //
+  // It bounds a transient, not a capability: unlike CPU or memory, in-flight
+  // creates drain on their own. The scheduler treats exhaustion as a reason to
+  // wait rather than to refuse -- see scheduler.worthWaiting -- so this being too
+  // low costs latency under burst, not failures, provided --create-wait is set.
+  int32 max_creates = 8;
 }
 
 message HeartbeatRequest {

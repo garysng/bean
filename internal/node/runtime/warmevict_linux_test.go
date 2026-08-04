@@ -149,7 +149,7 @@ func TestSweepStopsAtTheLowMark(t *testing.T) {
 		t.Fatal("evicted nothing")
 	}
 	if left := names(t, s); len(left) == 0 {
-		t.Error("emptied the store instead of reclaiming to the low mark; every "+
+		t.Error("emptied the store instead of reclaiming to the low mark; every " +
 			"create would boot until something is prewarmed again")
 	}
 	after, err := s.Usage()

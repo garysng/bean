@@ -66,6 +66,17 @@ func (o WaitOptions) poll() time.Duration {
 // reason that waiting will not change. Distinguishing the two is the whole point:
 // see the note at the top of this file.
 func (s *Scheduler) ScheduleWait(ctx context.Context, req *Request, opts WaitOptions) (string, error) {
+	// Checked before placing anything. The loop below honours cancellation, but the
+	// first attempt used to run regardless, so a caller that had already hung up
+	// could still have a node reserved for it -- and nothing would release it,
+	// because the release is the caller's job and the caller is gone.
+	//
+	// The window is small but it is exactly the burst case: a client with a deadline
+	// fires many creates, some are still queued when it gives up, and each one that
+	// slips through here holds CPU, memory and disk until reconciliation notices.
+	if err := ctx.Err(); err != nil {
+		return "", err
+	}
 	node, err := s.Schedule(req)
 	if err == nil || opts.Timeout <= 0 {
 		return node, err
@@ -138,15 +149,22 @@ func (s *Scheduler) worthWaiting(req *Request) bool {
 		if n.Region != req.Region {
 			continue
 		}
-		reasons := blockers(n, req)
-		if len(reasons) == 0 {
+		if len(blockers(n, req)) == 0 {
 			// Feasible as of this read: the earlier failure was a race, so retrying
 			// is the right answer rather than refusing.
 			return true
 		}
-		if len(reasons) == 1 && reasons[0] == constraintCreates {
-			return true
-		}
+		// There used to be a second case: wait when the only blocker was create
+		// concurrency, since that drains on its own. It was in fact the *main* reason
+		// this file exists. Create concurrency no longer blocks anything -- it is a
+		// score, not an admission check -- so the case is gone.
+		//
+		// That leaves one reason to wait, and it is worth stating plainly because the
+		// remaining value of --create-wait is much narrower than it was: a lost race.
+		// Schedule failed, this read finds a feasible node, so capacity freed in
+		// between. CPU, memory and disk are held for a sandbox's whole lifetime and
+		// will not free themselves within one request's patience, which is why
+		// nothing else here is worth waiting on.
 	}
 	return false
 }

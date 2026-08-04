@@ -111,9 +111,12 @@ func (s *Service) Register(ctx context.Context, req *nodev1.RegisterRequest) (*n
 		CPUVendor:         res.CpuVendor,
 		CPUFamily:         res.CpuFamily,
 		CPUTemplate:       res.CpuTemplate,
-		State:             scheduler.NodeReady,
-		AdvertiseAddr:     advertise,
-		LastHeartbeat:     time.Now(),
+		// Zero from a node that predates the field, which UpsertNode fills with the
+		// old fixed default so an old node keeps its old behaviour.
+		MaxCreates:    int(res.GetMaxCreates()),
+		State:         scheduler.NodeReady,
+		AdvertiseAddr: advertise,
+		LastHeartbeat: time.Now(),
 	}); err != nil {
 		return nil, status.Errorf(codes.Internal, "persist node: %v", err)
 	}

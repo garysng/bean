@@ -2,6 +2,7 @@ package scheduler
 
 import (
 	"errors"
+	"fmt"
 	"path/filepath"
 	"sync"
 	"testing"
@@ -246,27 +247,54 @@ func TestSpreadAcrossNodes(t *testing.T) {
 	}
 }
 
-func TestMaxCreatesBoundsBurst(t *testing.T) {
-	s, _ := newSched(t, node("n1", 100, 1<<20, func(n *store.NodeRecord) { n.MaxCreates = 2 }))
-	for i := 0; i < 2; i++ {
+// TestCreateConcurrencyDoesNotRefuse replaces a test that asserted the opposite.
+//
+// It used to be TestMaxCreatesBoundsBurst, and it required ErrNoCapacity once the
+// pipeline was full. That was the behaviour, and it was wrong: in-flight creates
+// drain on their own, so a full pipeline is a reason to prefer another node or to
+// wait, never a reason to tell a caller the cluster cannot do the work. What remains
+// asserted is that the counter still tracks and still unwinds -- the bookkeeping is
+// what CreatePressure scores on, so it has to stay correct even though nothing
+// refuses on it.
+func TestCreateConcurrencyDoesNotRefuse(t *testing.T) {
+	s, st := newSched(t, node("n1", 100, 1<<20,
+		func(n *store.NodeRecord) { n.MaxCreates = 2 }))
+
+	// Well past the node's preferred concurrency. Every one must be placed.
+	for i := 0; i < 6; i++ {
 		if _, err := s.Schedule(req(store.NewID("sbx"), 1, 256)); err != nil {
-			t.Fatalf("placement %d: %v", i, err)
+			t.Fatalf("placement %d refused at %d in flight of a preferred 2: %v\n"+
+				"exceeding the preferred level means boots contend, not that the "+
+				"work is impossible", i, i, err)
 		}
 	}
-	if _, err := s.Schedule(req("third", 1, 256)); !errors.Is(err, ErrNoCapacity) {
-		t.Errorf("err = %v, want ErrNoCapacity when create slots are full", err)
-	}
-	if err := s.FinishCreate("n1"); err != nil {
+
+	nodes, err := st.LoadNodes()
+	if err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.Schedule(req("third", 1, 256)); err != nil {
-		t.Errorf("after FinishCreate: %v", err)
+	if got := nodes[0].CreateInFlight; got != 6 {
+		t.Errorf("create_in_flight = %d, want 6; the counter feeds CreatePressure, "+
+			"so it has to keep counting past the preferred level", got)
+	}
+
+	for i := 0; i < 6; i++ {
+		if err := s.FinishCreate("n1"); err != nil {
+			t.Fatal(err)
+		}
 	}
 	// FinishCreate never underflows.
 	for i := 0; i < 5; i++ {
 		if err := s.FinishCreate("n1"); err != nil {
 			t.Fatal(err)
 		}
+	}
+	nodes, err = st.LoadNodes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := nodes[0].CreateInFlight; got != 0 {
+		t.Errorf("create_in_flight = %d after unwinding, want 0", got)
 	}
 }
 
@@ -646,5 +674,137 @@ func TestWarmDoesNotOverrideTheCPUConstraint(t *testing.T) {
 	if !errors.Is(err, ErrIncompatibleCPU) {
 		t.Errorf("err = %v, want ErrIncompatibleCPU; a warm snapshot must not make "+
 			"an incompatible node feasible", err)
+	}
+}
+
+// Create concurrency used to be a hard filter, next to region, runtime, labels and
+// CPU compatibility. Those are permanent facts about a node; in-flight creates drain
+// in a few hundred milliseconds. The tests below pin the distinction, because getting
+// it wrong is invisible until a single-node cluster reports NO_CAPACITY for work it
+// could have taken moments later.
+
+// busy sets a node's create pipeline state.
+func busy(inFlight, max int) func(*store.NodeRecord) {
+	return func(n *store.NodeRecord) {
+		n.CreateInFlight, n.MaxCreates = inFlight, max
+	}
+}
+
+// TestAFullPipelineIsStillPlaceable is the property the change is for. e2b scores
+// in-progress placements and never makes a busy node infeasible; this asserts bean
+// does the same.
+func TestAFullPipelineIsStillPlaceable(t *testing.T) {
+	// Driven through Reserve, because UpsertNode does not persist create_in_flight --
+	// the first version of this test set it on the record and so tested an empty
+	// pipeline, passing against the very filter it was written to reject.
+	s, st := newSched(t, node("only", 64, 65536, busy(0, 4)))
+	for i := 0; i < 4; i++ {
+		if err := st.Reserve("only", &store.Reservation{
+			SandboxID: fmt.Sprintf("filler-%d", i), CPU: 0.1, MemoryMiB: 16, DiskMiB: 16,
+		}); err != nil {
+			t.Fatalf("seeding in-flight creates: %v", err)
+		}
+	}
+	// The pipeline is now at its limit, which is the state under test.
+	nodes, err := st.LoadNodes()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if nodes[0].CreateInFlight < nodes[0].MaxCreates {
+		t.Fatalf("setup did not fill the pipeline: %d in flight of %d",
+			nodes[0].CreateInFlight, nodes[0].MaxCreates)
+	}
+
+	got, err := s.Schedule(req("sbx-busy", 1, 512))
+	if err != nil {
+		t.Fatalf("refused a node whose creates are in flight: %v\n"+
+			"in-flight creates drain on their own, so this is a reason to wait or "+
+			"to prefer elsewhere, not a reason to report no capacity", err)
+	}
+	if got != "only" {
+		t.Errorf("placed on %q", got)
+	}
+}
+
+// TestPressurePrefersTheQuieterNode checks the term actually steers placement, which
+// is what replaces the filter's job on a fleet.
+func TestPressurePrefersTheQuieterNode(t *testing.T) {
+	// create_in_flight is owned by Reserve, not by UpsertNode, so it has to be
+	// driven through the real path. An earlier version of this test set the field on
+	// the record it passed to newSched, where UpsertNode silently dropped it: both
+	// nodes had an empty pipeline and placement picked by map iteration order, so the
+	// test passed or failed by luck and proved nothing either way.
+	s, st := newSched(t,
+		node("loaded", 64, 65536, coldImage("img:1"), busy(0, 16)),
+		node("quiet", 64, 65536, coldImage("img:1"), busy(0, 16)),
+	)
+	for i := 0; i < 12; i++ {
+		if err := st.Reserve("loaded", &store.Reservation{
+			SandboxID: fmt.Sprintf("filler-%d", i), CPU: 0.1, MemoryMiB: 16,
+			DiskMiB: 16,
+		}); err != nil {
+			t.Fatalf("seeding in-flight creates on loaded: %v", err)
+		}
+	}
+
+	for i := 0; i < 6; i++ {
+		got, err := s.Schedule(req(store.NewID("sbx"), 1, 512))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != "quiet" {
+			t.Fatalf("placed on %s while a quieter node had room", got)
+		}
+		// Finish it so this placement does not itself become the pressure the next
+		// one sees, which would make the assertion depend on iteration count.
+		if err := s.FinishCreate(got); err != nil {
+			t.Fatal(err)
+		}
+	}
+}
+
+// TestPressureScalesByTheNodesOwnLimit guards against comparing absolute counts. Ten
+// in flight is most of a small node's pipeline and a tenth of a large one's, and a
+// term that could not tell them apart would push work off large nodes first --
+// exactly backwards.
+func TestPressureScalesByTheNodesOwnLimit(t *testing.T) {
+	small := node("small", 8, 8192, coldImage("img:1"), busy(10, 16))
+	large := node("large", 8, 8192, coldImage("img:1"), busy(10, 512))
+	s, _ := newSched(t, small, large)
+
+	spread := map[string]int{}
+	r := req("sbx-scale", 1, 512)
+	if s.score(large, spread, r) <= s.score(small, spread, r) {
+		t.Errorf("the node with far more headroom scored no better: small=%v large=%v",
+			s.score(small, spread, r), s.score(large, spread, r))
+	}
+}
+
+// TestPressureCannotOutweighFeasibility keeps the score from reintroducing the filter
+// by another route: an idle node with the wrong CPU must still be refused.
+func TestPressureCannotOutweighFeasibility(t *testing.T) {
+	s, _ := newSched(t, node("idle-wrong-cpu", 8, 8192, busy(0, 512),
+		func(n *store.NodeRecord) { n.CPUVendor, n.CPUFamily = "GenuineIntel", 6 }))
+	_, err := s.Schedule(req("sbx-cpu2", 1, 512, func(r *Request) {
+		r.CPUConstraint = CPUConstraint{Vendor: "AuthenticAMD", Family: 23}
+	}))
+	if !errors.Is(err, ErrIncompatibleCPU) {
+		t.Errorf("err = %v, want ErrIncompatibleCPU", err)
+	}
+}
+
+// TestAnIdleNodeIsNotPenalised checks the term is zero when nothing is in flight, so
+// the change cannot shift placement on a quiet cluster.
+func TestAnIdleNodeIsNotPenalised(t *testing.T) {
+	idle := node("idle", 8, 8192, coldImage("img:1"), busy(0, 512))
+	s, _ := newSched(t, idle)
+	spread := map[string]int{}
+	r := req("sbx-idle", 1, 512)
+
+	withPressure := s.score(idle, spread, r)
+	s.weights.CreatePressure = 0
+	if without := s.score(idle, spread, r); withPressure != without {
+		t.Errorf("an idle node scored %v with pressure and %v without; the term must "+
+			"be zero when the pipeline is empty", withPressure, without)
 	}
 }

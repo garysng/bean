@@ -33,12 +33,12 @@ func testKey() warmKey {
 func TestWarmKeySeparatesEveryField(t *testing.T) {
 	base := testKey()
 	variants := map[string]warmKey{
-		"base":             base,
-		"other digest":     {Digest: digestB, Vendor: "AuthenticAMD", Family: 23, Template: CPUTemplateNone},
-		"other vendor":     {Digest: digestA, Vendor: "GenuineIntel", Family: 23, Template: CPUTemplateNone},
-		"other family":     {Digest: digestA, Vendor: "AuthenticAMD", Family: 25, Template: CPUTemplateNone},
-		"other template":   {Digest: digestA, Vendor: "AuthenticAMD", Family: 23, Template: CPUTemplatePortable},
-		"no template":      {Digest: digestA, Vendor: "AuthenticAMD", Family: 23},
+		"base":           base,
+		"other digest":   {Digest: digestB, Vendor: "AuthenticAMD", Family: 23, Template: CPUTemplateNone},
+		"other vendor":   {Digest: digestA, Vendor: "GenuineIntel", Family: 23, Template: CPUTemplateNone},
+		"other family":   {Digest: digestA, Vendor: "AuthenticAMD", Family: 25, Template: CPUTemplateNone},
+		"other template": {Digest: digestA, Vendor: "AuthenticAMD", Family: 23, Template: CPUTemplatePortable},
+		"no template":    {Digest: digestA, Vendor: "AuthenticAMD", Family: 23},
 	}
 
 	seen := map[string]string{}

@@ -70,9 +70,13 @@ type Weights struct {
 	// WarmSnapshot favours a node that can restore the image rather than boot it.
 	// Applied in addition to ImageAffinity, never instead: see score.
 	WarmSnapshot float64
-	Packing      float64
-	NVMeCache    float64
-	Spread       float64
+	// CreatePressure penalises a node whose create pipeline is already full,
+	// scaled by how full. Subtracted rather than added, and never enough to make a
+	// node unplaceable -- see score.
+	CreatePressure float64
+	Packing        float64
+	NVMeCache      float64
+	Spread         float64
 }
 
 // DefaultWeights orders the terms by what they cost when got wrong.
@@ -86,8 +90,8 @@ type Weights struct {
 // It is above ImageAffinity deliberately, and the two do not compete: a warm node
 // necessarily has the image, so a warm node scores both.
 func DefaultWeights() Weights {
-	return Weights{ImageAffinity: 10, WarmSnapshot: 15, Packing: 3, NVMeCache: 2,
-		Spread: 4}
+	return Weights{ImageAffinity: 10, WarmSnapshot: 15, CreatePressure: 12,
+		Packing: 3, NVMeCache: 2, Spread: 4}
 }
 
 // Scheduler makes placement decisions against durable node state.
@@ -251,12 +255,22 @@ func (s *Scheduler) feasible(n *store.NodeRecord, req *Request) bool {
 	if !labelsMatch(n.Labels, req.NodeSelector) {
 		return false
 	}
-	if n.MaxCreates > 0 && n.CreateInFlight >= n.MaxCreates {
-		return false
-	}
+	// Create concurrency is deliberately NOT here. It used to be, alongside the
+	// checks above, and that was a category error: everything else in this function
+	// is a permanent fact about the node -- wrong region, missing runtime, wrong
+	// labels, a CPU the guest memory cannot run on -- while in-flight creates drain
+	// on their own in a few hundred milliseconds.
+	//
+	// Treating a transient as a capability meant a single-node cluster with a full
+	// pipeline reported NO_CAPACITY for work it could have taken moments later, and
+	// ScheduleWait's polling existed to paper over that rather than to add queueing
+	// on top of a correct answer. Pressure belongs in score, which is where e2b puts
+	// it too (packages/api/internal/orchestrator/placement/placement_best_of_K.go
+	// folds in-progress placements into the score's numerator and never makes a busy
+	// node infeasible).
+	//
 	// Restoring guest memory onto an incompatible CPU produces a sandbox that
-	// resumes and then misbehaves, so this belongs in the hard filter rather
-	// than in scoring.
+	// resumes and then misbehaves, so that one does belong in the hard filter.
 	if req.CPUConstraint.CheckCPU(n.CPUVendor, n.CPUFamily) != nil {
 		return false
 	}
@@ -316,6 +330,29 @@ func (s *Scheduler) score(n *store.NodeRecord, spread map[string]int, req *Reque
 		if img.Warm {
 			score += s.weights.WarmSnapshot
 		}
+	}
+
+	// Create pressure: a node already starting several sandboxes is a worse place
+	// for one more, because a create is mostly a guest boot and boots contend.
+	//
+	// This is a score rather than a filter, which is the whole point. A busy node
+	// stays placeable -- if it is the only node, or the best of a busy set, work goes
+	// there and takes slightly longer, instead of the cluster reporting no capacity
+	// for something it can do. The penalty grows with how full the pipeline is, so
+	// the effect on a fleet is that bursts spread without anyone deciding to spread
+	// them.
+	//
+	// Scaled by the node's own limit rather than by an absolute count: 8 in flight is
+	// most of a small node's capacity and a fraction of a large one's, and a term
+	// that could not tell those apart would push work off big nodes first.
+	if n.MaxCreates > 0 && n.CreateInFlight > 0 {
+		load := float64(n.CreateInFlight) / float64(n.MaxCreates)
+		if load > 1 {
+			// Over its own limit, which the store permits: the limit shapes
+			// preference, and something has to give when every node is over.
+			load = 1
+		}
+		score -= s.weights.CreatePressure * load
 	}
 
 	// Packing prefers the node that ends up most utilised, so large

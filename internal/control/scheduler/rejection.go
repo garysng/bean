@@ -50,9 +50,13 @@ func blockers(n *store.NodeRecord, req *Request) []constraint {
 	if !labelsMatch(n.Labels, req.NodeSelector) {
 		out = append(out, constraintLabels)
 	}
-	if n.MaxCreates > 0 && n.CreateInFlight >= n.MaxCreates {
-		out = append(out, constraintCreates)
-	}
+	// Create concurrency is not a blocker any more: nothing refuses on it, in the
+	// filter or at commit, so naming it here would attribute a rejection to a
+	// constraint that is not binding -- and this function exists precisely because an
+	// unattributed capacity error sends an operator to raise the wrong limit.
+	//
+	// It is still counted and still scored (Weights.CreatePressure), so a busy node
+	// loses to a quiet one; it just never makes a node unusable.
 	if req.CPUConstraint.CheckCPU(n.CPUVendor, n.CPUFamily) != nil {
 		out = append(out, constraintCPUCompat)
 	}
