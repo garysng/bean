@@ -6,6 +6,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"log/slog"
 	"net"
 	"os"
 	"os/exec"
@@ -14,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/garysng/bean/internal/logging"
 	"github.com/garysng/bean/internal/node/image"
 	"github.com/garysng/bean/internal/node/network"
 	"github.com/garysng/bean/internal/node/vsock"
@@ -265,12 +267,45 @@ func (r *FCRuntime) SnapshotCacheBytes() (int64, error) {
 }
 
 // CachedImages reports the images available on this node, with the size and
-// digest of each.
+// digest of each, and whether a create of it here would restore rather than boot.
+//
+// The warm flag is added here rather than by the image package because it is the
+// one place both halves are known: the provider owns the image files and their
+// digests, the warm store owns the bundles, and answering "is this image warm on
+// this node" needs the digest to build the key.
 func (r *FCRuntime) CachedImages() (map[string]image.CachedImage, error) {
 	if r.Images == nil {
 		return nil, errors.New("fc: no image provider")
 	}
-	return r.Images.Cached()
+	cached, err := r.Images.Cached()
+	if err != nil {
+		return nil, err
+	}
+	if !r.WarmSnapshots {
+		return cached, nil
+	}
+	vendor, family, cpuErr := HostCPUIdentity()
+	if cpuErr != nil {
+		// Reported as not-warm rather than as an error. The images are genuinely
+		// cached and that half of the answer is still useful for affinity; a node
+		// that cannot identify its own CPU simply cannot claim any warm snapshot,
+		// which is the safe direction -- a create placed here boots.
+		slog.Warn("cannot identify host cpu; reporting no warm snapshots",
+			logging.KeyError, cpuErr)
+		return cached, nil
+	}
+	for ref, img := range cached {
+		if img.Digest == "" {
+			continue
+		}
+		key := warmKey{Digest: img.Digest, Vendor: vendor, Family: family,
+			Template: r.CPUTemplate}
+		if _, ok := r.warm.Lookup(key); ok {
+			img.Warm = true
+			cached[ref] = img
+		}
+	}
+	return cached, nil
 }
 
 // CommitSandbox seals a sandbox's filesystem into a base image under tag.

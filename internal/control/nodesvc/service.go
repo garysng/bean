@@ -191,6 +191,7 @@ func (s *Service) UpdateNodeStatus(ctx context.Context, req *nodev1.UpdateNodeSt
 			images[ref] = store.CachedImage{
 				SizeBytes: img.GetSizeBytes(),
 				Digest:    img.GetDigest(),
+				Warm:      img.GetWarm(),
 			}
 		}
 		if err := s.store.PutNodeImages(req.GetNodeId(), images); err != nil {

@@ -944,6 +944,16 @@ func (m *Manager) createOrRestoreWarm(ctx context.Context, rspec *runtime.Spec,
 	warmSpec := *rspec
 	warmSpec.SnapshotID = layer.ID
 
+	// This is a *restore*, not a fork, in the vocabulary of
+	// docs/snapshot-resume.md section 0: it starts from a bundle on disk, produces a
+	// new sandbox with a new id, and survives a noded restart. A fork starts from a
+	// running sandbox and leaves no persistent object; the guest this bundle was
+	// captured from was destroyed when the prewarm finished.
+	//
+	// The method is named Fork because FCRuntime routes Create and Fork through one
+	// create(spec, layers) and a non-empty layers means "start from a checkpoint".
+	// The name is the runtime's existing inconsistency rather than a claim about
+	// which operation this is.
 	handle, err := m.rt.Fork(ctx, &warmSpec, []runtime.SnapshotLayer{layer})
 	if err != nil {
 		// Fall back rather than fail. The bundle was present and readable and still
