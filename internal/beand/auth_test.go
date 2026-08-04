@@ -26,7 +26,7 @@ func (f fakeHashes) AgentTokenHash(context.Context) (string, error) {
 // while noded and the agent disagree about it.
 func withToken(t *testing.T, token string) context.Context {
 	t.Helper()
-	outgoing := WithAgentToken(context.Background(), token)
+	outgoing := sbxtoken.WithAgentToken(context.Background(), token)
 	md, ok := metadata.FromOutgoingContext(outgoing)
 	if !ok {
 		t.Fatal("WithAgentToken attached no metadata")

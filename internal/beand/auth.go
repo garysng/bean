@@ -5,17 +5,10 @@ import (
 
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
-	"google.golang.org/grpc/metadata"
 	"google.golang.org/grpc/status"
 
 	"github.com/garysng/bean/internal/sbxtoken"
 )
-
-// MDKeyAgentToken carries the caller's credential.
-//
-// Lowercase because gRPC normalises metadata keys and a mixed-case constant would
-// read back differently than it was written.
-const MDKeyAgentToken = "x-bean-agent-token"
 
 // hashSource supplies the hash a caller must match. An interface so a test can
 // substitute one without a metadata service, and so the agent does not depend on how
@@ -63,9 +56,7 @@ func (a *Authenticator) authorize(ctx context.Context) error {
 		return status.Error(codes.PermissionDenied, "agent has no credential configured")
 	}
 
-	md, _ := metadata.FromIncomingContext(ctx)
-	vals := md.Get(MDKeyAgentToken)
-	if len(vals) == 0 || !sbxtoken.Verify(expected, vals[0]) {
+	if !sbxtoken.Verify(expected, sbxtoken.FromIncoming(ctx)) {
 		return status.Error(codes.PermissionDenied, "invalid agent token")
 	}
 	return nil
@@ -95,13 +86,4 @@ func (a *Authenticator) Stream() grpc.StreamServerInterceptor {
 		}
 		return handler(srv, ss)
 	}
-}
-
-// WithAgentToken attaches the credential to an outgoing call. Used by noded, which
-// holds the plaintext.
-func WithAgentToken(ctx context.Context, token string) context.Context {
-	if token == "" {
-		return ctx
-	}
-	return metadata.AppendToOutgoingContext(ctx, MDKeyAgentToken, token)
 }

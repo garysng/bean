@@ -26,16 +26,51 @@
 package sbxtoken
 
 import (
+	"context"
 	"crypto/rand"
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/hex"
 	"fmt"
+
+	"google.golang.org/grpc/metadata"
 )
 
 // tokenBytes is the size of a minted token. 256 bits, so the token is not guessable
 // and the hash below has nothing weaker in front of it.
 const tokenBytes = 32
+
+// MDKey is the gRPC metadata key carrying the credential.
+//
+// It lives here rather than in either side's package because both the node that
+// presents the token and the agent that checks it have to agree on it, and a
+// constant declared twice is a constant that eventually differs -- with a symptom
+// (every call rejected) that looks like a broken credential rather than a broken
+// name. Lowercase because gRPC normalises metadata keys, so a mixed-case constant
+// would read back differently than it was written.
+const MDKey = "x-bean-agent-token"
+
+// WithAgentToken attaches the credential to an outgoing call. Called by the node,
+// which holds the plaintext; an empty token is left off entirely so the agent sees
+// "no credential" rather than an empty one, which it rejects either way.
+func WithAgentToken(ctx context.Context, token string) context.Context {
+	if token == "" {
+		return ctx
+	}
+	return metadata.AppendToOutgoingContext(ctx, MDKey, token)
+}
+
+// FromIncoming reads the credential a caller presented, or "" if there is none.
+func FromIncoming(ctx context.Context) string {
+	md, ok := metadata.FromIncomingContext(ctx)
+	if !ok {
+		return ""
+	}
+	if vals := md.Get(MDKey); len(vals) > 0 {
+		return vals[0]
+	}
+	return ""
+}
 
 // New mints a token. The plaintext is what noded keeps and presents to the agent;
 // only its Hash is given to the guest.
