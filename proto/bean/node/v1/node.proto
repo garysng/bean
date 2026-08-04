@@ -141,6 +141,24 @@ message CachedImage {
   // serving a snapshot captured from the image a tag used to name is a silent
   // failure -- the wrong environment restores successfully.
   string digest = 2;
+  // warm reports that this node holds a warm snapshot for this image, so a create
+  // placed here restores instead of booting a kernel. Measured, that is 0.13 s of
+  // host CPU against 0.62 s -- and since throughput is CPU-bound, the difference
+  // is a placement decision worth making rather than a detail.
+  //
+  // A bool on the image rather than a separate list of warm keys, because the
+  // node has already resolved the parts the scheduler cannot. A warm snapshot is
+  // keyed on (digest, CPU vendor, family, template); a node only ever warms for
+  // its own CPU, and a sandbox placed on it runs on that CPU, so the CPU half is
+  // satisfied by construction. Reporting the tuple instead would make the
+  // scheduler join a ref to a digest to a CPU to answer a question the node has
+  // already answered.
+  //
+  // False is not "cannot be warmed" -- it means "not warm here, now". An image
+  // with no digest can never be warm, one that has not been prewarmed is not warm
+  // yet, and a node whose bundle was evicted stops reporting it. All three read as
+  // false and all three place normally, because a miss boots.
+  bool warm = 3;
 }
 
 // ImageInventory is the set of images a node holds.

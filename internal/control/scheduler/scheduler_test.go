@@ -515,3 +515,136 @@ func TestNodesSnapshot(t *testing.T) {
 		t.Errorf("nodes = %+v", nodes)
 	}
 }
+
+// Warm snapshots are the only scoring term denominated in host CPU rather than
+// latency, and CPU is what bounds a node's create rate. So the tests below are
+// about the ordering holding and about a cold node staying placeable -- the second
+// matters more, because a cluster where a new CPU generation became unschedulable
+// until somebody prewarmed it would be worse than any slow create.
+
+// warmImage marks an image as cached and warm on a node.
+func warmImage(ref string) func(*store.NodeRecord) {
+	return func(n *store.NodeRecord) {
+		n.CachedImages[ref] = store.CachedImage{SizeBytes: 1 << 30, Warm: true}
+	}
+}
+
+// coldImage marks an image as cached but not warm.
+func coldImage(ref string) func(*store.NodeRecord) {
+	return func(n *store.NodeRecord) {
+		n.CachedImages[ref] = store.CachedImage{SizeBytes: 1 << 30}
+	}
+}
+
+func TestWarmNodeWinsOverACachedButColdOne(t *testing.T) {
+	s, _ := newSched(t,
+		node("cold", 8, 8192, coldImage("img:1")),
+		node("warm", 8, 8192, warmImage("img:1")),
+	)
+	// Repeated because a single placement could be right by accident: both nodes are
+	// feasible and identical apart from the warm flag, so a scorer ignoring it would
+	// pick by map iteration order and pass roughly half the time.
+	for i := 0; i < 8; i++ {
+		got, err := s.Schedule(req(store.NewID("sbx"), 1, 512))
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != "warm" {
+			t.Fatalf("placed on %s; a create there boots and costs about five times "+
+				"the host CPU of one that restores", got)
+		}
+		if err := s.Release(""); err != nil {
+			_ = err
+		}
+	}
+}
+
+// TestWarmScoresOnTopOfImageAffinity is the property that keeps the two terms from
+// being confused. A warm node necessarily has the image, so if warm replaced the
+// affinity term rather than adding to it, warm and cold-but-cached would tie.
+func TestWarmScoresOnTopOfImageAffinity(t *testing.T) {
+	warm := node("warm", 8, 8192, warmImage("img:1"))
+	cold := node("cold", 8, 8192, coldImage("img:1"))
+	bare := node("bare", 8, 8192)
+
+	s, _ := newSched(t, warm, cold, bare)
+	spread := map[string]int{}
+	r := req("sbx-score", 1, 512)
+
+	warmScore := s.score(warm, spread, r)
+	coldScore := s.score(cold, spread, r)
+	bareScore := s.score(bare, spread, r)
+
+	if !(warmScore > coldScore && coldScore > bareScore) {
+		t.Errorf("scores are warm=%v cold=%v bare=%v; want strictly decreasing, so "+
+			"that warm beats cached-but-cold and cached beats nothing",
+			warmScore, coldScore, bareScore)
+	}
+
+	// The ordering above is necessary but not sufficient, and an earlier version of
+	// this test stopped there. Replacing `score +=` with `score =` for the warm term
+	// still leaves warm above cold whenever the warm weight exceeds the affinity
+	// weight, so the ordering assertion passed against exactly the implementation it
+	// was written to reject.
+	//
+	// Asserted as an arithmetic identity instead: the gap warm opens over cold must be
+	// the warm weight itself. That holds only if the term is added to everything else
+	// the node scored, which is the property in question.
+	gap := warmScore - coldScore
+	if diff := gap - s.weights.WarmSnapshot; diff > 1e-9 || diff < -1e-9 {
+		t.Errorf("warm scored %v above cold, want exactly the warm weight %v; a "+
+			"difference means the warm term replaced part of the score instead of "+
+			"adding to it, which loses whatever else the node had earned",
+			gap, s.weights.WarmSnapshot)
+	}
+}
+
+// TestAColdNodeIsStillPlaceable is the safety property. A node with no warm
+// snapshot -- a new CPU generation, or one nobody has prewarmed -- must take work.
+func TestAColdNodeIsStillPlaceable(t *testing.T) {
+	s, _ := newSched(t, node("only-cold", 8, 8192, coldImage("img:1")))
+	got, err := s.Schedule(req("sbx-cold", 1, 512))
+	if err != nil {
+		t.Fatalf("a cluster with no warm node refused to place: %v", err)
+	}
+	if got != "only-cold" {
+		t.Errorf("placed on %q", got)
+	}
+}
+
+// TestWarmForADifferentImageDoesNotCount guards the lookup being by reference. A
+// node warm for something else is no better than cold for this request, and scoring
+// it as warm would send work to a node that boots.
+func TestWarmForADifferentImageDoesNotCount(t *testing.T) {
+	other := node("warm-elsewhere", 8, 8192, warmImage("other:1"), coldImage("img:1"))
+	mine := node("warm-here", 8, 8192, warmImage("img:1"))
+	s, _ := newSched(t, other, mine)
+
+	spread := map[string]int{}
+	r := req("sbx-x", 1, 512)
+	if s.score(other, spread, r) >= s.score(mine, spread, r) {
+		t.Errorf("a node warm for another image scored at least as high as one warm "+
+			"for this request: %v vs %v",
+			s.score(other, spread, r), s.score(mine, spread, r))
+	}
+}
+
+// TestWarmDoesNotOverrideTheCPUConstraint keeps an optimisation from breaking a
+// correctness rule. A restore of a memory snapshot only works on a compatible CPU,
+// and no amount of warm-snapshot score may place one where the guest would
+// misbehave rather than fail cleanly.
+func TestWarmDoesNotOverrideTheCPUConstraint(t *testing.T) {
+	wrongCPU := node("warm-wrong-cpu", 8, 8192, warmImage("img:1"),
+		func(n *store.NodeRecord) {
+			n.CPUVendor, n.CPUFamily = "GenuineIntel", 6
+		})
+	s, _ := newSched(t, wrongCPU)
+
+	_, err := s.Schedule(req("sbx-cpu", 1, 512, func(r *Request) {
+		r.CPUConstraint = CPUConstraint{Vendor: "AuthenticAMD", Family: 23}
+	}))
+	if !errors.Is(err, ErrIncompatibleCPU) {
+		t.Errorf("err = %v, want ErrIncompatibleCPU; a warm snapshot must not make "+
+			"an incompatible node feasible", err)
+	}
+}

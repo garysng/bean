@@ -384,6 +384,14 @@ type CachedImage struct {
 	// different content, and serving a snapshot captured from the old content
 	// restores successfully into the wrong environment.
 	Digest string `json:"digest,omitempty"`
+	// Warm reports that the node holds a warm snapshot for this image, so a create
+	// placed there restores instead of booting a kernel -- measured at 0.13 s of
+	// host CPU against 0.62 s. The scheduler scores on it.
+	//
+	// Reported by the node and never inferred here. The node is the only party that
+	// knows whether the bundle is on its disk and whether it matches its own CPU,
+	// and a control plane that guessed would send work to a node that then boots.
+	Warm bool `json:"warm,omitempty"`
 }
 
 // PutNodeImages replaces a node's image inventory.

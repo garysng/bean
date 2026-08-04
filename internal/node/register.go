@@ -231,6 +231,7 @@ func (r *Registrar) reportStatus(ctx context.Context, client nodev1.NodeServiceC
 			images[ref] = &nodev1.CachedImage{
 				SizeBytes: img.SizeBytes,
 				Digest:    img.Digest,
+				Warm:      img.Warm,
 			}
 		}
 		req.Images = &nodev1.ImageInventory{Images: images}

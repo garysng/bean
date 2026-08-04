@@ -403,7 +403,25 @@ type CachedImage struct {
 	// is the key a warm snapshot has to be found by: a tag is not enough, since
 	// serving a snapshot captured from the image a tag used to name is a silent
 	// failure -- the wrong environment restores successfully.
-	Digest        string `protobuf:"bytes,2,opt,name=digest,proto3" json:"digest,omitempty"`
+	Digest string `protobuf:"bytes,2,opt,name=digest,proto3" json:"digest,omitempty"`
+	// warm reports that this node holds a warm snapshot for this image, so a create
+	// placed here restores instead of booting a kernel. Measured, that is 0.13 s of
+	// host CPU against 0.62 s -- and since throughput is CPU-bound, the difference
+	// is a placement decision worth making rather than a detail.
+	//
+	// A bool on the image rather than a separate list of warm keys, because the
+	// node has already resolved the parts the scheduler cannot. A warm snapshot is
+	// keyed on (digest, CPU vendor, family, template); a node only ever warms for
+	// its own CPU, and a sandbox placed on it runs on that CPU, so the CPU half is
+	// satisfied by construction. Reporting the tuple instead would make the
+	// scheduler join a ref to a digest to a CPU to answer a question the node has
+	// already answered.
+	//
+	// False is not "cannot be warmed" -- it means "not warm here, now". An image
+	// with no digest can never be warm, one that has not been prewarmed is not warm
+	// yet, and a node whose bundle was evicted stops reporting it. All three read as
+	// false and all three place normally, because a miss boots.
+	Warm          bool `protobuf:"varint,3,opt,name=warm,proto3" json:"warm,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -450,6 +468,13 @@ func (x *CachedImage) GetDigest() string {
 		return x.Digest
 	}
 	return ""
+}
+
+func (x *CachedImage) GetWarm() bool {
+	if x != nil {
+		return x.Warm
+	}
+	return false
 }
 
 // ImageInventory is the set of images a node holds.
@@ -2354,11 +2379,12 @@ const file_bean_node_v1_node_proto_rawDesc = "" +
 	"\rcached_images\x18\x05 \x03(\v20.bean.node.v1.HeartbeatRequest.CachedImagesEntryB\x02\x18\x01R\fcachedImages\x1a?\n" +
 	"\x11CachedImagesEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\x03R\x05value:\x028\x01\"D\n" +
+	"\x05value\x18\x02 \x01(\x03R\x05value:\x028\x01\"X\n" +
 	"\vCachedImage\x12\x1d\n" +
 	"\n" +
 	"size_bytes\x18\x01 \x01(\x03R\tsizeBytes\x12\x16\n" +
-	"\x06digest\x18\x02 \x01(\tR\x06digest\"\xa8\x01\n" +
+	"\x06digest\x18\x02 \x01(\tR\x06digest\x12\x12\n" +
+	"\x04warm\x18\x03 \x01(\bR\x04warm\"\xa8\x01\n" +
 	"\x0eImageInventory\x12@\n" +
 	"\x06images\x18\x01 \x03(\v2(.bean.node.v1.ImageInventory.ImagesEntryR\x06images\x1aT\n" +
 	"\vImagesEntry\x12\x10\n" +

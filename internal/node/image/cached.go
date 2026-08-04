@@ -77,6 +77,14 @@ type CachedImage struct {
 	// Digest is the manifest digest the reference resolved to, or "" for an image
 	// with no manifest -- a build's output, or a commit of a sandbox's filesystem.
 	Digest string
+	// Warm reports that a warm snapshot for this image exists on this node, so a
+	// create placed here restores instead of booting.
+	//
+	// Not filled in by this package, which knows about image files and not about
+	// snapshots. The runtime sets it, because it owns the warm store and is the only
+	// thing that can answer for this node's CPU. Kept on this struct anyway so the
+	// node reports one view of an image rather than two lists a reader has to join.
+	Warm bool
 }
 
 // cachedImages lists the images in a directory with their sizes and digests.
