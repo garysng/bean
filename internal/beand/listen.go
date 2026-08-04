@@ -44,6 +44,26 @@ func Listen(addr string) (net.Listener, error) {
 		return net.Listen("tcp", hostPort)
 	}
 
+	// Anything that looks like a scheme this agent does not implement is an error,
+	// not a filesystem path.
+	//
+	// This is the failure mode of an agent image older than the noded booting it, and
+	// it is worse than a plain rejection. Measured on the stock disk: an agent
+	// predating tcp: support was given "tcp:0.0.0.0:10001", fell through to this
+	// branch, and created a Unix socket named literally `tcp:0.0.0.0:10001` -- then
+	// logged "listening on tcp:0.0.0.0:10001" and served nothing reachable. noded
+	// reported a connection refused twenty seconds later.
+	//
+	// A Unix socket path is absolute, so requiring that is enough to separate the two
+	// without enumerating schemes -- which matters because the next scheme added will
+	// have the same problem, and an enumeration only catches the ones already known.
+	if !strings.HasPrefix(addr, "/") {
+		return nil, fmt.Errorf("beand: unusable listen address %q: a Unix socket "+
+			"path must be absolute, and no supported scheme matched. This agent "+
+			"understands vsock:PORT, tcp:HOST:PORT and an absolute path -- if noded "+
+			"passed something else, it is newer than this agent image", addr)
+	}
+
 	// A stale socket from a previous run would make bind fail; the sandbox
 	// owns this path, so removing it is safe.
 	if err := os.MkdirAll(filepath.Dir(addr), 0o755); err != nil {

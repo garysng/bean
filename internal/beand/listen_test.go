@@ -112,3 +112,84 @@ func TestListenVsockRequiresLinux(t *testing.T) {
 		t.Errorf("error = %v, want it to name the platform requirement", err)
 	}
 }
+
+// TestListenRefusesAnUnknownSchemeRatherThanCreatingAFile is a regression test for a
+// failure that reported success.
+//
+// The agent image ships separately from noded, so a node can boot an agent older than
+// itself. When that happened -- noded passing "tcp:0.0.0.0:10001" to an agent built
+// before tcp: existed -- the address fell through to the Unix-socket branch and the
+// agent created a socket named literally `tcp:0.0.0.0:10001`, logged "listening on
+// tcp:0.0.0.0:10001", and served nothing anything could reach. The only symptom was a
+// connection refused from noded twenty seconds later.
+//
+// Verified against the real stock disk before fixing: the file was created, srwxr-xr-x.
+func TestListenRefusesAnUnknownSchemeRatherThanCreatingAFile(t *testing.T) {
+	dir := t.TempDir()
+	prev, err := os.Getwd()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Chdir(dir); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = os.Chdir(prev) })
+
+	for _, addr := range []string{
+		"quic:0.0.0.0:10001", // a scheme that does not exist yet
+		"tcp/0.0.0.0:10001",  // a plausible typo
+		"agent.sock",         // a relative path
+		"",
+	} {
+		lis, err := Listen(addr)
+		if err == nil {
+			lis.Close()
+			t.Errorf("Listen(%q) succeeded; an address this agent cannot serve must be "+
+				"an error rather than a file, because an agent listening on an "+
+				"unreachable socket reports success and fails later, in noded", addr)
+			continue
+		}
+		if !strings.Contains(err.Error(), "unusable listen address") {
+			t.Errorf("Listen(%q) failed with %v, want the address named", addr, err)
+		}
+	}
+
+	// And nothing was created on the way to those errors: the original bug was
+	// precisely this file existing and looking like a working listener.
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, e := range entries {
+		t.Errorf("Listen created %q while rejecting an address", e.Name())
+	}
+}
+
+func TestListenTCPIsReachableOnTCP(t *testing.T) {
+	// Port 0 so this does not depend on a free port. The network is what is asserted,
+	// since the bug above was an address accepted onto the wrong one.
+	lis, err := Listen("tcp:127.0.0.1:0")
+	if err != nil {
+		t.Fatalf("Listen: %v", err)
+	}
+	defer lis.Close()
+
+	if got := lis.Addr().Network(); got != "tcp" {
+		t.Fatalf("listener network is %q, want tcp", got)
+	}
+	// Reachable, not merely bound.
+	conn, err := net.Dial("tcp", lis.Addr().String())
+	if err != nil {
+		t.Fatalf("dial the agent's own listener: %v", err)
+	}
+	conn.Close()
+}
+
+func TestListenRejectsMalformedTCPAddress(t *testing.T) {
+	for _, addr := range []string{"tcp:", "tcp:notaport", "tcp:1.2.3.4"} {
+		if lis, err := Listen(addr); err == nil {
+			lis.Close()
+			t.Errorf("Listen(%q) succeeded", addr)
+		}
+	}
+}
