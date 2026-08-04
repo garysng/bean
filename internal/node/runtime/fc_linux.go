@@ -170,11 +170,19 @@ type FCRuntime struct {
 	// warm holds one checkpoint per (image digest, CPU) so a create can restore
 	// instead of booting. See warmstore_linux.go.
 	warm *warmStore
-	// WarmSnapshots enables producing and consulting them. Off by default: a warm
-	// bundle costs roughly one guest's memory on disk per image per CPU generation
-	// and nothing reclaims it yet, so a node that has not opted in must behave
-	// exactly as it did before this existed.
+	// WarmSnapshots enables producing and consulting them.
 	WarmSnapshots bool
+	// WarmEviction bounds the warm store. The zero value leaves it unbounded, which
+	// grows by roughly one guest's memory per image per CPU generation and is
+	// invisible to the scheduler -- a node can fill its disk while placement still
+	// believes it has room.
+	//
+	// Separate from SnapshotCache rather than sharing its budget, because evicting
+	// the wrong one costs differently: a snapshot-cache entry can be re-unpacked from
+	// the control plane's blob, while a warm bundle can only be rebuilt by booting a
+	// guest again. A burst of restores must not evict the bundles that make creates
+	// cheap.
+	WarmEviction EvictionPolicy
 
 	mu   sync.Mutex
 	vms  map[string]*fcVM

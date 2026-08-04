@@ -68,6 +68,7 @@ func NewFCTier(cfg FCTierConfig) (Runtime, error) {
 	// and it said the feature was on.
 	rt.GuestDNS = cfg.GuestDNS
 	rt.WarmSnapshots = cfg.WarmSnapshots
+	rt.WarmEviction = cfg.WarmEviction
 	if cfg.WarmSnapshots {
 		// Swept at startup rather than on a timer: a temporary bundle can only be
 		// orphaned by a process that died, so this is the one moment the set of
@@ -81,9 +82,21 @@ func NewFCTier(cfg FCTierConfig) (Runtime, error) {
 		}
 		// Stated with its size because nothing reclaims these yet, so the number an
 		// operator needs to watch is the one that only grows.
-		slog.Info("warm snapshots on; a create restores instead of booting when this "+
-			"node holds one for the image and CPU",
-			"heldBytes", bytes, "dir", filepath.Join(cfg.BaseDir, ".warm"))
+		if cfg.WarmEviction.Enabled() {
+			slog.Info("warm snapshots on; a create restores instead of booting when "+
+				"this node holds one for the image and CPU",
+				"heldBytes", bytes, "highBytes", cfg.WarmEviction.HighBytes,
+				"lowBytes", cfg.WarmEviction.LowBytes,
+				"dir", filepath.Join(cfg.BaseDir, ".warm"))
+		} else {
+			// Warned rather than merely stated: unbounded is the setting that fills a
+			// disk, and the growth is invisible to the scheduler because a warm bundle
+			// consumes no commitment.
+			slog.Warn("warm snapshots on but unbounded; they grow by roughly one "+
+				"guest's memory per image per CPU generation and nothing will reclaim "+
+				"them. Set --warm-snapshot-high-mib",
+				"heldBytes", bytes, "dir", filepath.Join(cfg.BaseDir, ".warm"))
+		}
 	}
 	rt.SnapshotCache = cfg.SnapshotCache
 	if !cfg.SnapshotCache.Enabled() {

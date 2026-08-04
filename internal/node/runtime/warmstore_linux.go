@@ -9,6 +9,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 )
 
 // The node-local index from "which image, on what CPU" to a warm snapshot.
@@ -106,11 +107,59 @@ func (k warmKey) snapshotID() string {
 // filesystem -- the same reasoning as the image sidecars in internal/node/image:
 // an entry deleted by hand takes its own record with it, and a half-written one
 // cannot corrupt the record of any other.
-type warmStore struct{ dir string }
+type warmStore struct {
+	dir string
+
+	// mu guards reading, which is a counter per bundle rather than a flag: several
+	// creates restore from one warm bundle at the same time, which is the fan-out
+	// case this whole feature is for, so "in use" has to survive one of them
+	// finishing.
+	mu      sync.Mutex
+	reading map[string]int
+}
 
 // newWarmStore returns a store rooted at dir. The directory is created lazily, so
 // a node that never warms anything leaves no trace.
-func newWarmStore(dir string) *warmStore { return &warmStore{dir: dir} }
+func newWarmStore(dir string) *warmStore {
+	return &warmStore{dir: dir, reading: map[string]int{}}
+}
+
+// hold marks a bundle as being read, and returns the release.
+//
+// Needed because unlinking a file another process has open succeeds on Linux: the
+// restore would finish normally and the bundle would be gone, leaving the node
+// quietly cold for that image. That failure reports nothing, which is why eviction
+// consults this rather than relying on the filesystem to refuse.
+func (s *warmStore) hold(name string) func() {
+	s.mu.Lock()
+	if s.reading == nil {
+		s.reading = map[string]int{}
+	}
+	s.reading[name]++
+	s.mu.Unlock()
+
+	var once bool
+	return func() {
+		s.mu.Lock()
+		defer s.mu.Unlock()
+		if once {
+			return
+		}
+		once = true
+		if s.reading[name] <= 1 {
+			delete(s.reading, name)
+			return
+		}
+		s.reading[name]--
+	}
+}
+
+// inUse reports whether a bundle is being read right now.
+func (s *warmStore) inUse(name string) bool {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.reading[name] > 0
+}
 
 // Path is where a key's bundle lives, whether or not it exists.
 func (s *warmStore) Path(k warmKey) string {

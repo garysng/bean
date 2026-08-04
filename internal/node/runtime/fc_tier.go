@@ -56,6 +56,9 @@ type FCTierConfig struct {
 	// image per CPU generation, and nothing reclaims them yet. A miss always boots,
 	// so turning this on cannot make a create fail that would otherwise have worked.
 	WarmSnapshots bool
+	// WarmEviction bounds the warm store. Zero leaves it unbounded. Separate from
+	// SnapshotCache on purpose: see FCRuntime.WarmEviction.
+	WarmEviction EvictionPolicy
 
 	// Cgroups puts each sandbox's VMM in a cgroup with limits from its own spec.
 	// Off by default: the memory ceiling is derived from a headroom that has not

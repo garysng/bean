@@ -117,10 +117,10 @@ func main() {
 			"restore costs almost none, so a node's create rate is bounded by "+
 			"cores/5 until the boot is removed rather than made faster. Off by "+
 			"default because each warm snapshot costs roughly one guest's memory on "+
-			"disk, per image per CPU generation, and nothing reclaims them yet -- so "+
-			"a node with many prewarmed images will fill its disk. A miss always "+
-			"boots, so enabling this cannot make a create fail that would otherwise "+
-			"have worked")
+			"disk, per image per CPU generation: set --warm-snapshot-high-mib to "+
+			"bound that, or a node with many prewarmed images will fill its disk. A "+
+			"miss always boots, so enabling this cannot make a create fail that "+
+			"would otherwise have worked")
 	fcVMMUid := flag.Int("fc-vmm-uid", 0,
 		"run the VMM as this uid instead of root (fc runtime). 0 leaves it as "+
 			"noded's own identity, which is what it has always been. The uid needs "+
@@ -153,6 +153,18 @@ func main() {
 		"size a reclaim brings the snapshot cache down to; must be below the high "+
 			"mark, so eviction runs as an occasional batch rather than on every "+
 			"restore past the trigger. 0 derives 80% of the high mark (fc runtime)")
+	warmHighMiB := flag.Int64("warm-snapshot-high-mib", 0,
+		"evict warm snapshots once they reach this size; 0 leaves them unbounded, "+
+			"which grows by roughly one guest's memory per image per CPU generation "+
+			"and is invisible to the scheduler. Deliberately a separate budget from "+
+			"--snapshot-cache-high-mib: a cache entry can be re-unpacked from its "+
+			"blob, while a warm snapshot can only be rebuilt by booting a guest, so a "+
+			"burst of restores must not evict what makes creates cheap (fc runtime)")
+	warmLowMiB := flag.Int64("warm-snapshot-low-mib", 0,
+		"size an eviction brings the warm snapshots down to; must be below the high "+
+			"mark. 0 derives 80% of it. Eviction is least-recently-restored, not "+
+			"oldest: a warm snapshot is written once and read for weeks, so age since "+
+			"creation says nothing about whether it earns its space (fc runtime)")
 	logFormat := flag.String("log-format", "text", "log format: text|json")
 	logLevel := flag.String("log-level", "info", "log level: debug|info|warn|error")
 	otlpEndpoint := flag.String("otlp-endpoint", os.Getenv("BEAN_OTLP_ENDPOINT"),
@@ -204,6 +216,24 @@ func main() {
 	}
 	if err := snapCache.Validate(); err != nil {
 		log.Fatalf("--snapshot-cache-*: %v", err)
+	}
+
+	// Same derivation for the same reason, and a separate budget: see the flag's own
+	// documentation for why the two must not share one.
+	warmEvict := runtime.EvictionPolicy{HighBytes: *warmHighMiB << 20, LowBytes: *warmLowMiB << 20}
+	if warmEvict.HighBytes > 0 && warmEvict.LowBytes == 0 {
+		warmEvict.LowBytes = warmEvict.HighBytes / 5 * 4
+	}
+	if err := warmEvict.Validate(); err != nil {
+		log.Fatalf("--warm-snapshot-*: %v", err)
+	}
+	// Refused rather than ignored: a bound set on a node that does not warm anything
+	// reads as "warm snapshots are bounded here", and an operator who set it that way
+	// has a wrong belief about the node rather than a harmless unused flag.
+	if warmEvict.Enabled() && !*fcWarmSnapshots {
+		log.Fatal("--warm-snapshot-high-mib is set but --fc-warm-snapshots is not: " +
+			"there is nothing to bound, and leaving this accepted would read as a " +
+			"node whose warm snapshots are bounded when it has none")
 	}
 
 	tmpl, err := runtime.ParseCPUTemplate(*cpuTemplate)
@@ -293,6 +323,7 @@ func main() {
 			GuestDNS:        *guestDNS,
 			Cgroups:         *fcCgroups,
 			WarmSnapshots:   *fcWarmSnapshots,
+			WarmEviction:    warmEvict,
 			VMMUid:          *fcVMMUid,
 			VMMGid:          *fcVMMGid,
 		})
