@@ -24,6 +24,9 @@ IMAGE=${IMAGE:-alpine:3.20}
 # measuring on a node whose disk figure has not been tuned.
 DISK_MIB=${DISK_MIB:-}
 BASE_URL=${BEAN_BASE_URL:-http://127.0.0.1:18080}
+# noded's metrics, for reading the phase histograms it already keeps rather than
+# timing the same things again from outside.
+METRICS_URL=${METRICS_URL:-http://127.0.0.1:17444/metrics}
 API_KEY=${BEAN_API_KEY:-devkey}
 BEAN=${BEAN:-/tmp/bean}
 KEEP=0
@@ -44,6 +47,67 @@ export BEAN_BASE_URL="$BASE_URL" BEAN_API_KEY="$API_KEY"
 
 say() { printf '%s\n' "$*"; }
 hr() { printf '%s\n' "------------------------------------------------------------"; }
+
+# cpu_seconds sums host CPU across noded and every firecracker on the host.
+#
+# Including the VMMs is the whole point. Firecracker runs as a separate process, so
+# the guest kernel's boot is spent there and noded's own utime+stime cannot see it:
+# measuring only noded reported 0.01 s for a create whose real cost is closer to
+# 0.6 s, three orders of magnitude low, and made a restore look *more* expensive than
+# a boot because noded does more orchestration on the restore path. That mistake was
+# made in hack/warm-snapshot-probe.sh first; this is the corrected form.
+#
+# Summed across all firecracker processes rather than tracked per sandbox, because the
+# pid of a given sandbox's VMM is not knowable from here. Sandboxes belonging to other
+# work inflate before and after equally, so a delta is still attributable.
+cpu_seconds() {
+  local tck total=0 p
+  tck=$(getconf CLK_TCK)
+  for p in $(pgrep -f 'noded' 2>/dev/null; pgrep -x firecracker 2>/dev/null); do
+    [[ -r "/proc/$p/stat" ]] || continue
+    total=$(awk -v acc="$total" -v t="$tck" \
+      '{printf "%.4f", acc + ($14 + $15) / t}' "/proc/$p/stat" 2>/dev/null || echo "$total")
+  done
+  echo "$total"
+}
+
+# phase_p50 reads a phase's median from noded's own histogram, so the script reports
+# where the time went without adding timing code of its own. The phases are already
+# instrumented in internal/node/manager.go (runtime_create, agent_ready,
+# network_setup, total).
+#
+# Nearest bucket rather than an interpolation: a Prometheus histogram bounds the
+# median between two edges and inventing a value inside them would be false precision,
+# which is the same reason the latency percentiles below use nearest-rank.
+phase_p50() {
+  local phase="$1"
+  curl -sf "$METRICS_URL" 2>/dev/null | python3 -c '
+import sys, re
+phase = sys.argv[1]
+buckets = []
+total = None
+for line in sys.stdin:
+    if "phase=\"%s\"" % phase not in line:
+        continue
+    m = re.search(r"_bucket\{.*le=\"([^\"]+)\".*\} ([0-9.e+]+)", line)
+    if m:
+        buckets.append((float(m.group(1)), float(m.group(2))))
+        continue
+    m = re.search(r"_count\{.*\} ([0-9.e+]+)", line)
+    if m:
+        total = float(m.group(1))
+if not buckets or not total:
+    print("n/a")
+    sys.exit()
+buckets.sort()
+for edge, count in buckets:
+    if count >= total / 2:
+        print("<=%gs" % edge)
+        break
+else:
+    print(">%gs" % buckets[-1][0])
+' "$phase" 2>/dev/null || echo "n/a"
+}
 
 cleanup_workdir() { rm -rf "$WORK"; }
 trap cleanup_workdir EXIT
@@ -94,16 +158,25 @@ except Exception:
   printf '%s %s %s\n' "$ms" "$code" "$id" > "$out"
 }
 
-started=$(date +%s)
+# Wall clock in nanoseconds, because a 100-create burst on a large host can finish
+# in under a second and integer seconds would round the throughput figure to
+# infinity or zero.
+cpu_before=$(cpu_seconds)
+started_ns=$(date +%s%N)
 for i in $(seq 1 "$COUNT"); do
   create_one "$i" &
 done
 wait
-elapsed=$(( $(date +%s) - started ))
+elapsed_ns=$(( $(date +%s%N) - started_ns ))
+cpu_after=$(cpu_seconds)
+elapsed=$(( elapsed_ns / 1000000000 ))
+elapsed_s=$(python3 -c "print(f'{$elapsed_ns/1e9:.3f}')")
+cpu_used=$(python3 -c "print(f'{$cpu_after - $cpu_before:.2f}')")
+cores=$(nproc 2>/dev/null || echo 0)
 
 # ---- results ---------------------------------------------------------------
 cat "$WORK"/create.* > "$WORK/all" 2>/dev/null
-python3 - "$WORK/all" "$COUNT" "$elapsed" <<'PY'
+python3 - "$WORK/all" "$COUNT" "$elapsed_s" <<'PY'
 import sys, collections
 rows = []
 for line in open(sys.argv[1]):
@@ -111,7 +184,7 @@ for line in open(sys.argv[1]):
     if len(parts) < 3:
         continue
     rows.append((int(parts[0]), parts[1], parts[2].strip()))
-total, elapsed = int(sys.argv[2]), int(sys.argv[3])
+total, elapsed = int(sys.argv[2]), float(sys.argv[3])
 
 ok = [r for r in rows if r[1] == "201"]
 bad = [r for r in rows if r[1] != "201"]
@@ -125,7 +198,7 @@ def pct(values, p):
     return s[k]
 
 lat = [r[0] for r in ok]
-print(f"requests   {len(rows)}/{total}   wall {elapsed}s")
+print(f"requests   {len(rows)}/{total}   wall {elapsed:.3f}s")
 print(f"succeeded  {len(ok)}")
 print(f"failed     {len(bad)}")
 if lat:
@@ -140,6 +213,58 @@ if bad:
             (r[1], r[2][:60]) for r in bad).most_common():
         print(f"  {n:4d}  HTTP {code}  {reason}")
 PY
+
+# ---- throughput attribution ------------------------------------------------
+# This is the section the script was extended for. The latency figures above say how
+# long one create took under load; they cannot say what bounds the rate, and the claim
+# under test -- "throughput is about cores / CPU-seconds-per-create" -- is about the
+# rate.
+hr
+succeeded=$(awk '$2 == "201"' "$WORK/all" 2>/dev/null | grep -c . || echo 0)
+say "throughput attribution"
+say "  cores available      $cores"
+say "  wall                 ${elapsed_s}s"
+say "  host cpu consumed    ${cpu_used}s  (noded + every firecracker)"
+if [[ "$succeeded" -gt 0 ]]; then
+  python3 - "$succeeded" "$elapsed_s" "$cpu_used" "$cores" <<'PYA'
+import sys
+ok, wall, cpu, cores = int(sys.argv[1]), float(sys.argv[2]), float(sys.argv[3]), int(sys.argv[4])
+per = cpu / ok if ok else 0
+rate = ok / wall if wall > 0 else 0
+print(f"  cpu per create       {per:.3f}s")
+print(f"  observed throughput  {rate:.2f} creates/s")
+if per > 0 and cores > 0:
+    # The claim, stated as a prediction so the run can contradict it. If a create
+    # costs P CPU-seconds and nothing else binds, C cores should sustain C/P per
+    # second.
+    predicted = cores / per
+    print(f"  predicted by cpu     {predicted:.2f} creates/s   (cores / cpu-per-create)")
+    if predicted > 0:
+        ratio = rate / predicted
+        print(f"  observed / predicted {ratio:.2f}")
+        if ratio < 0.5:
+            print()
+            print("  The run is far below what its own CPU cost predicts, so host CPU")
+            print("  is NOT the binding constraint here. Something else serialises the")
+            print("  create path -- a lock, the SQLite write, or a per-node limit other")
+            print("  than create concurrency. The 'cores / cpu-per-create' claim in")
+            print("  README.md, docs/status.md and --create-wait's help text is wrong as")
+            print("  stated and needs correcting rather than explaining away.")
+        elif ratio > 2:
+            print()
+            print("  Faster than the CPU cost predicts, which means the per-create CPU")
+            print("  figure is not the whole story: creates overlap on something that is")
+            print("  not CPU (disk, or waiting on the agent), so the cost is not additive.")
+        else:
+            print()
+            print("  Consistent with host CPU being the binding constraint.")
+PYA
+fi
+say ""
+say "  where the time went (noded's own histograms, median bucket)"
+for phase in total runtime_create agent_ready network_setup; do
+  printf '    %-18s %s\n' "$phase" "$(phase_p50 "$phase")"
+done
 
 # ---- teardown and leak check ----------------------------------------------
 ids=$(awk '$2 == "201" { print $3 }' "$WORK/all" 2>/dev/null)
