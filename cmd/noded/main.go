@@ -110,6 +110,17 @@ func main() {
 			"and RHEL 9+ already are); a v1 node refuses to start rather than run "+
 			"unlimited, because v1 cannot cap swap and so cannot stop a guest at its "+
 			"ceiling instead of letting it thrash the host")
+	fcWarmSnapshots := flag.Bool("fc-warm-snapshots", false,
+		"boot one guest per image during prewarm and checkpoint it, so later creates "+
+			"of that image restore instead of booting (fc runtime). This is the "+
+			"throughput lever: a boot costs about 5 CPU-seconds of host CPU and a "+
+			"restore costs almost none, so a node's create rate is bounded by "+
+			"cores/5 until the boot is removed rather than made faster. Off by "+
+			"default because each warm snapshot costs roughly one guest's memory on "+
+			"disk, per image per CPU generation, and nothing reclaims them yet -- so "+
+			"a node with many prewarmed images will fill its disk. A miss always "+
+			"boots, so enabling this cannot make a create fail that would otherwise "+
+			"have worked")
 	fcVMMUid := flag.Int("fc-vmm-uid", 0,
 		"run the VMM as this uid instead of root (fc runtime). 0 leaves it as "+
 			"noded's own identity, which is what it has always been. The uid needs "+
@@ -281,6 +292,7 @@ func main() {
 			SnapshotCache:   snapCache,
 			GuestDNS:        *guestDNS,
 			Cgroups:         *fcCgroups,
+			WarmSnapshots:   *fcWarmSnapshots,
 			VMMUid:          *fcVMMUid,
 			VMMGid:          *fcVMMGid,
 		})

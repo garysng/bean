@@ -152,6 +152,30 @@ type ImageWarmer interface {
 	PrewarmImage(ctx context.Context, imageRef string) error
 }
 
+// SnapshotWarmer is implemented by runtimes that can hold one booted-and-
+// checkpointed guest per image, so a create restores instead of booting.
+//
+// Separate from ImageWarmer because preparing an image file and capturing a booted
+// guest are different costs with different lifetimes: the first removes a pull, the
+// second removes the ~5 CPU-seconds of a boot, and only the second is bound to the
+// CPU it was taken on. A tier can meaningfully do the first and not the second.
+type SnapshotWarmer interface {
+	// WarmKeyFor reports the key a warm snapshot for this image would have on this
+	// node, and whether the image can be warmed at all. An image with no digest
+	// cannot: see warmKey's documentation for why a tag is not a safe substitute.
+	WarmKeyFor(imageRef string) (key string, ok bool, err error)
+	// WarmLookup reports whether this node already holds a warm snapshot for the
+	// image, returning the layer a restore would use.
+	WarmLookup(imageRef string) (layer SnapshotLayer, release func(), ok bool)
+	// WarmStore writes a checkpoint of a running sandbox as the warm snapshot for
+	// an image. The caller has already established that the sandbox is a faithful
+	// freshly-booted instance of it.
+	WarmStore(ctx context.Context, imageRef, sandboxID string) error
+	// WarmEnabled reports whether the node is configured to use warm snapshots at
+	// all. A node that is not must behave exactly as it did before they existed.
+	WarmEnabled() bool
+}
+
 // ImageLister is implemented by runtimes that hold a local image cache. The node
 // reports this so the scheduler can prefer a node that already has an image, and
 // so a prewarm job can show progress.

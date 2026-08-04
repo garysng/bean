@@ -165,6 +165,14 @@ type FCRuntime struct {
 	// snapshots holds unpacked snapshot state, so restoring the same checkpoint
 	// twice does not unpack it twice.
 	snapshots *snapCache
+	// warm holds one checkpoint per (image digest, CPU) so a create can restore
+	// instead of booting. See warmstore_linux.go.
+	warm *warmStore
+	// WarmSnapshots enables producing and consulting them. Off by default: a warm
+	// bundle costs roughly one guest's memory on disk per image per CPU generation
+	// and nothing reclaims it yet, so a node that has not opted in must behave
+	// exactly as it did before this existed.
+	WarmSnapshots bool
 
 	mu   sync.Mutex
 	vms  map[string]*fcVM
@@ -231,6 +239,12 @@ func NewFCRuntime(fcBin, kernel, agentDisk, baseDir string, images image.Provide
 		// Beside the sandboxes rather than inside any one of them: the entries
 		// outlive the sandbox that first unpacked them.
 		snapshots: newSnapCache(filepath.Join(baseDir, ".snapshots")),
+		// Separate from .snapshots even though both hold bundles, because the two
+		// have different lifetimes: a snapshot-cache entry is a derived copy that
+		// can be re-unpacked from the control plane's blob, while a warm bundle is
+		// the only copy of itself. Sweeping the first is free; sweeping the second
+		// costs a boot.
+		warm: newWarmStore(filepath.Join(baseDir, ".warm")),
 	}
 }
 

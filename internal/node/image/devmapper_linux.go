@@ -347,3 +347,8 @@ func run(name string, args ...string) error {
 	}
 	return nil
 }
+
+// Digest reports what this node recorded for the image.
+func (p *DevMapperProvider) Digest(imageRef string) (string, error) {
+	return digestOf(p.ImageDir, imageRef)
+}

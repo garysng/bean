@@ -104,3 +104,8 @@ func (p *PullingProvider) ensure(ctx context.Context, imageRef string) error {
 
 	return result.err
 }
+
+// Digest delegates to the inner provider, which owns the image directory.
+func (p *PullingProvider) Digest(imageRef string) (string, error) {
+	return p.Inner.Digest(imageRef)
+}

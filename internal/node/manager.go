@@ -3,6 +3,8 @@ package node
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -189,7 +191,7 @@ func (m *Manager) Create(ctx context.Context, spec *nodev1.SandboxSpec) (*Sandbo
 	rtStart := time.Now()
 	rtCtx, rtSpan := obs.Tracer("noded").Start(ctx, "runtime.Create",
 		trace.WithAttributes(obs.Phase("runtime_create")))
-	handle, err := m.rt.Create(rtCtx, rspec)
+	handle, err := m.createOrRestoreWarm(rtCtx, rspec, spec.GetImage())
 	obs.Fail(rtCtx, err)
 	rtSpan.End()
 	m.observePhase(ctx, "runtime_create", time.Since(rtStart))
@@ -804,8 +806,185 @@ func (m *Manager) PrewarmImage(ctx context.Context, imageRef string) error {
 	m.metrics.IncCounter("bean_node_image_prewarms_total",
 		"Image prewarm attempts on this node.",
 		map[string]string{"outcome": boolOutcome(err == nil), "runtime": m.rt.Name()}, 1)
-	return err
+	if err != nil {
+		return err
+	}
+	// Preparing the image file removed the pull. It did not remove the boot: a
+	// create against a fully prewarmed image still boots a kernel and still costs
+	// the ~5 CPU-seconds that put the throughput ceiling at cores/5. Capturing one
+	// booted guest is what removes that, so it happens here rather than being a
+	// separate operation an operator has to know to run.
+	//
+	// Reported but not returned. The image is genuinely prewarmed at this point, and
+	// the caller asked for that; failing the whole prewarm because the optimisation
+	// on top of it did not work would turn a slower create into no create at all.
+	if werr := m.warmSnapshotFor(ctx, imageRef); werr != nil {
+		slog.Warn("image is prewarmed but has no warm snapshot; creates from it "+
+			"will boot", logging.KeyImage, imageRef, logging.KeyError, werr)
+	}
+	return nil
 }
+
+// warmSnapshotFor boots one sandbox from an image, waits for its agent, and
+// checkpoints it so later creates restore instead of booting.
+//
+// The sandbox is created through the ordinary path on purpose. A warm snapshot is
+// only worth having if it holds a guest indistinguishable from one a create would
+// have produced, and the readiness gate is the thing that establishes that: an
+// agent that answered a health check is the definition of "booted" this platform
+// uses everywhere else. Constructing a cheaper almost-boot here would produce a
+// snapshot whose guests differ from cold ones in ways nothing would report.
+func (m *Manager) warmSnapshotFor(ctx context.Context, imageRef string) error {
+	warmer, ok := m.rt.(runtime.SnapshotWarmer)
+	if !ok || !warmer.WarmEnabled() {
+		return nil
+	}
+	// Asked before doing any work: an image with no digest cannot be warmed, and
+	// booting a guest only to discover that would cost the 5 CPU-seconds this is
+	// meant to save, once per prewarm.
+	if _, canWarm, err := warmer.WarmKeyFor(imageRef); err != nil || !canWarm {
+		if err == nil {
+			// Said out loud, because silence here is indistinguishable from success
+			// and the consequence is that every create of this image boots forever.
+			// An image reaches this state by having no manifest -- a build's output or
+			// a commit -- or by having been converted before digests were recorded,
+			// and only the second is fixable, by re-converting.
+			slog.Info("image has no digest, so it cannot have a warm snapshot; "+
+				"creates from it will boot", logging.KeyImage, imageRef)
+		}
+		return err
+	}
+	if _, release, exists := warmer.WarmLookup(imageRef); exists {
+		release()
+		return nil
+	}
+
+	// Its own id, marked, so an operator seeing it in a listing knows why a sandbox
+	// exists that nobody asked for, and so it cannot collide with a user's. Generated
+	// here rather than through the control plane's store.NewID because the node must
+	// not import the control plane -- this sandbox exists only on this node and is
+	// never recorded upstream.
+	id, err := newWarmSandboxID()
+	if err != nil {
+		return err
+	}
+	spec := &nodev1.SandboxSpec{
+		SandboxId: id,
+		Image:     imageRef,
+		// Deliberately not the requesting sandbox's shape. This guest is discarded
+		// after being captured, and Firecracker's machine config is part of the
+		// snapshot, so the figures here are what every restore from it starts with.
+		// One vCPU and a small ceiling keep a prewarm from taking a whole node's
+		// worth of capacity while it runs.
+		Cpu:       1,
+		MemoryMib: warmSnapshotMemoryMiB,
+	}
+
+	start := time.Now()
+	if _, err := m.Create(ctx, spec); err != nil {
+		return fmt.Errorf("boot a guest to capture: %w", err)
+	}
+	// Destroyed whether or not the capture worked. A warm sandbox left running would
+	// hold a node's memory for a guest nobody can reach, and it is not in the control
+	// plane's expected set, so reconciliation would eventually destroy it anyway --
+	// after it had been counted against capacity for a while.
+	defer func() {
+		if derr := m.Destroy(context.WithoutCancel(ctx), id, true); derr != nil {
+			slog.Error("cannot destroy the guest booted for a warm snapshot; it holds "+
+				"capacity until reconciliation removes it",
+				logging.KeySandbox, id, logging.KeyError, derr)
+		}
+	}()
+
+	if err := warmer.WarmStore(ctx, imageRef, id); err != nil {
+		return err
+	}
+	m.observePhase(ctx, "warm_snapshot", time.Since(start))
+	return nil
+}
+
+// createOrRestoreWarm boots a guest, or restores this node's warm snapshot for the
+// image if it has one.
+//
+// A hit skips the kernel boot, which is the whole point: measured, a boot costs
+// about 5 CPU-seconds of host CPU and a restore costs almost none, so throughput is
+// bounded by the boot until it is removed rather than made faster.
+//
+// A miss boots, and so does every failure. That asymmetry is deliberate and is the
+// property that keeps this from being a liability: a corrupt bundle, an unreadable
+// one, an image with no digest, or a node that has never warmed anything all take
+// the path the node took before warm snapshots existed. The failure mode being
+// avoided is one bad warm snapshot making an image unusable across a cluster.
+func (m *Manager) createOrRestoreWarm(ctx context.Context, rspec *runtime.Spec,
+	imageRef string) (*runtime.Handle, error) {
+
+	warmer, ok := m.rt.(runtime.SnapshotWarmer)
+	if !ok || !warmer.WarmEnabled() || imageRef == "" {
+		return m.rt.Create(ctx, rspec)
+	}
+	// A restore of a snapshot the caller named must not be diverted to a warm one:
+	// the caller asked for specific state, and this optimisation is only ever a
+	// substitute for booting fresh.
+	if rspec.SnapshotID != "" {
+		return m.rt.Create(ctx, rspec)
+	}
+
+	layer, release, hit := warmer.WarmLookup(imageRef)
+	if !hit {
+		m.metrics.IncCounter("bean_node_warm_lookups_total",
+			"Warm snapshot lookups on create.",
+			map[string]string{"outcome": "miss", "runtime": m.rt.Name()}, 1)
+		return m.rt.Create(ctx, rspec)
+	}
+	defer release()
+
+	// The spec's snapshot id is set so the runtime caches the unpacked form under
+	// the warm key. That is what makes the second and every later warm-started create
+	// on this node skip the unpacking as well as the boot.
+	warmSpec := *rspec
+	warmSpec.SnapshotID = layer.ID
+
+	handle, err := m.rt.Fork(ctx, &warmSpec, []runtime.SnapshotLayer{layer})
+	if err != nil {
+		// Fall back rather than fail. The bundle was present and readable and still
+		// did not restore, which means it is unusable and every create of this image
+		// would fail the same way -- so the honest response is to boot and say so.
+		slog.Warn("warm snapshot did not restore; booting instead",
+			logging.KeyImage, imageRef, logging.KeySnapshot, layer.ID,
+			logging.KeyError, err)
+		m.metrics.IncCounter("bean_node_warm_lookups_total",
+			"Warm snapshot lookups on create.",
+			map[string]string{"outcome": "restore_failed", "runtime": m.rt.Name()}, 1)
+		return m.rt.Create(ctx, rspec)
+	}
+	m.metrics.IncCounter("bean_node_warm_lookups_total",
+		"Warm snapshot lookups on create.",
+		map[string]string{"outcome": "hit", "runtime": m.rt.Name()}, 1)
+	return handle, nil
+}
+
+// newWarmSandboxID names the throwaway guest a warm capture boots.
+//
+// Random rather than derived from the image, because two prewarms of the same image
+// must not pick the same id: Create rejects a duplicate, so a derived id would make
+// a concurrent prewarm fail instead of being harmlessly redundant.
+func newWarmSandboxID() (string, error) {
+	b := make([]byte, 8)
+	if _, err := rand.Read(b); err != nil {
+		return "", fmt.Errorf("generate warm sandbox id: %w", err)
+	}
+	return "warmsbx_" + hex.EncodeToString(b), nil
+}
+
+// warmSnapshotMemoryMiB is the guest size a warm snapshot is captured at.
+//
+// It bounds every sandbox restored from it, because Firecracker's machine config
+// travels inside the snapshot and a restore cannot raise it. So this is not a
+// prewarm-time convenience but the memory ceiling of every warm-started sandbox,
+// which is why it is a named constant with a stated basis rather than a literal:
+// 512 MiB is what the existing create path defaults to, so a warm-started sandbox
+// gets what a cold one would.
+const warmSnapshotMemoryMiB = 512
 
 // redialAgent replaces a sandbox's agent connection.
 func (m *Manager) redialAgent(ctx context.Context, id string) error {

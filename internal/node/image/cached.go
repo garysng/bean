@@ -227,3 +227,12 @@ func createSparse(path string, sizeMiB int64) error {
 	}
 	return nil
 }
+
+// Digest implements Provider for a provider whose images live in imageDir.
+//
+// A free function rather than a method because all three providers hold the
+// directory under a different field name and would otherwise each carry the same
+// two-line body.
+func digestOf(imageDir, imageRef string) (string, error) {
+	return cachedDigest(imageDir, imageRef)
+}
