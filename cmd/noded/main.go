@@ -516,6 +516,10 @@ func main() {
 				MaxCreates:           int32(maxCreates),
 			})
 		reg.Advertise = adv
+		// Advertised only when the listener exists. A node without it cannot serve
+		// port exposure, and the proxy needs to be able to say that rather than dial
+		// a port nothing is on.
+		reg.SandboxPortAddr = *sandboxPortAddr
 
 		// Host reconciliation is enabled only for the microVM tier, and only in
 		// multi-node mode. It is deliberately not a standalone startup step: what

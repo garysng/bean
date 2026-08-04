@@ -19,6 +19,19 @@ import (
 // registration labels.
 const LabelAdvertiseAddr = "bean.io/advertise-addr"
 
+// LabelSandboxPortAddr carries the address of a node's Host-routed forwarding port.
+//
+// Separate from LabelAdvertiseAddr because they are different services on different
+// ports: that one is the gRPC control interface the scheduler drives, this one is the
+// HTTP path into a sandbox. bean-proxy needs this one, and reusing the other would
+// point browser traffic at a gRPC listener.
+//
+// Absent when a node was started without --sandbox-port-listen, which is a node that
+// cannot serve port exposure at all. A caller has to treat absence as "not available
+// here" rather than assume a default port: a guessed port either refuses the
+// connection or belongs to something else entirely.
+const LabelSandboxPortAddr = "bean.io/sandbox-port-addr"
+
 // Registrar keeps a node registered with the control plane: it registers
 // once, then maintains the heartbeat stream and reconciles on restart.
 // The node dials out, so no inbound path to the control plane is needed.
@@ -33,6 +46,11 @@ type Registrar struct {
 	// Advertise is the address the control plane should dial for this
 	// node's data plane. Empty means the control plane must already know.
 	Advertise string
+	// SandboxPortAddr is where this node serves Host-routed access into its
+	// sandboxes. Empty when the node was started without that listener, which is a
+	// node that cannot serve port exposure -- so it is advertised only when present
+	// rather than defaulted, and a caller that finds it absent must say so.
+	SandboxPortAddr string
 	// ReclaimHost reclaims host resources a previous noded left behind. Nil
 	// disables it, which is what the local runtime and every test that is not
 	// about reconciliation want: there is nothing to reconcile without
@@ -107,14 +125,19 @@ func (r *Registrar) Run(ctx context.Context) error {
 // session performs one register -> reconcile -> heartbeat cycle.
 func (r *Registrar) session(ctx context.Context, client nodev1.NodeServiceClient) error {
 	labels := r.Labels
-	if r.Advertise != "" {
-		// Carry the data-plane address in labels so the control plane can
-		// route to this node without a separate discovery mechanism.
-		labels = make(map[string]string, len(r.Labels)+1)
+	if r.Advertise != "" || r.SandboxPortAddr != "" {
+		// Carry the addresses in labels so the control plane and the proxy can route
+		// to this node without a separate discovery mechanism.
+		labels = make(map[string]string, len(r.Labels)+2)
 		for k, v := range r.Labels {
 			labels[k] = v
 		}
-		labels[LabelAdvertiseAddr] = r.Advertise
+		if r.Advertise != "" {
+			labels[LabelAdvertiseAddr] = r.Advertise
+		}
+		if r.SandboxPortAddr != "" {
+			labels[LabelSandboxPortAddr] = r.SandboxPortAddr
+		}
 	}
 	resp, err := client.Register(ctx, &nodev1.RegisterRequest{
 		BootstrapToken: r.BootstrapToken,
