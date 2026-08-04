@@ -1,6 +1,6 @@
 # API 与 Proxy 服务设计
 
-> 对应组件:`bean-api`（api-gateway,✅）、`bean-proxy`（端口反代,📐 未实现）。
+> 对应组件:`bean-api`（api-gateway,✅）、`bean-proxy`（进入 sandbox 的反向代理,✅）。
 > 状态标注约定见 [architecture.md](architecture.md) §0。
 > 术语与状态机见 [architecture.md](architecture.md)。
 
@@ -156,17 +156,30 @@ POST /sandboxes/{id}/files:downloadUrl {"path": "..."}
 DELETE /sandboxes/{id}/files?path=...
 ```
 
-### 3.4 Ports 📐
+### 3.4 Ports —— 没有注册步骤 ✅
 
-> 未实现,依赖网络栈与 bean-proxy。
+访问沙箱内的端口是通的,而且**不需要任何 API 调用**。端口写在 Host 头里
+(`{port}-{sandbox}`,见 §6),bean-proxy 转发过去。沙箱内有进程在听就能访问,
+没有就返回 502。
 
+下面这套设计是先画的,**没有实现,而且是刻意不实现**:
 
 ```
-POST /sandboxes/{id}/ports    { "port": 8888, "auth": "token" }   // token|public
-→ { "url": "https://sbx-abc123-8888.<region>.sandbox.<domain>" }
+POST /sandboxes/{id}/ports    { "port": 8888, "auth": "token" }
 GET    /sandboxes/{id}/ports
 DELETE /sandboxes/{id}/ports/{port}
 ```
+
+它会给一件 guest 已经决定的事再造一个真相来源。端口开没开是沙箱内进程的事实,
+而一份「打算开的端口」清单只能与它一致或不一致 —— 不一致的表现就是一个解析得到
+却什么都没有的 URL,或者一个能用但平台说它关着的端口。什么都不分配也意味着没有池
+需要在重启后重建,而这正是当初不用宿主端口的另一个理由。
+
+真正缺的是**按端口的访问控制**(上面那个 `"auth": "token"`)。现在沙箱上任何端口,
+只要能连到 proxy 就能访问,所以不要给沙箱一个它不希望调用方看到的端口。外部认证层
+(A7)管的是能否访问这个沙箱,不是沙箱内的哪个端口。
+
+`10001` 是保留端口 —— 那是 agent —— 任何代用户映射端口的东西都必须拒绝它。
 
 ### 3.5 Images ✅
 
@@ -461,23 +474,31 @@ noded → agent：vsock（fc 主路径;容器档 unix socket,P5）
 状态语义：PAUSED → 触发透明唤醒,请求阻塞至 resume（超过唤醒时限,默认 10s,
 才回 502 + Retry-After）;PULLING/STOPPING 等不可唤醒态 → 409 SANDBOX_NOT_RUNNING。
 
-## 6. bean-proxy（端口反代服务）📐
+## 6. bean-proxy（进入 sandbox 的反向代理）✅
 
-> **整节未实现**,`cmd/bean-proxy` 不存在。它依赖的网络栈现在已经建好
-> (network.md),所以剩下的阻塞是这个 proxy 本身,而不是它下面的地址层。
+> 已建成:`cmd/bean-proxy`。在真机上端到端验证过 —— 用户的服务器与 agent 都经它到达,
+> 未知沙箱 404,畸形 Host 400。
 
-### 6.0 两件不同的事想用同一个二进制 ⚠️
+### 6.0 那两件事其实是一件 ⚠️
 
-本节设计的是**端口暴露**:浏览器访问 sandbox 内的一个端口。
-[GitHub #27](https://github.com/garysng/bean/issues/27) 要的是另一件会住在同一进程里的事
-—— 把 **exec 与文件流量**移出控制面 —— 混淆两者已经导致过一次错误的方案,所以把区别记在这里。
+本节原本把**端口暴露**(浏览器访问 sandbox 内的端口)和**数据面**
+([GitHub #27](https://github.com/garysng/bean/issues/27),把 exec 与文件流量移出控制面)
+设计成两件事,并警告混淆两者已经导致过一次错误的方案。
 
-| | 端口暴露(本节) | 数据面(#27) |
+**那个警告对风险的判断是对的,对结论的判断是错的。** 它们是同一个机制,而让它们合并的
+是把 agent 从 vsock 移到 guest 内的一个 TCP 端口:一旦 agent 就是 *guest 上的一个端口*,
+「访问 agent」和「访问用户在 8000 上的服务」就是同一个请求,只是 Host 里的数字不同。
+
+| | 原设计(两件事) | 实际实现(一件事) |
 |---|---|---|
-| 谁在调用 | 浏览器,任意 HTTP | SDK 与 CLI |
-| 如何寻址 | `{sbxId}-{port}.{region}...` 域名 | 现有的 REST 路径 |
-| 终点 | sandbox 自己的 IP:port | noded,再由它转给 agent |
-| 存在理由 | 让端口可达 | 让批量字节离开调度器所在的进程 |
+| 如何寻址 | 域名 vs REST 路径 | 两者都是 `{port}-{sandbox}` |
+| 终点 | sandbox 的 IP:port vs noded 转给 agent | 始终是 sandbox 的 IP:port |
+| 路由器需要区分吗 | 需要 | **不需要** —— 它转发的是一个端口 |
+
+顺序是 `{port}-{sandbox}`,端口在前,与 e2b 的 `ParseHost` 一致:沙箱 id 长度可变且
+可能含分隔符,端口两者都不是。
+
+下面保留的是当初推理中站得住的部分 —— 动机是收窄接口,而不是负载。
 
 **第二件事更强的理由不是负载。** `SandboxService` 把 `DestroySandbox`、
 `SnapshotSandbox`、`CommitSandbox` 和 `Exec`、`ReadFile`、`WriteFile` 放在同一个服务里,

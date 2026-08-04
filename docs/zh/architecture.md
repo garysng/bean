@@ -56,8 +56,12 @@ AI evaluation / agent rollout 场景（如 SWE-bench 类任务）的特点：
 **已交付、不再是非目标**:pause/resume 与 snapshot 都已实装并在真 KVM 机器实测
 (full / `--no-memory` / `--base` 增量三种,见 snapshot-resume.md)。
 
-**当前真正的空白**是网络:sandbox 没有任何网络能力,连出网都没有 ——
-不是「跨节点不互通」,是「完全没有网络栈」(noded-design §5 全节未实现)。
+**网络曾是最大空白,现已建成**(network.md):每个 sandbox 有独立 namespace、tap
+与出网,元数据网段与 RFC1918 默认拒绝,沙箱内的端口可以从节点外经 bean-proxy 到达。
+全部在真实内核上验证过,包括那些拒绝规则。
+
+跨节点 sandbox 互通仍是非目标。真正缺的是**按端口的访问控制** —— 沙箱上的任何端口,
+只要能连到 proxy 就能访问(api-design.md §3.4)。
 
 ## 2. 总体架构 ⚠️
 
@@ -102,7 +106,7 @@ AI evaluation / agent rollout 场景（如 SWE-bench 类任务）的特点：
 | `api-gateway` | Go | ✅ REST + gRPC API、鉴权、配额（端口反代由 bean-proxy 承担,可合部） |
 | `scheduler` | Go | 节点选择（镜像亲和 + 资源 bin-packing）、租约管理——**control plane 逻辑模块**（`internal/control/scheduler`,与 bean-api 同进程:调度决策与事务扣量、指令下发需原子完成;成为瓶颈或需选主时再拆） |
 | `image-service` | Go | 镜像元数据索引、格式转换编排、prewarm、S3 blob GC（control plane 逻辑模块，P0–P2 内嵌 bean-api） |
-| `bean-proxy` | Go | 📐 **未实现**,`cmd/` 下没有这个二进制。端口暴露反向代理:通配域名 TLS、路由到 noded → agent。依赖网络栈,而网络栈也未实现 |
+| `bean-proxy` | Go | ✅ 进入 sandbox 的反向代理。从 Host 读 `{port}-{sandbox}`,查出沙箱所在节点后转发。用户暴露的端口和 agent 自己的接口走同一条路——端口暴露和数据面是一个机制而非两个。不做用户认证(外部层负责,见 A7),拒绝绑公网地址。TLS 与 DNS 属于托管层,不在 bean 内 |
 | `noded` | Go | 节点 daemon：sandbox 生命周期、网络、镜像缓存、卷挂载、健康上报 |
 | `beand` | Go（静态编译） | sandbox 内 PID1：exec、PTY、文件读写、端口转发 |
 | `sdk-python` | Python | evaluation/rollout 侧主 SDK |
@@ -435,7 +439,7 @@ bean/
 │   ├── bean-api/           ✅ gateway（内嵌 scheduler / image / snapshot 模块）
 │   ├── noded/              ✅ node daemon
 │   ├── beand/              ✅ sandbox 内 agent
-│   └── bean-proxy/         📐 未实现
+│   └── bean-proxy/         ✅ 进入 sandbox 的反向代理(按 Host 路由)
 ├── internal/
 │   ├── control/            ✅ api / scheduler / store / snapshot / s3
 │   ├── node/               ✅ manager / runtime / image / vsock（无网络模块）
