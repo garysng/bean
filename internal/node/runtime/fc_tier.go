@@ -48,6 +48,15 @@ type FCTierConfig struct {
 	// there is nothing per-sandbox for it to vary with.
 	GuestDNS string
 
+	// WarmSnapshots has prewarm boot one guest per image and checkpoint it, so
+	// later creates of that image restore instead of booting.
+	//
+	// Off by default for a storage reason rather than a correctness one: each warm
+	// snapshot is a full memory image, so the cost is roughly one guest's memory per
+	// image per CPU generation, and nothing reclaims them yet. A miss always boots,
+	// so turning this on cannot make a create fail that would otherwise have worked.
+	WarmSnapshots bool
+
 	// Cgroups puts each sandbox's VMM in a cgroup with limits from its own spec.
 	// Off by default: the memory ceiling is derived from a headroom that has not
 	// been measured against real workloads, and a ceiling set too low does not

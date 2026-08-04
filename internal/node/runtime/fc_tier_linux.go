@@ -67,6 +67,24 @@ func NewFCTier(cfg FCTierConfig) (Runtime, error) {
 	// report a resolver it never passed to a guest -- the log was the only evidence
 	// and it said the feature was on.
 	rt.GuestDNS = cfg.GuestDNS
+	rt.WarmSnapshots = cfg.WarmSnapshots
+	if cfg.WarmSnapshots {
+		// Swept at startup rather than on a timer: a temporary bundle can only be
+		// orphaned by a process that died, so this is the one moment the set of
+		// orphans is both knowable and stable.
+		if err := rt.warm.Clean(); err != nil {
+			slog.Warn("cannot clean partial warm snapshots", logging.KeyError, err)
+		}
+		bytes, err := rt.WarmBytes()
+		if err != nil {
+			slog.Warn("cannot size the warm snapshots", logging.KeyError, err)
+		}
+		// Stated with its size because nothing reclaims these yet, so the number an
+		// operator needs to watch is the one that only grows.
+		slog.Info("warm snapshots on; a create restores instead of booting when this "+
+			"node holds one for the image and CPU",
+			"heldBytes", bytes, "dir", filepath.Join(cfg.BaseDir, ".warm"))
+	}
 	rt.SnapshotCache = cfg.SnapshotCache
 	if !cfg.SnapshotCache.Enabled() {
 		// Stated because the growth is otherwise invisible: the cache consumes no

@@ -85,6 +85,14 @@ type Provider interface {
 	// and lets a warm snapshot be found by the image's digest rather than by a tag
 	// that may since have moved.
 	Cached() (map[string]CachedImage, error)
+	// Digest reports the manifest digest a reference resolved to when it was
+	// prepared on this node, or "" if that is not recorded.
+	//
+	// Read from what the node has, never re-resolved against a registry. The
+	// question is what the local file was built from, and that differs from what
+	// the tag points at now precisely when it matters. An empty return is not an
+	// error: the image simply cannot be warmed, and booting is the correct answer.
+	Digest(imageRef string) (string, error)
 }
 
 // FileProvider backs each sandbox with a sparse file formatted as ext4. It
@@ -179,4 +187,9 @@ func (p *FileProvider) basePath(imageRef string) (string, error) {
 		return "", err
 	}
 	return path, nil
+}
+
+// Digest reports what this node recorded for the image.
+func (p *FileProvider) Digest(imageRef string) (string, error) {
+	return digestOf(p.ImageDir, imageRef)
 }
