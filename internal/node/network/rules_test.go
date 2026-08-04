@@ -306,6 +306,31 @@ func TestSetupPlanRefusesWithoutAnUplink(t *testing.T) {
 	}
 }
 
+func TestNoCarveOutForTheMetadataService(t *testing.T) {
+	// Firecracker's metadata service is at 169.254.169.254, inside a denied range,
+	// and the agent reads its credential from there -- which reads like a conflict
+	// that needs an exception. It is not one: with /mmds/config applied the VMM
+	// answers on the tap, below the forwarding path, so the request never reaches
+	// this chain. Measured on a live guest, an ACCEPT for it sat at position 1
+	// across a successful read and counted zero packets.
+	//
+	// This test exists because the measurement is easy to get backwards. A build
+	// without /mmds/config *does* have that packet forwarded and dropped, which
+	// looks identical to the filter being at fault, and the obvious repair is to
+	// open a hole in a boundary that nothing traverses.
+	_, rules := planFor(t, 14)
+	for _, r := range rules {
+		a := argsOf(r)
+		if strings.Contains(a, "169.254.169.254") {
+			t.Errorf("a rule singles out the metadata address: %s\n"+
+				"The VMM answers it below the forwarding path, so this rule cannot "+
+				"match -- and as an ACCEPT it widens the link-local denial for "+
+				"nothing. If MMDS is genuinely unreachable, check that /mmds/config "+
+				"was applied before concluding the filter is at fault", r)
+		}
+	}
+}
+
 func TestPlanHasNoIPv6Rules(t *testing.T) {
 	// The v4 rules say nothing about fd00:ec2::254. That is sound only while the
 	// guest has no IPv6 address at all, which is the current state. If an address
