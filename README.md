@@ -128,7 +128,7 @@ checkpoint fan out to many sandboxes without collisions.
 | Warm snapshots | 📐 The largest remaining throughput lever. A create still boots, costing ~5 CPU-seconds against a restore's near-zero — so the ceiling is `cores / 5` regardless of how fast one create is. [docs/warm-snapshots.md](docs/warm-snapshots.md) |
 | Data plane | 📐 `exec` and file transfer are relayed through the control plane rather than going node-direct |
 | Postgres | ⚠️ SQLite in use. No `Store` interface — all SQL is contained in one package, but callers hold the concrete type |
-| overlaybd lazy-pull | ⚠️ **verified working** (7 ms mount, 19.6% of layer bytes transferred to read a file) but not wired into the image provider — dm-snapshot is the live path |
+| overlaybd | ⚠️ `OverlaybdProvider` is implemented and verified on hardware: it builds and seals layers, attaches them through TCMU, and the mounted device serves the layer's contents. Opt-in via `--fc-overlaybd`; dm-snapshot remains the default. Lazy pull against a registry is implemented but **untested**, and `commit` on this backend is unexercised. [docs/image-pipeline.md](docs/image-pipeline.md) §7 |
 
 ---
 

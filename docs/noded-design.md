@@ -151,7 +151,7 @@ than making callers check for the capability.
 
 Key points:
 
-- **Zero containerd on the fc hot path** ✅: the image module manages block devices itself, and a pure fc node does not install containerd. But the current backend is **dm-snapshot rather than overlaybd ublk** — the overlaybd capability has been measured working (7ms to mount, only 19.6% of layer bytes transferred) but is not yet wired into `image.Provider` (`docs/decisions.md` §3.1).
+- **Zero containerd on the fc hot path** ✅: the image module manages block devices itself, and a pure fc node does not install containerd. The default backend is **dm-snapshot**; overlaybd is now wired into `image.Provider` as `OverlaybdProvider`, enabled with `--fc-overlaybd`, over TCMU rather than ublk (the verification host's 5.15 kernel has no ublk). Verified on hardware: layers built and sealed, attached through TCMU, and the mounted device serves the layer's contents. See [image-pipeline.md](image-pipeline.md) §7.
 - `image.Rootfs` is produced by the image module (see §4) and carries two fields: `Device` (the path the VM attaches) and `Writable` (the CoW layer a snapshot has to capture). **`Writable` is the crucial one**: the snapshot captures it, and restore fills it back in through `PrepareOptions.SeedWritable` before the device is assembled.
 
 ### 3.1 fcRuntime Details ⚠️

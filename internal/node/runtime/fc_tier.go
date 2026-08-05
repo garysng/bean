@@ -48,6 +48,33 @@ type FCTierConfig struct {
 	// there is nothing per-sandbox for it to vary with.
 	GuestDNS string
 
+	// Overlaybd assembles rootfs devices from overlaybd layers instead of
+	// flattening each image into its own ext4.
+	//
+	// The gain is storage: layers are shared by digest, so a set of images built on
+	// one base stores that base once rather than once per image -- measured at 3.1x
+	// less disk for a SWE-bench-shaped set. It also removes the per-image conversion
+	// of shared layers, which is CPU the flattening path pays every time.
+	//
+	// Off by default because it is newer than the device-mapper path and depends on
+	// more of the host: the TCMU kernel modules, a running overlaybd-tcmu, and the
+	// overlaybd binaries. A node configured for it refuses to start if any of those
+	// are missing rather than silently falling back, since falling back would give
+	// the cluster a node whose storage behaviour differs from what was asked for.
+	Overlaybd bool
+	// OverlaybdLazyPull leaves layers in the registry for overlaybd to range-read on
+	// demand rather than converting them locally.
+	//
+	// Requires Overlaybd. Off by default: a locally converted layer is a file this
+	// node owns, while a lazily pulled one makes every block read depend on the
+	// registry still being reachable and still serving that digest.
+	OverlaybdLazyPull bool
+	// OverlaybdBinDir holds the overlaybd binaries. Empty resolves them on PATH.
+	OverlaybdBinDir string
+	// OverlaybdLayerDir holds sealed layers, shared across images. Empty puts them
+	// beside the base images.
+	OverlaybdLayerDir string
+
 	// WarmSnapshots has prewarm boot one guest per image and checkpoint it, so
 	// later creates of that image restore instead of booting.
 	//

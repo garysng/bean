@@ -13,11 +13,18 @@
 PullingProvider          缺镜像时触发转换,并发去重
   └── DevMapperProvider  共享只读 base + 每 sandbox CoW → /dev/mapper/bean-<id>
       (或 FileProvider)  每 sandbox 全量拷贝,无 dm 依赖时兜底
+
+OverlaybdProvider        另一条路,--fc-overlaybd;层按 digest 共享(见 §7)
 ```
 
 分层而不是一个大 provider 的理由:**「镜像从哪来」和「块设备怎么组」是两件事**。
 `PullingProvider` 包着任意一个内层实现,所以「首次使用时拉取」这个行为
-不需要在每个块设备后端里重复实现;换 overlaybd 后端时它也不用改。
+不需要在每个块设备后端里重复实现。
+
+`OverlaybdProvider` 站在这个栈**旁边**而不是里面 —— 这是原先的分层没预料到的一处。
+它自己把镜像解析成层,因为「取哪些层」和「要不要取层」是同一个决定
+(lazy pull 一个都不取)。把它包进 `PullingProvider` 会先跑 ext4 转换器,
+产出一个 overlaybd 用不上的东西。
 
 `Provider` 接口很小 —— 组设备,加上上报节点持有什么:
 
@@ -183,7 +190,7 @@ alpine    2m45s(网络不稳时)
   否则第一批 sandbox 全在等下载
 - 这也是 **overlaybd lazy-pull 的价值所在**:它把「下载全部层」换成
   「按需读实际用到的块」。已实测挂载 7ms、只传 19.6% 的层字节就能挂载并读文件
-  (decisions §3.1)。**但尚未接入** —— 见 §6
+  (decisions §3.1)。**但尚未接入** —— 见 §7
 
 镜像亲和调度是同一个问题的另一面:同一镜像的重复 eval run 应该落到已有它的节点上。
 这条已实装(`Cached()` → 心跳 → 调度打分)。
@@ -267,26 +274,106 @@ beand 是 PID 1,降低自己的 uid 就会失去之后 exec 任何东西的能�
 代价:commit 产物是全量镜像而非增量。overlaybd 接入后可以改成
 `overlaybd-commit` seal LSMT 可写层 —— 那才是真正的零转换(image-build §2)。
 
-## 7. 与 overlaybd 的关系 ⚠️
+## 7. overlaybd 路径 ✅
 
-**能力已实测跑通,尚未接入代码。** 现状与目标形态的差别:
+拍平之外的另一条路,用 `--fc-overlaybd` 选择。默认关闭 —— 不显式开启时,
+节点走的仍是上面的 dm-snapshot。
 
-| | 当前(dm-snapshot) | 目标(overlaybd) |
+| | dm-snapshot(默认) | overlaybd |
 |---|---|---|
 | 首次使用 | 拉全量 + 转换,分钟级 | 按需读块,挂载 7ms |
-| 每 sandbox 成本 | 44 KiB(已实测) | 相当,CoW 都只存改动 |
-| 层格式 | 转成单个 ext4,丢掉层结构 | 保留 LSMT 层,可直接 seal |
-| commit | 读出全量 ext4 | seal 可写层,零转换 |
+| 每 sandbox 成本 | 44 KiB(已实测) | 相当,都只存改动 |
+| 层共享 | **没有** —— 每个镜像一个独立 ext4 | 按 digest 共享,每层只存一份 |
+| 转换 CPU | 每个镜像都付一次,共享层也重复付 | 每个不同的层只付一次 |
+| commit | 读出全量 ext4 | 原地 seal 可写层 |
 
-**关键认识:overlaybd 的价值在「首次使用大镜像的等待时间」,不在「每 sandbox 成本」——
-后者 dm-snapshot 的 CoW 已经解决了。** 所以它是优化项而非基础设施,
-这也是它被排在快照能力之后的理由。
+真正让这件事值得做的收益,不是原先写在这里的那个。旧版说价值在首次使用的等待时间、
+而 prewarm 能遮掉它 —— 这话没错,但漏了 prewarm **遮不掉**的两项:跨镜像共享的层
+只存一份而不是每个镜像各存一份(SWE-bench 形状的镜像集省 3.1 倍磁盘,
+用 `hack/layer-amplification.go` 实测),以及共享 base 的转换 CPU 每个节点只付一次
+而不是每个镜像付一次。2000 张基于同一个 base 的任务镜像,拍平路径要把那个 base
+gunzip 并重写 2000 遍。
 
-接入的工作量是写一个 `OverlaybdProvider` 实现同一个 `Provider` 接口:
-configfs 编排(TCMU backstore → tpgt → nexus → LUN,**顺序不能错**)、
-registry 推送、生命周期。两个只有真机能发现的陷阱记在 decisions §3.1:
-LUN 必须在 nexus 之后链接,以及每个 backstore 必须设唯一 `vpd_unit_serial`
-否则宿主 `multipathd` 会合并不同镜像的设备并**静默返回错误数据**。
+### 层构建流水线
+
+```
+registry 层 (tar.gz)
+  │  解压 —— overlaybd-apply 读 tar,不读 tar.gz
+  ▼
+overlaybd-create --mkfs data index <GB>     建带文件系统的空层
+overlaybd-apply  layer.tar apply.json      把 tar 写进去
+overlaybd-commit -z -t data index out      封成 zfile blob
+  ▼
+<layerDir>/sha256-<digest>.obd             按 OCI digest 命名,因此可共享
+```
+
+按 digest 而非按镜像命名:这就是层共享的全部机制,也意味着第二个镜像引用
+已在本地的层时不需要任何转换。
+
+每 sandbox 的可写层是 `overlaybd-create -s`(稀疏),成本只是写入的块而非虚拟大小 ——
+实测空闲 sandbox 占 40 KiB,而表面大小是 1.1 GB。
+
+### 怎么暴露成块设备
+
+overlaybd 自己没有块设备接口,由内核的 SCSI target 子系统提供,而驱动它的方式
+全是往 configfs 写文件。顺序不是风格问题:
+
+```
+1. mkdir  core/user_999/<name>              建 TCMU backstore
+2. write  control = dev_config=overlaybd/<config.json>,dev_size=N
+3. write  wwn/vpd_unit_serial = <hex>       必须在 enable 之前,见下
+4. write  enable = 1
+5. mkdir  loopback/<wwn>/tpgt_1
+6. write  tpgt_1/nexus = <wwn>              必须在 LUN 之前
+7. mkdir  tpgt_1/lun/lun_0
+8. symlink lun_0/virtual_scsi_port -> backstore
+```
+
+### 四条约束,每条都来自真机
+
+这些都不会给出指明原因的报错,所以在代码里连同理由一起强制,而不是留给文档。
+
+**1. nexus 必须在 LUN 之前。** SCSI host 在 fabric 注册时扫描 LUN,而注册发生在写
+nexus 那一刻;之后再链接的 LUN 永远不会被扫描,后写 nexus 也不触发重扫。
+实测:顺序错时没有设备出现,而 configfs 报告 `enable=1`、`Status: ACTIVATED`,
+overlaybd 自己的 result 文件也说 success。没有任何地方报错。
+
+**2. 每个 backstore 都要有唯一的 unit serial,且必须在 `enable=1` 之前写。**
+TCMU 默认不提供,于是设备 WWID 都是 `36001405` 后跟一串零。multipathd 看到相同
+WWID,判定它们是同一个 LUN 的两条路径,于是合并 —— **把一个 sandbox 的数据喂给
+另一个**,而原设备还会变成 busy 无法直接挂载。已现场复现:没设 serial 的设备被并进
+`mpatha`,设了的那个保持独立。
+
+**3. serial 必须只含十六进制字符。** 内核用 serial 里的**十六进制字符**构造 WWID,
+其余全部丢弃:`bean-aaa` 变成 `naa.6001405beaaaa000...`。所以 `bean-sbx-alpha` 和
+`bean-probe-2` 都归约成 `beabaa` —— 两个看起来唯一实际相撞的 serial,
+也就是第 2 条那个坑,只是更难发现。`deviceSerial` 把 sandbox id 哈希成十六进制,
+而 `attachTCMU` 对非十六进制的 serial **直接拒绝**而不是替调用方净化,
+这样到内核的值就是调用方选的值。
+
+**4. 下层必须是 sealed 的。** 把刚 apply 完(未 seal)的层当 lower,daemon 会报
+`trailer magic, trailer type, file type or sealedness doesn't match` 并让 backstore
+停在 DEACTIVATED —— 而这传到调用方只是 `enable` 写入时的 `ENOENT`,真实原因在
+`/var/log/overlaybd.log` 里。相关地,**构建**层时喂给 `overlaybd-apply` 的临时 config
+的 lowers 必须**为空**:把该层写成自己的 lower 等于让 overlaybd 把同一个文件同时当
+只读父层和可写目标,报错只有 `failed to create image file`。
+
+另外两个「看起来该能用但不能」的细节。teardown **不写** `enable=0` ——
+内核拒绝这个写入(`For dev_enable ops, only valid value is 1`),backstore 靠删目录拆除。
+以及查 LUN 对应的块设备要走 WWID,因为 `udev_path` 始终为空、SCSI model 对所有这类设备
+都读作 `TCMUdevice`、而 `statistics/scsi_port/dev` 是全局端口计数器而非 tcm_loop
+adapter 号(某个报 26 的 LUN 实际由 `tcm_loop_adapter_24` 提供)。
+
+### 验证了什么,没验证什么
+
+`internal/node/image/overlaybd_hw_linux_test.go` 跑真二进制、真 configfs、真块设备,
+宿主不支持时跳过。在验证机(内核 5.15、TCMU、multipathd active)上:构建并封装层、
+attach、**挂载设备并读回层里那个文件**、确认两个设备拿到不同 WWID。
+
+尚未验证:对真 registry 的 lazy pull(`--fc-overlaybd-lazy-pull` 已实现但没测过 ——
+实测的 7ms 挂载和 19.6% 传输量来自 decisions §3.1 的手工验证,不是这份代码)、
+走 `CommitSandbox` 的 commit、以及并发扇出下的表现。ublk 会比 TCMU 快但需要内核 ≥ 6.0;
+TCMU 功能上是完整的。
 
 ## 8. 还没有的 📐
 

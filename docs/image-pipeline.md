@@ -16,12 +16,20 @@ start goes.
 PullingProvider          triggers conversion on a cache miss, deduplicates concurrency
   └── DevMapperProvider  shared read-only base + one CoW per sandbox → /dev/mapper/bean-<id>
       (or FileProvider)  a full copy per sandbox, the fallback when dm is unavailable
+
+OverlaybdProvider        alternative, --fc-overlaybd; layers shared by digest (section 7)
 ```
 
 Why it is layered rather than one large provider: **"where the image comes from" and "how the
 block device is assembled" are two different things**. `PullingProvider` wraps any inner
 implementation, so the behaviour "pull on first use" does not have to be reimplemented in
-every block-device backend; and it will not need to change when the backend becomes overlaybd.
+every block-device backend.
+
+`OverlaybdProvider` sits **beside** that stack rather than inside it, which is the one place
+the original layering did not anticipate. It resolves an image to its layers itself, because
+deciding which layers to fetch is the same decision as deciding whether to fetch them at all
+(lazy pull fetches none). Wrapping it in `PullingProvider` would run the ext4 converter first
+and produce an artifact overlaybd has no use for.
 
 The `Provider` interface is small — assembling a device, plus reporting what the node holds:
 
@@ -203,7 +211,7 @@ itself (mkfs + unpack) is seconds. So:
 - This is also **where overlaybd lazy-pull's value lies**: it trades "download every layer"
   for "read the blocks actually used, on demand". Measured at 7ms to mount, with only 19.6% of
   the layer bytes transferred before it mounts and files can be read
-  (decisions §3.1). **But it is not wired in yet** — see §6
+  (decisions §3.1). **Now wired in** — see §7
 
 Image-affinity scheduling is the other face of the same problem: repeated eval runs on the
 same image should land on nodes that already have it. That part is shipped (`Cached()` →
@@ -294,29 +302,118 @@ The cost: a commit produces a full image rather than an increment. Once overlayb
 this can become `overlaybd-commit` sealing the LSMT writable layer — that is the genuinely
 zero-conversion form (image-build §2).
 
-## 7. Relationship to overlaybd ⚠️
+## 7. The overlaybd path ✅
 
-**The capability is measured working, but it is not wired into the code.** The difference
-between the current state and the target form:
+An alternative to flattening, selected with `--fc-overlaybd`. Off by default; the
+dm-snapshot path above is still what a node uses unless asked otherwise.
 
-| | Current (dm-snapshot) | Target (overlaybd) |
+| | dm-snapshot (default) | overlaybd |
 |---|---|---|
 | First use | pull the whole thing + convert, minutes | read blocks on demand, 7ms to mount |
-| Per-sandbox cost | 44 KiB (measured) | comparable, CoW stores only changes in both |
-| Layer format | converted into one ext4, layer structure lost | LSMT layers retained, sealable directly |
-| commit | read out a full ext4 | seal the writable layer, zero conversion |
+| Per-sandbox cost | 44 KiB (measured) | comparable, both store only changes |
+| Layer sharing | **none** — each image is its own ext4 | shared by digest, one copy per layer |
+| Conversion CPU | paid per image, including for shared layers | paid once per distinct layer |
+| commit | read out a full ext4 | seal the writable layer in place |
 
-**The key realisation: overlaybd's value is in "the wait when a large image is used for the
-first time", not in "the per-sandbox cost" — dm-snapshot's CoW already solved the latter.**
-So it is an optimisation rather than infrastructure, which is also why it is sequenced after
-the snapshot capability.
+The gain that made this worth building is not the one originally written down here. The
+earlier note said the value was first-use latency and that prewarm shadows it — true, but
+it omits the two that prewarm does **not** shadow: layers shared across images are stored
+once instead of once per image (3.1x less disk for a SWE-bench-shaped set, measured with
+`hack/layer-amplification.go`), and the CPU to convert a shared base is paid once per node
+rather than once per image. For a set of 2000 task images on one base, the flattening path
+gunzips and rewrites that base 2000 times.
 
-The work to wire it in is writing an `OverlaybdProvider` implementing the same `Provider`
-interface: configfs orchestration (TCMU backstore → tpgt → nexus → LUN, **the order cannot be
-wrong**), registry push, lifecycle. Two traps only a real machine can reveal are recorded in
-decisions §3.1: the LUN has to be linked after the nexus, and every backstore has to be given
-a unique `vpd_unit_serial`, otherwise the host's `multipathd` will merge the devices of
-different images and **silently return wrong data**.
+### The layer pipeline
+
+```
+registry layer (tar.gz)
+  │  decompress -- overlaybd-apply reads tar, not tar.gz
+  ▼
+overlaybd-create --mkfs data index <GB>     empty layer with a filesystem
+overlaybd-apply  layer.tar apply.json      write the tar into it
+overlaybd-commit -z -t data index out      seal to a zfile blob
+  ▼
+<layerDir>/sha256-<digest>.obd             named by OCI digest, so shared
+```
+
+Named by digest rather than by image: that is the whole mechanism behind layer sharing,
+and it means a second image referencing a layer already here converts nothing.
+
+A per-sandbox writable layer is `overlaybd-create -s` (sparse), costing the blocks written
+rather than its virtual size — 40 KiB measured for an idle sandbox against a 1.1 GB
+apparent size.
+
+### Exposing it as a block device
+
+overlaybd has no block-device interface of its own; the kernel's SCSI target subsystem
+provides one, driven entirely by writing files under configfs. The order is not
+stylistic:
+
+```
+1. mkdir  core/user_999/<name>              create the TCMU backstore
+2. write  control = dev_config=overlaybd/<config.json>,dev_size=N
+3. write  wwn/vpd_unit_serial = <hex>       BEFORE enable, see below
+4. write  enable = 1
+5. mkdir  loopback/<wwn>/tpgt_1
+6. write  tpgt_1/nexus = <wwn>              MUST precede the LUN
+7. mkdir  tpgt_1/lun/lun_0
+8. symlink lun_0/virtual_scsi_port -> the backstore
+```
+
+### Four constraints, each learned from hardware
+
+None of these produce an error message that names the cause, which is why they are
+enforced in code with the reasoning attached rather than left to documentation.
+
+**1. The nexus must precede the LUN.** The SCSI host scans for LUNs when the fabric
+registers, which happens on the nexus write; a LUN linked afterwards is never scanned and
+writing the nexus later does not trigger a rescan. Verified: with the wrong order, no
+device appears while configfs reports `enable=1` and `Status: ACTIVATED`, and overlaybd's
+own result file says success. Nothing reports a problem.
+
+**2. Every backstore needs a unique unit serial, written before `enable=1`.** TCMU
+provides none by default, so devices report WWID `36001405` followed by zeros. multipathd
+sees identical WWIDs, concludes they are two paths to one LUN, and merges them —
+**serving one sandbox another's data**, with the original device then reporting "already
+mounted or mount point busy". Reproduced live: a serial-less device was merged into
+`mpatha` while a serialled one stayed distinct.
+
+**3. The serial must be hex digits only.** The kernel builds the WWID from the
+*hex-digit characters* of the serial and discards the rest: `bean-aaa` became
+`naa.6001405beaaaa000...`. So `bean-sbx-alpha` and `bean-probe-2` both reduce to `beabaa`
+— two serials that look unique and collide, which is constraint 2 all over again but
+harder to see. `deviceSerial` hashes the sandbox id into hex, and `attachTCMU` **refuses**
+a non-hex serial rather than sanitising one, so the value that reaches the kernel is the
+value the caller chose.
+
+**4. A lower layer must be sealed.** Handed a freshly applied (unsealed) layer, the
+daemon fails with `trailer magic, trailer type, file type or sealedness doesn't match` and
+leaves the backstore DEACTIVATED — which reaches the caller only as `ENOENT` on the
+`enable` write, with the real reason in `/var/log/overlaybd.log`. Relatedly, the throwaway
+config handed to `overlaybd-apply` while *building* a layer must have **empty** lowers:
+naming the layer as its own lower asks overlaybd to open one file as both read-only parent
+and writable target, and fails with only `failed to create image file`.
+
+Two further notes on details that look like they should work and do not. Teardown does
+**not** write `enable=0` — the kernel rejects it (`For dev_enable ops, only valid value
+is 1`), so a backstore is removed by removing its directory. And finding a LUN's block
+device goes by WWID, because `udev_path` stays empty, the SCSI model reads `TCMUdevice`
+for every such device, and `statistics/scsi_port/dev` is a global port counter rather than
+the tcm_loop adapter number (a LUN reporting 26 was served by `tcm_loop_adapter_24`).
+
+### What is verified, and what is not
+
+`internal/node/image/overlaybd_hw_linux_test.go` runs against real binaries, real
+configfs and real block devices, skipping where the host cannot support it. On the
+verification host (kernel 5.15, TCMU, multipathd active) it builds and seals a layer,
+attaches it, **mounts the device and reads back the file the layer was built from**, and
+confirms two devices get distinct WWIDs.
+
+Not yet exercised: lazy pull against a registry (`--fc-overlaybd-lazy-pull` is
+implemented and untested — the measured 7 ms mount and 19.6% transfer come from the
+earlier manual verification in decisions §3.1, not from this code), `commit` through
+`CommitSandbox`, and behaviour under concurrent fan-out. ublk would be a faster backend
+than TCMU but needs kernel ≥ 6.0; TCMU is functionally complete.
 
 ## 8. What does not exist yet 📐
 

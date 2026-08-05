@@ -39,7 +39,7 @@ guest kernel 6.1.102, Alpine 3.20.
 | Host resource reconciliation | 📐 | A crashed noded leaves dm mappings and sandbox directories behind |
 | Postgres | ⚠️ | SQLite in use. There is no `Store` interface — `*store.Store` is a concrete type at every call site. What is true is that `database/sql` and the driver import appear only inside `internal/control/store`, so the SQL boundary is contained in one package; swapping the engine means changing that package, not extracting it from callers |
 | Build logs and cancellation | ⚠️ | A build reports no progress and cannot be stopped |
-| overlaybd lazy-pull | ⚠️ | **Verified working** (7 ms mount, 19.6% of layer bytes transferred to read a file) but not wired into the image provider — dm-snapshot is the live path |
+| overlaybd | ⚠️ | `OverlaybdProvider` is implemented and verified on hardware — layers built and sealed, attached through TCMU, and the mounted device serves the layer's contents (`overlaybd_hw_linux_test.go`). Opt-in with `--fc-overlaybd`; dm-snapshot is still the default path. **Untested**: lazy pull against a registry, `commit` on this backend, and concurrent fan-out. See [image-pipeline.md](image-pipeline.md) §7 |
 
 ## Measured latency
 

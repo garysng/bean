@@ -131,6 +131,28 @@ func main() {
 			"bound that, or a node with many prewarmed images will fill its disk. A "+
 			"miss always boots, so enabling this cannot make a create fail that "+
 			"would otherwise have worked")
+	fcOverlaybd := flag.Bool("fc-overlaybd", false,
+		"assemble rootfs devices from overlaybd layers instead of flattening each "+
+			"image into its own ext4 (fc runtime). Layers are shared by digest, so a "+
+			"set of images built on one base stores that base once rather than once "+
+			"per image: measured at 3.1x less disk for a SWE-bench-shaped set, and it "+
+			"also removes the repeated conversion of shared layers, which is CPU the "+
+			"flattening path pays per image. Needs the TCMU kernel modules, a running "+
+			"overlaybd-tcmu, and the overlaybd binaries; a node started with this and "+
+			"missing any of them fails at startup rather than falling back, because a "+
+			"silent fallback gives the cluster a node whose storage behaviour is not "+
+			"what was asked for")
+	fcOverlaybdLazyPull := flag.Bool("fc-overlaybd-lazy-pull", false,
+		"leave layers in the registry for overlaybd to read on demand instead of "+
+			"converting them locally (needs --fc-overlaybd). This is what removes the "+
+			"cold-pull wait: 19.6% of one layer's bytes were enough to mount and read "+
+			"a file, against minutes to download a large image in full. The cost is "+
+			"that every block read then depends on the registry still being reachable "+
+			"and still serving that digest, so a locally converted layer is the safer "+
+			"default for a node expected to keep working while the registry is down")
+	fcOverlaybdBinDir := flag.String("fc-overlaybd-bin-dir", "/opt/overlaybd/bin",
+		"directory holding the overlaybd binaries (overlaybd-create, -apply, "+
+			"-commit). Empty resolves them on PATH")
 	fcVMMUid := flag.Int("fc-vmm-uid", 0,
 		"run the VMM as this uid instead of root (fc runtime). 0 leaves it as "+
 			"noded's own identity, which is what it has always been. The uid needs "+
@@ -246,6 +268,16 @@ func main() {
 			"node whose warm snapshots are bounded when it has none")
 	}
 
+	// Same reasoning: lazy pull is a property of the overlaybd path, so accepting it
+	// on a node that flattens images would read as a node that reads layers on
+	// demand when in fact it downloads every one in full.
+	if *fcOverlaybdLazyPull && !*fcOverlaybd {
+		log.Fatal("--fc-overlaybd-lazy-pull is set but --fc-overlaybd is not: " +
+			"lazy pull is how the overlaybd path fetches layers, and the flattening " +
+			"path has no equivalent, so this would read as a node that reads layers " +
+			"on demand when it downloads each one in full")
+	}
+
 	tmpl, err := runtime.ParseCPUTemplate(*cpuTemplate)
 	if err != nil {
 		log.Fatalf("--cpu-template: %v", err)
@@ -347,6 +379,10 @@ func main() {
 			WarmEviction:    warmEvict,
 			VMMUid:          *fcVMMUid,
 			VMMGid:          *fcVMMGid,
+
+			Overlaybd:         *fcOverlaybd,
+			OverlaybdLazyPull: *fcOverlaybdLazyPull,
+			OverlaybdBinDir:   *fcOverlaybdBinDir,
 		})
 		if err != nil {
 			log.Fatalf("fc runtime: %v", err)
