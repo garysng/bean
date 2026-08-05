@@ -366,14 +366,34 @@ adapter 号(某个报 26 的 LUN 实际由 `tcm_loop_adapter_24` 提供)。
 
 ### 验证了什么,没验证什么
 
-`internal/node/image/overlaybd_hw_linux_test.go` 跑真二进制、真 configfs、真块设备,
-宿主不支持时跳过。在验证机(内核 5.15、TCMU、multipathd active)上:构建并封装层、
+三个层次,因为每一层回答的问题都是下一层答不了的。
+
+**provider 层** —— `internal/node/image/overlaybd_hw_linux_test.go` 跑真二进制、
+真 configfs、真块设备,宿主不支持时跳过。内容:构建并封装层(并确认第二次调用复用)、
 attach、**挂载设备并读回层里那个文件**、确认两个设备拿到不同 WWID。
 
-尚未验证:对真 registry 的 lazy pull(`--fc-overlaybd-lazy-pull` 已实现但没测过 ——
+**约束层** —— `hack/overlaybd-probe.sh` 断言测试断言不了的反面情况:
+LUN 在 nexus 之前链接时确实没有设备出现,以及在没设 serial 的设备上现场复现
+multipathd 合并。
+
+**端到端** —— `hack/overlaybd-e2e.sh` 用 `--fc-overlaybd` 起一个真的全栈,
+**从 overlaybd 设备启动一个 sandbox**。在验证机(内核 5.15、TCMU、multipathd active、
+AMD EPYC 7542)上全部通过:节点选中 overlaybd 而非降级、`bean run --image alpine:3.20`
+成功、guest 从自己的 rootfs 读到 `PRETTY_NAME="Alpine Linux v3.20"`、写入落到可写层、
+运行中的 sandbox 有对应 TCMU backstore、镜像的 PATH 进了 guest 环境、
+`bean kill` 之后无 backstore 残留也无 multipath 设备。
+
+最后这层才是关键:宿主能挂载的设备和 guest 能从它启动是两个不同的断言,
+只有这一层能把这个缺口补上。
+
+**尚未验证**:对真 registry 的 lazy pull(`--fc-overlaybd-lazy-pull` 已实现但没测过 ——
 实测的 7ms 挂载和 19.6% 传输量来自 decisions §3.1 的手工验证,不是这份代码)、
 走 `CommitSandbox` 的 commit、以及并发扇出下的表现。ublk 会比 TCMU 快但需要内核 ≥ 6.0;
 TCMU 功能上是完整的。
+
+用之前值得知道的一个数:**镜像首次使用比 CLI 默认等待时间更慢**,因为要先转换层
+才能组设备。e2e 脚本给了 120s。这条改动完全没有改善冷路径 —— prewarm 仍是必需的,
+真正能消掉它的是 lazy pull。
 
 ## 8. 还没有的 📐
 

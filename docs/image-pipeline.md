@@ -403,17 +403,39 @@ the tcm_loop adapter number (a LUN reporting 26 was served by `tcm_loop_adapter_
 
 ### What is verified, and what is not
 
-`internal/node/image/overlaybd_hw_linux_test.go` runs against real binaries, real
-configfs and real block devices, skipping where the host cannot support it. On the
-verification host (kernel 5.15, TCMU, multipathd active) it builds and seals a layer,
-attaches it, **mounts the device and reads back the file the layer was built from**, and
-confirms two devices get distinct WWIDs.
+Three levels, because each answers a question the one below it cannot.
 
-Not yet exercised: lazy pull against a registry (`--fc-overlaybd-lazy-pull` is
+**Provider level** — `internal/node/image/overlaybd_hw_linux_test.go` runs against real
+binaries, real configfs and real block devices, skipping where the host cannot support
+it. It builds and seals a layer (and confirms a second call reuses it), attaches it,
+**mounts the device and reads back the file the layer was built from**, and confirms two
+devices get distinct WWIDs.
+
+**Constraint level** — `hack/overlaybd-probe.sh` asserts the negative cases the tests
+cannot: no device appears when the LUN is linked before the nexus, and the multipathd
+merge is reproduced live on a serial-less device.
+
+**End to end** — `hack/overlaybd-e2e.sh` starts a real stack with `--fc-overlaybd` and
+**boots a sandbox from an overlaybd device**. On the verification host (kernel 5.15,
+TCMU, multipathd active, AMD EPYC 7542) all of the following passed: the node selects
+overlaybd rather than falling back, `bean run --image alpine:3.20` succeeds, the guest
+reads `PRETTY_NAME="Alpine Linux v3.20"` from its own rootfs, writes land in the
+writable layer, a TCMU backstore exists for the running sandbox, the image's PATH is in
+the guest environment, and `bean kill` leaves no backstore and no multipath device.
+
+That last one is the level that matters: a device the host can mount is not the same
+claim as a guest that boots from it, and only this closes the gap.
+
+**Not yet exercised**: lazy pull against a registry (`--fc-overlaybd-lazy-pull` is
 implemented and untested — the measured 7 ms mount and 19.6% transfer come from the
-earlier manual verification in decisions §3.1, not from this code), `commit` through
+manual verification in decisions §3.1, not from this code), `commit` through
 `CommitSandbox`, and behaviour under concurrent fan-out. ublk would be a faster backend
 than TCMU but needs kernel ≥ 6.0; TCMU is functionally complete.
+
+One number worth knowing before using this: **first use of an image is slower than the
+CLI's default wait**, because the layer is converted before the device can be assembled.
+The e2e script allows 120s for it. Nothing here changes that cold path — prewarm is still
+required, and lazy pull is the thing that would remove it.
 
 ## 8. What does not exist yet 📐
 

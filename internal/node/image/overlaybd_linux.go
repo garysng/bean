@@ -252,7 +252,17 @@ func (p *OverlaybdProvider) lowersFor(ctx context.Context, imageRef string) ([]o
 		lowers = append(lowers, obdLayer{File: path, Digest: layer.Digest, Size: layer.Size})
 	}
 
-	if err := recordRef(p.ImageDir, imageRef, manifest.Digest); err != nil {
+	// The image's own configuration has to be recorded here for the same reason the
+	// flattening path records it during conversion: this is the only moment a
+	// registry is in reach, and without it the guest never learns the image's ENV,
+	// ENTRYPOINT, CMD or WORKDIR. Skipping it on this backend would make an image
+	// start differently depending on which provider a node happens to use, and
+	// nothing would report the difference.
+	cfg, err := p.Registry.FetchConfig(ctx, ref, manifest)
+	if err != nil {
+		return nil, err
+	}
+	if err := recordRef(p.ImageDir, imageRef, manifest.Digest, cfg); err != nil {
 		return nil, fmt.Errorf("image: record reference: %w", err)
 	}
 	return lowers, nil
@@ -344,6 +354,12 @@ func (p *OverlaybdProvider) Cached() (map[string]CachedImage, error) {
 
 func (p *OverlaybdProvider) Digest(imageRef string) (string, error) {
 	return digestOf(p.ImageDir, imageRef)
+}
+
+// Config reports the image configuration this node recorded, written by lowersFor
+// when the image's layers were resolved.
+func (p *OverlaybdProvider) Config(imageRef string) (*Config, error) {
+	return cachedConfig(p.ImageDir, imageRef)
 }
 
 // CommitSandbox seals a sandbox's writable layer into a shareable read-only one.

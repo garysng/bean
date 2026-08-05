@@ -39,7 +39,7 @@ guest kernel 6.1.102, Alpine 3.20.
 | Host resource reconciliation | 📐 | A crashed noded leaves dm mappings and sandbox directories behind |
 | Postgres | ⚠️ | SQLite in use. There is no `Store` interface — `*store.Store` is a concrete type at every call site. What is true is that `database/sql` and the driver import appear only inside `internal/control/store`, so the SQL boundary is contained in one package; swapping the engine means changing that package, not extracting it from callers |
 | Build logs and cancellation | ⚠️ | A build reports no progress and cannot be stopped |
-| overlaybd | ⚠️ | `OverlaybdProvider` is implemented and verified on hardware — layers built and sealed, attached through TCMU, and the mounted device serves the layer's contents (`overlaybd_hw_linux_test.go`). Opt-in with `--fc-overlaybd`; dm-snapshot is still the default path. **Untested**: lazy pull against a registry, `commit` on this backend, and concurrent fan-out. See [image-pipeline.md](image-pipeline.md) §7 |
+| overlaybd | ⚠️ | `OverlaybdProvider` is implemented and **verified end to end on hardware**: a sandbox boots from an overlaybd device, the guest reads `PRETTY_NAME="Alpine Linux v3.20"` from its own rootfs, writes land in the writable layer, and teardown leaks nothing (`hack/overlaybd-e2e.sh`, with `overlaybd_hw_linux_test.go` at the provider level and `hack/overlaybd-probe.sh` covering the negative cases). Opt-in with `--fc-overlaybd`; dm-snapshot is still the default. **Untested**: lazy pull against a registry, `commit` on this backend, concurrent fan-out. First use is slower than the CLI's default wait, because the layer is converted before the device can be assembled. See [image-pipeline.md](image-pipeline.md) §7 |
 
 ## Measured latency
 
