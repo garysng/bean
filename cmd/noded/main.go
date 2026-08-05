@@ -143,13 +143,16 @@ func main() {
 			"silent fallback gives the cluster a node whose storage behaviour is not "+
 			"what was asked for")
 	fcOverlaybdLazyPull := flag.Bool("fc-overlaybd-lazy-pull", false,
-		"leave layers in the registry for overlaybd to read on demand instead of "+
-			"converting them locally (needs --fc-overlaybd). This is what removes the "+
-			"cold-pull wait: 19.6% of one layer's bytes were enough to mount and read "+
-			"a file, against minutes to download a large image in full. The cost is "+
-			"that every block read then depends on the registry still being reachable "+
-			"and still serving that digest, so a locally converted layer is the safer "+
-			"default for a node expected to keep working while the registry is down")
+		"read layers from the registry on demand instead of converting them locally "+
+			"(needs --fc-overlaybd). This is what removes the cold-pull wait -- 19.6% "+
+			"of one layer's bytes were enough to mount and read a file, against "+
+			"minutes to download a large image in full. **It only works on images "+
+			"whose blobs are already sealed overlaybd layers**: a standard OCI layer "+
+			"is a gzipped tar with no block index to seek into, so an ordinary image "+
+			"from a registry cannot be read this way and a create naming one is "+
+			"refused. Producing such images needs a conversion-and-push step this "+
+			"node does not do. The other cost is that every block read then depends "+
+			"on the registry still being reachable and still serving that digest")
 	fcOverlaybdBinDir := flag.String("fc-overlaybd-bin-dir", "/opt/overlaybd/bin",
 		"directory holding the overlaybd binaries (overlaybd-create, -apply, "+
 			"-commit). Empty resolves them on PATH")

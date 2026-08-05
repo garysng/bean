@@ -146,6 +146,43 @@ func (c *obdConfig) validate() error {
 // maxLayers is overlaybd's compiled-in ceiling on chain length.
 const maxLayers = 256
 
+// Media types for blobs that are already sealed overlaybd layers, as published by
+// accelerated-container-image's converter.
+const (
+	mediaTypeOverlaybdLayer    = "application/vnd.containerd.overlaybd.layer.v1+tar"
+	mediaTypeOverlaybdLayerGz  = "application/vnd.containerd.overlaybd.layer.v1+tar+gzip"
+	mediaTypeOverlaybdTurboV1  = "application/vnd.containerd.overlaybd.turbo.v1+json"
+	mediaTypeOverlaybdBlockTar = "application/vnd.oci.image.layer.v1.tar+overlaybd"
+)
+
+// isOverlaybdLayer reports whether a blob can be read directly from a registry by
+// the overlaybd daemon.
+//
+// This is the distinction that decides whether lazy pull is possible at all. A
+// sealed overlaybd layer is an LSMT structure whose blocks are individually
+// addressable, so the daemon can range-read it over HTTP. A standard OCI layer is a
+// gzipped tar: there is no block index to seek into, and the whole thing has to be
+// fetched and converted before it can back a device.
+//
+// So "lazy pull" is a property of the image, not of the node's configuration. An
+// ordinary image from Docker Hub cannot be lazily pulled no matter what this node is
+// told to do -- it first has to be converted and pushed in overlaybd form.
+//
+// turbo-OCI is excluded deliberately even though it is an overlaybd format: those
+// blobs carry only indexes over the original OCI layers, so reading one means
+// resolving its target layer as well, which this provider does not implement.
+func isOverlaybdLayer(mediaType string) bool {
+	switch mediaType {
+	case mediaTypeOverlaybdLayer, mediaTypeOverlaybdLayerGz, mediaTypeOverlaybdBlockTar:
+		return true
+	case mediaTypeOverlaybdTurboV1:
+		// Named rather than falling through to the default, so a turbo image is
+		// refused by a case that says why instead of by omission.
+		return false
+	}
+	return false
+}
+
 // sanitiseDigest turns "sha256:abc..." into a usable filename.
 //
 // The colon is the only character an OCI digest carries that a path cannot, so

@@ -353,8 +353,33 @@ it having been done.
 
 **Create latency is not improved.** Measured 12–32 s per cold create on both backends,
 dominated by registry download and varying more between runs of the same backend than
-between backends. Nothing here touches the cold path; see the note at the end of this
-section.
+between backends.
+
+That deserves more than a shrug, because it is the opposite of what overlaybd is famous
+for. The reason is that **the path measured above still converts before it creates** —
+download every layer, seal each one, then assemble the device. It does strictly more work
+than flattening on a first use; it wins on the second image and on disk, not on the first
+create.
+
+The version that would win on a cold start is lazy pull, and it does not apply to ordinary
+images at all:
+
+| | what the blob is | can overlaybd read it remotely? |
+|---|---|---|
+| `alpine:3.20` from Docker Hub | gzipped tar | ❌ no block index to seek into |
+| an image converted and pushed in overlaybd form | sealed LSMT layer | ✅ range-read over HTTP |
+
+So **lazy pull is a property of the image, not of the node's flags**. `--fc-overlaybd-lazy-pull`
+on a node fed ordinary registry images cannot do anything: `lowersFor` now refuses such a
+create explicitly rather than building a config overlaybd would open and find no LSMT
+structure in. The measured 7 ms mount and 19.6% transfer in decisions §3.1 were against a
+blob that had been converted and pushed first — that step is what this node does not do.
+
+**So the cold path is unchanged and stays that way until images are published in overlaybd
+form.** That is a pipeline question (convert once centrally, push, let every node
+range-read) rather than a provider one, and it is the next thing worth building if
+cold-start latency is the goal. Until then prewarm remains mandatory, exactly as on the
+flattening path.
 
 ### The layer pipeline
 

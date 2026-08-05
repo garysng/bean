@@ -232,9 +232,17 @@ func (p *OverlaybdProvider) lowersFor(ctx context.Context, imageRef string) ([]o
 
 	lowers := make([]obdLayer, 0, len(manifest.Layers))
 	for i, layer := range manifest.Layers {
-		// Lazy pull hands overlaybd the digest and lets it range-read. Nothing is
-		// converted, so first use costs no local work at all.
+		// A remote layer is only readable if the blob in the registry is already a
+		// sealed overlaybd layer. Handing overlaybd the digest of a standard OCI
+		// layer -- a gzipped tar -- does not work: it opens the blob expecting LSMT
+		// structure and finds none.
 		if p.LazyPull {
+			if !isOverlaybdLayer(layer.MediaType) {
+				return nil, fmt.Errorf("image: %s layer %d is %s, which cannot be "+
+					"read remotely: lazy pull needs an image whose blobs are already "+
+					"sealed overlaybd layers (see image-pipeline.md section 7)",
+					imageRef, i+1, layer.MediaType)
+			}
 			lowers = append(lowers, obdLayer{Digest: layer.Digest, Size: layer.Size})
 			continue
 		}

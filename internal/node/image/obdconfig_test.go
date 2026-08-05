@@ -222,6 +222,42 @@ func TestShortHashDistinguishesSandboxes(t *testing.T) {
 	}
 }
 
+// Lazy pull only works on blobs that are already sealed overlaybd layers. This was
+// implemented the other way round first -- handing overlaybd the digest of a standard
+// OCI layer and expecting it to range-read a gzipped tar, which it cannot do. The
+// distinction is a property of the image, not of the node's configuration, so it is
+// worth a test rather than a comment.
+func TestOnlySealedOverlaybdLayersCanBeReadRemotely(t *testing.T) {
+	remote := []string{
+		"application/vnd.containerd.overlaybd.layer.v1+tar",
+		"application/vnd.containerd.overlaybd.layer.v1+tar+gzip",
+		"application/vnd.oci.image.layer.v1.tar+overlaybd",
+	}
+	for _, mt := range remote {
+		if !isOverlaybdLayer(mt) {
+			t.Errorf("isOverlaybdLayer(%q) = false, want true", mt)
+		}
+	}
+
+	local := []string{
+		// The ordinary cases: any image from a registry. These have no block index
+		// to seek into, so they must be converted locally.
+		"application/vnd.docker.image.rootfs.diff.tar.gzip",
+		"application/vnd.oci.image.layer.v1.tar+gzip",
+		"application/vnd.oci.image.layer.v1.tar",
+		"application/vnd.oci.image.layer.v1.tar+zstd",
+		// turbo-OCI is an overlaybd format but carries only indexes over the
+		// original layers, so reading one means resolving its target too.
+		"application/vnd.containerd.overlaybd.turbo.v1+json",
+		"",
+	}
+	for _, mt := range local {
+		if isOverlaybdLayer(mt) {
+			t.Errorf("isOverlaybdLayer(%q) = true, want false", mt)
+		}
+	}
+}
+
 // Measured on hardware: the kernel builds a TCMU WWID from the hex-digit characters
 // of the unit serial and discards the rest, so "bean-aaa" became
 // naa.6001405beaaaa000... That makes a non-hex serial actively dangerous rather than
