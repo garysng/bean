@@ -42,12 +42,65 @@ func Open(path string) (*Store, error) {
 		return nil, err
 	}
 	db.SetMaxOpenConns(1) // sqlite single-writer
+
+	// WAL so that another process can read this database while the control plane
+	// writes it. bean-proxy resolves placement on the data path, and in the default
+	// rollback-journal mode a reader and a writer lock each other out -- which would
+	// present as the proxy stalling whenever a sandbox is created.
+	//
+	// A property of the file rather than of a connection, so it is set once here by
+	// the writer and only verified by OpenReadOnly.
+	if _, err := db.Exec("PRAGMA journal_mode=WAL"); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("enable WAL on %s: %w", path, err)
+	}
+
 	s := &Store{db: db}
 	if err := s.migrate(); err != nil {
 		db.Close()
 		return nil, err
 	}
 	return s, nil
+}
+
+// OpenReadOnly opens an existing database for reading only.
+//
+// Distinct from Open because Open runs migrate(), which is DDL: a second process
+// calling it against a database the first process owns attempts schema writes on
+// someone else's file. Measured -- bean-proxy calling Open failed with
+// "database is locked (SQLITE_BUSY)" and never started, while the log line saying so
+// looked like a transient contention problem rather than a wrong call.
+//
+// Read-only is enforced by SQLite through the URI mode rather than by this package
+// declining to write. A reader that could write is one bug away from being a second
+// writer to the placement ledger, and the proxy sits on the data path where such a
+// write would be least expected.
+//
+// WAL matters here: without it a reader and a writer on one SQLite file block each
+// other, so the proxy would stall on every control-plane write. The writer sets the
+// journal mode -- it is a property of the file, not of a connection -- and this
+// verifies rather than assumes it, because a rollback-journal database would produce
+// exactly the intermittent stalls that get blamed on the network.
+func OpenReadOnly(path string) (*Store, error) {
+	db, err := sql.Open("sqlite", "file:"+path+"?mode=ro")
+	if err != nil {
+		return nil, err
+	}
+	// More than one, unlike Open: readers do not serialise against each other under
+	// WAL, and the proxy serves concurrent requests.
+	db.SetMaxOpenConns(4)
+
+	var mode string
+	if err := db.QueryRow("PRAGMA journal_mode").Scan(&mode); err != nil {
+		db.Close()
+		return nil, fmt.Errorf("read %s: %w", path, err)
+	}
+	if !strings.EqualFold(mode, "wal") {
+		db.Close()
+		return nil, fmt.Errorf("%s is in %s journal mode, not WAL: a reader and the "+
+			"control plane's writer would block each other on every write", path, mode)
+	}
+	return &Store{db: db}, nil
 }
 
 func (s *Store) Close() error { return s.db.Close() }

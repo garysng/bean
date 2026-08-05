@@ -1,11 +1,15 @@
 package node
 
 import (
+	"bufio"
 	"context"
+	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	nodev1 "github.com/garysng/bean/internal/gen/bean/node/v1"
 )
@@ -63,7 +67,7 @@ func TestParseSandboxHostRejectsWhatItCannotRoute(t *testing.T) {
 
 func TestForwardingRejectsAnUnroutableHost(t *testing.T) {
 	m, _ := newNetworkedManager(t)
-	f := NewPortForwarder(m)
+	f := NewPortForwarder(m, "")
 
 	r := httptest.NewRequest(http.MethodGet, "http://example/", nil)
 	r.Host = "no-port-here.sandbox.ai"
@@ -79,7 +83,7 @@ func TestForwardingRejectsASandboxThisNodeDoesNotHold(t *testing.T) {
 	// The common case once a preview tab outlives its sandbox. A 404 rather than a
 	// hang or a 502, so the client can tell "gone" from "not answering".
 	m, _ := newNetworkedManager(t)
-	f := NewPortForwarder(m)
+	f := NewPortForwarder(m, "")
 
 	r := httptest.NewRequest(http.MethodGet, "http://example/", nil)
 	r.Host = "8000-sbx_not_here.sandbox.ai"
@@ -133,5 +137,202 @@ func TestTargetForSaysWhyWhenTheNodeHasNoNetworking(t *testing.T) {
 	if !strings.Contains(err.Error(), "guest-subnet") {
 		t.Errorf("error %q does not name the missing configuration, so an operator "+
 			"cannot tell it from a wrong sandbox id", err)
+	}
+}
+
+// This port reaches every sandbox on the node, including the agent's interface which
+// runs commands as root. The proxy in front presented a token from the beginning; for
+// a while nothing here read it, so the header was decoration and the port was
+// protected by network position alone.
+
+func TestForwardingRequiresTheNodeToken(t *testing.T) {
+	m, _ := newNetworkedManager(t)
+	f := NewPortForwarder(m, "sekret")
+
+	for _, tc := range []struct {
+		name, token string
+	}{
+		{"no token", ""},
+		{"wrong token", "guessed"},
+		// A prefix of the real token, which a byte-at-a-time comparison would accept
+		// more slowly than a wrong first byte -- the oracle the constant-time compare
+		// exists to close.
+		{"prefix of the token", "sek"},
+	} {
+		r := httptest.NewRequest(http.MethodGet, "http://example/", nil)
+		r.Host = "8000-sbx_abc.sandbox.ai"
+		if tc.token != "" {
+			r.Header.Set(HeaderNodeToken, tc.token)
+		}
+		w := httptest.NewRecorder()
+		f.ServeHTTP(w, r)
+		if w.Code != http.StatusUnauthorized {
+			t.Errorf("%s: got %d, want 401", tc.name, w.Code)
+		}
+	}
+}
+
+func TestTheTokenCheckDoesNotRevealWhichSandboxesExist(t *testing.T) {
+	// An unauthenticated caller must not be able to tell a real sandbox from an
+	// invented one. Checking the token after resolving the sandbox would answer 404
+	// for one and 401 for the other, which is an enumeration oracle for the whole
+	// node.
+	m, _ := newNetworkedManager(t)
+	if _, err := m.Create(context.Background(), &nodev1.SandboxSpec{
+		SandboxId: "sbx_real", Image: "scratch",
+	}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	f := NewPortForwarder(m, "sekret")
+
+	codes := map[string]int{}
+	for _, id := range []string{"sbx_real", "sbx_invented"} {
+		r := httptest.NewRequest(http.MethodGet, "http://example/", nil)
+		r.Host = "8000-" + id + ".sandbox.ai"
+		w := httptest.NewRecorder()
+		f.ServeHTTP(w, r)
+		codes[id] = w.Code
+	}
+	if codes["sbx_real"] != codes["sbx_invented"] {
+		t.Fatalf("a real sandbox answered %d and an invented one %d; the difference "+
+			"lets an unauthenticated caller enumerate this node's sandboxes",
+			codes["sbx_real"], codes["sbx_invented"])
+	}
+	if codes["sbx_real"] != http.StatusUnauthorized {
+		t.Fatalf("got %d, want 401 for both", codes["sbx_real"])
+	}
+}
+
+func TestTheRightTokenIsAdmitted(t *testing.T) {
+	// The negative control for the tests above: with the correct token the request
+	// gets past authentication and fails on something else (an unknown sandbox), which
+	// is what shows the 401s were about the token rather than about everything.
+	m, _ := newNetworkedManager(t)
+	f := NewPortForwarder(m, "sekret")
+
+	r := httptest.NewRequest(http.MethodGet, "http://example/", nil)
+	r.Host = "8000-sbx_absent.sandbox.ai"
+	r.Header.Set(HeaderNodeToken, "sekret")
+	w := httptest.NewRecorder()
+	f.ServeHTTP(w, r)
+
+	if w.Code == http.StatusUnauthorized {
+		t.Fatal("the correct token was rejected")
+	}
+	if w.Code != http.StatusNotFound {
+		t.Fatalf("got %d, want 404: authentication passed and the sandbox does not "+
+			"exist on this node", w.Code)
+	}
+}
+
+func TestAnEmptyTokenDisablesTheCheck(t *testing.T) {
+	// Loopback development, and the same arrangement the gRPC listener has. cmd/noded
+	// is what keeps it honest by refusing an off-loopback bind without a token.
+	m, _ := newNetworkedManager(t)
+	f := NewPortForwarder(m, "")
+
+	r := httptest.NewRequest(http.MethodGet, "http://example/", nil)
+	r.Host = "8000-sbx_absent.sandbox.ai"
+	w := httptest.NewRecorder()
+	f.ServeHTTP(w, r)
+
+	if w.Code == http.StatusUnauthorized {
+		t.Fatal("a forwarder with no token configured demanded one")
+	}
+}
+
+func TestWebSocketUpgradeSurvivesTheNodeHop(t *testing.T) {
+	// The node's forwarder wraps its transport in a func to pick h2c or HTTP/1.1 per
+	// request, and httputil.ReverseProxy only tunnels a 101 when it can get at an
+	// http.Transport. So the wrapping is what this checks: a handshake that returns
+	// 101 and then moves no bytes is the failure mode, and it looks like the user's
+	// app hanging.
+	//
+	// The dialer is replaced rather than a sandbox booted: what is under test is the
+	// proxy plumbing, and a real guest would test the guest.
+	upstream := httptest.NewServer(http.HandlerFunc(
+		func(w http.ResponseWriter, r *http.Request) {
+			if !strings.EqualFold(r.Header.Get("Upgrade"), "websocket") {
+				t.Errorf("upstream saw Upgrade=%q, want websocket", r.Header.Get("Upgrade"))
+				w.WriteHeader(http.StatusBadRequest)
+				return
+			}
+			conn, buf, err := w.(http.Hijacker).Hijack()
+			if err != nil {
+				t.Fatalf("hijack: %v", err)
+			}
+			defer conn.Close()
+			_, _ = buf.WriteString("HTTP/1.1 101 Switching Protocols\r\n" +
+				"Upgrade: websocket\r\nConnection: Upgrade\r\n\r\n")
+			_ = buf.Flush()
+			line, _ := buf.ReadString('\n')
+			_, _ = buf.WriteString("ECHO:" + line)
+			_ = buf.Flush()
+		}))
+	defer upstream.Close()
+	upstreamAddr := strings.TrimPrefix(upstream.URL, "http://")
+
+	m, _ := newNetworkedManager(t)
+	if _, err := m.Create(context.Background(), &nodev1.SandboxSpec{
+		SandboxId: "sbx_ws", Image: "scratch",
+	}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+	f := NewPortForwarder(m, "")
+	// Send the guest-bound connection to the test server instead of into a namespace.
+	f.h1 = &http.Transport{
+		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
+			var d net.Dialer
+			return d.DialContext(ctx, "tcp", upstreamAddr)
+		},
+		DisableKeepAlives: true,
+	}
+
+	front := httptest.NewServer(f)
+	defer front.Close()
+
+	conn, err := net.Dial("tcp", strings.TrimPrefix(front.URL, "http://"))
+	if err != nil {
+		t.Fatalf("dial the forwarder: %v", err)
+	}
+	defer conn.Close()
+	if err := conn.SetDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		t.Fatal(err)
+	}
+
+	if _, err := fmt.Fprintf(conn, "GET /live HTTP/1.1\r\nHost: 8000-sbx_ws.sandbox.ai\r\n"+
+		"Connection: Upgrade\r\nUpgrade: websocket\r\n"+
+		"Sec-WebSocket-Version: 13\r\nSec-WebSocket-Key: dGhlIHNhbXBsZSBub25jZQ==\r\n\r\n"); err != nil {
+		t.Fatalf("write the handshake: %v", err)
+	}
+
+	br := bufio.NewReader(conn)
+	status, err := br.ReadString('\n')
+	if err != nil {
+		t.Fatalf("read the status line: %v", err)
+	}
+	if !strings.Contains(status, "101") {
+		t.Fatalf("handshake got %q, want 101", strings.TrimSpace(status))
+	}
+	for {
+		line, err := br.ReadString('\n')
+		if err != nil {
+			t.Fatalf("read headers: %v", err)
+		}
+		if strings.TrimSpace(line) == "" {
+			break
+		}
+	}
+
+	if _, err := conn.Write([]byte("ping\n")); err != nil {
+		t.Fatalf("write after upgrade: %v", err)
+	}
+	echoed, err := br.ReadString('\n')
+	if err != nil {
+		t.Fatalf("read after upgrade: %v", err)
+	}
+	if strings.TrimSpace(echoed) != "ECHO:ping" {
+		t.Fatalf("after the upgrade got %q, want ECHO:ping -- the 101 arrived but the "+
+			"tunnel carries no bytes", strings.TrimSpace(echoed))
 	}
 }

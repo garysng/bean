@@ -234,7 +234,12 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 // headerNodeToken is how the proxy authenticates to a node's forwarding port.
-const headerNodeToken = "X-Bean-Node-Token"
+//
+// Deliberately the same name node.MetadataTokenKey uses on the gRPC surface. gRPC
+// metadata is carried in HTTP/2 headers, so one credential travelling under two names
+// would be one name too many -- and the failure of a mismatch is every request
+// rejected, which reads as a bad token rather than a bad header.
+const headerNodeToken = "bean-node-token"
 
 // Handler returns the proxy as an http.Handler.
 func (s *Server) Handler() http.Handler { return s }

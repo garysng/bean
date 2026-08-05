@@ -2,6 +2,7 @@ package store
 
 import (
 	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 )
@@ -196,5 +197,70 @@ func TestListEventsEmpty(t *testing.T) {
 func TestOpenInvalidPath(t *testing.T) {
 	if _, err := Open("/nonexistent-dir-xyz/sub/test.db"); err == nil {
 		t.Error("expected error opening store in a missing directory")
+	}
+}
+
+func TestOpenReadOnlyWorksWhileTheWriterHoldsTheFile(t *testing.T) {
+	// The case bean-proxy needs: two processes, one writing and one reading. Calling
+	// Open from the reader failed with "database is locked (SQLITE_BUSY)" and the
+	// proxy never started, because Open runs migrate() -- DDL against a file another
+	// process owns.
+	path := filepath.Join(t.TempDir(), "bean.db")
+	writer, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer writer.Close()
+
+	if err := writer.PutSandbox(&Sandbox{ID: "sbx_ro", State: SandboxRunning,
+		NodeID: "node-1"}); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	reader, err := OpenReadOnly(path)
+	if err != nil {
+		t.Fatalf("OpenReadOnly while the writer is open: %v", err)
+	}
+	defer reader.Close()
+
+	got, err := reader.GetSandbox("sbx_ro")
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if got == nil || got.NodeID != "node-1" {
+		t.Fatalf("read back %+v, want the record the writer stored", got)
+	}
+
+	// And a write through the read-only handle must fail, rather than making the
+	// proxy a second writer to the placement ledger.
+	if err := reader.PutSandbox(&Sandbox{ID: "sbx_forbidden"}); err == nil {
+		t.Fatal("a write succeeded through the read-only handle")
+	}
+
+	// The writer keeps working with a reader attached, which is what WAL buys.
+	if err := writer.PutSandbox(&Sandbox{ID: "sbx_after", State: SandboxRunning}); err != nil {
+		t.Fatalf("writer blocked while a reader was attached: %v", err)
+	}
+}
+
+func TestOpenSetsWALSoAReaderDoesNotBlockTheWriter(t *testing.T) {
+	// OpenReadOnly refuses a database that is not in WAL, so this pins the writer's
+	// side of that contract: without it the refusal would be correct and every
+	// deployment would hit it.
+	path := filepath.Join(t.TempDir(), "bean.db")
+	st, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer st.Close()
+
+	var mode string
+	if err := st.db.QueryRow("PRAGMA journal_mode").Scan(&mode); err != nil {
+		t.Fatalf("read journal_mode: %v", err)
+	}
+	if !strings.EqualFold(mode, "wal") {
+		t.Fatalf("journal_mode is %q, want wal: in rollback-journal mode a reader and "+
+			"the writer lock each other out, which presents as bean-proxy stalling "+
+			"whenever a sandbox is created", mode)
 	}
 }

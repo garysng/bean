@@ -55,11 +55,10 @@ func main() {
 	sandboxPortAddr := flag.String("sandbox-port-listen", "",
 		"HTTP address serving Host-routed access into sandboxes, as "+
 			"{port}-{sandboxID}.<anything>. One port covers both the agent's interface "+
-			"and any port a user's process listens on. Empty disables it. This is "+
-			"reached by bean-proxy, never by a user directly: it applies no "+
-			"user-level authorization, so anything that can connect to it can reach "+
-			"any sandbox on this node -- bind it to loopback or a private address, "+
-			"and let the proxy be what faces users")
+			"and any port a user's process listens on. Empty disables it. Callers must "+
+			"present --node-token, the same secret the gRPC surface requires; what it "+
+			"does not do is distinguish one user from another, so it is reached by "+
+			"bean-proxy rather than by users directly, and a public bind is refused")
 	fcBin := flag.String("firecracker-bin", "firecracker", "Firecracker binary (fc runtime)")
 	fcKernel := flag.String("kernel", "/var/lib/bean/assets/vmlinux",
 		"guest kernel image (fc runtime)")
@@ -212,17 +211,25 @@ func main() {
 		log.Fatalf("refusing to listen on %s without --node-token (or BEAN_NODE_TOKEN)", *listen)
 	}
 
-	// The forwarding port applies no user-level authorization: it resolves a sandbox
-	// id from a Host header and connects. Whoever reaches it reaches every sandbox on
-	// this node, including the agent's own interface, which runs commands as root.
+	// The forwarding port requires the node token, but that distinguishes the cluster
+	// from everyone else -- not one user from another. Whoever holds it reaches every
+	// sandbox on this node, including the agent's own interface, which runs commands
+	// as root.
 	//
-	// So it is refused on a public address the same way the control interface is
-	// refused without a token. The check is here rather than in a comment because the
-	// failure is silent -- the port works perfectly when bound to 0.0.0.0, and
-	// nothing surfaces until someone else is on the network.
-	//
-	// A private address is permitted: that is where bean-proxy reaches it in a real
-	// deployment, and requiring loopback would make multi-node impossible.
+	// Two guards, and the second is the one that matters more.
+	if *sandboxPortAddr != "" && *nodeToken == "" && !isLoopback(*sandboxPortAddr) {
+		// Off-loopback without a token is the same refusal the gRPC listener makes,
+		// and for the same reason: with no credential, network position is the only
+		// authentication, and a private network is not one.
+		log.Fatalf("refusing to serve --sandbox-port-listen on %s without "+
+			"--node-token: with no credential, anything on that network can reach "+
+			"every sandbox on this node", *sandboxPortAddr)
+	}
+	// And never on a public address, token or not. A shared cluster secret is not
+	// something to expose to the internet, and the failure is silent -- the port
+	// works perfectly bound to 0.0.0.0, and nothing surfaces until someone else is on
+	// the network. A private address is permitted because that is where bean-proxy
+	// reaches it in a real deployment; requiring loopback would rule out multi-node.
 	if *sandboxPortAddr != "" && isPubliclyRoutable(*sandboxPortAddr) {
 		log.Fatalf("refusing to serve --sandbox-port-listen on %s: it grants access "+
 			"to every sandbox on this node and applies no user authorization, so it "+
@@ -475,7 +482,7 @@ func main() {
 			// Both halves are needed and they are separate. This is the inbound side;
 			// the forwarder's own transport is the outbound side. Fixing only one
 			// leaves gRPC broken with a different error.
-			Handler: h2c.NewHandler(node.NewPortForwarder(mgr), &http2.Server{}),
+			Handler: h2c.NewHandler(node.NewPortForwarder(mgr, *nodeToken), &http2.Server{}),
 			// Deliberately no write or read deadline beyond the headers. What comes
 			// through here is a user's own application: a long poll, a websocket
 			// upgrade, a slow download. A timeout appropriate for an API call would cut

@@ -157,7 +157,8 @@ nohup "$BIN/noded" \
 # connection refused that looks like the proxy being absent.
 nohup "$BIN/bean-proxy" \
   --listen 127.0.0.1:$PROXY_PORT \
-  --db "$RUN/bean.db" \
+  --control-plane "http://127.0.0.1:$API_PORT" \
+  --api-key "$API_KEY" \
   --node-token "$NODE_TOKEN" \
   >"$RUN/proxy.log" 2>&1 &
 

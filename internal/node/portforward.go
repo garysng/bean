@@ -2,6 +2,7 @@ package node
 
 import (
 	"context"
+	"crypto/subtle"
 	"crypto/tls"
 	"fmt"
 	"log/slog"
@@ -119,6 +120,12 @@ func (m *Manager) TargetFor(sandboxID string, port int) (*PortTarget, error) {
 type PortForwarder struct {
 	mgr *Manager
 
+	// token is required of callers. Empty means no check, which is only correct when
+	// network position substitutes for authentication -- the same arrangement the
+	// gRPC listener has, and the reason cmd/noded refuses a non-loopback bind
+	// without one.
+	token string
+
 	// proxy is shared across sandboxes. Its transport dials per request through the
 	// namespace named in the request's own context, so one instance can serve every
 	// sandbox on the node without a connection from one leaking to another.
@@ -179,9 +186,20 @@ func (f *PortForwarder) transportFor(port int) http.RoundTripper {
 	return f.h1
 }
 
+// HeaderNodeToken is the credential a caller of this port must present.
+//
+// The same name the gRPC surface uses for the same secret (MetadataTokenKey): gRPC
+// metadata travels in HTTP/2 headers, so one credential under two names is one name
+// too many, and a mismatch rejects every request while looking like a bad token.
+const HeaderNodeToken = MetadataTokenKey
+
 // NewPortForwarder builds the forwarder.
-func NewPortForwarder(mgr *Manager) *PortForwarder {
-	f := &PortForwarder{mgr: mgr}
+//
+// token is the shared node token this port requires. Empty disables the check, which
+// is correct only on loopback -- cmd/noded refuses a non-loopback bind without one, the
+// same rule the gRPC listener follows.
+func NewPortForwarder(mgr *Manager, token string) *PortForwarder {
+	f := &PortForwarder{mgr: mgr, token: token}
 	f.h2c = h2cTransport()
 	f.h1 = &http.Transport{
 		DialContext: func(ctx context.Context, _, _ string) (net.Conn, error) {
@@ -227,6 +245,14 @@ func NewPortForwarder(mgr *Manager) *PortForwarder {
 }
 
 func (f *PortForwarder) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+	// Checked before the Host is parsed, so an unauthenticated caller learns nothing
+	// about which sandbox ids exist: a 401 for a bad token and a 404 for an unknown
+	// sandbox would otherwise let anyone enumerate the node's sandboxes.
+	if !f.authorized(r) {
+		http.Error(w, "invalid node token", http.StatusUnauthorized)
+		return
+	}
+
 	sandboxID, port, err := ParseSandboxHost(r.Host)
 	if err != nil {
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -239,6 +265,24 @@ func (f *PortForwarder) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	f.proxy.ServeHTTP(w, r.WithContext(
 		context.WithValue(r.Context(), targetKey{}, target)))
+}
+
+// authorized reports whether a caller presented the node token.
+//
+// This port grants access to every sandbox on the node, including the agent's own
+// interface which runs commands as root, so it is not a place for a permissive check.
+// It is nonetheless allowed to be off: with no token set, network position is the
+// authentication, exactly as it is for the gRPC listener and for the Docker daemon on
+// a Unix socket. cmd/noded is what keeps that honest by refusing a non-loopback bind
+// without a token.
+func (f *PortForwarder) authorized(r *http.Request) bool {
+	if f.token == "" {
+		return true
+	}
+	// Constant-time because the comparison is against a secret and the caller is
+	// remote; a byte-at-a-time compare leaks a prefix oracle.
+	return subtle.ConstantTimeCompare(
+		[]byte(r.Header.Get(HeaderNodeToken)), []byte(f.token)) == 1
 }
 
 // netnsHandlePath renders the bind-mounted namespace handle's path.

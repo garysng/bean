@@ -25,7 +25,6 @@ import (
 	"golang.org/x/net/http2/h2c"
 
 	"github.com/garysng/bean/internal/control/proxy"
-	"github.com/garysng/bean/internal/control/store"
 	"github.com/garysng/bean/internal/logging"
 )
 
@@ -33,7 +32,19 @@ var version = "dev"
 
 func main() {
 	listen := flag.String("listen", "127.0.0.1:7480", "HTTP listen address")
-	dbPath := flag.String("db", "", "path to the control plane's database (read-only)")
+	controlPlane := flag.String("control-plane", "",
+		"bean-api base URL, e.g. http://bean-api.internal:8080. Placement is read "+
+			"through the API rather than out of its database: a SQLite file does not "+
+			"cross machines, and this proxy belongs near the nodes it forwards to")
+	apiKey := flag.String("api-key", os.Getenv("BEAN_API_KEY"),
+		"key this proxy authenticates to bean-api with (or BEAN_API_KEY). The proxy "+
+			"is a cluster component and holds its own credential rather than "+
+			"forwarding a caller's")
+	cacheFor := flag.Duration("placement-cache", 5*time.Second,
+		"how long a sandbox's node is remembered. Placement changes when a sandbox is "+
+			"created or destroyed, not per request, so without this every proxied "+
+			"request costs two control-plane round trips -- which is most of what "+
+			"moving the data plane off the control plane was for")
 	nodeToken := flag.String("node-token", os.Getenv("BEAN_NODE_TOKEN"),
 		"token presented to a node's forwarding port (or BEAN_NODE_TOKEN)")
 	logFormat := flag.String("log-format", "text", "log format: text|json")
@@ -42,16 +53,10 @@ func main() {
 
 	logging.Setup(*logFormat, *logLevel)
 
-	if *dbPath == "" {
-		log.Fatal("--db is required: the proxy resolves which node holds a sandbox " +
-			"by reading the control plane's placement records")
+	if *controlPlane == "" {
+		log.Fatal("--control-plane is required: the proxy asks bean-api which node " +
+			"holds a sandbox")
 	}
-
-	st, err := store.Open(*dbPath)
-	if err != nil {
-		log.Fatalf("open store %s: %v", *dbPath, err)
-	}
-	defer st.Close()
 
 	// No user authentication here, by design: an external layer does that, and bean is
 	// the infrastructure underneath it. So whatever can reach this port can reach any
@@ -64,7 +69,8 @@ func main() {
 			"in front", *listen)
 	}
 
-	handler := proxy.New(proxy.StoreSandboxes{Store: st}, *nodeToken)
+	handler := proxy.New(
+		proxy.NewAPISandboxes(*controlPlane, *apiKey, *cacheFor), *nodeToken)
 
 	srv := &http.Server{
 		Addr: *listen,
@@ -81,7 +87,7 @@ func main() {
 	}
 
 	slog.Info("bean-proxy listening", "version", version, "addr", *listen,
-		"db", *dbPath, "nodeTokenSet", *nodeToken != "")
+		"controlPlane", *controlPlane, "nodeTokenSet", *nodeToken != "")
 	if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
 		log.Fatal(err)
 	}
