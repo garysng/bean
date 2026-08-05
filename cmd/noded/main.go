@@ -109,6 +109,24 @@ func main() {
 			"only with measurements, and only with --fc-cgroups on: without a cgroup "+
 			"around the VMM there is nothing in the kernel enforcing fairness when "+
 			"the host comes under pressure")
+	fcPidNS := flag.Bool("fc-pid-namespace", false,
+		"give each sandbox's VMM its own PID namespace, so it cannot see or signal "+
+			"any process on the host (fc runtime). Firecracker talks to noded over a "+
+			"socket and to the guest over KVM, and spawns no children, so it has no "+
+			"use for the host's process table. Applied as a clone flag during the "+
+			"fork, so no wrapper process appears and destroy stays reliable")
+	fcKillOnExit := flag.Bool("fc-kill-on-exit", false,
+		"have the kernel SIGKILL a sandbox's VMM if noded dies (fc runtime). "+
+			"Reconciliation already reclaims such a VMM, but only at the next startup: "+
+			"until then it holds memory the scheduler has promised to something else. "+
+			"SIGKILL rather than SIGTERM because in a PID namespace the VMM is PID 1, "+
+			"and PID 1 ignores signals it has no handler for")
+	fcMountNS := flag.Bool("fc-mount-namespace", false,
+		"give each sandbox's VMM a private mount namespace (fc runtime). Off by "+
+			"default and separate from the other two because its failure is quiet: "+
+			"bean's rootfs is a device-mapper node under /dev rather than a file, so a "+
+			"guest that cannot resolve it finds no root device, and that appears only "+
+			"in the guest console")
 	fcCgroups := flag.Bool("fc-cgroups", false,
 		"put each sandbox's VMM in a cgroup with a memory ceiling, CPU quota and "+
 			"pid cap from its own spec (fc runtime). Off by default because the "+
@@ -365,24 +383,27 @@ func main() {
 		rt = localRT
 	case "fc":
 		fcRT, err := runtime.NewFCTier(runtime.FCTierConfig{
-			FirecrackerBin:  *fcBin,
-			KernelPath:      *fcKernel,
-			AgentDiskPath:   *fcAgentDisk,
-			BaseDir:         *baseDir,
-			ImageDir:        *imageDir,
-			DefaultDiskMiB:  *defaultDiskMiB,
-			BuildkitAddr:    *buildkitAddr,
-			BuildctlBin:     *buildctlBin,
-			DebugConsole:    *debugConsole,
-			CPUTemplate:     tmpl,
-			TrackDirtyPages: *trackDirtyPages,
-			SnapshotCache:   snapCache,
-			GuestDNS:        *guestDNS,
-			Cgroups:         *fcCgroups,
-			WarmSnapshots:   *fcWarmSnapshots,
-			WarmEviction:    warmEvict,
-			VMMUid:          *fcVMMUid,
-			VMMGid:          *fcVMMGid,
+			FirecrackerBin:    *fcBin,
+			KernelPath:        *fcKernel,
+			AgentDiskPath:     *fcAgentDisk,
+			BaseDir:           *baseDir,
+			ImageDir:          *imageDir,
+			DefaultDiskMiB:    *defaultDiskMiB,
+			BuildkitAddr:      *buildkitAddr,
+			BuildctlBin:       *buildctlBin,
+			DebugConsole:      *debugConsole,
+			CPUTemplate:       tmpl,
+			TrackDirtyPages:   *trackDirtyPages,
+			SnapshotCache:     snapCache,
+			GuestDNS:          *guestDNS,
+			Cgroups:           *fcCgroups,
+			VMMPidNamespace:   *fcPidNS,
+			VMMKillOnExit:     *fcKillOnExit,
+			VMMMountNamespace: *fcMountNS,
+			WarmSnapshots:     *fcWarmSnapshots,
+			WarmEviction:      warmEvict,
+			VMMUid:            *fcVMMUid,
+			VMMGid:            *fcVMMGid,
 		})
 		if err != nil {
 			log.Fatalf("fc runtime: %v", err)

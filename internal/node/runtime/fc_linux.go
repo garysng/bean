@@ -201,6 +201,10 @@ type FCRuntime struct {
 	// not buy without a mount namespace.
 	VMMCreds *vmmCreds
 
+	// VMMIsolation narrows what the VMM sees of the host. The zero value applies
+	// nothing, which is how every deployment before this ran.
+	VMMIsolation VMMIsolation
+
 	// snapshots holds unpacked snapshot state, so restoring the same checkpoint
 	// twice does not unpack it twice.
 	snapshots *snapCache
@@ -620,6 +624,10 @@ func (r *FCRuntime) startVMM(ctx context.Context, vm *fcVM, apiSocket string) er
 	// survive, because killVMM signals the negative pid and depends on the VMM
 	// leading its own group.
 	applyCreds(cmd, r.VMMCreds)
+	// Namespaces and parent-death cleanup, applied by the kernel during this fork so
+	// that no wrapper process comes between noded and Firecracker -- which is what
+	// keeps cmd.Process.Pid the VMM's own. See vmmisolation_linux.go.
+	isolateVMM(cmd, r.VMMIsolation)
 	// The console log is opened by noded as root and inherited as an fd, so the
 	// dropped uid writes to it without needing to open it. The fd is already open
 	// at the point of the drop, which is what makes that work.
