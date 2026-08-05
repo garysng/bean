@@ -46,7 +46,7 @@ guest kernel 6.1.102, Alpine 3.20.
 | Container tiers (runc/gVisor) | 📐 | microVM, plus a no-isolation `local` tier for development, are the only options |
 | Volumes | 📐 | |
 | Host resource reconciliation | 📐 | A crashed noded leaves dm mappings and sandbox directories behind |
-| Postgres | ⚠️ | SQLite in use. There is no `Store` interface — `*store.Store` is a concrete type at every call site. What is true is that `database/sql` and the driver import appear only inside `internal/control/store`, so the SQL boundary is contained in one package; swapping the engine means changing that package, not extracting it from callers |
+| Postgres | ⚠️ | SQLite in use, but the store is now behind seven interfaces cut by who may write what, and `database/sql` appears only inside `internal/control/store`. So a second engine is an addition to one package rather than an extraction from callers. **What mattered more than the interfaces**: 37 of 39 methods relied on a process-local mutex for atomicity, which switching engines would not have fixed. The two with a genuine read-then-write (`AcquireSnapshot`, `DeleteSnapshot`) now express their conditions in SQL and decide from `RowsAffected`, as `Reserve` always did |
 | Build logs and cancellation | ⚠️ | A build reports no progress and cannot be stopped |
 | overlaybd lazy-pull | ⚠️ | **Verified working** (7 ms mount, 19.6% of layer bytes transferred to read a file) but not wired into the image provider — dm-snapshot is the live path |
 
