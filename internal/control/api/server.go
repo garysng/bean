@@ -73,8 +73,23 @@ type QueueingPlacer interface {
 // Server is the REST gateway. It holds no placement state of its own: node
 // capacity and reservations live in the store, so replicas are
 // interchangeable and a restart loses nothing.
+// Store is what the gateway needs of the state store.
+//
+// Composed of four of the store's interfaces rather than all seven, and the two it
+// leaves out are the point: the gateway cannot reach Placement or Nodes. Capacity is
+// the scheduler's to commit and node liveness is nodesvc's to record, so a handler that
+// could write either would be able to contradict them -- and the compiler now refuses
+// rather than a reviewer having to notice.
+type Store interface {
+	store.Sandboxes
+	store.Snapshots
+	store.Images
+	store.RegistryCredentials
+	store.Builds
+}
+
 type Server struct {
-	store  *store.Store
+	store  Store
 	router Router
 	placer Placer
 	region string
@@ -134,7 +149,7 @@ type Options struct {
 
 // New builds a gateway. A placer is required: every sandbox is placed by
 // the scheduler, whether the cluster has one node or many.
-func New(st *store.Store, router Router, placer Placer, opts Options) *Server {
+func New(st Store, router Router, placer Placer, opts Options) *Server {
 	tier := opts.RuntimeTier
 	if tier == "" {
 		tier = "fc"

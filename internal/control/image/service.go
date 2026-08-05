@@ -34,21 +34,29 @@ type NodeCacheSource interface {
 }
 
 // Service owns image metadata and prewarm jobs.
+// Store is what the image service needs: the image catalogue and the prewarm jobs
+// that populate it. Snapshots, sandboxes and the resource ledger are unreachable
+// through it, which is the point -- an image service that could move a reservation
+// would be a second scheduler.
+type Store interface {
+	store.Images
+}
+
 type Service struct {
-	store  *store.Store
+	store  Store
 	cache  NodeCacheSource
 	policy Policy
 
 	mu sync.Mutex
 }
 
-func New(st *store.Store, cache NodeCacheSource) *Service {
+func New(st Store, cache NodeCacheSource) *Service {
 	return &Service{store: st, cache: cache}
 }
 
 // NewWithPolicy builds a service that refuses references an operator's policy
 // forbids. The zero Policy permits everything, so this is New plus a rule.
-func NewWithPolicy(st *store.Store, cache NodeCacheSource, policy Policy) *Service {
+func NewWithPolicy(st Store, cache NodeCacheSource, policy Policy) *Service {
 	return &Service{store: st, cache: cache, policy: policy}
 }
 

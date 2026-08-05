@@ -246,7 +246,7 @@ func main() {
 // markNodeSandboxesLost flags a lost node's sandboxes and returns their
 // capacity, so a node failure strands neither the records nor the
 // reservations.
-func markNodeSandboxesLost(st *store.Store, sched *scheduler.Scheduler, nodeID string) {
+func markNodeSandboxesLost(st store.Sandboxes, sched *scheduler.Scheduler, nodeID string) {
 	recs, err := st.ListSandboxes("", "", "")
 	if err != nil {
 		slog.Error("cannot list sandboxes to mark lost",
@@ -279,7 +279,7 @@ func markNodeSandboxesLost(st *store.Store, sched *scheduler.Scheduler, nodeID s
 
 // storeLister answers SyncState from the records the control plane believes
 // belong to a node.
-type storeLister struct{ store *store.Store }
+type storeLister struct{ store store.Sandboxes }
 
 func (l *storeLister) ExpectedForNode(nodeID string) []*nodev1.SandboxSpec {
 	recs, err := l.store.ListSandboxes("", "", "")
@@ -306,7 +306,7 @@ func (l *storeLister) ExpectedForNode(nodeID string) []*nodev1.SandboxSpec {
 
 // nodeCacheSource reports how many nodes cache an image, which drives
 // prewarm progress and image-affinity scoring.
-type nodeCacheSource struct{ store *store.Store }
+type nodeCacheSource struct{ store store.Nodes }
 
 func (n nodeCacheSource) CachedNodeCount(ref string) int {
 	nodes, err := n.store.LoadNodes()
