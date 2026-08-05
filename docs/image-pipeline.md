@@ -23,13 +23,15 @@ block device is assembled" are two different things**. `PullingProvider` wraps a
 implementation, so the behaviour "pull on first use" does not have to be reimplemented in
 every block-device backend; and it will not need to change when the backend becomes overlaybd.
 
-The `Provider` interface has only four methods:
+The `Provider` interface is small — assembling a device, plus reporting what the node holds:
 
 ```go
 Name() string
 Prepare(ctx, sandboxID, imageRef string, opts PrepareOptions) (*Rootfs, error)
 Prewarm(ctx, imageRef string) error
-Cached() (map[string]int64, error)
+Cached() (map[string]CachedImage, error)
+Config(imageRef string) (*Config, error)   // §5
+Digest(imageRef string) (string, error)
 ```
 
 `Cached()` exists because **the node is the only authority on what it holds** — the heartbeat
@@ -207,7 +209,80 @@ Image-affinity scheduling is the other face of the same problem: repeated eval r
 same image should land on nodes that already have it. That part is shipped (`Cached()` →
 heartbeat → scheduling score).
 
-## 5. commit: the reverse path ✅
+## 5. Image configuration: ENV / ENTRYPOINT / CMD / WORKDIR ✅
+
+An image is two things: layers, and a configuration blob describing how to start them.
+The conversion above handles the first and **drops the second** — flattening layers into an
+ext4 carries no metadata. So the config has to travel by a separate route, and without one
+an image that depends on its own `ENV` or `WORKDIR` starts wrong with no error anywhere.
+
+The route has two halves, because the registry is reachable at conversion time and not at
+create time:
+
+```
+convert  FetchConfig(manifest.Config.Digest)  → Config{Env,Entrypoint,Cmd,WorkingDir,User}
+             │                                    written into the .ref sidecar
+             ▼
+create   Provider.Config(ref) → *Config    ┐
+         spec.Cmd / spec.Env               ├→ MergeConfig → Process{Argv,Env,Workdir,User}
+                                           ┘        │
+                                    StartUserProcessRequest → beand exec
+```
+
+Recorded in the same `.ref` sidecar as the reference and digest rather than a second file, so
+one atomic write publishes everything the node knows about an image and no reader can catch
+the two disagreeing.
+
+### Field-by-field correspondence
+
+| OCI config | Where it goes | Status |
+|---|---|---|
+| `Env` | merged under the request's env, per key | ✅ |
+| `Entrypoint` | head of `Argv`, always preserved | ✅ |
+| `Cmd` | tail of `Argv`, replaced by the request's cmd if it has one | ✅ |
+| `WorkingDir` | `Workdir`, used when the request names none | ✅ |
+| `User` | carried on `Process`, **not applied** | 📐 |
+| `VOLUME` / `EXPOSE` / `HEALTHCHECK` | ignored / metadata / not executed | ➖ same as a container runtime |
+
+### The merge rules, and the one that is easy to get wrong
+
+```
+Argv     = Entrypoint ++ (request.Cmd if non-empty else image.Cmd)
+Env      = image.Env, then request.Env overriding per key
+Workdir  = request.Workdir, else image.WorkingDir, else the agent's default
+```
+
+**A request's command replaces `Cmd` and leaves `Entrypoint` alone.** This is what makes
+`docker run python:3.12 -c 'print(1)'` pass an argument to the interpreter rather than trying
+to exec `-c`. Overriding both together looks right for every image whose `Entrypoint` is empty
+— which is most of what anyone tests with — and breaks precisely the images that declare one.
+The table test in `config_test.go` pins this case specifically.
+
+Env merges per key rather than wholesale for a related reason: an image's `PATH` and a caller's
+one extra variable both have to survive, and a caller cannot be expected to restate the image's
+environment in order to add to it.
+
+### Where a config comes from, by image source
+
+| Source | Config | Why |
+|---|---|---|
+| registry pull | from the config blob | fetched during conversion |
+| `commit` | carried forward from the source image | committing changes a filesystem, not the way the environment starts |
+| `build` | **none** 📐 | buildctl is asked for `type=tar`, a flat rootfs with no image metadata; capturing the Dockerfile's `ENV`/`ENTRYPOINT` means exporting an OCI image from the builder instead |
+
+An absent config reads back as `nil`, never as an empty `Config`, and a `nil` means "start from
+the request alone" — which is what every image did before configs were recorded. Distinguishing
+the two matters: an empty `Config` would claim the image genuinely declares no entrypoint.
+
+### `User` is recorded but not enforced 📐
+
+The value is stored and reaches `Process`, and everything runs as root regardless. It cannot be
+applied where the rest of this is applied: beand is PID 1, so lowering its own uid would cost it
+the ability to exec anything afterwards — it has to happen in the child. Resolving a name like
+`nobody` also needs the guest's `/etc/passwd`, which only exists after the pivot to the image's
+rootfs. So this is a separate change rather than a missing line.
+
+## 6. commit: the reverse path ✅
 
 `commit` seals the filesystem of a running sandbox into a new base image.
 
@@ -219,7 +294,7 @@ The cost: a commit produces a full image rather than an increment. Once overlayb
 this can become `overlaybd-commit` sealing the LSMT writable layer — that is the genuinely
 zero-conversion form (image-build §2).
 
-## 6. Relationship to overlaybd ⚠️
+## 7. Relationship to overlaybd ⚠️
 
 **The capability is measured working, but it is not wired into the code.** The difference
 between the current state and the target form:
@@ -243,7 +318,7 @@ decisions §3.1: the LUN has to be linked after the nexus, and every backstore h
 a unique `vpd_unit_serial`, otherwise the host's `multipathd` will merge the devices of
 different images and **silently return wrong data**.
 
-## 7. What does not exist yet 📐
+## 8. What does not exist yet 📐
 
 - **Cache reclamation**: base images in `ImageDir` are never cleaned up automatically. The
   design has image-granularity LRU + chunk LRU (noded-design §4.2) with zero implementation.

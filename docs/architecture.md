@@ -210,7 +210,7 @@ straight from the host-side overlaybd writable layer, and there is zero union
 complexity inside the guest.
 
 - No container layer inside the guest; "container" is reduced to an image format, and the zero-conversion promise is unchanged
-- Compatibility: ENV/ENTRYPOINT and the other config semantics are replicated by the agent (the same code as the container tier); the guest is a complete, real Linux kernel, so compatibility beats a gVisor emulation layer. The one difference: the kernel is packaged and provided by the platform (not the host kernel), which a purely user-space eval workload cannot tell apart. See the fcRuntime section of noded-design.md
+- Compatibility: ENV/ENTRYPOINT/CMD/WORKDIR are recorded beside the image when it is converted and merged with the create request when the process starts (rules in [image-pipeline.md](image-pipeline.md) §5); USER is recorded but not yet enforced. The guest is a complete, real Linux kernel, so compatibility beats a gVisor emulation layer. The one difference: the kernel is packaged and provided by the platform (not the host kernel), which a purely user-space eval workload cannot tell apart. See the fcRuntime section of noded-design.md
 - Agent communication goes over vsock (a transport abstraction; same protocol as the container tier's unix socket)
 - Networking: a tap device joins the node's bean0 bridge, with the same nftables rules as the container tier
 - This route is validated in production by AgentENV (the Kimi K3 training infrastructure); the implementation takes its overlaybd+ublk integration and snapshot design as reference

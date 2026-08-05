@@ -85,6 +85,18 @@ type Provider interface {
 	// and lets a warm snapshot be found by the image's digest rather than by a tag
 	// that may since have moved.
 	Cached() (map[string]CachedImage, error)
+	// Config reports the OCI configuration recorded for an image, or nil if the
+	// image has none.
+	//
+	// On the Provider rather than read straight from disk by the runtime because
+	// only the provider knows where it keeps its images, which is the same reason
+	// Digest is here.
+	//
+	// Nil is a normal answer rather than an error: an image converted before configs
+	// were recorded has none, and neither does a build's output. A caller then starts
+	// the sandbox from its request alone, which is what every image did before this
+	// was stored.
+	Config(imageRef string) (*Config, error)
 	// Digest reports the manifest digest a reference resolved to when it was
 	// prepared on this node, or "" if that is not recorded.
 	//
@@ -192,4 +204,9 @@ func (p *FileProvider) basePath(imageRef string) (string, error) {
 // Digest reports what this node recorded for the image.
 func (p *FileProvider) Digest(imageRef string) (string, error) {
 	return digestOf(p.ImageDir, imageRef)
+}
+
+// Config reports the image configuration this node recorded.
+func (p *FileProvider) Config(imageRef string) (*Config, error) {
+	return cachedConfig(p.ImageDir, imageRef)
 }

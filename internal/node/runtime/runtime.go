@@ -199,6 +199,23 @@ type CacheReporter interface {
 	SnapshotCacheBytes() (int64, error)
 }
 
+// ImageConfigReader is implemented by runtimes that start sandboxes from OCI images
+// and can report what an image declared -- its ENV, ENTRYPOINT, CMD and WORKDIR --
+// so a caller can honour it when starting the user process.
+//
+// Optional for the same reason ImageLister is: LocalRuntime runs a host binary and
+// has no image whose configuration it could report. A caller that finds this
+// unimplemented starts the process from its own request alone, which is what every
+// tier did before image configs were recorded.
+type ImageConfigReader interface {
+	// ImageConfig reports what the image declared, or nil if this node holds no
+	// record of it.
+	//
+	// Nil is a normal answer rather than an error: an image converted before configs
+	// were stored has none, and neither does a build's output.
+	ImageConfig(imageRef string) (*image.Config, error)
+}
+
 // ImageBuilder is implemented by runtimes on nodes that can build images.
 //
 // Building is optional per node: it needs BuildKit, and a cluster may well want

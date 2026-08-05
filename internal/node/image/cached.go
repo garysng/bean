@@ -28,12 +28,25 @@ const (
 )
 
 // recordRef notes which reference an image file corresponds to.
-func recordRef(imageDir, imageRef, digest string) error {
+//
+// cfg is the image's OCI configuration, or nil for an image that has none. It is
+// stored here because the conversion flattens layers into a filesystem and leaves
+// the config blob behind: without this the guest never learns the image's ENV,
+// ENTRYPOINT, CMD or WORKDIR. Written to the same sidecar as the reference rather
+// than a second file, so one atomic write publishes everything the node knows
+// about an image and a reader cannot see the two disagree.
+func recordRef(imageDir, imageRef, digest string, cfg *Config) error {
 	name, err := refToFilename(imageRef)
 	if err != nil {
 		return err
 	}
-	rec := map[string]string{"ref": imageRef}
+	rec := map[string]any{"ref": imageRef}
+	// Omitted rather than written as null when absent, matching how digest is
+	// handled: a reader can then tell an image that predates this field from one
+	// whose config was genuinely empty.
+	if cfg != nil {
+		rec["config"] = cfg
+	}
 	// The digest is what makes an image identifiable independently of the name it
 	// was fetched under, and nothing else on the node records it: refToFilename is
 	// a string encoding that does not resolve anything, so python:3.12 and
@@ -166,6 +179,35 @@ func cachedDigest(imageDir, imageRef string) (string, error) {
 		return "", fmt.Errorf("image: read digest for %s: %w", imageRef, err)
 	}
 	return rec.Digest, nil
+}
+
+// cachedConfig reports the OCI configuration recorded for an image, or nil if the
+// image has none.
+//
+// Nil is not an error and callers must handle it: images converted before configs
+// were recorded have no entry, and a build's output legitimately has none. The
+// correct response is to start the sandbox from the caller's request alone, which
+// is what every image did before this was stored -- so an absent config degrades to
+// the previous behaviour rather than failing the create.
+func cachedConfig(imageDir, imageRef string) (*Config, error) {
+	name, err := refToFilename(imageRef)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := os.ReadFile(filepath.Join(imageDir, name+refSuffix))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var rec struct {
+		Config *Config `json:"config"`
+	}
+	if err := json.Unmarshal(raw, &rec); err != nil {
+		return nil, fmt.Errorf("image: read config for %s: %w", imageRef, err)
+	}
+	return rec.Config, nil
 }
 
 // cachedRefs caches the image listing so a heartbeat, which fires every few

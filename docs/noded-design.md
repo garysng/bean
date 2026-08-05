@@ -182,7 +182,8 @@ Key points:
 
 | Item | Compatibility | Notes |
 |---|---|---|
-| ENV/ENTRYPOINT/CMD/USER/WORKDIR | ✅ | The agent replicates the image config, sharing code with the container tier |
+| ENV/ENTRYPOINT/CMD/WORKDIR | ✅ | Recorded beside the image at conversion and merged with the request at create; rules in [image-pipeline §5](image-pipeline.md) |
+| USER | 📐 | Recorded and carried, **not enforced** — everything runs as root. Needs fork-then-setuid in the child plus the guest's `/etc/passwd`; see image-pipeline §5 |
 | Filesystem/permissions/uid-gid | ✅ | The block device is mounted as-is |
 | /proc /sys /dev | ✅ | A real kernel, more complete than gVisor's emulation |
 | Dynamic linking/glibc/musl | ✅ | User space is unchanged |

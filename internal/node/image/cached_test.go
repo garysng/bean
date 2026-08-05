@@ -22,7 +22,7 @@ func seedCachedImage(t *testing.T, dir, ref string, size int64) {
 	if err := createSparse(filepath.Join(dir, name+".ext4"), size); err != nil {
 		t.Fatal(err)
 	}
-	if err := recordRef(dir, ref, ""); err != nil {
+	if err := recordRef(dir, ref, "", nil); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -202,7 +202,7 @@ func TestCachedRefsReturnsACopy(t *testing.T) {
 // one would make a perfectly usable image invisible.
 func TestRecordRefIsAtomic(t *testing.T) {
 	dir := t.TempDir()
-	if err := recordRef(dir, "atomic:1", ""); err != nil {
+	if err := recordRef(dir, "atomic:1", "", nil); err != nil {
 		t.Fatal(err)
 	}
 	entries, err := os.ReadDir(dir)
@@ -216,13 +216,13 @@ func TestRecordRefIsAtomic(t *testing.T) {
 	}
 
 	// Recording again must overwrite cleanly rather than fail.
-	if err := recordRef(dir, "atomic:1", ""); err != nil {
+	if err := recordRef(dir, "atomic:1", "", nil); err != nil {
 		t.Errorf("second recordRef: %v", err)
 	}
 }
 
 func TestRecordRefRejectsEmptyRef(t *testing.T) {
-	if err := recordRef(t.TempDir(), "", ""); err == nil {
+	if err := recordRef(t.TempDir(), "", "", nil); err == nil {
 		t.Error("recordRef accepted an empty reference")
 	}
 }
@@ -232,7 +232,7 @@ func TestCachedDigestRoundTrips(t *testing.T) {
 	dir := t.TempDir()
 	const ref = "python:3.12"
 	const digest = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
-	if err := recordRef(dir, ref, digest); err != nil {
+	if err := recordRef(dir, ref, digest, nil); err != nil {
 		t.Fatal(err)
 	}
 	got, err := cachedDigest(dir, ref)
@@ -254,7 +254,7 @@ func TestCachedDigestRoundTrips(t *testing.T) {
 // have broken every image already on a node.
 func TestCachedDigestOfAnImageWithoutOne(t *testing.T) {
 	dir := t.TempDir()
-	if err := recordRef(dir, "built:1", ""); err != nil {
+	if err := recordRef(dir, "built:1", "", nil); err != nil {
 		t.Fatal(err)
 	}
 	got, err := cachedDigest(dir, "built:1")
@@ -291,11 +291,11 @@ func TestMovedTagGetsADistinctDigest(t *testing.T) {
 	const before = "sha256:aaaa111111111111111111111111111111111111111111111111111111111111"
 	const after = "sha256:bbbb222222222222222222222222222222222222222222222222222222222222"
 
-	if err := recordRef(dir, tag, before); err != nil {
+	if err := recordRef(dir, tag, before, nil); err != nil {
 		t.Fatal(err)
 	}
 	// The tag moves and the image is converted again under the same name.
-	if err := recordRef(dir, tag, after); err != nil {
+	if err := recordRef(dir, tag, after, nil); err != nil {
 		t.Fatal(err)
 	}
 	got, err := cachedDigest(dir, tag)

@@ -23,7 +23,10 @@ import (
 // manifest -- a build's output, or a commit of a sandbox's filesystem. It is
 // recorded so a warm snapshot can be keyed on the image's identity rather than on
 // the name it was fetched under; see recordRef.
-func writeBaseImage(imageDir, workDir, imageRef, digest string, sizeMiB int64,
+// cfg is the image's OCI configuration, or nil for an image that has none. It is
+// recorded alongside the reference because the fill above flattens layers into a
+// filesystem and drops the config blob; see recordRef.
+func writeBaseImage(imageDir, workDir, imageRef, digest string, cfg *Config, sizeMiB int64,
 	fill func(root string) error) (path string, err error) {
 
 	name, err := refToFilename(imageRef)
@@ -87,7 +90,7 @@ func writeBaseImage(imageDir, workDir, imageRef, digest string, sizeMiB int64,
 	// The sidecar records which reference this file came from, which is how the
 	// node reports what it holds. It is written after the image, so a sidecar
 	// never advertises an image that is not yet usable.
-	if err = recordRef(imageDir, imageRef, digest); err != nil {
+	if err = recordRef(imageDir, imageRef, digest, cfg); err != nil {
 		return "", fmt.Errorf("image: record reference: %w", err)
 	}
 	return final, nil

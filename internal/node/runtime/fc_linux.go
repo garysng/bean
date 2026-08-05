@@ -191,12 +191,16 @@ type FCRuntime struct {
 
 // fcVM is one running microVM.
 type fcVM struct {
-	id     string
-	dir    string
-	cmd    *exec.Cmd
-	client *fcClient
-	rootfs *image.Rootfs
-	paused bool
+	id string
+	// imageRef is what this sandbox was started from. Kept because a commit has to
+	// carry the source image's configuration onto its output, and by then the spec
+	// that named the image is gone.
+	imageRef string
+	dir      string
+	cmd      *exec.Cmd
+	client   *fcClient
+	rootfs   *image.Rootfs
+	paused   bool
 	// uffd serves guest page faults for a VM restored from a snapshot. Nil for a
 	// cold boot, which has no memory image to fault against.
 	uffd *uffdHandler
@@ -281,6 +285,15 @@ func (r *FCRuntime) SnapshotCacheBytes() (int64, error) {
 // one place both halves are known: the provider owns the image files and their
 // digests, the warm store owns the bundles, and answering "is this image warm on
 // this node" needs the digest to build the key.
+// ImageConfig reports what an image declared, so a create can honour its ENV,
+// ENTRYPOINT, CMD and WORKDIR.
+func (r *FCRuntime) ImageConfig(imageRef string) (*image.Config, error) {
+	if r.Images == nil {
+		return nil, errors.New("fc: no image provider")
+	}
+	return r.Images.Config(imageRef)
+}
+
 func (r *FCRuntime) CachedImages() (map[string]image.CachedImage, error) {
 	if r.Images == nil {
 		return nil, errors.New("fc: no image provider")
@@ -329,7 +342,7 @@ func (r *FCRuntime) CommitSandbox(ctx context.Context, id, tag string) error {
 	if err != nil {
 		return err
 	}
-	_, err = r.Committer.Commit(ctx, vm.rootfs.Device, tag)
+	_, err = r.Committer.Commit(ctx, vm.rootfs.Device, tag, vm.imageRef)
 	return err
 }
 
@@ -474,10 +487,11 @@ func (r *FCRuntime) create(ctx context.Context, spec *Spec, layers []SnapshotLay
 	}
 
 	vm := &fcVM{
-		id:     spec.SandboxID,
-		dir:    dir,
-		rootfs: rootfs,
-		done:   make(chan struct{}),
+		id:       spec.SandboxID,
+		imageRef: spec.Image,
+		dir:      dir,
+		rootfs:   rootfs,
+		done:     make(chan struct{}),
 		// Resolved here, where the Spec is in hand. Empty on a node with no
 		// network pool, which keeps that node's launch identical to before.
 		netnsPath: netnsPathFor(spec),
