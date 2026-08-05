@@ -201,8 +201,12 @@ type FCRuntime struct {
 	// not buy without a mount namespace.
 	VMMCreds *vmmCreds
 
-	// VMMIsolation narrows what the VMM sees of the host. The zero value applies
-	// nothing, which is how every deployment before this ran.
+	// VMMIsolation narrows what the VMM sees of the host.
+	//
+	// The zero value applies nothing. That is deliberately not the same as noded's
+	// default, which turns all three on: a zero value has to mean "as it was before
+	// this existed" so that a caller constructing this struct directly -- a test, or
+	// another entry point -- does not silently acquire behaviour it did not ask for.
 	VMMIsolation VMMIsolation
 
 	// snapshots holds unpacked snapshot state, so restoring the same checkpoint

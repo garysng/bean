@@ -62,10 +62,9 @@ func isolateVMM(cmd *exec.Cmd, opts VMMIsolation) {
 		// out. e2b spells the same thing `mount --make-rprivate /` inside its
 		// unshare'd shell; Unshareflags is Go asking the kernel for it directly.
 		//
-		// This is the one flag whose failure is not visible from the host: bean's
-		// rootfs is a device-mapper node under /dev rather than a file, so if /dev
-		// does not resolve the same way inside, the guest finds no root device -- and
-		// that appears only in the guest console.
+		// Verified on a guest, not just on the flags: bean's rootfs is a
+		// device-mapper node under /dev, and the concern was that it would stop being
+		// openable in here. It does not. See VMMIsolation.MountNamespace.
 		cmd.SysProcAttr.Cloneflags |= syscall.CLONE_NEWNS
 		cmd.SysProcAttr.Unshareflags |= syscall.CLONE_NEWNS
 	}

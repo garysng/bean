@@ -109,24 +109,29 @@ func main() {
 			"only with measurements, and only with --fc-cgroups on: without a cgroup "+
 			"around the VMM there is nothing in the kernel enforcing fairness when "+
 			"the host comes under pressure")
-	fcPidNS := flag.Bool("fc-pid-namespace", false,
+	fcPidNS := flag.Bool("fc-pid-namespace", true,
 		"give each sandbox's VMM its own PID namespace, so it cannot see or signal "+
 			"any process on the host (fc runtime). Firecracker talks to noded over a "+
 			"socket and to the guest over KVM, and spawns no children, so it has no "+
 			"use for the host's process table. Applied as a clone flag during the "+
-			"fork, so no wrapper process appears and destroy stays reliable")
-	fcKillOnExit := flag.Bool("fc-kill-on-exit", false,
+			"fork, so no wrapper process appears and destroy stays reliable. On by "+
+			"default: measured at no cost, and verified by namespace inode on a "+
+			"running VMM. Pass =false to turn it off")
+	fcKillOnExit := flag.Bool("fc-kill-on-exit", true,
 		"have the kernel SIGKILL a sandbox's VMM if noded dies (fc runtime). "+
 			"Reconciliation already reclaims such a VMM, but only at the next startup: "+
 			"until then it holds memory the scheduler has promised to something else. "+
 			"SIGKILL rather than SIGTERM because in a PID namespace the VMM is PID 1, "+
-			"and PID 1 ignores signals it has no handler for")
-	fcMountNS := flag.Bool("fc-mount-namespace", false,
-		"give each sandbox's VMM a private mount namespace (fc runtime). Off by "+
-			"default and separate from the other two because its failure is quiet: "+
-			"bean's rootfs is a device-mapper node under /dev rather than a file, so a "+
-			"guest that cannot resolve it finds no root device, and that appears only "+
-			"in the guest console")
+			"and PID 1 ignores signals it has no handler for. On by default because "+
+			"this fixes a leak that was measured rather than supposed: without it, "+
+			"kill -9 on noded leaves the VMM running. Pass =false to turn it off")
+	fcMountNS := flag.Bool("fc-mount-namespace", true,
+		"give each sandbox's VMM a private mount namespace, so mounts it makes do "+
+			"not reach the host and the host's later mounts do not reach it (fc "+
+			"runtime). On by default, but verified on a guest rather than assumed: "+
+			"bean's rootfs is a device-mapper node under /dev rather than a file, and "+
+			"the concern was that it would stop being openable in here. It does not. "+
+			"Pass =false to turn it off")
 	fcCgroups := flag.Bool("fc-cgroups", false,
 		"put each sandbox's VMM in a cgroup with a memory ceiling, CPU quota and "+
 			"pid cap from its own spec (fc runtime). Off by default because the "+

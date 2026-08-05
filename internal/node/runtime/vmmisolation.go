@@ -28,11 +28,19 @@ type VMMIsolation struct {
 	// MountNamespace gives the VMM a private mount namespace, so mounts it makes are
 	// invisible to the host and the host's later mounts are invisible to it.
 	//
-	// Riskier than the other two and therefore separate: bean's rootfs is a
-	// device-mapper node under /dev, not a file, so whether it stays openable inside a
-	// private mount namespace is a question about /dev propagation rather than about
-	// paths. A wrong answer is a guest with no root device, and that failure is
-	// visible only in the guest console.
+	// Verified on real hardware rather than reasoned about, because the concern was
+	// specific and turned out to be unfounded: bean's rootfs is a device-mapper node
+	// under /dev rather than a file, and the worry was that it would stop being
+	// openable inside a private mount namespace. It does not -- a dm node reads fine
+	// under `unshare -m --propagation private`, and a sandbox booted with this flag
+	// has a working eth0 and its own mnt, pid and net namespaces at once.
+	//
+	// Recording the wrong prediction because the failure it feared is real for
+	// something else: a guest that cannot resolve its root device reports nothing
+	// except a boot that never finishes, so anything in this area has to be measured
+	// on a guest rather than inferred from the flags. Two apparent failures during
+	// that measurement were both cold image pulls on a freshly restarted stack, which
+	// look identical to a broken flag from the create's timing alone.
 	MountNamespace bool
 }
 
