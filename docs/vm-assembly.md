@@ -244,9 +244,67 @@ Absent from the assembly path:
 
 - ~~**A NIC**~~. Built: the interface is registered before `InstanceStart`, the VMM runs in the sandbox's namespace, and MMDS is bound to that interface. See network.md
 - **balloon**. Memory reclamation cannot lean on it, so memory overcommit is one mechanism short (see noded-design §3.2)
-- **jailer**. firecracker is exec'd directly, with no chroot / privilege drop / device allowlist (GitHub #20)
-- **cgroup**. The FC process has no resource limit on the host
+- ~~**cgroup**~~. Built: `--fc-cgroups`, v2 only, memory ceiling and CPU quota and pid cap per sandbox
+- ~~**privilege drop**~~. Built: `--fc-vmm-uid`, the VMM is not root
+- **chroot and a device allowlist**. Still absent, and this is the remaining half of GitHub #20
 
-balloon is a missing capability and the last two are missing defence in depth — the
-hardware virtualisation boundary is still there, but the consequence of an FC/KVM vulnerability
-is host root rather than a low-privilege user inside a chroot.
+**The consequence of an FC/KVM vulnerability is no longer host root.** It is an
+unprivileged uid, in its own pid namespace, in the sandbox's network namespace where
+egress to RFC1918 and the metadata range is dropped, under a cgroup that caps its
+memory and pids. What is missing from that list is a filesystem view of its own -- the
+VMM still sees the host's mount namespace, so it can read whatever that uid can read.
+
+The usual name for the missing piece is jailer, and it is worth saying why that is not
+simply "add jailer". jailer's `pivot_root` requires **mknod'ing** device nodes into a
+per-sandbox jail, because device nodes cannot be symlinked into a chroot -- and bean's
+rootfs is a device-mapper node. e2b gets the namespace half without any of that, by
+`unshare`ing a mount namespace and using tmpfs plus symlinks, which work where a chroot
+would not. bean already has the namespace isolation e2b gets that way, applied as clone
+flags instead of a wrapper process (see §12); the private mount namespace is
+implemented behind `--fc-mount-namespace` and left off until the dm node is verified
+inside one.
+
+## 12. Isolation without a wrapper process ✅
+
+The VMM is started with clone flags rather than under `unshare`, and the difference is
+about **which pid noded records**, not about which namespaces exist.
+
+e2b's equivalent is a three-deep command
+(`packages/orchestrator/internal/sandbox/fc/process.go`):
+
+```
+unshare -pfm --kill-child -- bash -c "mount --make-rprivate / && ... && ip netns exec <ns> firecracker"
+```
+
+That works, and `--kill-child` covers the parent dying. But `cmd.Process.Pid` names
+`unshare`, so whether signalling it reaches Firecracker depends on whether each layer
+execs in place or forks. The failure that arrangement risks is specific: **a destroy
+that reports success while the microVM keeps running**, holding memory the scheduler
+has already handed to something else.
+
+bean asks the kernel for the same namespaces during the fork instead:
+
+| | e2b | bean |
+|---|---|---|
+| pid namespace | `unshare -p` | `Cloneflags: CLONE_NEWPID` |
+| mount namespace | `unshare -m` + `mount --make-rprivate /` | `Cloneflags` + `Unshareflags: CLONE_NEWNS` |
+| parent death | `--kill-child` | `Pdeathsig: SIGKILL` |
+| network namespace | `ip netns exec` | `setns` on a pinned thread (§ netns_linux.go) |
+| processes between noded and the VMM | 2 | **0** |
+
+**Why the network namespace is the odd one out**: `CLONE_NEWNET` creates an *empty*
+namespace, and this sandbox's namespace already exists with its tap in it. Joining an
+existing namespace is `setns`, which is per-thread — so the thread is pinned, the
+namespace joined, and the fork happens on that same thread. The clone flags then apply
+during that fork, which is why both take effect at once. Measured on a live VMM by
+inode: its pid namespace differs from the host's and its network namespace is the
+sandbox's, simultaneously.
+
+**Why `Pdeathsig` is SIGKILL** and not SIGTERM: in a pid namespace the VMM is pid 1,
+and pid 1 ignores signals it has no handler for. A catchable signal would be dropped
+exactly when the sandbox most needs to die.
+
+Both are off by default. `--fc-pid-namespace` and `--fc-kill-on-exit` turn them on;
+`--fc-mount-namespace` exists but is unverified, because bean's rootfs is a
+device-mapper node rather than a file and a guest that cannot resolve it reports
+nothing but a boot that did not finish.
