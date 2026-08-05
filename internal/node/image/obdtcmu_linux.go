@@ -249,7 +249,6 @@ func blockDeviceForSerial(serial string) (string, bool) {
 	return "", false
 }
 
-
 // detach unwinds an attached device.
 //
 // Order is the reverse of attach and matters as much: removing the backstore while
