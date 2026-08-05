@@ -317,11 +317,44 @@ dm-snapshot path above is still what a node uses unless asked otherwise.
 
 The gain that made this worth building is not the one originally written down here. The
 earlier note said the value was first-use latency and that prewarm shadows it — true, but
-it omits the two that prewarm does **not** shadow: layers shared across images are stored
-once instead of once per image (3.1x less disk for a SWE-bench-shaped set, measured with
-`hack/layer-amplification.go`), and the CPU to convert a shared base is paid once per node
-rather than once per image. For a set of 2000 task images on one base, the flattening path
-gunzips and rewrites that base 2000 times.
+it omits the two that prewarm does **not** shadow: shared layers are stored once instead
+of once per image, and the CPU to convert a shared base is paid once per node rather than
+once per image.
+
+### Measured, both backends, same host ✅
+
+`hack/overlaybd-bench.sh`. Three python `-slim` images, which share one debian base
+(measured 1.51x by manifest for a pair). Allocated blocks, not apparent size — the
+flattened ext4 files are sparse and report 2.0 GiB apparent against ~130 MiB allocated,
+so the apparent figure would overstate the flattening path by 15x.
+
+| | dm-snapshot | overlaybd |
+|---|---|---|
+| image dir, 2 images | 261 MiB | 94 MiB (**2.78x less**) |
+| image dir, 3 images | 392 MiB | 118 MiB (**3.32x less**) |
+| noded CPU, 1st image | 2.32 s | 1.37 s |
+| noded CPU, 2nd image | 2.24 s | **0.49 s** |
+| noded CPU, 3rd image | 2.15 s | **0.44 s** |
+
+The CPU column is the layer-sharing claim, made observable. On dm-snapshot every image
+costs the same to convert, because each flattens its own copy of the shared base. On
+overlaybd the second and third images cost roughly a third of the first, because their
+shared layer is already sealed on the node and only their own layers are new.
+
+That the disk ratio grows with the set (2.78x → 3.32x) is the same effect from the other
+side: each added image contributes its full base to the flattening store and almost
+nothing to the layer store.
+
+**Note what this replaces.** The 3.1x previously quoted here came from
+`hack/layer-amplification.go`, which reads manifests and extrapolates from compressed blob
+sizes. It was never a measurement of this implementation. The figures above are, and they
+happen to agree — but the agreement is a check on the extrapolation, not a substitute for
+it having been done.
+
+**Create latency is not improved.** Measured 12–32 s per cold create on both backends,
+dominated by registry download and varying more between runs of the same backend than
+between backends. Nothing here touches the cold path; see the note at the end of this
+section.
 
 ### The layer pipeline
 

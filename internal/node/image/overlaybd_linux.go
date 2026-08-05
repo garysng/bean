@@ -275,6 +275,15 @@ func (p *OverlaybdProvider) materialiseLayer(ctx context.Context, ref Reference,
 		return path, nil
 	}
 
+	// The work directory has to exist before the layer is staged into it. buildLayer
+	// creates it, but staging happens first, so relying on that ordering meant every
+	// create failed on a node whose image directory was new -- and passed on one where
+	// an earlier run had left the directory behind, which is why this survived a
+	// working end-to-end run.
+	if err := os.MkdirAll(p.Builder.WorkDir, 0o700); err != nil {
+		return "", fmt.Errorf("image: create work dir: %w", err)
+	}
+
 	blob, err := p.Registry.FetchBlob(ctx, ref, layer.Digest)
 	if err != nil {
 		return "", err
