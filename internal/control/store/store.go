@@ -526,26 +526,50 @@ func (s *Store) SnapshotChain(id string) ([]*Snapshot, error) {
 	return chain, nil
 }
 
-// AcquireSnapshot increments the reference count so an in-progress restore
-// cannot have its source deleted. Returns the snapshot for convenience.
+// AcquireSnapshot increments the reference count so an in-progress restore cannot have
+// its source deleted. Returns the snapshot for convenience.
+//
+// The readiness check is a condition of the UPDATE rather than a preceding read, and
+// the outcome is decided by how many rows changed. That is what makes this atomic in
+// the database rather than in this process. The earlier form read the row, checked
+// State, then issued the increment as a second statement -- correct only while one
+// process-local mutex serialises every caller. Two bean-api replicas would interleave
+// that check with DeleteSnapshot's, and the visible result is a snapshot deleted
+// underneath a running restore.
+//
+// Reserve in placement.go has always been written this way. This is the same shape, and
+// the reason the mutex is gone rather than kept "just in case": a lock that is not
+// load-bearing reads as though it were, and the next person to add a method here would
+// copy the pattern.
 func (s *Store) AcquireSnapshot(id string) (*Snapshot, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	snap, err := s.getSnapshotLocked(id)
+	res, err := s.db.Exec(`
+UPDATE snapshots SET ref_count = ref_count + 1
+WHERE id = ? AND state = ?`, id, string(SnapshotReady))
 	if err != nil {
 		return nil, err
 	}
-	if snap == nil {
-		return nil, ErrNotFound
-	}
-	if snap.State != SnapshotReady {
-		return nil, fmt.Errorf("snapshot %s is %s, not %s", id, snap.State, SnapshotReady)
-	}
-	if _, err := s.db.Exec(`UPDATE snapshots SET ref_count = ref_count + 1 WHERE id=?`, id); err != nil {
+	affected, err := res.RowsAffected()
+	if err != nil {
 		return nil, err
 	}
-	snap.RefCount++
-	return snap, nil
+	if affected == 0 {
+		// Nothing changed, and the two reasons need separating for the caller: an
+		// absent snapshot is a 404 while one that exists but is not ready is a 409.
+		// This read cannot race the update it is explaining -- the update has already
+		// declined by the time it runs.
+		snap, gerr := s.GetSnapshot(id)
+		if gerr != nil {
+			return nil, gerr
+		}
+		if snap == nil {
+			return nil, ErrNotFound
+		}
+		return nil, fmt.Errorf("snapshot %s is %s, not %s", id, snap.State, SnapshotReady)
+	}
+	// Read back rather than returning a pre-read row with the count incremented in Go.
+	// What the caller sees is then what the database holds, which under concurrency is
+	// not the same as "whatever it was, plus one".
+	return s.GetSnapshot(id)
 }
 
 // ReleaseSnapshot decrements the reference count, never below zero.
@@ -559,9 +583,35 @@ func (s *Store) ReleaseSnapshot(id string) error {
 
 // DeleteSnapshot refuses while restores still reference the snapshot.
 func (s *Store) DeleteSnapshot(id string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	snap, err := s.getSnapshotLocked(id)
+	// One statement, with both refusals as conditions: no references, and no
+	// incremental snapshot standing on this one as its base.
+	//
+	// This is the delete side of the race AcquireSnapshot describes. Read the count,
+	// check it, then delete, and a concurrent acquire lands between the check and the
+	// delete -- the restore holds a reference to a row that is gone. Neither operation
+	// can be fixed alone: both had to move their conditions into SQL.
+	//
+	// The NOT EXISTS subquery replaces a separate COUNT for the same reason.
+	res, err := s.db.Exec(`
+DELETE FROM snapshots
+WHERE id = ?
+  AND ref_count = 0
+  AND NOT EXISTS (SELECT 1 FROM snapshots c WHERE c.base_id = ?)`, id, id)
+	if err != nil {
+		return err
+	}
+	affected, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if affected > 0 {
+		return nil
+	}
+
+	// Nothing was deleted. Which of the three reasons applies is worth telling apart,
+	// and reading now is safe: the delete has already declined, so this read is
+	// explaining a decision rather than making one.
+	snap, err := s.GetSnapshot(id)
 	if err != nil {
 		return err
 	}
@@ -587,8 +637,11 @@ func (s *Store) DeleteSnapshot(id string) error {
 		return fmt.Errorf("%w: snapshot %s is the base of %d incremental snapshot(s)",
 			ErrInUse, id, children)
 	}
-	_, err = s.db.Exec(`DELETE FROM snapshots WHERE id=?`, id)
-	return err
+	// The delete declined but no reason holds any more, which means the state changed
+	// under us between the two statements -- a reference was taken and released, or a
+	// child appeared and went. Reporting it rather than retrying: a caller that asked
+	// to delete something and got no error would reasonably believe it is gone.
+	return fmt.Errorf("%w: snapshot %s changed while being deleted", ErrInUse, id)
 }
 
 // ---- images ----

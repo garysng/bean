@@ -1,8 +1,11 @@
 package store
 
 import (
+	"errors"
+	"fmt"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -262,5 +265,115 @@ func TestOpenSetsWALSoAReaderDoesNotBlockTheWriter(t *testing.T) {
 		t.Fatalf("journal_mode is %q, want wal: in rollback-journal mode a reader and "+
 			"the writer lock each other out, which presents as bean-proxy stalling "+
 			"whenever a sandbox is created", mode)
+	}
+}
+
+// TestConcurrentAcquiresCountEveryReference is the test a process-local mutex made
+// impossible to write honestly.
+//
+// A mutex serialises every caller inside one Store, so no arrangement of goroutines
+// through a single handle could fail -- and a concurrency test that cannot fail proves
+// nothing. Two Store instances over one file are two callers the mutex cannot see,
+// which is exactly what two bean-api replicas are.
+//
+// Measured first, so the test is known to discriminate: two connections each doing an
+// unguarded read-then-write to the same row lost 194 of 200 updates. SQLite does not
+// serialise this for us.
+//
+// The invariant: N successful acquires must leave ref_count at N. A lost increment
+// means a restore holds a reference the database does not know about, and the snapshot
+// becomes deletable while it is being read.
+func TestConcurrentAcquiresCountEveryReference(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "acquire.db")
+	stores := make([]*Store, 4)
+	for i := range stores {
+		st, err := Open(path)
+		if err != nil {
+			t.Fatalf("open %d: %v", i, err)
+		}
+		defer st.Close()
+		stores[i] = st
+	}
+
+	const rounds = 20
+	for r := 0; r < rounds; r++ {
+		id := fmt.Sprintf("snap-acq-%d", r)
+		if err := stores[0].PutSnapshot(&Snapshot{
+			ID: id, SandboxID: "sbx", State: SnapshotReady,
+		}); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+
+		var wg sync.WaitGroup
+		var mu sync.Mutex
+		ok := 0
+		start := make(chan struct{})
+		for _, st := range stores {
+			s := st
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				if _, err := s.AcquireSnapshot(id); err == nil {
+					mu.Lock()
+					ok++
+					mu.Unlock()
+				}
+			}()
+		}
+		close(start)
+		wg.Wait()
+
+		snap, err := stores[0].GetSnapshot(id)
+		if err != nil {
+			t.Fatalf("read back: %v", err)
+		}
+		if snap == nil {
+			t.Fatalf("%s vanished", id)
+		}
+		if snap.RefCount != ok {
+			t.Fatalf("%s: %d acquires reported success but ref_count is %d; a restore "+
+				"holds a reference the database does not know about, so the snapshot "+
+				"can be deleted while it is being read", id, ok, snap.RefCount)
+		}
+	}
+}
+
+// TestAcquireRefusesWhatDeleteRemoved pins the pair from the other side: once a
+// snapshot is gone, an acquire must fail rather than resurrect a reference to it.
+func TestAcquireRefusesWhatDeleteRemoved(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "pair.db")
+	a, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	b, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+
+	if err := a.PutSnapshot(&Snapshot{ID: "s1", SandboxID: "sbx", State: SnapshotReady}); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.DeleteSnapshot("s1"); err != nil {
+		t.Fatalf("delete through the second store: %v", err)
+	}
+	if _, err := a.AcquireSnapshot("s1"); err == nil {
+		t.Fatal("acquired a snapshot the other store deleted")
+	}
+
+	// And the converse: a held reference must block the delete, across stores.
+	if err := a.PutSnapshot(&Snapshot{ID: "s2", SandboxID: "sbx", State: SnapshotReady}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.AcquireSnapshot("s2"); err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	if err := b.DeleteSnapshot("s2"); err == nil {
+		t.Fatal("deleted a snapshot another store holds a reference to")
+	} else if !errors.Is(err, ErrInUse) {
+		t.Fatalf("got %v, want ErrInUse so the API answers 409", err)
 	}
 }
