@@ -89,7 +89,18 @@ func (b *OverlaybdBuilder) sealedLayerPath(digest string) string {
 // Already-built layers are returned as they are. Layers are immutable and named by
 // digest, so an existing file is the same bytes by construction -- which is what
 // makes a shared base cost its conversion once per node instead of once per image.
-func (b *OverlaybdBuilder) buildLayer(ctx context.Context, tarPath, digest string, vsizeGB int64) (path string, err error) {
+//
+// parents are the already-sealed layers below this one, base first. A layer's tar is
+// applied *over* them, because an OCI layer is a diff: it contains whiteouts and
+// modified files that only mean anything relative to what is underneath. Applying one
+// into an empty filesystem yields a layer holding just that diff, and a chain of such
+// layers assembles into a rootfs missing everything the diffs did not restate.
+//
+// That failure is quiet in the worst way. Every layer seals, the chain opens
+// (`open_lowers ... success`), the device appears and mounts -- and the guest finds an
+// empty filesystem. Single-layer images work, which is why an end-to-end run against
+// alpine passed while python:3.12-slim produced a sandbox with no /bin/sh.
+func (b *OverlaybdBuilder) buildLayer(ctx context.Context, tarPath, digest string, vsizeGB int64, parents []string) (path string, err error) {
 	final := b.sealedLayerPath(digest)
 	if _, err := os.Stat(final); err == nil {
 		return final, nil
@@ -110,29 +121,32 @@ func (b *OverlaybdBuilder) buildLayer(ctx context.Context, tarPath, digest strin
 	dataPath := filepath.Join(stage, "data")
 	indexPath := filepath.Join(stage, "index")
 
-	// --mkfs puts a filesystem in the layer, which only the base layer of a chain
-	// should carry: an upper layer is a set of changed blocks over a filesystem
-	// that already exists, and formatting it would overwrite the lower's
-	// superblock with an empty one. Every layer built here is a lower in some
-	// chain, and the first one has to be formatted, so this is decided by the
-	// caller through vsize semantics rather than guessed at here.
-	if err := b.run(ctx, "overlaybd-create", "--mkfs",
-		dataPath, indexPath, fmt.Sprint(vsizeGB)); err != nil {
+	// --mkfs only for the base layer, which is the one that has to contain a
+	// filesystem. Formatting a layer that sits over others would write an empty
+	// superblock on top of the filesystem they hold.
+	createArgs := []string{dataPath, indexPath, fmt.Sprint(vsizeGB)}
+	if len(parents) == 0 {
+		createArgs = append([]string{"--mkfs"}, createArgs...)
+	}
+	if err := b.run(ctx, "overlaybd-create", createArgs...); err != nil {
 		return "", err
 	}
 
 	// apply wants a config describing what it is writing into, not the raw layer
-	// paths -- the same format the daemon reads. So a throwaway one is written
-	// naming this layer as the upper.
+	// paths -- the same format the daemon reads. So a throwaway one is written with
+	// this layer as the upper and its parents as the lowers, which is what makes the
+	// tar's whiteouts and modified files resolve against the right base.
 	//
-	// Lowers is empty, and has to be: the layer being built has nothing underneath
-	// it, and naming it as its own lower asks overlaybd to open one file as both a
-	// read-only parent and a writable target. That fails with "failed to create
-	// image file" and nothing more specific -- verified on hardware, which is the
-	// only way this was going to be found.
+	// The base layer's lowers are empty, and have to be: naming the layer as its own
+	// lower asks overlaybd to open one file as both a read-only parent and a writable
+	// target, which fails with only "failed to create image file".
+	lowers := make([]obdLayer, 0, len(parents))
+	for _, p := range parents {
+		lowers = append(lowers, obdLayer{File: p})
+	}
 	applyCfg := filepath.Join(stage, "apply.json")
 	if err := writeConfig(applyCfg, &obdConfig{
-		Lowers: []obdLayer{},
+		Lowers: lowers,
 		Upper:  obdUpper{Data: dataPath, Index: indexPath},
 	}); err != nil {
 		return "", err

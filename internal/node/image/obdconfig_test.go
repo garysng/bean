@@ -72,6 +72,39 @@ func TestConfigValidateRejectsSilentlyWrongChains(t *testing.T) {
 			want: "no repoBlobUrl",
 		},
 		{
+			// A cache dir is not a source: it starts empty and only holds blocks
+			// already fetched, so a layer with a dir and no URL can never be read.
+			name: "a cache dir is not a substitute for a repoBlobUrl",
+			cfg: obdConfig{
+				Lowers: []obdLayer{{Digest: "sha256:aaa", Size: 10, Dir: "/cache/aaa"}},
+			},
+			want: "no repoBlobUrl",
+		},
+		{
+			// overlaybd range-reads a remote layer, so a zero length leaves it unable
+			// to work out what to request.
+			name: "remote layer with no size",
+			cfg: obdConfig{
+				RepoBlobURL: "http://s3/b/blobs",
+				Lowers:      []obdLayer{{Digest: "sha256:aaa"}},
+			},
+			want: "no size",
+		},
+		{
+			// A per-layer URL is not a source. overlaybd reads only the config-level
+			// one -- __open_ro_remote uses conf.repoBlobUrl() while taking dir, digest
+			// and size from the layer -- so a config like this passed validation and
+			// then failed in the daemon with "empty repoBlobUrl for remote layer",
+			// reaching the caller as a bare ENOENT on the enable write.
+			name: "remote layer with only its own repoBlobUrl",
+			cfg: obdConfig{
+				Lowers: []obdLayer{
+					{Digest: "sha256:aaa", Size: 10, RepoBlobURL: "http://s3/b/blobs"},
+				},
+			},
+			want: "config sets no repoBlobUrl",
+		},
+		{
 			// A lone data file is sparse mode to overlaybd, so accepting this
 			// would quietly change the upper layer's format.
 			name: "upper data without an index",
@@ -117,16 +150,41 @@ func TestConfigValidateAcceptsWorkableChains(t *testing.T) {
 			name: "remote layers with a config-level repoBlobUrl",
 			cfg: obdConfig{
 				RepoBlobURL: "https://r/v2/x/blobs",
-				Lowers:      []obdLayer{{Digest: "sha256:aaa"}, {Digest: "sha256:bbb"}},
-				Upper:       obdUpper{Data: "d", Index: "i"},
+				Lowers: []obdLayer{
+					{Digest: "sha256:aaa", Size: 10},
+					{Digest: "sha256:bbb", Size: 20},
+				},
+				Upper: obdUpper{Data: "d", Index: "i"},
 			},
 		},
 		{
-			// A chain whose layers come from different repositories: the per-layer
-			// URL has to satisfy the check on its own.
-			name: "remote layer carrying its own repoBlobUrl",
+			// The lazy-pull shape: read remotely, cache locally. Both set, because the
+			// daemon prefers the cache and falls back to HTTP, which keeps the local
+			// copy reclaimable. The URL is config-level because that is the only place
+			// overlaybd reads it.
+			name: "remote layer with a local cache dir",
 			cfg: obdConfig{
-				Lowers: []obdLayer{{Digest: "sha256:aaa", RepoBlobURL: "https://other/v2/y/blobs"}},
+				RepoBlobURL: "http://s3.example/bucket/blobs",
+				Lowers: []obdLayer{{
+					Digest: "sha256:aaa",
+					Size:   36352,
+					Dir:    "/var/lib/bean/images/layers/cache/sha256-aaa",
+				}},
+				Upper: obdUpper{Data: "d", Index: "i"},
+			},
+		},
+		{
+			// A mixed chain: one layer already on disk, one read remotely. This is
+			// what a partially published image looks like, and it has to work rather
+			// than being an all-or-nothing choice.
+			name: "one local layer and one remote",
+			cfg: obdConfig{
+				RepoBlobURL: "http://s3.example/b/blobs",
+				Lowers: []obdLayer{
+					{File: "/l/base.obd", Digest: "sha256:aaa"},
+					{Digest: "sha256:bbb", Size: 99},
+				},
+				Upper: obdUpper{Data: "d", Index: "i"},
 			},
 		},
 	}
@@ -320,5 +378,52 @@ func TestDeviceSerialIsHexOnlyAndDistinct(t *testing.T) {
 func TestDeviceSerialIsStable(t *testing.T) {
 	if a, b := deviceSerial("sbx-42"), deviceSerial("sbx-42"); a != b {
 		t.Errorf("deviceSerial is not stable: %q then %q", a, b)
+	}
+}
+
+// overlaybd reads repoBlobUrl from the config root only: __open_ro_remote uses
+// conf.repoBlobUrl() while taking dir, digest and size from the layer. A per-layer key
+// is silently ignored, so this asserts on where the URL lands in the JSON rather than
+// merely that it round-trips through the struct.
+//
+// The cost of getting it wrong is not a clear error. The daemon logs "empty repoBlobUrl
+// for remote layer" and the caller sees ENOENT on the enable write, naming neither the
+// layer nor the key.
+func TestConfigSerialisesTheBlobURLAtTheRootOnly(t *testing.T) {
+	cfg := obdConfig{
+		RepoBlobURL: "http://s3.example/bucket/blobs",
+		Lowers: []obdLayer{{
+			Digest:      "sha256:aaa",
+			Size:        36352,
+			Dir:         "/cache/aaa",
+			RepoBlobURL: "http://ignored.example/blobs",
+		}},
+		Upper: obdUpper{Data: "d", Index: "i"},
+	}
+	raw, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	var got struct {
+		RepoBlobURL string `json:"repoBlobUrl"`
+		Lowers      []map[string]any
+	}
+	if err := json.Unmarshal(raw, &got); err != nil {
+		t.Fatal(err)
+	}
+	if got.RepoBlobURL != "http://s3.example/bucket/blobs" {
+		t.Errorf("root repoBlobUrl = %q", got.RepoBlobURL)
+	}
+	if len(got.Lowers) != 1 {
+		t.Fatalf("got %d lowers", len(got.Lowers))
+	}
+	// Present in the layer, it would read as a source that overlaybd never consults,
+	// which is the belief this whole check exists to keep out of the config.
+	if _, ok := got.Lowers[0]["repoBlobUrl"]; ok {
+		t.Error("layer serialised a repoBlobUrl; overlaybd does not read one")
+	}
+	if got.Lowers[0]["dir"] != "/cache/aaa" {
+		t.Errorf("layer dir = %v, want it kept per-layer", got.Lowers[0]["dir"])
 	}
 }

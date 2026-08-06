@@ -51,10 +51,15 @@ type obdConfig struct {
 
 // obdLayer is one read-only layer in the chain.
 //
-// A layer is either local (File) or remote (Digest plus the config's
-// RepoBlobURL). Both are spelled here because a node legitimately holds some
-// layers and streams others -- a base that has been pulled once, plus a task
-// layer being read on demand.
+// A layer is either local (File) or remote (Digest, resolved against the config's
+// top-level RepoBlobURL). Both are spelled here because a node legitimately holds some
+// layers and streams others -- a base that has been pulled once, plus a task layer
+// being read on demand.
+//
+// The consequence of the URL being config-level is that **every remote layer in one
+// chain must come from the same prefix**. That holds here because remote layers are
+// either all from bean's object store or all from one image's registry repository, but
+// it is a constraint of overlaybd's config rather than a choice.
 type obdLayer struct {
 	// File is a local path to the layer blob. Empty means fetch it by digest.
 	File string `json:"file,omitempty"`
@@ -63,9 +68,26 @@ type obdLayer struct {
 	// Size is the blob's length. overlaybd wants it up front so it can range-read
 	// without a HEAD first.
 	Size int64 `json:"size,omitempty"`
-	// RepoBlobURL overrides the config-level one for this layer, for a chain whose
-	// layers come from different repositories.
-	RepoBlobURL string `json:"repoBlobUrl,omitempty"`
+	// RepoBlobURL records where this layer is fetched from, and is *not* serialised:
+	// the field exists so the resolver can carry a per-layer answer through to the
+	// point where the config is built, which then hoists it to the config root.
+	//
+	// overlaybd reads only the top-level `repoBlobUrl` -- `__open_ro_remote` uses
+	// `conf.repoBlobUrl()` while taking dir, digest and size from the layer. A
+	// per-layer key is silently ignored, and the failure is
+	// "empty repoBlobUrl for remote layer" followed by ENOENT on the enable write,
+	// which names neither the layer nor the key that was wrong.
+	RepoBlobURL string `json:"-"`
+	// Dir is a local cache directory for a remotely read layer.
+	//
+	// Set alongside a remote reference rather than instead of one: overlaybd serves
+	// from the cache when the blocks are there and falls back to HTTP when they are
+	// not, so the local copy stays reclaimable. Using File instead would make the
+	// local copy load-bearing, with no fallback if it were evicted.
+	//
+	// Without it the daemon logs "local dir of layer N didn't set, skip background
+	// anyway" and every read goes to the network.
+	Dir string `json:"dir,omitempty"`
 	// TargetFile and TargetDigest name the underlying OCI layer for a turboOCI
 	// layer, whose blob is an index over the original tar rather than a
 	// self-contained image of it.
@@ -129,9 +151,21 @@ func (c *obdConfig) validate() error {
 			return fmt.Errorf("image: layer %d names neither a file nor a digest", i)
 		}
 		// A digest without somewhere to fetch it from is the specific case that
-		// yields a chain silently short one layer.
-		if l.File == "" && l.RepoBlobURL == "" && c.RepoBlobURL == "" {
-			return fmt.Errorf("image: layer %d is remote but no repoBlobUrl is set", i)
+		// yields a chain silently short one layer. A cache `dir` does not count as a
+		// source: it starts empty and is only where fetched blocks are kept, so a
+		// layer with a dir and no URL has nowhere to fetch from at all.
+		//
+		// Only the config-level URL is accepted. A layer's own RepoBlobURL is not
+		// serialised and overlaybd would not read it if it were, so treating it as a
+		// source here is what let a config pass validation and then fail in the daemon
+		// with "empty repoBlobUrl for remote layer".
+		if l.File == "" && c.RepoBlobURL == "" {
+			return fmt.Errorf("image: layer %d is remote but the config sets no repoBlobUrl", i)
+		}
+		// A remote layer needs its size: overlaybd range-reads it, and a zero length
+		// leaves it unable to work out what to ask for.
+		if l.File == "" && l.Size <= 0 {
+			return fmt.Errorf("image: remote layer %d has no size", i)
 		}
 	}
 	// Enforced rather than papered over: overlaybd treats a lone data file as
