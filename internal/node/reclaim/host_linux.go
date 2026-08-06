@@ -70,7 +70,35 @@ func (h *LinuxHost) RemoveDM(name string) error {
 		// mapping.
 		return fmt.Errorf("reclaim: refusing to remove mapping %q: not bean's", name)
 	}
-	return run("dmsetup", "remove", "--retry", name)
+	err := run("dmsetup", "remove", "--retry", name)
+	if err != nil && dmAlreadyGone(err) {
+		// The mapping disappeared between ListDMNames and now, which is the common
+		// case rather than a rare one: a sandbox destroying itself concurrently with
+		// a reconcile pass removes its own mapping, and the pass then finds it
+		// missing. That is the outcome this call wanted.
+		//
+		// Reporting it as a failure was measured to cascade. The caller treats a
+		// failed removal as "something still holds it open" and marks the sandbox's
+		// mapping alive, which then blocks reclaiming its loop device and its
+		// directory -- so one already-completed removal leaks the two resources
+		// behind it. A 300-sandbox burst produced 109 of these.
+		return nil
+	}
+	return err
+}
+
+// dmAlreadyGone reports whether a dmsetup failure means the mapping was not there.
+//
+// Matched on message text because dmsetup exits 1 for every error, so the exit code
+// cannot distinguish "already gone" from "still busy" -- and those two need opposite
+// handling. Narrow on purpose: only the kernel's ENXIO/ENODEV wording for a missing
+// device counts, so a busy device, a permission problem, or a missing dmsetup all
+// still fail loudly.
+func dmAlreadyGone(err error) bool {
+	msg := strings.ToLower(err.Error())
+	return strings.Contains(msg, "no such device or address") ||
+		strings.Contains(msg, "no such device") ||
+		strings.Contains(msg, "device does not exist")
 }
 
 // ListLoopDevices returns every loop device with its backing file.

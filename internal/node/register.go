@@ -12,7 +12,6 @@ import (
 	nodev1 "github.com/garysng/bean/internal/gen/bean/node/v1"
 	"github.com/garysng/bean/internal/logging"
 	"github.com/garysng/bean/internal/node/reclaim"
-	"github.com/garysng/bean/internal/node/runtime"
 )
 
 // LabelAdvertiseAddr carries a node's data-plane address through
@@ -156,14 +155,30 @@ func (r *Registrar) session(ctx context.Context, client nodev1.NodeServiceClient
 	}
 	slog.Info("registered with control plane", logging.KeyNode, r.NodeID, "region", r.Region)
 
-	if err := r.reconcile(ctx, client); err != nil {
-		slog.Error("reconcile failed", logging.KeyError, err)
-	}
-
 	stream, err := client.Heartbeat(ctx)
 	if err != nil {
 		return fmt.Errorf("open heartbeat: %w", err)
 	}
+
+	// Reconciliation runs after the heartbeat stream is open, and on its own
+	// goroutine, because it is unbounded in time while the lease is not.
+	//
+	// It used to run here, synchronously, before the stream existed. Measured on a
+	// 128-core host: a burst left 109 orphaned device-mapper mappings, each held open
+	// by a firecracker process, and `dmsetup remove --retry` spends 4.806 seconds on
+	// each one before giving up -- strictly serially. That is 8.7 minutes before the
+	// first heartbeat could be sent, against a 45-second lease. The control plane
+	// declared the node LOST at 50 seconds while noded was healthy and working, and
+	// every create it had in flight was marked lost with it.
+	//
+	// The ordering is the whole fix. Reconciliation is a cleanup task whose duration
+	// depends on how much mess the previous process left; the lease is a liveness
+	// signal that must not depend on anything of the sort.
+	go func() {
+		if err := r.reconcile(ctx, client); err != nil {
+			slog.Error("reconcile failed", logging.KeyError, err)
+		}
+	}()
 
 	// The node's inventory goes up on its own schedule and, importantly, on its
 	// own goroutine. See UpdateNodeStatus in node.proto for why the two reports
@@ -186,11 +201,17 @@ func (r *Registrar) session(ctx context.Context, client nodev1.NodeServiceClient
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-t.C:
+			// Both fields from one lock acquisition. Calling Statuses() and usage()
+			// separately would take the manager's mutex twice per beat and, worse,
+			// report a set of sandboxes and a usage total gathered at different
+			// instants -- so a create landing between them shows up in one and not
+			// the other.
+			statuses, cpu, mem := r.mgr.HeartbeatSnapshot()
 			if err := stream.Send(&nodev1.HeartbeatRequest{
 				NodeId:    r.NodeID,
 				NodeToken: r.nodeToken,
-				Sandboxes: r.mgr.Statuses(),
-				Usage:     r.usage(),
+				Sandboxes: statuses,
+				Usage:     r.usageFrom(cpu, mem),
 			}); err != nil {
 				return fmt.Errorf("heartbeat send: %w", err)
 			}
@@ -331,24 +352,32 @@ func (r *Registrar) reclaimHost(expected map[string]bool) {
 }
 
 func (r *Registrar) usage() *nodev1.NodeUsage {
-	var cpu float64
-	var mem int64
-	for _, st := range r.mgr.Statuses() {
-		if st.State != string(runtime.StateRunning) && st.State != string(runtime.StatePaused) {
-			continue
-		}
-		if spec := r.mgr.SpecOf(st.SandboxId); spec != nil {
-			cpu += spec.Cpu
-			mem += spec.MemoryMib
-		}
-	}
+	cpu, mem := r.mgr.CommittedUsage()
+	return r.usageFrom(cpu, mem)
+}
+
+// usageFrom builds the report from figures a caller already holds, so the heartbeat can
+// gather the sandbox list and the totals under one lock rather than two.
+//
+// The reason is consistency, not speed. usage() used to call Statuses() and then SpecOf()
+// per sandbox -- 2N+1 acquisitions of the manager's mutex -- which meant the status list
+// and the usage totals were sampled at different instants: a create landing between them
+// appears in the list while its resources are missing from the totals, so the control
+// plane sees a sandbox the node is apparently not paying for.
+//
+// Not a performance fix, and worth saying so plainly. This was the first suspect for a
+// node being declared LOST under a 300-sandbox burst, and it was wrong: the manager's
+// lock is held only briefly on the create path, and a test built to catch the 2N+1 shape
+// passed against it. The actual cause was reconciliation running before the heartbeat
+// stream opened (see session).
+func (r *Registrar) usageFrom(cpu float64, memMiB int64) *nodev1.NodeUsage {
 	// Disk is measured rather than summed. CPU and memory commitments are close
 	// enough to real usage to be worth summing, but a sandbox's disk request is
 	// nominal: the sparse layer behind a 20 GiB request holds kilobytes, so adding
 	// the requests up would overstate the node by orders of magnitude.
 	return &nodev1.NodeUsage{
 		CpuCommitted:       cpu,
-		MemoryCommittedMib: mem,
+		MemoryCommittedMib: memMiB,
 		DiskUsedMib:        r.mgr.DiskUsedMiB(),
 	}
 }

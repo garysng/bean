@@ -1338,6 +1338,71 @@ func (m *Manager) Resume(ctx context.Context, id string) error {
 	return nil
 }
 
+// HeartbeatSnapshot returns the sandbox list and the committed totals from a single
+// pass under one lock.
+//
+// Combined rather than composed so the two are consistent. Gathered separately -- via
+// Statuses() then SpecOf() per sandbox -- a create landing between them appears in the
+// status list while its resources are missing from the totals, and the control plane sees
+// a sandbox the node is apparently not paying for.
+//
+// The lower lock count is incidental. It was the first suspect for a node being declared
+// LOST under a 300-sandbox burst and was measured not to be the cause.
+func (m *Manager) HeartbeatSnapshot() (statuses []*nodev1.SandboxStatus, cpu float64, memMiB int64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	statuses = make([]*nodev1.SandboxStatus, 0, len(m.sandboxes))
+	for id, sb := range m.sandboxes {
+		st := &nodev1.SandboxStatus{
+			SandboxId:        id,
+			State:            string(sb.State),
+			Reason:           sb.Reason,
+			LastActivityUnix: sb.lastActivity.Unix(),
+		}
+		if sb.Handle != nil {
+			st.StartedAtUnix = sb.Handle.StartedAt.Unix()
+		}
+		statuses = append(statuses, st)
+
+		if sb.State != runtime.StateRunning && sb.State != runtime.StatePaused {
+			continue
+		}
+		if sb.Spec != nil {
+			cpu += sb.Spec.Cpu
+			memMiB += sb.Spec.MemoryMib
+		}
+	}
+	return statuses, cpu, memMiB
+}
+
+// CommittedUsage sums the CPU and memory promised to sandboxes that hold their
+// resources, under a single lock acquisition.
+//
+// It exists because the heartbeat needs this figure every few seconds and the obvious
+// composition -- Statuses() then SpecOf() per sandbox -- takes the mutex 2N+1 times.
+// At 300 sandboxes that is 601 acquisitions per beat, contending with every concurrent
+// create for the same lock, and it starved the heartbeat until the control plane
+// declared the node LOST.
+//
+// Only RUNNING and PAUSED count. A starting sandbox has not been handed its resources
+// and a stopped one has given them back; counting either would report usage the node
+// is not carrying, and the control plane treats this figure as what the node is
+// actually holding.
+func (m *Manager) CommittedUsage() (cpu float64, memMiB int64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, sb := range m.sandboxes {
+		if sb.State != runtime.StateRunning && sb.State != runtime.StatePaused {
+			continue
+		}
+		if sb.Spec != nil {
+			cpu += sb.Spec.Cpu
+			memMiB += sb.Spec.MemoryMib
+		}
+	}
+	return cpu, memMiB
+}
+
 // Statuses lists all sandboxes for heartbeat/reconcile.
 func (m *Manager) Statuses() []*nodev1.SandboxStatus {
 	m.mu.Lock()
