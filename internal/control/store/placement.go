@@ -120,7 +120,7 @@ func (s *Store) UpsertNode(n *NodeRecord) error {
 	if n.MaxCreates <= 0 {
 		n.MaxCreates = 16
 	}
-	_, err = s.db.Exec(`
+	_, err = s.exec(`
 INSERT INTO nodes(id, region, labels, runtimes, cpu_alloc, mem_alloc, disk_alloc, gpu_count,
                   max_creates, cached_images, nvme_cache, state, advertise_addr, last_heartbeat,
                   cpu_vendor, cpu_family, cpu_template)
@@ -146,7 +146,7 @@ ON CONFLICT(id) DO UPDATE SET
 func (s *Store) LoadNodes() ([]*NodeRecord, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	rows, err := s.db.Query(`
+	rows, err := s.query(`
 SELECT id, region, labels, runtimes, cpu_alloc, mem_alloc, disk_alloc, gpu_count,
        cpu_committed, mem_committed, disk_committed, gpu_committed,
        create_in_flight, max_creates, cached_images, nvme_cache, state,
@@ -172,7 +172,7 @@ FROM nodes ORDER BY id`)
 func (s *Store) GetNode(id string) (*NodeRecord, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	row := s.db.QueryRow(`
+	row := s.queryRow(`
 SELECT id, region, labels, runtimes, cpu_alloc, mem_alloc, disk_alloc, gpu_count,
        cpu_committed, mem_committed, disk_committed, gpu_committed,
        create_in_flight, max_creates, cached_images, nvme_cache, state,
@@ -239,7 +239,7 @@ func (s *Store) Reserve(nodeID string, res *Reservation) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	tx, err := s.db.Begin()
+	tx, err := s.begin()
 	if err != nil {
 		return err
 	}
@@ -257,6 +257,17 @@ WHERE id = ?
   AND cpu_committed + ? <= cpu_alloc
   AND mem_committed + ? <= mem_alloc
   AND disk_committed + ? <= disk_alloc
+  -- The GPU guard was missing until Postgres refused the statement with "got 9
+  -- parameters but the statement requires 8". The argument list had always passed
+  -- res.GPU a second time and there was no placeholder for it, so SQLite silently
+  -- ignored the extra and GPUs were committed without ever being checked against
+  -- gpu_count. A node with one GPU would accept a second reservation for it, and the
+  -- failure would land in the guest as a device that is already in use.
+  --
+  -- Nothing in the codebase could have caught this: the comment below says "four
+  -- guards", the argument list has four values, and only an engine that counts
+  -- placeholders disagreed.
+  AND gpu_committed + ? <= gpu_count
   -- create_in_flight is counted but deliberately NOT a condition. The four guards
   -- above are correctness: overselling memory kills a process, overselling disk
   -- destroys a copy-on-write layer, and neither recovers on its own. Concurrent
@@ -307,7 +318,7 @@ func (s *Store) Release(sandboxID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	tx, err := s.db.Begin()
+	tx, err := s.begin()
 	if err != nil {
 		return err
 	}
@@ -349,7 +360,7 @@ WHERE id = ?`, cpu, mem, disk, gpu, nodeID); err != nil {
 func (s *Store) FinishCreate(nodeID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_, err := s.db.Exec(
+	_, err := s.exec(
 		`UPDATE nodes SET create_in_flight = MAX(create_in_flight - 1, 0) WHERE id=?`, nodeID)
 	return err
 }
@@ -362,7 +373,7 @@ func (s *Store) SpreadCounts(spreadKey string) (map[string]int, error) {
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	rows, err := s.db.Query(
+	rows, err := s.query(
 		`SELECT node_id, COUNT(*) FROM reservations WHERE spread_key=? GROUP BY node_id`,
 		spreadKey)
 	if err != nil {
@@ -388,7 +399,7 @@ func (s *Store) SpreadCounts(spreadKey string) (map[string]int, error) {
 func (s *Store) SetNodeState(nodeID, state string) (bool, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	result, err := s.db.Exec(
+	result, err := s.exec(
 		`UPDATE nodes SET state=? WHERE id=? AND state!=?`, state, nodeID, state)
 	if err != nil {
 		return false, err
@@ -434,7 +445,7 @@ func (s *Store) PutNodeImages(nodeID string, images map[string]CachedImage) erro
 	if err != nil {
 		return err
 	}
-	_, err = s.db.Exec(`UPDATE nodes SET cached_images=? WHERE id=?`, cached, nodeID)
+	_, err = s.exec(`UPDATE nodes SET cached_images=? WHERE id=?`, cached, nodeID)
 	return err
 }
 
@@ -447,7 +458,7 @@ func (s *Store) PutNodeImages(nodeID string, images map[string]CachedImage) erro
 func (s *Store) TouchNode(nodeID string, diskUsedMiB int64) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_, err := s.db.Exec(`
+	_, err := s.exec(`
 UPDATE nodes SET last_heartbeat=?, disk_used_mib=?,
   state = CASE WHEN state IN ('SUSPECT','LOST') THEN 'READY' ELSE state END
 WHERE id=?`, time.Now().UnixMilli(), diskUsedMiB, nodeID)
@@ -483,7 +494,7 @@ func (s *Store) StaleNodes(olderThan time.Time, excludeStates ...string) ([]*Nod
 func (s *Store) OrphanReservations() ([]string, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	rows, err := s.db.Query(`
+	rows, err := s.query(`
 SELECT r.sandbox_id, s.state
 FROM reservations r
 LEFT JOIN sandboxes s ON s.id = r.sandbox_id`)

@@ -33,8 +33,66 @@ type Event struct {
 
 type Store struct {
 	db *sql.DB
+	// d is the engine's syntax. Every statement goes through d.bind, so a query is
+	// written once with `?` and rewritten for whichever driver is underneath. See
+	// dialect.go for why this is a translation rather than a second implementation.
+	d  dialect
 	mu sync.Mutex
 }
+
+// exec, query and queryRow route every statement through the dialect.
+//
+// Wrappers rather than calling s.db directly, because the alternative is remembering to
+// bind at 103 call sites. A forgotten bind is a statement that works on SQLite and fails
+// on Postgres at the first `?` -- loud, but only for whoever runs Postgres, and only
+// once they reach that code path.
+func (s *Store) exec(q string, args ...any) (sql.Result, error) {
+	return s.db.Exec(s.d.bind(q), args...)
+}
+
+func (s *Store) query(q string, args ...any) (*sql.Rows, error) {
+	return s.db.Query(s.d.bind(q), args...)
+}
+
+func (s *Store) queryRow(q string, args ...any) *sql.Row {
+	return s.db.QueryRow(s.d.bind(q), args...)
+}
+
+// storeTx is a transaction that binds, so a statement inside one gets the same treatment
+// as a statement outside one.
+//
+// This type exists because it was missing. The wrappers above covered s.db and nothing
+// else, which read as complete -- but Reserve and Release run five statements through
+// tx.Exec, and those went to Postgres with `?` still in them. The measured symptom was
+// `pq: syntax error at or near ","`, pointing at a comma rather than at the placeholder,
+// on the one requirement whose failure oversells a node.
+//
+// The lesson is about the shape of the abstraction rather than the bug: an escape hatch
+// that is only used five times is worse than one used often, because those five are the
+// ones nobody thinks to check.
+type storeTx struct {
+	tx *sql.Tx
+	d  dialect
+}
+
+func (s *Store) begin() (*storeTx, error) {
+	tx, err := s.db.Begin()
+	if err != nil {
+		return nil, err
+	}
+	return &storeTx{tx: tx, d: s.d}, nil
+}
+
+func (t *storeTx) Exec(q string, args ...any) (sql.Result, error) {
+	return t.tx.Exec(t.d.bind(q), args...)
+}
+
+func (t *storeTx) QueryRow(q string, args ...any) *sql.Row {
+	return t.tx.QueryRow(t.d.bind(q), args...)
+}
+
+func (t *storeTx) Commit() error   { return t.tx.Commit() }
+func (t *storeTx) Rollback() error { return t.tx.Rollback() }
 
 func Open(path string) (*Store, error) {
 	db, err := sql.Open("sqlite", path)
@@ -55,7 +113,7 @@ func Open(path string) (*Store, error) {
 		return nil, fmt.Errorf("enable WAL on %s: %w", path, err)
 	}
 
-	s := &Store{db: db}
+	s := &Store{db: db, d: sqliteDialect{}}
 	if err := s.migrate(); err != nil {
 		db.Close()
 		return nil, err
@@ -100,7 +158,7 @@ func OpenReadOnly(path string) (*Store, error) {
 		return nil, fmt.Errorf("%s is in %s journal mode, not WAL: a reader and the "+
 			"control plane's writer would block each other on every write", path, mode)
 	}
-	return &Store{db: db}, nil
+	return &Store{db: db, d: sqliteDialect{}}, nil
 }
 
 func (s *Store) Close() error { return s.db.Close() }
@@ -109,7 +167,7 @@ func (s *Store) migrate() error {
 	// Records are stored as JSON blobs with the few query dimensions
 	// promoted to columns; this keeps schema churn low while the domain
 	// types are still moving.
-	_, err := s.db.Exec(`
+	_, err := s.exec(s.d.ddl(`
 CREATE TABLE IF NOT EXISTS sandboxes (
   id TEXT PRIMARY KEY,
   data TEXT NOT NULL,
@@ -117,7 +175,7 @@ CREATE TABLE IF NOT EXISTS sandboxes (
   created_at INTEGER NOT NULL
 );
 CREATE TABLE IF NOT EXISTS events (
-  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  id ` + s.d.autoIncrementPK() + `,
   sandbox_id TEXT NOT NULL,
   type TEXT NOT NULL,
   ts INTEGER NOT NULL,
@@ -169,7 +227,7 @@ CREATE TABLE IF NOT EXISTS nodes (
   create_in_flight INTEGER NOT NULL DEFAULT 0,
   max_creates INTEGER NOT NULL DEFAULT 16,
   cached_images TEXT NOT NULL DEFAULT '{}',
-  nvme_cache INTEGER NOT NULL DEFAULT 0,
+  nvme_cache ` + s.d.boolColumn() + `,
   state TEXT NOT NULL DEFAULT 'READY',
   advertise_addr TEXT NOT NULL DEFAULT '',
   last_heartbeat INTEGER NOT NULL DEFAULT 0,
@@ -212,13 +270,13 @@ CREATE INDEX IF NOT EXISTS idx_builds_state ON builds(state);
 CREATE TABLE IF NOT EXISTS registry_credentials (
   host TEXT PRIMARY KEY,
   username TEXT NOT NULL,
-  secret BLOB NOT NULL,
+  secret ` + s.d.blobColumn() + `,
   created_at INTEGER NOT NULL,
   updated_at INTEGER NOT NULL
 );
-`)
+`))
 	if err != nil {
-		return err
+		return fmt.Errorf("%s: create schema: %w", s.d.name(), err)
 	}
 	return s.addMissingColumns()
 }
@@ -232,34 +290,36 @@ CREATE TABLE IF NOT EXISTS registry_credentials (
 // Records stored as JSON blobs do not need this; only the columns promoted for
 // querying do.
 func (s *Store) addMissingColumns() error {
-	// ALTER TABLE ADD COLUMN fails when the column is already there, and SQLite
-	// has no IF NOT EXISTS for it, so a duplicate-column error is the expected
-	// outcome on an up-to-date database rather than a problem.
-	for _, stmt := range []string{
-		`ALTER TABLE nodes ADD COLUMN cpu_vendor TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE nodes ADD COLUMN cpu_family INTEGER NOT NULL DEFAULT 0`,
-		`ALTER TABLE nodes ADD COLUMN cpu_template TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE snapshots ADD COLUMN base_id TEXT NOT NULL DEFAULT ''`,
-		`ALTER TABLE nodes ADD COLUMN disk_used_mib INTEGER NOT NULL DEFAULT 0`,
-		`ALTER TABLE images ADD COLUMN owner TEXT NOT NULL DEFAULT ''`,
+	// Rendered per engine rather than written once, because the two disagree about how
+	// an already-present column is reported. Postgres has ADD COLUMN IF NOT EXISTS and
+	// succeeds silently; SQLite has no such clause, so an error is the expected outcome
+	// on an up-to-date database and has to be recognised by its text.
+	//
+	// The alternative -- one statement plus a text match against both engines' wording --
+	// would mean a Postgres error unrelated to duplication could be swallowed by a
+	// substring, and the missing column would surface later as a scan failure.
+	for _, c := range []struct{ table, def string }{
+		{"nodes", `cpu_vendor TEXT NOT NULL DEFAULT ''`},
+		{"nodes", `cpu_family INTEGER NOT NULL DEFAULT 0`},
+		{"nodes", `cpu_template TEXT NOT NULL DEFAULT ''`},
+		{"snapshots", `base_id TEXT NOT NULL DEFAULT ''`},
+		{"nodes", `disk_used_mib INTEGER NOT NULL DEFAULT 0`},
+		{"images", `owner TEXT NOT NULL DEFAULT ''`},
 	} {
-		if _, err := s.db.Exec(stmt); err != nil && !isDuplicateColumn(err) {
+		stmt := s.d.ddl(s.d.addColumn(c.table, c.def))
+		if _, err := s.exec(stmt); err != nil && !s.d.isDuplicateColumn(err) {
 			return fmt.Errorf("migrate: %q: %w", stmt, err)
 		}
 	}
 	// Indexes on migrated columns come last: on an old database the column does
 	// not exist until the ALTER above runs, and CREATE INDEX would fail.
-	if _, err := s.db.Exec(
+	if _, err := s.exec(
 		`CREATE INDEX IF NOT EXISTS idx_images_owner ON images(owner)`); err != nil {
 		return fmt.Errorf("migrate: index images(owner): %w", err)
 	}
 	return nil
 }
 
-// isDuplicateColumn reports SQLite's complaint about an already-present column.
-func isDuplicateColumn(err error) bool {
-	return strings.Contains(err.Error(), "duplicate column name")
-}
 
 // marshalJSON encodes a value for a JSON column, using an empty object or
 // array rather than SQL NULL so scans never have to handle nulls.
@@ -291,7 +351,7 @@ func (s *Store) PutSandbox(sb *Sandbox) error {
 	if err != nil {
 		return err
 	}
-	_, err = s.db.Exec(
+	_, err = s.exec(
 		`INSERT INTO sandboxes(id, data, state, created_at) VALUES(?,?,?,?)
 		 ON CONFLICT(id) DO UPDATE SET data=excluded.data, state=excluded.state`,
 		sb.ID, string(blob), string(sb.State), sb.CreatedAt.Unix())
@@ -303,7 +363,7 @@ func (s *Store) GetSandbox(id string) (*Sandbox, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var blob string
-	err := s.db.QueryRow(`SELECT data FROM sandboxes WHERE id=?`, id).Scan(&blob)
+	err := s.queryRow(`SELECT data FROM sandboxes WHERE id=?`, id).Scan(&blob)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -321,7 +381,7 @@ func (s *Store) GetSandbox(id string) (*Sandbox, error) {
 func (s *Store) ListSandboxes(labelKey, labelVal string, state SandboxState) ([]*Sandbox, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	rows, err := s.db.Query(`SELECT data FROM sandboxes ORDER BY created_at DESC`)
+	rows, err := s.query(`SELECT data FROM sandboxes ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -350,7 +410,7 @@ func (s *Store) ListSandboxes(labelKey, labelVal string, state SandboxState) ([]
 func (s *Store) DeleteSandbox(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_, err := s.db.Exec(`DELETE FROM sandboxes WHERE id=?`, id)
+	_, err := s.exec(`DELETE FROM sandboxes WHERE id=?`, id)
 	return err
 }
 
@@ -363,7 +423,7 @@ func (s *Store) AppendEvent(e *Event) error {
 	if err != nil {
 		return err
 	}
-	_, err = s.db.Exec(`INSERT INTO events(sandbox_id, type, ts, data) VALUES(?,?,?,?)`,
+	_, err = s.exec(`INSERT INTO events(sandbox_id, type, ts, data) VALUES(?,?,?,?)`,
 		e.SandboxID, e.Type, e.Timestamp.UnixMilli(), string(data))
 	return err
 }
@@ -375,7 +435,7 @@ func (s *Store) ListEvents(sandboxID string, limit int) ([]*Event, error) {
 	if limit <= 0 || limit > 1000 {
 		limit = 100
 	}
-	rows, err := s.db.Query(
+	rows, err := s.query(
 		`SELECT id, sandbox_id, type, ts, data FROM events WHERE sandbox_id=? ORDER BY id DESC LIMIT ?`,
 		sandboxID, limit)
 	if err != nil {
@@ -416,7 +476,7 @@ func (s *Store) PutSnapshot(snap *Snapshot) error {
 	// base_id is duplicated out of the JSON blob into its own column because
 	// deletion has to ask "does anything descend from this", which is a query
 	// over other rows rather than a field of the row being deleted.
-	_, err = s.db.Exec(
+	_, err = s.exec(
 		`INSERT INTO snapshots(id, data, state, sandbox_id, ref_count, base_id, created_at) VALUES(?,?,?,?,?,?,?)
 		 ON CONFLICT(id) DO UPDATE SET data=excluded.data, state=excluded.state, base_id=excluded.base_id`,
 		snap.ID, string(blob), string(snap.State), snap.SandboxID, snap.RefCount,
@@ -435,7 +495,7 @@ func (s *Store) GetSnapshot(id string) (*Snapshot, error) {
 func (s *Store) getSnapshotLocked(id string) (*Snapshot, error) {
 	var blob string
 	var refCount int
-	err := s.db.QueryRow(`SELECT data, ref_count FROM snapshots WHERE id=?`, id).
+	err := s.queryRow(`SELECT data, ref_count FROM snapshots WHERE id=?`, id).
 		Scan(&blob, &refCount)
 	if err == sql.ErrNoRows {
 		return nil, nil
@@ -454,7 +514,7 @@ func (s *Store) getSnapshotLocked(id string) (*Snapshot, error) {
 func (s *Store) ListSnapshots(labelKey, labelVal string, state SnapshotState) ([]*Snapshot, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	rows, err := s.db.Query(`SELECT data, ref_count FROM snapshots ORDER BY created_at DESC`)
+	rows, err := s.query(`SELECT data, ref_count FROM snapshots ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -542,7 +602,7 @@ func (s *Store) SnapshotChain(id string) ([]*Snapshot, error) {
 // load-bearing reads as though it were, and the next person to add a method here would
 // copy the pattern.
 func (s *Store) AcquireSnapshot(id string) (*Snapshot, error) {
-	res, err := s.db.Exec(`
+	res, err := s.exec(`
 UPDATE snapshots SET ref_count = ref_count + 1
 WHERE id = ? AND state = ?`, id, string(SnapshotReady))
 	if err != nil {
@@ -576,8 +636,15 @@ WHERE id = ? AND state = ?`, id, string(SnapshotReady))
 func (s *Store) ReleaseSnapshot(id string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_, err := s.db.Exec(
-		`UPDATE snapshots SET ref_count = MAX(ref_count - 1, 0) WHERE id=?`, id)
+	// Clamped in the WHERE clause rather than with a two-argument MAX, which is not
+	// portable: SQLite overloads MAX as a scalar, Postgres reserves it for aggregation
+	// and answers `function max(bigint, integer) does not exist`. GREATEST is the
+	// Postgres spelling, but a condition needs no dialect method and says the same thing.
+	//
+	// Matching no row is still success. Releasing an already-released snapshot is a
+	// no-op by design, so cleanup paths and retries do not have to coordinate.
+	_, err := s.exec(
+		`UPDATE snapshots SET ref_count = ref_count - 1 WHERE id=? AND ref_count > 0`, id)
 	return err
 }
 
@@ -592,7 +659,7 @@ func (s *Store) DeleteSnapshot(id string) error {
 	// can be fixed alone: both had to move their conditions into SQL.
 	//
 	// The NOT EXISTS subquery replaces a separate COUNT for the same reason.
-	res, err := s.db.Exec(`
+	res, err := s.exec(`
 DELETE FROM snapshots
 WHERE id = ?
   AND ref_count = 0
@@ -629,7 +696,7 @@ WHERE id = ?
 	// This reuses ErrInUse rather than adding an error: to a caller both mean
 	// "something still needs this", and both map to the same 409.
 	var children int
-	if err := s.db.QueryRow(
+	if err := s.queryRow(
 		`SELECT COUNT(*) FROM snapshots WHERE base_id=?`, id).Scan(&children); err != nil {
 		return fmt.Errorf("count snapshot descendants: %w", err)
 	}
@@ -654,7 +721,7 @@ func (s *Store) PutImage(img *Image) error {
 	if err != nil {
 		return err
 	}
-	_, err = s.db.Exec(
+	_, err = s.exec(
 		`INSERT INTO images(ref, data, state, updated_at, owner) VALUES(?,?,?,?,?)
 		 ON CONFLICT(ref) DO UPDATE SET data=excluded.data, state=excluded.state,
 		   updated_at=excluded.updated_at, owner=excluded.owner`,
@@ -667,7 +734,7 @@ func (s *Store) GetImage(ref string) (*Image, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var blob string
-	err := s.db.QueryRow(`SELECT data FROM images WHERE ref=?`, ref).Scan(&blob)
+	err := s.queryRow(`SELECT data FROM images WHERE ref=?`, ref).Scan(&blob)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -698,7 +765,7 @@ func (s *Store) ListImages(owner string) ([]*Image, error) {
 		         ORDER BY updated_at DESC`
 		args = append(args, owner)
 	}
-	rows, err := s.db.Query(query, args...)
+	rows, err := s.query(query, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -721,7 +788,7 @@ func (s *Store) ListImages(owner string) ([]*Image, error) {
 func (s *Store) DeleteImage(ref string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	_, err := s.db.Exec(`DELETE FROM images WHERE ref=?`, ref)
+	_, err := s.exec(`DELETE FROM images WHERE ref=?`, ref)
 	return err
 }
 
@@ -739,7 +806,7 @@ func (s *Store) PutBuild(b *ImageBuild) error {
 	if b.Plan != nil {
 		tag = b.Plan.Tag
 	}
-	_, err = s.db.Exec(
+	_, err = s.exec(
 		`INSERT INTO builds(id, data, state, tag, created_at) VALUES(?,?,?,?,?)
 		 ON CONFLICT(id) DO UPDATE SET data=excluded.data, state=excluded.state`,
 		b.ID, string(blob), string(b.State), tag, b.CreatedAt.Unix())
@@ -751,7 +818,7 @@ func (s *Store) GetBuild(id string) (*ImageBuild, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var blob string
-	err := s.db.QueryRow(`SELECT data FROM builds WHERE id=?`, id).Scan(&blob)
+	err := s.queryRow(`SELECT data FROM builds WHERE id=?`, id).Scan(&blob)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
@@ -769,7 +836,7 @@ func (s *Store) GetBuild(id string) (*ImageBuild, error) {
 func (s *Store) ListBuilds(state BuildState) ([]*ImageBuild, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	rows, err := s.db.Query(`SELECT data FROM builds ORDER BY created_at DESC`)
+	rows, err := s.query(`SELECT data FROM builds ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
 	}
@@ -812,7 +879,7 @@ func (s *Store) PutRegistryCredential(c *RegistryCredential) error {
 	if c.CreatedAt.IsZero() {
 		c.CreatedAt = now
 	}
-	_, err := s.db.Exec(
+	_, err := s.exec(
 		`INSERT INTO registry_credentials(host, username, secret, created_at, updated_at)
 		 VALUES(?,?,?,?,?)
 		 ON CONFLICT(host) DO UPDATE SET username=excluded.username,
@@ -828,7 +895,7 @@ func (s *Store) GetRegistryCredential(host string) (*RegistryCredential, error) 
 	defer s.mu.Unlock()
 	var c RegistryCredential
 	var created, updated int64
-	err := s.db.QueryRow(
+	err := s.queryRow(
 		`SELECT host, username, secret, created_at, updated_at
 		 FROM registry_credentials WHERE host=?`, host).
 		Scan(&c.Host, &c.Username, &c.SecretCiphertext, &created, &updated)
@@ -848,7 +915,7 @@ func (s *Store) GetRegistryCredential(host string) (*RegistryCredential, error) 
 func (s *Store) ListRegistryCredentials() ([]*RegistryCredential, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	rows, err := s.db.Query(
+	rows, err := s.query(
 		`SELECT host, username, created_at, updated_at FROM registry_credentials ORDER BY host`)
 	if err != nil {
 		return nil, err
@@ -871,7 +938,7 @@ func (s *Store) ListRegistryCredentials() ([]*RegistryCredential, error) {
 func (s *Store) DeleteRegistryCredential(host string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	res, err := s.db.Exec(`DELETE FROM registry_credentials WHERE host=?`, host)
+	res, err := s.exec(`DELETE FROM registry_credentials WHERE host=?`, host)
 	if err != nil {
 		return err
 	}
@@ -890,7 +957,7 @@ func (s *Store) PutPrewarmJob(job *PrewarmJob) error {
 	if err != nil {
 		return err
 	}
-	_, err = s.db.Exec(
+	_, err = s.exec(
 		`INSERT INTO prewarm_jobs(id, data, created_at) VALUES(?,?,?)
 		 ON CONFLICT(id) DO UPDATE SET data=excluded.data`,
 		job.ID, string(blob), job.CreatedAt.Unix())
@@ -902,7 +969,7 @@ func (s *Store) GetPrewarmJob(id string) (*PrewarmJob, error) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	var blob string
-	err := s.db.QueryRow(`SELECT data FROM prewarm_jobs WHERE id=?`, id).Scan(&blob)
+	err := s.queryRow(`SELECT data FROM prewarm_jobs WHERE id=?`, id).Scan(&blob)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}

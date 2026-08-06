@@ -21,6 +21,7 @@
 package storetest
 
 import (
+	"bytes"
 	"errors"
 	"fmt"
 	"sync"
@@ -37,6 +38,7 @@ type Store interface {
 	store.Snapshots
 	store.Placement
 	store.Nodes
+	store.RegistryCredentials
 }
 
 // OpenFunc returns a handle to the same underlying database each time it is called.
@@ -62,6 +64,9 @@ func Run(t *testing.T, open OpenFunc) {
 	})
 	t.Run("ReserveDoesNotOversell", func(t *testing.T) {
 		reserveDoesNotOversell(t, open)
+	})
+	t.Run("CiphertextSurvivesRoundTrip", func(t *testing.T) {
+		ciphertextSurvivesRoundTrip(t, open)
 	})
 	t.Run("SetNodeStateReportsChange", func(t *testing.T) {
 		setNodeStateReportsChange(t, open)
@@ -268,6 +273,58 @@ func reserveDoesNotOversell(t *testing.T, open OpenFunc) {
 		t.Errorf("granted %d reservations, want exactly 2: the node had room for two "+
 			"and the third must be refused", granted)
 	}
+
+	// GPUs get their own node because the dimension has to be the only thing that can
+	// refuse. Reusing node-1 above would let an exhausted CPU or disk guard produce the
+	// refusal and report a pass for a GPU check that does not exist -- which is what
+	// happened: the statement had no GPU condition at all for as long as this suite has
+	// existed, and every requirement passed.
+	//
+	// Deliberately generous on every other dimension for the same reason.
+	if err := s.UpsertNode(&store.NodeRecord{
+		ID: "node-gpu", Region: "local", State: "READY",
+		Runtimes:          []string{"fc"},
+		CPUAllocatable:    64,
+		MemoryAllocateMiB: 262144,
+		DiskAllocateMiB:   1048576,
+		GPUCount:          1,
+		LastHeartbeat:     time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	gpuGranted := 0
+	for i := 0; i < 3; i++ {
+		err := s.Reserve("node-gpu", &store.Reservation{
+			SandboxID: fmt.Sprintf("sbx-gpu-%d", i),
+			CPU:       1,
+			MemoryMiB: 512,
+			DiskMiB:   2048,
+			GPU:       1,
+		})
+		if err == nil {
+			gpuGranted++
+			continue
+		}
+		if !errors.Is(err, store.ErrCapacityChanged) {
+			t.Fatalf("gpu reserve %d failed for an unexpected reason: %v", i, err)
+		}
+	}
+
+	gpuNode, err := s.GetNode("node-gpu")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if gpuNode.GPUCommitted > gpuNode.GPUCount {
+		t.Errorf("committed %d GPUs on a node with %d after %d grants; the same physical "+
+			"device is handed to two guests, and the failure surfaces inside one of them "+
+			"as a device already in use",
+			gpuNode.GPUCommitted, gpuNode.GPUCount, gpuGranted)
+	}
+	if gpuGranted != 1 {
+		t.Errorf("granted %d GPU reservations on a single-GPU node, want exactly 1",
+			gpuGranted)
+	}
 }
 
 // setNodeStateReportsChange is requirement 5. Without it a health sweep cannot tell a
@@ -296,5 +353,93 @@ func setNodeStateReportsChange(t *testing.T, open OpenFunc) {
 	if changed {
 		t.Fatal("setting a node to the state it already holds reported a change; a " +
 			"health sweep would announce the same node as newly lost on every pass")
+	}
+}
+
+// ciphertextSurvivesRoundTrip requires that opaque bytes come back byte-identical.
+//
+// This requirement exists because of a real failure. The dialect layer was sized by
+// counting placeholders and grepping for AUTOINCREMENT, which found 103 binds and two DDL
+// constructs; it missed `secret BLOB NOT NULL`, and Postgres rejects the whole schema with
+// `type "blob" does not exist`. The suite could not have caught it earlier: no requirement
+// touched the credentials table, so the column's type was unconstrained on any engine but
+// the one it was written for.
+//
+// The payload is deliberately not text. A column declared TEXT instead of BYTEA would pass
+// a round trip of printable ASCII and corrupt real ciphertext, so the bytes here include a
+// zero, a 0xff, and an invalid UTF-8 sequence -- the values an encoding conversion would
+// mangle. Storing plaintext would also pass; what is being checked is the transport, since
+// the store never decrypts anything.
+func ciphertextSurvivesRoundTrip(t *testing.T, open OpenFunc) {
+	s := open(t)
+
+	ciphertext := []byte{0x00, 0x01, 0xff, 0xfe, 0x80, 0xc3, 0x28, 0x7f, 0x00, 0xab}
+	host := "registry.conformance.invalid"
+
+	if err := s.PutRegistryCredential(&store.RegistryCredential{
+		Host:             host,
+		Username:         "robot",
+		SecretCiphertext: ciphertext,
+	}); err != nil {
+		t.Fatalf("put credential: %v", err)
+	}
+
+	got, err := s.GetRegistryCredential(host)
+	if err != nil {
+		t.Fatalf("get credential: %v", err)
+	}
+	if got == nil {
+		t.Fatal("credential is missing after a successful put; a pull of a private " +
+			"image would fall back to anonymous and fail with a permission error " +
+			"that points at the registry rather than at the store")
+	}
+	if !bytes.Equal(got.SecretCiphertext, ciphertext) {
+		t.Errorf("ciphertext changed in the database: stored %x, read back %x; "+
+			"decryption will fail and the error will name the cipher, not the column",
+			ciphertext, got.SecretCiphertext)
+	}
+
+	// Overwriting matters as much as inserting: PutRegistryCredential is an upsert, and
+	// rotating a credential is the common path. An ON CONFLICT clause that updates the
+	// wrong column would leave the old ciphertext in place and read as a stale secret.
+	rotated := []byte{0xde, 0xad, 0x00, 0xbe, 0xef}
+	if err := s.PutRegistryCredential(&store.RegistryCredential{
+		Host:             host,
+		Username:         "robot",
+		SecretCiphertext: rotated,
+	}); err != nil {
+		t.Fatalf("rotate credential: %v", err)
+	}
+	got, err = s.GetRegistryCredential(host)
+	if err != nil {
+		t.Fatalf("get rotated credential: %v", err)
+	}
+	if !bytes.Equal(got.SecretCiphertext, rotated) {
+		t.Errorf("rotation did not take: read back %x, want %x", got.SecretCiphertext, rotated)
+	}
+
+	// ListRegistryCredentials is documented to omit the ciphertext so its result is safe
+	// to serialise into an API response. Checked here because the only thing standing
+	// between that comment and a leaked secret is the column list in one SELECT.
+	list, err := s.ListRegistryCredentials()
+	if err != nil {
+		t.Fatalf("list credentials: %v", err)
+	}
+	for _, c := range list {
+		if len(c.SecretCiphertext) != 0 {
+			t.Errorf("ListRegistryCredentials returned ciphertext for %q; this result "+
+				"is serialised into an API response", c.Host)
+		}
+	}
+
+	if err := s.DeleteRegistryCredential(host); err != nil {
+		t.Fatalf("delete credential: %v", err)
+	}
+	got, err = s.GetRegistryCredential(host)
+	if err != nil {
+		t.Fatalf("get after delete: %v", err)
+	}
+	if got != nil {
+		t.Error("credential survived deletion, so revoking access does not revoke it")
 	}
 }
