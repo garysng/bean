@@ -58,17 +58,17 @@ diverge from reality immediately.
 ⑥ applyLayer per layer  unpack in order, handle whiteouts
 ⑦ add the directories the guest requires   mount points such as /proc /sys /dev
 ⑧ unmount → rename into place              atomic publication
-⑨ write a sidecar recording the ref        remember which ref this file came from
+⑨ write the image metadata file            remember which ref this file came from
 ```
 
-**The sidecar is written after the image**, and the order is deliberate: it is the basis for
-what `Cached()` reports, so writing the sidecar first would have the node claim to hold an
+**The metadata file is written after the image**, and the order is deliberate: it is the basis
+for what `Cached()` reports, so writing it first would have the node claim to hold an
 image that is not usable yet — the scheduler would send work over on that basis, and then
 create would fail.
 
 `refToFilename` encodes a ref into a filename (non-alphanumerics become separators), and
 **different separators must not all map to the same character**, otherwise `a:b` and `a/b`
-would collide. The sidecar is the answer to the reverse lookup: the original ref cannot be
+would collide. The metadata file is the answer to the reverse lookup: the original ref cannot be
 derived back from the filename, so it is recorded separately.
 
 ### Immutable semantics ✅
@@ -229,7 +229,7 @@ create time:
 
 ```
 convert  FetchConfig(manifest.Config.Digest)  → Config{Env,Entrypoint,Cmd,WorkingDir,User}
-             │                                    written into the .ref sidecar
+             │                                    written into the .ref metadata file
              ▼
 create   Provider.Config(ref) → *Config    ┐
          spec.Cmd / spec.Env               ├→ MergeConfig → Process{Argv,Env,Workdir,User}
@@ -237,7 +237,7 @@ create   Provider.Config(ref) → *Config    ┐
                                     StartUserProcessRequest → beand exec
 ```
 
-Recorded in the same `.ref` sidecar as the reference and digest rather than a second file, so
+Recorded in the same `.ref` file as the reference and digest rather than a second file, so
 one atomic write publishes everything the node knows about an image and no reader can catch
 the two disagreeing.
 
@@ -351,17 +351,40 @@ sizes. It was never a measurement of this implementation. The figures above are,
 happen to agree — but the agreement is a check on the extrapolation, not a substitute for
 it having been done.
 
-**Create latency is not improved.** Measured 12–32 s per cold create on both backends,
-dominated by registry download and varying more between runs of the same backend than
-between backends.
+### Create latency: cold vs published ✅
 
-That deserves more than a shrug, because it is the opposite of what overlaybd is famous
-for. The reason is that **the path measured above still converts before it creates** —
-download every layer, seal each one, then assemble the device. It does strictly more work
-than flattening on a first use; it wins on the second image and on disk, not on the first
-create.
+`hack/overlaybd-lazy-bench.sh`, three arms on one host. The third prewarms, then **wipes
+the node's layer directory** before creating — otherwise the create reads local files and
+the measurement says nothing about the published copy.
 
-The version that would win on a cold start is lazy pull, and it does not apply to ordinary
+| arm | create 1 | create 2 | image dir |
+|---|---|---|---|
+| dm-snapshot | 14.3 s | 15.1 s | 261 MiB |
+| overlaybd, cold (converts on the create path) | 14.0 s | 6.8 s | 96 MiB |
+| overlaybd, layers published, node has none | **1.3 s** | **1.4 s** | 36 KiB |
+
+**A cold create is not improved** — 14.0 s against dm-snapshot's 14.3 s, and across runs
+the two vary more between repetitions of one backend than between backends. That is the
+honest number for a fleet that never prewarms, and it is the opposite of what overlaybd is
+famous for. The reason is that a cold create still converts before it creates: download
+every layer, seal each one, then assemble the device. It does strictly more work than
+flattening on a first use.
+
+**A published create is ~10x faster** than either, and this is the number the design is
+for. It is also the one that had never been measured: earlier rounds quoted 12–32 s for
+both backends and concluded latency was unimproved, because every arm measured then had
+conversion on the path.
+
+Checks that the fast arm is not a false pass, all from the same run: zero `.obd` files in
+the layer directory afterwards (nothing was converted), 4 layers opened from `remotefs` in
+the daemon's log, and 32 KiB of block cache — bytes fetched on demand rather than a layer
+downloaded whole.
+
+Those 1.3 s were measured while a create still fetched the image's **manifest** from the
+registry before it could look up a single layer. That is no longer so — see "the store as a
+source" below — but it is what the number above includes.
+
+The version that wins on a cold start is lazy pull, and it does not apply to ordinary
 images at all:
 
 | | what the blob is | can overlaybd read it remotely? |
@@ -369,17 +392,20 @@ images at all:
 | `alpine:3.20` from Docker Hub | gzipped tar | ❌ no block index to seek into |
 | an image converted and pushed in overlaybd form | sealed LSMT layer | ✅ range-read over HTTP |
 
-So **lazy pull is a property of the image, not of the node's flags**. `--fc-overlaybd-lazy-pull`
-on a node fed ordinary registry images cannot do anything: `lowersFor` now refuses such a
-create explicitly rather than building a config overlaybd would open and find no LSMT
-structure in. The measured 7 ms mount and 19.6% transfer in decisions §3.1 were against a
-blob that had been converted and pushed first — that step is what this node does not do.
+So **lazy pull is a property of the blob, not of the node's flags**. A node fed ordinary
+gzipped registry layers has nothing to range-read, and the measured 7 ms mount and 19.6%
+transfer in decisions §3.1 were against a blob that had been converted and sealed first.
 
-**So the cold path is unchanged and stays that way until images are published in overlaybd
-form.** That is a pipeline question (convert once centrally, push, let every node
-range-read) rather than a provider one, and it is the next thing worth building if
-cold-start latency is the goal. Until then prewarm remains mandatory, exactly as on the
-flattening path.
+What closes that gap is bean's own object store rather than the registry. `Prewarm`
+converts an image and publishes its sealed layers under their digests; any node reading the
+same store then resolves those layers at level 2 and range-reads them. So the sealed form
+does get produced — just by the first node to prewarm, not by a central pipeline.
+
+**A genuinely cold create is still a conversion.** Nothing can make it otherwise: a gzipped
+tar has no block index to seek into, so the bytes have to be fetched and sealed before
+anything can be read on demand. What the store buys is that this happens once per *fleet*
+per image instead of once per node — provided something prewarms. Without a prewarm the
+cold path is exactly the flattening path's, and prewarm remains as mandatory as it is there.
 
 ### The layer pipeline
 
@@ -400,6 +426,260 @@ and it means a second image referencing a layer already here converts nothing.
 A per-sandbox writable layer is `overlaybd-create -s` (sparse), costing the blocks written
 rather than its virtual size — 40 KiB measured for an idle sandbox against a 1.1 GB
 apparent size.
+
+### What a create looks for, in order
+
+A create resolves each layer through three levels and **never publishes**. Publication is
+`Prewarm`'s job, for reasons in the next subsection.
+
+| level | condition | how the layer is referenced |
+|---|---|---|
+| 0 | the registry blob is *already* a sealed overlaybd layer | `digest` + registry `repoBlobUrl` + `dir=` |
+| 1 | this node has `<layerDir>/sha256-<digest>.obd` | `file=` |
+| 2 | the object store has the published blob (lazy pull only) | `digest` + store `repoBlobUrl` + `dir=` |
+| 3 | none of the above | convert locally, reference as `file=` |
+
+The ordering is not arbitrary. Level 1 before level 2 means bytes already on this node are
+read as a local file rather than through the daemon's HTTP path, so a read that cannot fail
+does not acquire a dependency on the object store being reachable. Level 2 before level 3 is
+the point of publishing at all: a node that has never seen the image starts reading blocks
+instead of converting.
+
+### A chain cannot be half remote
+
+A conversion needs its parent layers as **local files**, because an OCI layer is a diff
+applied over them. So a chain that mixes a remote parent with a converted child cannot be
+built, and two rules follow from that one constraint:
+
+- **A prewarm never reads remotely.** Its whole output is a local chain, so consulting the
+  store for an early layer would leave a later one with no parent to apply over.
+- **A create that hits the mix converts the entire image locally.** This is a partly
+  published image — some layers in the store, a later one not — which happens when a
+  prewarm was interrupted mid-image. The fallback spends the download the remote levels
+  exist to avoid, and it beats refusing a create that can plainly succeed.
+
+The first of these was not a precaution. Publishing was originally allowed to consult the
+store, and a prewarm then failed **against its own earlier publication**: layer 2 of
+`python:3.12-slim` had to be converted while layer 1 had resolved to the store copy. It
+surfaced in a benchmark run, not a test, which is why the test that now covers it asserts
+on a prewarm succeeding with a *seeded* store rather than an empty one.
+
+### Conversion is per-node work; publishing is what makes it fleet-wide 📐
+
+Two deduplications exist, at different granularities, and neither makes conversion a
+fleet-wide operation on its own.
+
+- `PullingProvider.ensure` collapses concurrent requests **per image reference** (§3).
+- `OverlaybdProvider.materialiseLayer` collapses them **per layer digest**.
+
+The finer one is not redundant. Two different images sharing a base are two different
+references, so the reference-level map does not relate them, but they name the same layer
+digests. Without digest-level dedup, concurrent creates of `python:3.12-slim` and
+`python:3.11-slim` each fetch and convert the shared debian base. The rename in
+`buildLayer` already made that *correct* — both produce identical bytes and one overwrites
+the other — so the only symptom was duplicated work. Measured on hardware: 4 concurrent
+creates of one image fetched the layer blob 4 times before the flight was added, 1 after.
+
+Both are in-process maps. **Nothing coordinates across nodes.** A layer converted on node A
+is invisible to node B, so a fleet of N nodes converting the same image does the conversion
+N times — the sharing this backend is built for is *within* a node.
+
+The object store is what changes that, and only via `Prewarm`:
+
+```
+Prewarm  →  convert what is missing  →  publish every local layer
+Create   →  look (levels 0-3)        →  never publish
+```
+
+Publication was on the create path first, and that was wrong in a way worth recording: it
+put an S3 upload of tens of MiB on the latency path of a sandbox whose bytes were *already
+on the node's disk*, to benefit a later create that may never arrive. Moving it to
+`Prewarm` puts the upload where nobody is waiting on it.
+
+One detail a naive move gets wrong: a prewarm on a node that had already converted the image
+hits level 1 and would return having published nothing, leaving the layer on one node's disk
+and unreachable to the rest. So `Prewarm` publishes any local layer, not only a freshly
+converted one. That gap was found by a hardware test asserting on the store's call count,
+not by reading the code.
+
+A fleet that never prewarms still works. Every node just converts for itself.
+
+### The cache levels
+
+Four levels, and the distinction that matters most is that the first two are
+**alternatives rather than tiers**: a layer is either a full local file or a sparse
+cache over a remote source, never both.
+
+```
+node
+├── <layerDir>/sha256-<digest>.obd          full, load-bearing, keyed by digest
+├── <layerDir>/cache/sha256-<digest>/       sparse, reclaimable, keyed by digest
+├── /opt/overlaybd/registry_cache           4 GiB LRU, shared across all layers
+└── <sandbox>/writable.{data,index}         per sandbox, sparse, ~40 KiB
+```
+
+| level | holds | lifetime | shared by |
+|---|---|---|---|
+| sealed layer file | the whole layer | until reclaimed; **losing it means reconverting** | every image and sandbox referencing that digest |
+| per-layer cache dir | only the blocks read | reclaimable — losing it costs bandwidth, not correctness | same |
+| `registry_cache` | recently read blocks, any layer | LRU eviction at 4 GiB | every layer on the node |
+| writable layer | one sandbox's writes | the sandbox | nobody |
+
+**Which of the first two a layer gets is decided by whether it has a remote source.** A
+layer converted locally has nowhere to fall back to, so it is referenced as `file=` and is
+load-bearing. A layer published to the object store is referenced as `digest` +
+`repoBlobUrl` + `dir=`, and the daemon serves from `dir` when the blocks are there and
+range-reads when they are not — which is what makes that copy reclaimable. Setting `file=`
+for a remote layer would work and would throw away the fallback; setting only `dir=` would
+leave a layer with nowhere to fetch from, which `validate()` rejects.
+
+### What "on demand" does and does not mean
+
+Reads are block-granular in every case: `refill_size` (default **256 KiB**) is described
+in overlaybd's own configuration as "the I/O unit and bitmap granularity", so reading a
+17-byte file fetches 256 KiB. A cache entry is a **sparse file plus a bitmap** of which
+blocks are present, with per-block in-flight deduplication so concurrent readers of one
+block fetch it once.
+
+What differs between the levels is not the granularity of reads but **where the bytes come
+from**, and therefore what the first use costs:
+
+| the layer is | first use costs | later reads |
+|---|---|---|
+| already sealed locally | nothing — it was paid at conversion | local, block-granular |
+| published to the store | **only the blocks touched** | HTTP 206, then cached |
+| neither | the whole layer: download + convert | local, block-granular |
+
+So on-demand loading applies to the middle row only. It cannot apply to the third,
+because a standard OCI layer is a gzipped tar with no block index — there is nothing to
+seek into, which is why `lowersFor` refuses to reference one remotely. **The first
+encounter with an image on the whole fleet always pays a full download and conversion;
+what this backend removes is paying it again**, per node and per image.
+
+### Fan-out: what a hundred sandboxes from one image share
+
+This is where the design earns its complexity:
+
+- the **read-only layers** are one copy, whether full or sparse
+- the **blocks already fetched** are shared, so the second sandbox hits what the first
+  pulled
+- only the **writable layer** is per sandbox, at ~40 KiB
+
+Sharing is keyed by digest rather than by image, so it crosses images too: the measured
+0.49 s of conversion CPU for a second python `-slim` image against 1.37 s for the first is
+the shared debian base already being there.
+
+### The store as a source, not a cache ✅
+
+Publishing layer blobs alone does not make the store something an image can be *resolved*
+from. A prefix full of `blobs/sha256:...` is a flat set of layers with nothing saying which
+of them form an image, so a node still had to ask the registry — and a store you must ask
+the registry about is a cache, not a source.
+
+Three prefixes, and the last two are what close that gap:
+
+```
+blobs/<layer-digest>            the sealed layer            read by the overlaybd daemon
+manifests/<manifest-digest>     layer list + OCI config     read by bean
+tags/<host>/<repo>/<tag>        → manifest digest           read by bean
+```
+
+Note the readers differ, and that is why this is a separate type from `BlobStore`. The
+daemon reads `blobs/` **anonymously**, which forces the public-read policy described below.
+`manifests/` and `tags/` are read by bean itself with credentials, so they carry no such
+requirement.
+
+`tags/` is keyed by host and repository as well as tag, because a tag means nothing without
+them: `python:3.12` from Docker Hub and from a mirror are different images that share a
+name, and one key for both would have one serve the other.
+
+**What a create needs the registry for, now:**
+
+| | registry needed |
+|---|---|
+| tag recorded in the store | no |
+| digest reference, manifest in the store | no |
+| digest reference, resolved here before | no — the local record answers it |
+| never prewarmed anywhere | yes — this is a cold start, level 3 |
+| prewarm | **yes, always** |
+
+Prewarm is the only writer, and it never reads its own answer. That is deliberate: a
+prewarm satisfied from the store would be a no-op reporting success, and a moved tag would
+never be picked up at all.
+
+**The semantic this establishes, which is worth being explicit about:** bean's store — not
+the upstream registry — is the authority for what a tag means, until the next prewarm. An
+upstream tag that moves is not noticed in between. For a sandbox platform that is the right
+default: a batch of evals half-way through silently picking up new image contents is worse
+than running a slightly old image. Reproducibility over freshness.
+
+The same reasoning is why a **tag** is never answered from the *local* record even though a
+**digest** is. A digest is immutable, so the recorded chain is the same chain; a tag is a
+pointer, and pinning it locally would mean every node drifted independently with nothing
+able to refresh them. The store is refreshable by prewarm; a local pin is not.
+
+### Starting with the registry down ✅
+
+`DevMapperProvider.Prepare` is purely local — it looks for a converted file and never opens
+a socket — so a node with the registry unreachable starts every image it has cached. Every
+overlaybd create fetched the manifest first, so the same node started **nothing**. That was
+a regression introduced by this backend, not a property of it.
+
+A create now falls back to the layer chain the node recorded, warns that it is using what
+the reference resolved to when last pulled, and starts. Two details that a partial fix
+misses:
+
+- The **config** lives in its own blob, so a manifest answered locally still leaves a
+  registry fetch on the path. Without handling that too, the offline create gets one step
+  further and fails on the config instead — and a sandbox that boots with no `ENV` or
+  `ENTRYPOINT` is worse than one that does not boot.
+- A **caller's cancellation** is not the registry being unreachable, and must not be
+  answered from a stale record.
+
+A prewarm does not fall back, for the reason above.
+
+### The blob store must allow anonymous reads ⚠️
+
+**The daemon reads the object store without credentials.** It goes through registryfs,
+which has no notion of SigV4, so the keys `noded` signs its uploads with do not help it.
+
+A private bucket therefore fails in a way that names nothing useful: MinIO answers the
+daemon's range request with 403, registryfs looks for a `WWW-Authenticate` challenge to
+follow, finds none, logs `connection failed`, and the create surfaces as `ENOENT` on the
+configfs `enable` write. Nothing in that chain mentions the bucket or its policy. It cost
+a full benchmark run to find.
+
+For MinIO the fix is one command:
+
+```
+mc anonymous set download <alias>/bean-obd-layers
+```
+
+`noded` now probes this at startup with an unsigned range request and warns with the
+remedy if the store demands credentials. It warns rather than refusing to start: a node
+that cannot read the store still works, it just converts every layer locally.
+
+Note the asymmetry this creates — **writes are authenticated, reads are not.** The prefix
+holds only sealed layer blobs, which are content-addressed and derived from images the
+registry already serves, so public readability is a smaller exposure than it sounds. It is
+still a deployment decision, and a store holding anything else should use a separate
+bucket.
+
+### Two settings that are not the code's to choose
+
+`/etc/overlaybd/overlaybd.json` belongs to the overlaybd package — bean reads it (the
+builder passes it to `overlaybd-apply`) and never writes it. Two of its defaults matter
+enough to state:
+
+**`download.enable` must be `false`.** The default is `true` with `delay: 600`, which has
+the daemon **fetch the rest of a layer in the background ten minutes in**. A sparse cache
+then grows into a full copy, which is the opposite of reading on demand. Harmless for an
+eval sandbox that lives for seconds; a long-running one quietly pulls whole images.
+
+**`cacheConfig.cacheSizeGB` (4 GiB by default) is a node-level ceiling** shared by every
+layer. For a batch over hundreds of distinct images it is the first thing to raise, and
+its symptom when too small is not an error but eviction — blocks being re-fetched that
+were already paid for.
 
 ### Exposing it as a block device
 
