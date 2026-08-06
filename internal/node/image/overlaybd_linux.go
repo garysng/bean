@@ -188,6 +188,28 @@ func (p *OverlaybdProvider) Prepare(ctx context.Context, sandboxID, imageRef str
 		return nil, err
 	}
 
+	// The filesystem has to be grown to match the device before the device exists,
+	// because the two sizes are decided independently and only agree by accident.
+	//
+	// The device is sized from what the caller asked for. The filesystem lives in the
+	// base layer and was sized by vsizeForImage when that layer was converted -- an
+	// estimate from the image's compressed layers, with a 2 GB floor. Neither knows
+	// about the other, so a sandbox asking for less than the estimate gets a device
+	// smaller than the filesystem inside it, and the kernel refuses to mount its own
+	// root: "bad geometry: block count 524288 exceeds size of device (262144 blocks)".
+	//
+	// Measured on hardware: 1024 MiB failed, 2048 and 4096 worked. The default
+	// --default-disk-mib is 2048, exactly the floor, which is why every end-to-end run
+	// passed while any smaller disk was unusable.
+	//
+	// Growing rather than shrinking the device to fit is what the caller asked for: a
+	// configured 20 GB should be 20 GB of writable space. The resize writes through the
+	// chain into the *writable* layer, so the shared base is untouched and this is
+	// per-sandbox work.
+	if err := p.Builder.resizeToGB(ctx, cfgPath, vsizeGB); err != nil {
+		return nil, err
+	}
+
 	// The serial is what keeps multipathd from merging this device with another and
 	// serving the wrong image's data (see setSerial). It has to be a hash of the
 	// sandbox id rather than the id itself: the kernel keeps only the hex digits
