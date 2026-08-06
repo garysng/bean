@@ -94,8 +94,6 @@ type Reservation struct {
 // accounting: a node that re-registers after a restart must not appear
 // empty, or the scheduler would oversell it.
 func (s *Store) UpsertNode(n *NodeRecord) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	labels, err := marshalJSON(n.Labels)
 	if err != nil {
 		return err
@@ -144,8 +142,6 @@ ON CONFLICT(id) DO UPDATE SET
 // LoadNodes returns every node with its current accounting, which is how a
 // scheduler rebuilds its view after a restart.
 func (s *Store) LoadNodes() ([]*NodeRecord, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	rows, err := s.query(`
 SELECT id, region, labels, runtimes, cpu_alloc, mem_alloc, disk_alloc, gpu_count,
        cpu_committed, mem_committed, disk_committed, gpu_committed,
@@ -170,8 +166,6 @@ FROM nodes ORDER BY id`)
 
 // GetNode returns one node, or nil when it is unknown.
 func (s *Store) GetNode(id string) (*NodeRecord, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	row := s.queryRow(`
 SELECT id, region, labels, runtimes, cpu_alloc, mem_alloc, disk_alloc, gpu_count,
        cpu_committed, mem_committed, disk_committed, gpu_committed,
@@ -236,8 +230,6 @@ func scanNode(sc rowScanner) (*NodeRecord, error) {
 // replicas racing on the same node cannot both succeed: the loser sees
 // ErrCapacityChanged and re-scores against fresh state.
 func (s *Store) Reserve(nodeID string, res *Reservation) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	tx, err := s.begin()
 	if err != nil {
@@ -315,8 +307,6 @@ ON CONFLICT(sandbox_id) DO NOTHING`,
 // already-released reservation is a no-op, so cleanup paths and retries do
 // not have to coordinate.
 func (s *Store) Release(sandboxID string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	tx, err := s.begin()
 	if err != nil {
@@ -370,8 +360,6 @@ WHERE id = ?`,
 // FinishCreate clears the in-flight marker once a create settles, whether
 // it succeeded or failed. The reservation itself stays until Release.
 func (s *Store) FinishCreate(nodeID string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	// Clamped in the WHERE clause: the decrement is by a constant, so a condition is
 	// enough and no CASE is needed. See Release for why the two-argument MAX is gone.
 	_, err := s.exec(
@@ -386,8 +374,6 @@ func (s *Store) SpreadCounts(spreadKey string) (map[string]int, error) {
 	if spreadKey == "" {
 		return nil, nil
 	}
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	rows, err := s.query(
 		`SELECT node_id, COUNT(*) FROM reservations WHERE spread_key=? GROUP BY node_id`,
 		spreadKey)
@@ -412,8 +398,6 @@ func (s *Store) SpreadCounts(spreadKey string) (map[string]int, error) {
 // marking sandboxes lost when a node's lease expires) even with several
 // replicas sweeping concurrently.
 func (s *Store) SetNodeState(nodeID, state string) (bool, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	result, err := s.exec(
 		`UPDATE nodes SET state=? WHERE id=? AND state!=?`, state, nodeID, state)
 	if err != nil {
@@ -454,8 +438,6 @@ type CachedImage struct {
 // interfere. They used to share the heartbeat, which meant this JSON blob was
 // re-serialised and rewritten every few seconds for a value that rarely changes.
 func (s *Store) PutNodeImages(nodeID string, images map[string]CachedImage) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	cached, err := marshalJSON(images)
 	if err != nil {
 		return err
@@ -471,8 +453,6 @@ func (s *Store) PutNodeImages(nodeID string, images map[string]CachedImage) erro
 //
 // The image inventory is deliberately not here; see PutNodeImages.
 func (s *Store) TouchNode(nodeID string, diskUsedMiB int64) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	_, err := s.exec(`
 UPDATE nodes SET last_heartbeat=?, disk_used_mib=?,
   state = CASE WHEN state IN ('SUSPECT','LOST') THEN 'READY' ELSE state END
@@ -507,8 +487,6 @@ func (s *Store) StaleNodes(olderThan time.Time, excludeStates ...string) ([]*Nod
 // terminal, so their capacity can be reclaimed. Without this, a gateway
 // that dies mid-create would leak capacity permanently.
 func (s *Store) OrphanReservations() ([]string, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	rows, err := s.query(`
 SELECT r.sandbox_id, s.state
 FROM reservations r

@@ -8,7 +8,6 @@ import (
 	"errors"
 	"fmt"
 	"strings"
-	"sync"
 	"time"
 
 	_ "modernc.org/sqlite"
@@ -36,9 +35,26 @@ type Store struct {
 	// d is the engine's syntax. Every statement goes through d.bind, so a query is
 	// written once with `?` and rewritten for whichever driver is underneath. See
 	// dialect.go for why this is a translation rather than a second implementation.
-	d  dialect
-	mu sync.Mutex
+	d dialect
 }
+
+// There is deliberately no mutex here.
+//
+// Every method used to take one, and it protected nothing: a lock inside one process
+// cannot order writes from a second bean-api replica, which is the whole reason this store
+// exists rather than an in-memory scheduler. What it did instead was make a real bug
+// unreproducible -- AcquireSnapshot read the ref count, decided in Go, and wrote it back,
+// and the mutex hid that through a single handle. Measured after removing it: two
+// connections doing that lost 194 of 200 updates.
+//
+// Now the conditions live in the statements (see AcquireSnapshot, DeleteSnapshot, Reserve,
+// Release), so a lock would add nothing but the appearance of safety -- and that
+// appearance is the hazard. A uniform lock across 37 methods reads as though someone had
+// thought about concurrency, which is why the two methods where it mattered went
+// unexamined for as long as they did.
+//
+// A future method that needs more than one statement to be atomic should use s.begin(),
+// not a mutex.
 
 // exec, query and queryRow route every statement through the dialect.
 //
@@ -345,8 +361,6 @@ func unmarshalJSON(s string, out any) error {
 // ---- sandboxes ----
 
 func (s *Store) PutSandbox(sb *Sandbox) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	blob, err := json.Marshal(sb)
 	if err != nil {
 		return err
@@ -360,8 +374,6 @@ func (s *Store) PutSandbox(sb *Sandbox) error {
 
 // GetSandbox returns nil (no error) when the sandbox does not exist.
 func (s *Store) GetSandbox(id string) (*Sandbox, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	var blob string
 	err := s.queryRow(`SELECT data FROM sandboxes WHERE id=?`, id).Scan(&blob)
 	if err == sql.ErrNoRows {
@@ -379,8 +391,6 @@ func (s *Store) GetSandbox(id string) (*Sandbox, error) {
 
 // ListSandboxes filters by label and state; empty filters match everything.
 func (s *Store) ListSandboxes(labelKey, labelVal string, state SandboxState) ([]*Sandbox, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	rows, err := s.query(`SELECT data FROM sandboxes ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
@@ -408,8 +418,6 @@ func (s *Store) ListSandboxes(labelKey, labelVal string, state SandboxState) ([]
 }
 
 func (s *Store) DeleteSandbox(id string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	_, err := s.exec(`DELETE FROM sandboxes WHERE id=?`, id)
 	return err
 }
@@ -417,8 +425,6 @@ func (s *Store) DeleteSandbox(id string) error {
 // ---- events ----
 
 func (s *Store) AppendEvent(e *Event) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	data, err := json.Marshal(e.Data)
 	if err != nil {
 		return err
@@ -430,8 +436,6 @@ func (s *Store) AppendEvent(e *Event) error {
 
 // ListEvents returns a sandbox's events oldest-first, capped by limit.
 func (s *Store) ListEvents(sandboxID string, limit int) ([]*Event, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	if limit <= 0 || limit > 1000 {
 		limit = 100
 	}
@@ -467,8 +471,6 @@ func (s *Store) ListEvents(sandboxID string, limit int) ([]*Event, error) {
 // ---- snapshots ----
 
 func (s *Store) PutSnapshot(snap *Snapshot) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	blob, err := json.Marshal(snap)
 	if err != nil {
 		return err
@@ -487,8 +489,6 @@ func (s *Store) PutSnapshot(snap *Snapshot) error {
 // GetSnapshot returns nil (no error) when the snapshot does not exist.
 // RefCount is read from its column, not the JSON blob.
 func (s *Store) GetSnapshot(id string) (*Snapshot, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	return s.getSnapshotLocked(id)
 }
 
@@ -512,8 +512,6 @@ func (s *Store) getSnapshotLocked(id string) (*Snapshot, error) {
 }
 
 func (s *Store) ListSnapshots(labelKey, labelVal string, state SnapshotState) ([]*Snapshot, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	rows, err := s.query(`SELECT data, ref_count FROM snapshots ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
@@ -554,8 +552,6 @@ func (s *Store) ListSnapshots(labelKey, labelVal string, state SnapshotState) ([
 // anything descends from it (see DeleteSnapshot), so the leaf's own reference
 // keeps the whole chain alive for as long as the restore holds it.
 func (s *Store) SnapshotChain(id string) ([]*Snapshot, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 
 	var chain []*Snapshot
 	seen := map[string]bool{}
@@ -634,8 +630,6 @@ WHERE id = ? AND state = ?`, id, string(SnapshotReady))
 
 // ReleaseSnapshot decrements the reference count, never below zero.
 func (s *Store) ReleaseSnapshot(id string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	// Clamped in the WHERE clause rather than with a two-argument MAX, which is not
 	// portable: SQLite overloads MAX as a scalar, Postgres reserves it for aggregation
 	// and answers `function max(bigint, integer) does not exist`. GREATEST is the
@@ -714,8 +708,6 @@ WHERE id = ?
 // ---- images ----
 
 func (s *Store) PutImage(img *Image) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	img.UpdatedAt = time.Now()
 	blob, err := json.Marshal(img)
 	if err != nil {
@@ -731,8 +723,6 @@ func (s *Store) PutImage(img *Image) error {
 
 // GetImage returns nil (no error) when the image is not registered.
 func (s *Store) GetImage(ref string) (*Image, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	var blob string
 	err := s.queryRow(`SELECT data FROM images WHERE ref=?`, ref).Scan(&blob)
 	if err == sql.ErrNoRows {
@@ -756,8 +746,6 @@ func (s *Store) GetImage(ref string) (*Image, error) {
 // means visible to everyone: excluding them would make an upgraded deployment
 // look like it had lost the base images it is still perfectly able to run.
 func (s *Store) ListImages(owner string) ([]*Image, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	query := `SELECT data FROM images ORDER BY updated_at DESC`
 	args := []any{}
 	if owner != "" {
@@ -786,8 +774,6 @@ func (s *Store) ListImages(owner string) ([]*Image, error) {
 }
 
 func (s *Store) DeleteImage(ref string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	_, err := s.exec(`DELETE FROM images WHERE ref=?`, ref)
 	return err
 }
@@ -795,8 +781,6 @@ func (s *Store) DeleteImage(ref string) error {
 // ---- builds ----
 
 func (s *Store) PutBuild(b *ImageBuild) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	b.UpdatedAt = time.Now()
 	blob, err := json.Marshal(b)
 	if err != nil {
@@ -815,8 +799,6 @@ func (s *Store) PutBuild(b *ImageBuild) error {
 
 // GetBuild returns nil (no error) when the build does not exist.
 func (s *Store) GetBuild(id string) (*ImageBuild, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	var blob string
 	err := s.queryRow(`SELECT data FROM builds WHERE id=?`, id).Scan(&blob)
 	if err == sql.ErrNoRows {
@@ -834,8 +816,6 @@ func (s *Store) GetBuild(id string) (*ImageBuild, error) {
 
 // ListBuilds returns builds newest first, optionally filtered by state.
 func (s *Store) ListBuilds(state BuildState) ([]*ImageBuild, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	rows, err := s.query(`SELECT data FROM builds ORDER BY created_at DESC`)
 	if err != nil {
 		return nil, err
@@ -866,8 +846,6 @@ func (s *Store) ListBuilds(state BuildState) ([]*ImageBuild, error) {
 // dump alone cannot be used to pull private images.
 
 func (s *Store) PutRegistryCredential(c *RegistryCredential) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	if c.Host == "" {
 		return fmt.Errorf("registry host required")
 	}
@@ -891,8 +869,6 @@ func (s *Store) PutRegistryCredential(c *RegistryCredential) error {
 // GetRegistryCredential returns nil (no error) when the host has no
 // credential, which means anonymous pulls.
 func (s *Store) GetRegistryCredential(host string) (*RegistryCredential, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	var c RegistryCredential
 	var created, updated int64
 	err := s.queryRow(
@@ -913,8 +889,6 @@ func (s *Store) GetRegistryCredential(host string) (*RegistryCredential, error) 
 // ListRegistryCredentials returns credentials without their ciphertext, so
 // the result is safe to serialise into an API response.
 func (s *Store) ListRegistryCredentials() ([]*RegistryCredential, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	rows, err := s.query(
 		`SELECT host, username, created_at, updated_at FROM registry_credentials ORDER BY host`)
 	if err != nil {
@@ -936,8 +910,6 @@ func (s *Store) ListRegistryCredentials() ([]*RegistryCredential, error) {
 }
 
 func (s *Store) DeleteRegistryCredential(host string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	res, err := s.exec(`DELETE FROM registry_credentials WHERE host=?`, host)
 	if err != nil {
 		return err
@@ -951,8 +923,6 @@ func (s *Store) DeleteRegistryCredential(host string) error {
 // ---- prewarm jobs ----
 
 func (s *Store) PutPrewarmJob(job *PrewarmJob) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	blob, err := json.Marshal(job)
 	if err != nil {
 		return err
@@ -966,8 +936,6 @@ func (s *Store) PutPrewarmJob(job *PrewarmJob) error {
 
 // GetPrewarmJob returns nil (no error) when the job does not exist.
 func (s *Store) GetPrewarmJob(id string) (*PrewarmJob, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
 	var blob string
 	err := s.queryRow(`SELECT data FROM prewarm_jobs WHERE id=?`, id).Scan(&blob)
 	if err == sql.ErrNoRows {
