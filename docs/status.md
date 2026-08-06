@@ -27,17 +27,26 @@ guest kernel 6.1.102, Alpine 3.20.
 | Builds | ✅ | Dockerfile through BuildKit, and `commit` to freeze a running sandbox into a base image |
 | Snapshot cache eviction | ✅ | High/low watermarks with LRU, and the cache's size is reported |
 | Disk pressure | ✅ | Actual occupancy reported; a node stops admitting sandboxes below a floor |
+| Sandbox networking | ✅ | Per-sandbox namespace, tap, NAT egress. Metadata and RFC1918 denied by default, verified by rule counters on a live guest. `pip install` works |
+| Port exposure and the data plane | ✅ | One mechanism, not two: `{port}-{sandbox}` in the Host reaches that port in that guest, whether it is a user's server or the agent. No registration call and no host-port pool — noded enters the namespace and connects |
+| Per-sandbox agent credential | ✅ | The agent is on TCP so one addressing scheme covers it, which means the sandbox can dial it. A per-sandbox token whose hash reaches the guest through MMDS is what replaces the vsock guarantee; verified on hardware that the readable hash is not usable as a token (security-and-startup.md A7) |
+| VMM host cgroups | ✅ | `--fc-cgroups`: memory ceiling, CPU quota and pid cap per sandbox, from its own spec. **v2 only** -- a v1 node refuses to start rather than run unlimited, because v1 cannot cap swap and a guest could thrash the host instead of stopping at its ceiling |
+| VMM dropped uid | ✅ | `--fc-vmm-uid`: the VMM does not run as root |
+| VMM pid namespace | ✅ | `--fc-pid-namespace`, **on by default**: the VMM cannot see or signal any host process. Verified by inode on a live VMM, simultaneously with the sandbox's network namespace -- the two compose because the netns is joined before the fork and the clone flags apply during it |
+| VMM mount namespace | ✅ | `--fc-mount-namespace`, **on by default**. Held back at first on the expectation that bean's device-mapper rootfs would stop being openable inside one. That was wrong: a booted guest has a working `eth0` and its own mnt, pid and net namespaces at once |
+| VMM killed if noded dies | ✅ | `--fc-kill-on-exit`, **on by default**. Reconciliation already reclaimed such a VMM, but only at the next startup, and until then it holds memory promised elsewhere. Measured with a negative control: with the flag the VMM is gone after `kill -9` on noded, without it it survives |
+| Postgres | ✅ | `bean-api --postgres`, which is what allows more than one replica: SQLite is one file, so two replicas cannot share it. A dialect rather than a second implementation, sized by measurement — 103 placeholders plus a few DDL constructs, with all eight `ON CONFLICT` clauses porting unchanged. `hack/postgres-conformance.sh` runs the requirements against a real Postgres 16; the suite skips loudly rather than reporting a pass earned by SQLite. **Reading the SQL was not enough** — see below |
 
 ## Not delivered
 
 | | | |
 |---|---|---|
-| **Networking** | 📐 | **Sandboxes have no network at all.** The `vsock` link to the agent is a control channel, not data. Design in [network.md](network.md); the address pool is built, the plumbing is not. **Largest gap** — SWE-bench-style tasks need `pip install` |
-| jailer / host cgroups | 📐 | The VMM runs as root in the host mount namespace. Hardware virtualisation is the boundary; defence in depth is thinner than it should be |
+| Cross-node sandbox networking | 📐 | A non-goal, not a gap. Sandbox-to-sandbox traffic does not cross nodes |
+| Per-port access control | 📐 | Any port on a sandbox is reachable by anything that can reach bean-proxy. A sandbox must not be given a port it would not want its caller to see (api-design.md §3.4) |
+| jailer chroot | 📐 | Not done, and probably not the right shape. What jailer adds over what is now in place is a chroot and a device allowlist, and it needs the device-mapper node `mknod`'d into a per-sandbox jail (docs/jailer.md). The namespace isolation it is usually wanted for is delivered without it |
 | Container tiers (runc/gVisor) | 📐 | microVM, plus a no-isolation `local` tier for development, are the only options |
-| Volumes, port exposure, `fork` | 📐 | |
+| Volumes | 📐 | |
 | Host resource reconciliation | 📐 | A crashed noded leaves dm mappings and sandbox directories behind |
-| Postgres | ⚠️ | SQLite in use. There is no `Store` interface — `*store.Store` is a concrete type at every call site. What is true is that `database/sql` and the driver import appear only inside `internal/control/store`, so the SQL boundary is contained in one package; swapping the engine means changing that package, not extracting it from callers |
 | Build logs and cancellation | ⚠️ | A build reports no progress and cannot be stopped |
 | overlaybd lazy-pull | ⚠️ | **Verified working** (7 ms mount, 19.6% of layer bytes transferred to read a file) but not wired into the image provider — dm-snapshot is the live path |
 
@@ -209,6 +218,12 @@ holding deleted files all return to their baseline. The loop-device leak fix
 - **S3 against a real MinIO** in CI, not a fake server — `ErrBlobNotFound`
   mapping, abort leaving no object, and range-read boundaries are server
   behaviours
+- **The store's requirements against a real Postgres 16**, not a mock: nine
+  requirements plus a per-method smoke test, via
+  `hack/postgres-conformance.sh`. Confirmed the pass is earned by the database
+  rather than by the engine's locking — replacing the conditional `UPDATE` with a
+  `SELECT` fails the reference-count requirement on Postgres too. Both engines are
+  also run under `-race`, which matters because the store now holds no mutex
 
 ### Two testing rules earned the hard way
 
@@ -224,6 +239,39 @@ assertion was green against the broken implementation, so this was the only way 
 know the new test was worth anything. Applied since to the loop-device leak, the
 merge ordering, snapshot cache pinning, and the queue's transient-vs-lifetime
 distinction.
+
+### A third: a statement no test calls is a statement no engine has parsed
+
+Adding Postgres was scoped by reading the SQL: 103 placeholders, one
+`AUTOINCREMENT`, one `INTEGER`-as-bool, every `ON CONFLICT` portable. That survey
+was right about the shape and wrong about the inventory. Running `migrate()`
+against a real Postgres 16 found four more differences, and the reading could
+never have found the last two:
+
+- `secret BLOB` — Postgres has no such type and rejected the whole schema.
+- `ADD COLUMN` idempotency — only Postgres can say `IF NOT EXISTS`, so the
+  duplicate case is per engine rather than one error-text match applied to both.
+- `INTEGER` — 64 bits in SQLite, 32 in Postgres, and every timestamp column
+  stores Unix milliseconds. Five of seven requirements failed on overflow. **This
+  is unreadable by inspection**: the spelling is identical and the meaning is not.
+- **`Reserve` had no GPU guard at all.** Eight placeholders, nine arguments;
+  SQLite ignored the extra one, so `gpu_committed` was never compared against
+  `gpu_count`. A one-GPU node would hand the same device to two guests, and the
+  failure surfaces inside a guest as a device already in use. Only an engine that
+  counts placeholders objected.
+
+Then the suite passed 8/8 while `Release` and `FinishCreate` had never executed on
+Postgres — both used SQLite's two-argument `MAX(x - ?, 0)`, which Postgres cannot
+run. No requirement called either. Had that shipped, capacity would be committed
+at `Reserve` and never returned: nodes fill permanently and later placements
+report `NO_CAPACITY` for resources nothing is using, with an error naming capacity
+rather than the statement.
+
+Measured afterwards: **23 of 38 interface methods were never executed against
+Postgres by any test.** So there is now a smoke test calling every method once,
+plus a reflection-based guard that fails when a method is missing from it — the
+hand-written call list would otherwise decay exactly as the interfaces did. The
+guard caught three snapshot methods left out of its own first draft.
 
 ## Open gaps worth naming
 

@@ -20,14 +20,16 @@ points:
   (44 KiB per sandbox). The overlaybd capability is measured but not wired in — it has become an
   optimisation rather than a foundation
 - ⚠️ **The jailer P0 talks about is not done**: noded execs firecracker directly
-- 📐 **The networking P0/P1 talk about is entirely undone**: no tap/bridge/NAT, and sandboxes have
-  no network. This is the largest capability gap right now, not an edge-case problem like "no
-  cross-node connectivity"
-- 📐 **Not done**: the container tiers (runc/runsc), volumes, bean-proxy port exposure, fork,
-  Postgres, the TypeScript SDK, build logs and cancellation
+- ✅ **The networking P0/P1 talk about is done**, and it was the largest gap: per-sandbox
+  namespace, tap and NAT egress, metadata and RFC1918 denied by default, and a port inside a
+  sandbox reachable from outside the node through bean-proxy. Verified on a real kernel,
+  denials included. Cross-node sandbox connectivity is still a non-goal
+- 📐 **Not done**: the container tiers (runc/runsc), volumes, per-port access control,
+  Postgres, the TypeScript SDK
 
 In one sentence: **vertically (snapshots / startup optimisation) it has gone deeper than the
-roadmap, and horizontally (networking / multiple tiers / volumes) almost nothing has moved.**
+roadmap; horizontally, networking has closed and what remains is the container tiers and
+volumes.**
 
 ## P0 — Single-node end-to-end skeleton (fc direct boot, no containerd)
 

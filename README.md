@@ -117,17 +117,26 @@ checkpoint fan out to many sandboxes without collisions.
   AWS SDK; multipart upload and range reads
 - **Tracing** — OpenTelemetry with W3C `traceparent` across gateway → noded →
   in-sandbox agent, arriving as one span tree per request
+- **Node-direct data plane** — `{port}-{sandbox}` in the Host reaches that port in
+  that guest, whether it is a user's server or the agent. One mechanism rather than
+  two: no registration call, no host-port pool, and `exec` and file transfer no
+  longer relay through the control plane
+- **Warm snapshots** — prewarm produces a resumable base snapshot, so a create
+  restores instead of booting, and the scheduler prefers nodes that can. Bounded on
+  disk with LRU eviction
+- **Postgres** — `bean-api --postgres`, which is what allows more than one replica;
+  SQLite is one file and two replicas cannot share it. The requirements are run
+  against a real Postgres 16 by `hack/postgres-conformance.sh`, and the store holds
+  no mutex — atomicity is in the statements, so the database arbitrates
 
 ### Not built yet
 
 | | |
 |---|---|
-| jailer / mount namespace | 📐 The VMM drops to an unprivileged uid and runs in a per-sandbox cgroup, but still sees the host filesystem. Hardware virtualisation is the boundary; `chroot` confinement is [#20](https://github.com/garysng/bean/issues/20) phase 2 |
+| jailer chroot | 📐 The VMM drops to an unprivileged uid, runs in a per-sandbox cgroup, and has its own pid, mount and network namespaces by default. What jailer would add on top is a `chroot` and a device allowlist — [#20](https://github.com/garysng/bean/issues/20) phase 2, and probably not the right shape |
 | Container tiers (runc/gVisor) | 📐 microVM, plus a no-isolation `local` tier for development, are the only options |
-| Volumes, port exposure | 📐 |
-| Warm snapshots | 📐 The largest remaining throughput lever. A create still boots, costing ~5 CPU-seconds against a restore's near-zero — so the ceiling is `cores / 5` regardless of how fast one create is. [docs/warm-snapshots.md](docs/warm-snapshots.md) |
-| Data plane | 📐 `exec` and file transfer are relayed through the control plane rather than going node-direct |
-| Postgres | ⚠️ SQLite in use. No `Store` interface — all SQL is contained in one package, but callers hold the concrete type |
+| Volumes | 📐 |
+| Per-port access control | 📐 Any port on a sandbox is reachable by anything that can reach bean-proxy — [#50](https://github.com/garysng/bean/issues/50) |
 | overlaybd lazy-pull | ⚠️ **verified working** (7 ms mount, 19.6% of layer bytes transferred to read a file) but not wired into the image provider — dm-snapshot is the live path |
 
 ---

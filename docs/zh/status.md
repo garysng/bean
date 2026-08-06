@@ -267,6 +267,35 @@ loop device 全部归零 —— loop 泄漏的修复(#16)在并发下成立。
 - S3：真 MinIO 上分片上传、abort 不留可读对象、range 读、含空格的 key
 - 安全回归：symlink 逃逸阻断、setuid 位剥离、host env 不泄漏、孤儿孙进程不挂起
 - vsock：CONNECT 握手不过读、Close 唤醒阻塞的 Accept、端口可重绑
+- **store 的 requirement 对真 Postgres 16 跑过**（不是 mock）：九条 requirement
+  加一个逐方法 smoke test,入口 `hack/postgres-conformance.sh`。并确认这个绿是
+  数据库挣来的、不是引擎的锁掩盖出来的 —— 把条件 `UPDATE` 换成 `SELECT`,
+  引用计数那条 requirement 在 Postgres 上同样失败。两个引擎都跑 `-race`,
+  这一点重要是因为 store 现在没有任何 mutex
+
+### 第三条测试规则：没有测试调用的语句,等于没有引擎解析过它
+
+接 Postgres 时,范围是靠读 SQL 定的:103 处占位符、一个 `AUTOINCREMENT`、
+一个当 bool 用的 `INTEGER`、`ON CONFLICT` 全部可移植。这个梳理对了形状,错了清单。
+对真 Postgres 16 跑 `migrate()` 又找出四处差异,其中后两处读代码根本读不出来:
+
+- `secret BLOB` —— Postgres 没这个类型,整个 schema 被拒
+- `ADD COLUMN` 幂等 —— 只有 Postgres 能写 `IF NOT EXISTS`,所以重复列这件事必须
+  按引擎分开处理,而不是拿一份错误文本去匹配两个引擎
+- `INTEGER` —— SQLite 64 位,Postgres 32 位,而所有时间戳列存的是 Unix 毫秒。
+  七条 requirement 里五条溢出失败。**这条靠看是看不出来的**:拼写一样,含义不一样
+- **`Reserve` 从来就没有 GPU 守卫。** 8 个占位符、9 个实参,SQLite 默默吞掉多余的
+  那个,所以 `gpu_committed` 从未与 `gpu_count` 比对过。单卡节点会把同一块 GPU 发给
+  两个 guest,故障最后落在 guest 里表现成「设备已被占用」。只有会数占位符的引擎提出了异议
+
+然后套件 8/8 全绿,而 `Release` 和 `FinishCreate` 在 Postgres 上从没执行过 ——
+两者都用了 SQLite 的两参数 `MAX(x - ?, 0)`,Postgres 跑不了,而没有任何 requirement
+调用它们。真上线的后果:容量在 `Reserve` 提交、永远还不回来,节点永久填满,
+后续放置一律报 `NO_CAPACITY`,而那些资源没人在用 —— 报错说的是容量,不是那条语句。
+
+事后实测:**38 个接口方法里,23 个从没被任何测试在 Postgres 上执行过。**
+所以现在有一个把每个方法各调一次的 smoke test,加一个基于反射的漂移守卫 ——
+手写的调用清单否则会跟接口一样腐烂。守卫立刻抓出它自己初稿漏掉的三个 snapshot 方法。
 
 ## 2. 与设计的差距
 
@@ -275,11 +304,12 @@ loop device 全部归零 —— loop 泄漏的修复(#16)在并发下成立。
 | build image：声明式 steps（Modal 风格链式 API） | ⛔ 未开始;Dockerfile 路径已通,steps 只是另一个前端编译到同一个 plan（`docs/image-build.md` §3.2、§5） |
 | overlaybd lazy-pull | ⚠️ **能力已实测跑通,尚未接入代码**。当前生产路径是「拉全量 + 转换 + CoW 共享」（每 sandbox 44 KiB）。overlaybd 侧已在验证机上验证:挂载 7ms、只传 19.6% 的层字节就能挂载并读文件、8 个 HTTP 206、可写上层实占 40 KiB（`docs/decisions.md` §3.1）。剩下的是写 `OverlaybdProvider` 接进 `image.Provider` |
 | diff snapshot（增量） | ✅ `--base SNAP` 只存自 base 以来改动的 guest 内存。实测 base 15.5 MB → diff 298 KB(52×);深度 2 的链 restore 后文件全在且 `uptime 57`(载入内存态而非重新开机 —— 新 sandbox 接着被采集那个 guest 的 uptime 走)。合并在 restore 时物化成平坦镜像,**UFFD 缺页路径零改动**;链深超 8 自动转 full;删 base 有子代时返回 409。需 `--track-dirty-pages`(默认关,boot 前生效) |
-| fork / shared-fs 卷 / proxy 端口暴露 | ⛔ P3–P4 范围,未开始 |
+| 端口暴露与数据面 | ✅ 一个机制而非两个:Host 里的 `{port}-{sandbox}` 直达该 guest 的该端口,用户的服务器和 agent 走同一条路。无需注册调用、无需宿主端口池 —— noded 进入 namespace 后直连。缺的是按端口的访问控制 |
+| shared-fs 卷 | ⛔ P3–P4 范围,未开始 |
 | OTel trace | ✅ **已实装并实测**。一次 create/exec 是一棵跨进程 span 树(下方「可观测」段有实测树)。`--otlp-endpoint` 为空则装 no-op provider,埋点无需条件判断。**限制**:beand 在 guest 内无出网路径,只采纳 trace id 写进自己的日志、不导出 span;而 guest 的 stderr 只在 `--debug-console` 下经串口出来,所以默认配置看不到那条日志 |
 | 资源超卖 | ✅ `--overcommit-cpu` / `--overcommit-memory`,节点侧算,上报已含系数。实测 `--cpu 8 --overcommit-cpu 3` → allocatable 24。CPU 超了只是变慢,内存超了是被杀,所以内存默认 1.0 —— 抬高它需要先实测 FC 按需供页的富余(#18)并给 VMM 进程加 cgroup(#20) |
-| Postgres | ⚠️ 当前 SQLite。**没有 `Store` 接口**,各调用点都是具体类型 `*store.Store`;成立的是 SQL 边界收在 `internal/control/store` 一个包内,换引擎是改这个包,而不是把它从调用方里抽出来 |
-| 创建阶段指标 network | ⚠️ 埋点位已留,等网络实装 |
+| Postgres | ✅ `bean-api --postgres`。这才是多副本的前提:SQLite 是一个文件,两个副本没法共享。做成方言而不是第二套实现,规模是实测出来的 —— 103 处占位符加少数 DDL 构造,八条 `ON CONFLICT` 原样可移植。`hack/postgres-conformance.sh` 对真 Postgres 16 跑全部 requirement;没跑过真库时套件会显式 skip,不会拿 SQLite 挣来的绿报成通过。**光读 SQL 不够** —— 见下文 |
+| 创建阶段指标 network | ✅ 网络已实装,`network_setup` 阶段已上报 |
 
 ## 3. 节点前提
 

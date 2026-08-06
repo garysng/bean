@@ -94,9 +94,21 @@ func DefaultWeights() Weights {
 		Packing: 3, NVMeCache: 2, Spread: 4}
 }
 
+// Store is what the scheduler needs of the state store: the resource ledger and the
+// node registry, and nothing else.
+//
+// Narrow on purpose. A sandbox record, a snapshot and an image are all unreachable
+// through this, which is a statement about authority rather than about tidiness --
+// placement decisions and the records they are about are separate concerns, and the
+// separation stops being true the moment one type carries both.
+type Store interface {
+	store.Placement
+	store.Nodes
+}
+
 // Scheduler makes placement decisions against durable node state.
 type Scheduler struct {
-	store   *store.Store
+	store   Store
 	weights Weights
 
 	suspectAfter time.Duration
@@ -108,7 +120,7 @@ type Scheduler struct {
 	maxAttempts int
 }
 
-func New(st *store.Store, w Weights) *Scheduler {
+func New(st Store, w Weights) *Scheduler {
 	return &Scheduler{
 		store:        st,
 		weights:      w,

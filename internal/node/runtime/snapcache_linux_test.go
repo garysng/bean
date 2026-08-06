@@ -8,7 +8,9 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 )
 
 // writeEntry stands in for merging a chain: it drops the two reusable members
@@ -277,5 +279,65 @@ func TestFillRejectsHalfBundle(t *testing.T) {
 		})
 	if err == nil {
 		t.Error("a bundle with vmstate but no memory was accepted")
+	}
+}
+
+// TestSnapCacheFillDoesNotRebuildAfterPublication pins the window CI caught.
+//
+// The sibling test above fans out eight goroutines and hopes the interleaving
+// happens. It does, on a loaded shared runner -- but 400 race-enabled runs on two
+// pinned cores did not reproduce it locally, so relying on chance means the fix is
+// justified by a failure nobody can show, and a regression would look like flake.
+//
+// So this one opens the window deliberately: every caller but the first is held
+// between observing the entry absent and taking the lock, which is exactly the
+// ordering that lets the first builder publish and remove its pending marker before
+// the others look for it. Measured against the unfixed code, this fails with the
+// same message CI reported -- "built the shared entry 2 times, want 1".
+func TestSnapCacheFillDoesNotRebuildAfterPublication(t *testing.T) {
+	c := newSnapCache(filepath.Join(t.TempDir(), "snapshots"))
+
+	var misses atomic.Int32
+	orig := afterCacheMiss
+	// Only callers after the first are delayed. Delaying all of them makes everyone
+	// arrive early, which is the ordering that already works.
+	afterCacheMiss = func() {
+		if misses.Add(1) > 1 {
+			time.Sleep(60 * time.Millisecond)
+		}
+	}
+	t.Cleanup(func() { afterCacheMiss = orig })
+
+	var mu sync.Mutex
+	builds := 0
+
+	var wg sync.WaitGroup
+	errs := make([]error, 4)
+	for i := range errs {
+		wg.Add(1)
+		go func(i int) {
+			defer wg.Done()
+			_, errs[i] = c.Fill("snap_race", func(dir string) (snapEntry, error) {
+				if dir != "" {
+					mu.Lock()
+					builds++
+					mu.Unlock()
+				}
+				return writeEntry(t, dir)
+			})
+		}(i)
+	}
+	wg.Wait()
+
+	for i, err := range errs {
+		if err != nil {
+			t.Fatalf("restore %d: %v", i, err)
+		}
+	}
+	if builds != 1 {
+		t.Errorf("built the shared entry %d times, want 1. A caller that missed the "+
+			"lookup before publication and took the lock after it finds no pending "+
+			"marker, so it unpacks hundreds of megabytes that are already on disk",
+			builds)
 	}
 }

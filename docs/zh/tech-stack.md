@@ -536,7 +536,7 @@ GET / PUT / DELETE / HEAD 加分片上传 —— 五个操作。
 
 ## 6. 控制面
 
-### 6.1 现在是 SQLite,Postgres 是接口 ⚠️
+### 6.1 SQLite 或 Postgres,由 flag 决定 ✅
 
 热状态 —— sandbox 元数据、租约、调度承诺 —— 落关系库而不是 S3,
 因为承诺需要事务:调度决策、资源扣减、命令记录必须原子提交,
@@ -546,13 +546,25 @@ GET / PUT / DELETE / HEAD 加分片上传 —— 五个操作。
 `CGO_ENABLED=0`,而一个 cgo 版 SQLite 会把工具链故事劈成两半。
 `SetMaxOpenConns(1)` 强制单写者。
 
-**⚠️ Postgres 这个说法需要限定。** 早先的版本记的是「接口已抽象,在用 SQLite」;
-`status.md` 现在已经不这么写了,原因就在这里。
-在代码里,`*store.Store` 是具体类型,被穿进 api server、scheduler、nodesvc、
-image service;**没有**一个 `Store` 接口供第二个后端实现。抽象的是**边界** ——
-所有 SQL 都在 `internal/control/store/` 里面,调用方不拼查询 ——
-而这确实是事后最难补的那部分。但「换成 Postgres」仍然是一项接口提取工作,
-不是改配置。多副本控制面需要它,单机部署不需要,这就是它没做的原因。
+Postgres 现在是一个 flag,不是一个项目:`bean-api --postgres <dsn>`。这才是多副本的
+前提 —— SQLite 是一个文件,两个副本没法共享。
+
+**是方言,不是第二套实现。** 一套用 `?` 写的语句,按引擎改写。规模是实测出来的
+(103 处占位符加少数 DDL 构造,八条 `ON CONFLICT` 原样可移植),不是凭口味定的。
+两套必须保持一致的 SQL、再配一个只能事后告诉你哪一套漂了的套件,是更糟的处境。
+
+**真正让换引擎成立的是原子性,不是接口。** 本节早先的版本担心的是抽出一个 `Store`
+接口,那反而是容易的一半。难的一半是:39 个方法里有 37 个依赖进程内的 mutex 保证
+原子性 —— 而它本来就无法为第二个副本的写入定序,还掩盖了一个真实的丢更新 bug
+(去掉它之后实测:200 次更新丢了 194 次)。现在每个操作的条件都在它自己的语句里,
+store 里没有任何 mutex。
+
+**光读 SQL 不足以完成移植。** 对真 Postgres 跑一遍,比事前梳理多找出四处差异,
+其中 `INTEGER` 这条读代码根本读不出来 —— SQLite 里是 64 位,Postgres 里是 32 位,
+而所有时间戳都是 Unix 毫秒:拼写完全一样,含义不一样。它还顺带抓出一个两个引擎共有的
+真 bug:`Reserve` 有 8 个占位符、9 个实参,也就是 GPU 那条守卫根本不存在,而 SQLite
+默默吞掉了多余的实参。完整清单、以及为什么现在有一个逐方法的 smoke test 加漂移守卫,
+见 `status.md`。
 
 被否掉的:**用 etcd 或 K8s API server 当存储**。调度器刻意是自己的
 (architecture D7),因为 eval 调度足够简单,自己写反而能做 K8s 做不到的优化:
@@ -857,7 +869,7 @@ restore  1500 ms → 950 ms(首次 1617ms)
 | Sandbox 网络 | veth + netns + nftables | 📐 地址池已建,管道未通 |
 | 语言 | Go,标准库优先 | ✅ |
 | 状态存储 | SQLite(`modernc.org/sqlite`,纯 Go) | ✅ |
-| 状态存储 | Postgres | ⚠️ SQL 边界已收拢,接口未提取 |
+| 状态存储 | Postgres | ✅ SQLite 或 Postgres 由 flag 决定;requirement 对真 Postgres 16 跑过 |
 | 内部 RPC | gRPC + protobuf,生成器钉版本 | ✅ |
 | 外部 API | `net/http` 上的 REST | ✅ |
 | 对象存储 | S3 兼容,手写 SigV4、分片、range 读 | ✅ |

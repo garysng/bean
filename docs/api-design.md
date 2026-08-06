@@ -2,7 +2,7 @@
 
 > 中文版:[zh/api-design.md](zh/api-design.md)
 
-> Corresponding components: `bean-api` (api-gateway, ✅), `bean-proxy` (port reverse proxy, 📐 unimplemented).
+> Corresponding components: `bean-api` (api-gateway, ✅), `bean-proxy` (reverse proxy into sandboxes, ✅).
 > The status-marker convention is defined in [architecture.md](architecture.md) §0.
 > Terminology and the state machine live in [architecture.md](architecture.md).
 
@@ -162,17 +162,34 @@ POST /sandboxes/{id}/files:downloadUrl {"path": "..."}
 DELETE /sandboxes/{id}/files?path=...
 ```
 
-### 3.4 Ports 📐
+### 3.4 Ports — no registration step ✅
 
-> Unimplemented; depends on the network stack and on bean-proxy.
+Reaching a port inside a sandbox works, and it takes **no API call at all**. The port
+travels in the Host header (`{port}-{sandbox}`, §6) and bean-proxy forwards to it. A
+process listening in the sandbox is reachable; one that is not returns 502.
 
+The design below was drafted first and is **not** built, deliberately:
 
 ```
-POST /sandboxes/{id}/ports    { "port": 8888, "auth": "token" }   // token|public
-→ { "url": "https://sbx-abc123-8888.<region>.sandbox.<domain>" }
+POST /sandboxes/{id}/ports    { "port": 8888, "auth": "token" }
 GET    /sandboxes/{id}/ports
 DELETE /sandboxes/{id}/ports/{port}
 ```
+
+It would be a second source of truth for something the guest already decides. Whether a
+port is open is a fact about a process inside the sandbox, and a registry of intended
+ports can only agree or disagree with it -- with the disagreement showing up as a URL
+that resolves to nothing, or a working port the platform says is closed. Allocating
+nothing means there is no pool to rebuild after a restart, which was the other reason
+given for avoiding host ports.
+
+What is genuinely missing is **per-port access control** (`"auth": "token"` above). Today
+any port on a sandbox is reachable by anything that can reach the proxy, so a sandbox
+must not be given a port it would not want its caller to see. The external auth layer
+(A7) gates access to the sandbox, not to individual ports within it.
+
+`10001` is reserved -- it is the agent -- and anything mapping ports on a user's behalf
+must refuse it.
 
 ### 3.5 Images ✅
 
@@ -508,11 +525,55 @@ State semantics: PAUSED → triggers a transparent wake, and the request blocks 
 (only past the wake deadline, 10s by default, does it return 502 + Retry-After);
 unwakeable states such as PULLING/STOPPING → 409 SANDBOX_NOT_RUNNING.
 
-## 6. bean-proxy (port reverse-proxy service) 📐
+## 6. bean-proxy (reverse proxy into sandboxes) ✅
 
-> **The entire section is unimplemented**; `cmd/bean-proxy` does not exist. It depends on
-> the sandbox having a network address, and the network stack is unimplemented too
-> (noded-design §5). What follows is design intent.
+> Built: `cmd/bean-proxy`. Verified end to end on hardware -- a user's server and the
+> agent both reached through it, an unknown sandbox 404, a malformed Host 400.
+
+### 6.0 The two things turned out to be one ⚠️
+
+This section originally designed **port exposure** (a browser reaching a port inside a
+sandbox) as separate from the **data plane** ([GitHub #27](https://github.com/garysng/bean/issues/27),
+moving exec and file traffic off the control plane), and warned that conflating them had
+already produced one wrong plan.
+
+**The warning was right about the risk and wrong about the conclusion.** They are the
+same mechanism, and what unified them was moving the agent from vsock to a TCP port
+inside the guest: once the agent is *a port on the guest*, "reach the agent" and "reach
+the user's server on 8000" are the same request with a different number in the Host.
+
+| | as designed (two things) | as built (one thing) |
+|---|---|---|
+| Addressed by | hostname vs REST paths | `{port}-{sandbox}` for both |
+| Terminates at | the sandbox's IP:port vs noded relaying to the agent | the sandbox's IP:port, always |
+| Router must distinguish them | yes | **no** -- it forwards a port |
+
+The port order is `{port}-{sandbox}`, port first, matching e2b's `ParseHost`: a sandbox
+id is variable-length and may contain the separator, a port is neither.
+
+What the original reasoning got right is recorded below and still holds -- that the
+motivation is interface narrowing rather than load.
+
+**The stronger reason for the second one is not load.** `SandboxService` puts
+`DestroySandbox`, `SnapshotSandbox` and `CommitSandbox` in the same service as
+`Exec`, `ReadFile` and `WriteFile`, behind one shared `--node-token`. So "let clients
+reach noded directly" is not a routing change with a performance benefit -- it would
+hand every caller the ability to destroy any sandbox on the node. A proxy holding that
+token and forwarding **only** the data-plane methods is how the interface gets narrowed;
+the byte path is the lesser gain.
+
+e2b arrives at the same shape from the other direction: `packages/client-proxy` resolves
+a sandbox to its node and forwards, and it carries `trafficAccessToken` and
+`envdAccessToken` as *separate* credentials rather than one cluster secret
+(`internal/proxy/proxy.go`). Their orchestrator also listens on its own proxy port
+(5007) rather than exposing the control RPCs to clients.
+
+**Whether noded needs authentication at all** depends on where it listens, and the
+answer today is the same one dockerd gives: `cmd/noded/main.go` refuses to start on a
+non-loopback address without a token, and requires nothing on loopback. Network position
+substitutes for authentication, exactly as a unix socket does for the Docker daemon. That
+is coherent as long as noded is not client-reachable -- which is the invariant a data
+plane must not break.
 
 
 A standalone stateless service, co-deployable with the gateway or scaled horizontally.
@@ -527,10 +588,10 @@ A standalone stateless service, co-deployable with the gateway or scaled horizon
 
 ```
 browser → {sbxId}-{port}.{region}.sandbox.<domain> (DNS lands directly on that region's proxy)
-        → regional proxy: parse Host → authenticate (6.3)
-        → route lookup: state store → sandbox → nodeId → noded address
-          (local LRU cache 30s + invalidation pushed over heartbeat; PAUSED → trigger a
-           transparent wake, then re-route)
+        → regional proxy: parse Host for {port}-{sandbox}
+        → route lookup: GET /v1/sandboxes/{id} for nodeId, then /v1/nodes for that
+          node's forwarding address (published as bean.io/sandbox-port-addr)
+          (cached 5s by default; --placement-cache)
         → HTTP reverse proxy → sandbox-proxy embedded in noded (node-side reverse proxy)
         → direct to sandbox IP:port (fc tier tap IP / container tier veth IP, routed inside the node)
 ```
@@ -544,16 +605,37 @@ browser → {sbxId}-{port}.{region}.sandbox.<domain> (DNS lands directly on that
 - WebSocket upgrades pass through naturally; connection-level timeout (>620s, to duck under
   the upstream LB), per-sandbox concurrency/bandwidth limits; connection liveness on the
   proxy side feeds the idle determination (lifecycle)
-- The sandbox-proxy on the noded side also performs a second layer of validation beyond
-  nftables (only exposed ports are let through)
+- The node side requires the cluster's node token, which is what stops anything that can
+  reach that port from reaching every sandbox on the node -- including the agent, which
+  runs commands as root. It is checked **before** the Host is parsed, so an
+  unauthenticated caller cannot distinguish a real sandbox from an invented one; a 404
+  for one and a 401 for the other would be an enumeration oracle
+- **It does not filter by "exposed port"**, which an earlier draft of this section
+  promised. There is no registry of exposed ports (§3.4), so there is nothing to filter
+  against: a port with a process listening on it is reachable, and one without returns
+  502. Per-port access control is the real gap
 
 ### 6.3 Port authentication 📐
 
-- `auth=public`: anyone holding the URL can access it (for internal demos)
-- `auth=token` (default): requires `?bean_token=<sandbox JWT>` or a Cookie; the proxy
-  validates the JWT signature and the sandbox-id match, then sets a Cookie (1h), so
-  subsequent requests need no query parameter
-- The proxy injects an `X-Bean-Sandbox-Id` header and strips any inbound header of the same name
+**Not built, and this is the one real gap in the route.** Today anything that can reach
+bean-proxy can reach any sandbox it can name, on any port. So a sandbox must not be given
+a port it would not want its caller to see.
+
+What exists instead is two credentials, neither of which is a user:
+
+| Hop | Credential | Distinguishes |
+|---|---|---|
+| client → bean-proxy | whatever the external auth layer requires (Traefik middleware) | one user from another — **outside bean** |
+| bean-proxy → noded | the cluster's node token | the cluster from everyone else |
+
+bean is the infrastructure underneath a platform layer, and user identity is that layer's
+(architecture.md §2.1, security-and-startup.md A7). What bean cannot delegate is the part
+below: a caller who gets past the platform layer reaches *every* port of the sandbox they
+were authorised for, and that is what per-port control would fix.
+
+The design drafted here — `auth=public` / `auth=token` with a sandbox-scoped JWT — depends
+on the port registry §3.4 explains is deliberately absent, so it needs rethinking rather
+than implementing.
 
 ### 6.4 Lifecycle interlock 📐
 

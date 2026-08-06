@@ -1,3 +1,15 @@
 coverage.out
 bean.db
 *.test
+
+# Binaries a stray `go build` or a test drops in the repo root. Named rather than
+# globbed: the directories under cmd/ share these names, and a pattern would hide
+# their source too.
+/beand
+/noded
+/bean-api
+/bean-proxy
+/bean
+
+# Personal permission overrides, not team-wide
+.claude/settings.local.json

@@ -42,6 +42,10 @@ func main() {
 	nodeGRPC := flag.String("node-grpc", "127.0.0.1:7440", "NodeService listen address")
 	region := flag.String("region", "local", "region this control plane serves")
 	dbPath := flag.String("db", "bean.db", "SQLite database path")
+	postgresDSN := flag.String("postgres", os.Getenv("BEAN_POSTGRES_DSN"),
+		"Postgres connection string (or BEAN_POSTGRES_DSN); overrides --db when set. "+
+			"This is what allows more than one bean-api replica: SQLite is a single file "+
+			"and two replicas cannot share it, so on SQLite the count is exactly one")
 	apiKey := flag.String("api-key", os.Getenv("BEAN_API_KEY"), "API key (or BEAN_API_KEY env)")
 	nodeToken := flag.String("node-token", os.Getenv("BEAN_NODE_TOKEN"),
 		"token presented when calling a node's data plane")
@@ -110,11 +114,27 @@ func main() {
 		log.Fatal("api key required: set --api-key or BEAN_API_KEY")
 	}
 
-	st, err := store.Open(*dbPath)
+	// Postgres when a DSN is given, SQLite otherwise. The engine is chosen by which
+	// flag is set rather than by a --db-driver value, so an inconsistent pair -- a
+	// driver naming one engine and a path pointing at the other -- cannot be expressed.
+	var st *store.Store
+	if *postgresDSN != "" {
+		st, err = store.OpenPostgres(*postgresDSN)
+	} else {
+		st, err = store.Open(*dbPath)
+	}
 	if err != nil {
 		log.Fatalf("open store: %v", err)
 	}
 	defer st.Close()
+	// Logged because it decides whether a second replica is safe to start, and that is
+	// not visible from anything else in the startup output.
+	if *postgresDSN != "" {
+		slog.Info("state store: postgres (multiple replicas can share it)")
+	} else {
+		slog.Info("state store: sqlite", "path", *dbPath,
+			"note", "one file, so exactly one bean-api replica")
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -246,7 +266,7 @@ func main() {
 // markNodeSandboxesLost flags a lost node's sandboxes and returns their
 // capacity, so a node failure strands neither the records nor the
 // reservations.
-func markNodeSandboxesLost(st *store.Store, sched *scheduler.Scheduler, nodeID string) {
+func markNodeSandboxesLost(st store.Sandboxes, sched *scheduler.Scheduler, nodeID string) {
 	recs, err := st.ListSandboxes("", "", "")
 	if err != nil {
 		slog.Error("cannot list sandboxes to mark lost",
@@ -279,7 +299,7 @@ func markNodeSandboxesLost(st *store.Store, sched *scheduler.Scheduler, nodeID s
 
 // storeLister answers SyncState from the records the control plane believes
 // belong to a node.
-type storeLister struct{ store *store.Store }
+type storeLister struct{ store store.Sandboxes }
 
 func (l *storeLister) ExpectedForNode(nodeID string) []*nodev1.SandboxSpec {
 	recs, err := l.store.ListSandboxes("", "", "")
@@ -306,7 +326,7 @@ func (l *storeLister) ExpectedForNode(nodeID string) []*nodev1.SandboxSpec {
 
 // nodeCacheSource reports how many nodes cache an image, which drives
 // prewarm progress and image-affinity scoring.
-type nodeCacheSource struct{ store *store.Store }
+type nodeCacheSource struct{ store store.Nodes }
 
 func (n nodeCacheSource) CachedNodeCount(ref string) int {
 	nodes, err := n.store.LoadNodes()

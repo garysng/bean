@@ -654,7 +654,7 @@ nodes hold no long-lived credentials; that is unimplemented.
 
 ## 6. Control plane
 
-### 6.1 SQLite now, Postgres as the interface ⚠️
+### 6.1 SQLite or Postgres, chosen by a flag ✅
 
 Hot state — sandbox metadata, leases, scheduling commitments — lands in a
 relational database rather than in S3, because commitments need transactions:
@@ -665,16 +665,32 @@ Today that is `modernc.org/sqlite`: **pure Go, no cgo**, which matters because
 `CGO_ENABLED=0` is a requirement elsewhere in the build and a cgo SQLite would
 split the toolchain story. `SetMaxOpenConns(1)` enforces the single writer.
 
-**⚠️ The Postgres claim needs qualifying.** Older revisions recorded it as
-"interface abstracted, SQLite in use"; `status.md` no longer says that, and this
-is why. In the code, `*store.Store` is a concrete type
-threaded through the api server, scheduler, nodesvc and image service; there is
-no `Store` interface for a second backend to satisfy. What is abstracted is the
-*boundary* — all SQL is inside `internal/control/store/`, so callers do not build
-queries — and that is genuinely the hard part to retrofit. But "swap in Postgres"
-is still an interface-extraction job, not a configuration change. A multi-replica
-control plane needs it; a single-machine deployment does not, which is why it has
-not been done.
+Postgres is now a flag rather than a project: `bean-api --postgres <dsn>`. That is
+what allows more than one replica, since SQLite is a single file two replicas
+cannot share.
+
+**A dialect, not a second implementation.** One body of statements written with
+`?`, rewritten per engine — sized by measurement (103 placeholders plus a few DDL
+constructs; all eight `ON CONFLICT` clauses port unchanged) rather than by taste.
+Two bodies of SQL that must agree, checked by a suite that can only say afterwards
+which one drifted, is the worse position.
+
+**What actually made the swap safe was atomicity, not the interfaces.** Earlier
+revisions of this section worried about extracting a `Store` interface, and that
+turned out to be the easy half. The hard half was that 37 of 39 methods relied on
+a process-local mutex — which could never have ordered writes from a second
+replica, and which hid a real lost-update bug (194 of 200 updates lost once it was
+removed). Every operation's conditions now live in its statement, and the store
+holds no mutex at all.
+
+**Reading the SQL was not sufficient to port it.** Running against a real Postgres
+found four more differences than the survey did, including `INTEGER` — 64 bits in
+SQLite, 32 in Postgres, with every timestamp in Unix milliseconds — which is
+invisible to inspection because the spelling is identical and the meaning is not.
+It also found a genuine bug on both engines: `Reserve` had eight placeholders and
+nine arguments, so its GPU guard did not exist and SQLite silently ignored the
+extra. See `status.md` for the full list and for why there is now a per-method
+smoke test with a drift guard.
 
 Rejected: **etcd or a K8s API server as the store**. The scheduler is deliberately
 ours (architecture D7) because evaluation scheduling is simple enough that writing
@@ -1029,7 +1045,7 @@ choose the technology.
 | Sandbox networking | veth + netns + nftables | 📐 address pool built, plumbing not |
 | Language | Go, standard library first | ✅ |
 | State store | SQLite (`modernc.org/sqlite`, pure Go) | ✅ |
-| State store | Postgres | ⚠️ SQL boundary contained, interface not extracted |
+| State store | Postgres | ✅ SQLite or Postgres by flag; requirements run against a real Postgres 16 |
 | Internal RPC | gRPC + protobuf, pinned generators | ✅ |
 | External API | REST on `net/http` | ✅ |
 | Object storage | S3-compatible, hand-rolled SigV4, multipart, range reads | ✅ |

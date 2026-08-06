@@ -1,6 +1,6 @@
 # API 与 Proxy 服务设计
 
-> 对应组件:`bean-api`（api-gateway,✅）、`bean-proxy`（端口反代,📐 未实现）。
+> 对应组件:`bean-api`（api-gateway,✅）、`bean-proxy`（进入 sandbox 的反向代理,✅）。
 > 状态标注约定见 [architecture.md](architecture.md) §0。
 > 术语与状态机见 [architecture.md](architecture.md)。
 
@@ -156,17 +156,30 @@ POST /sandboxes/{id}/files:downloadUrl {"path": "..."}
 DELETE /sandboxes/{id}/files?path=...
 ```
 
-### 3.4 Ports 📐
+### 3.4 Ports —— 没有注册步骤 ✅
 
-> 未实现,依赖网络栈与 bean-proxy。
+访问沙箱内的端口是通的,而且**不需要任何 API 调用**。端口写在 Host 头里
+(`{port}-{sandbox}`,见 §6),bean-proxy 转发过去。沙箱内有进程在听就能访问,
+没有就返回 502。
 
+下面这套设计是先画的,**没有实现,而且是刻意不实现**:
 
 ```
-POST /sandboxes/{id}/ports    { "port": 8888, "auth": "token" }   // token|public
-→ { "url": "https://sbx-abc123-8888.<region>.sandbox.<domain>" }
+POST /sandboxes/{id}/ports    { "port": 8888, "auth": "token" }
 GET    /sandboxes/{id}/ports
 DELETE /sandboxes/{id}/ports/{port}
 ```
+
+它会给一件 guest 已经决定的事再造一个真相来源。端口开没开是沙箱内进程的事实,
+而一份「打算开的端口」清单只能与它一致或不一致 —— 不一致的表现就是一个解析得到
+却什么都没有的 URL,或者一个能用但平台说它关着的端口。什么都不分配也意味着没有池
+需要在重启后重建,而这正是当初不用宿主端口的另一个理由。
+
+真正缺的是**按端口的访问控制**(上面那个 `"auth": "token"`)。现在沙箱上任何端口,
+只要能连到 proxy 就能访问,所以不要给沙箱一个它不希望调用方看到的端口。外部认证层
+(A7)管的是能否访问这个沙箱,不是沙箱内的哪个端口。
+
+`10001` 是保留端口 —— 那是 agent —— 任何代用户映射端口的东西都必须拒绝它。
 
 ### 3.5 Images ✅
 
@@ -461,10 +474,47 @@ noded → agent：vsock（fc 主路径;容器档 unix socket,P5）
 状态语义：PAUSED → 触发透明唤醒,请求阻塞至 resume（超过唤醒时限,默认 10s,
 才回 502 + Retry-After）;PULLING/STOPPING 等不可唤醒态 → 409 SANDBOX_NOT_RUNNING。
 
-## 6. bean-proxy（端口反代服务）📐
+## 6. bean-proxy（进入 sandbox 的反向代理）✅
 
-> **整节未实现**,`cmd/bean-proxy` 不存在。它依赖 sandbox 有网络地址,
-> 而网络栈也未实现(noded-design §5)。下面是设计意图。
+> 已建成:`cmd/bean-proxy`。在真机上端到端验证过 —— 用户的服务器与 agent 都经它到达,
+> 未知沙箱 404,畸形 Host 400。
+
+### 6.0 那两件事其实是一件 ⚠️
+
+本节原本把**端口暴露**(浏览器访问 sandbox 内的端口)和**数据面**
+([GitHub #27](https://github.com/garysng/bean/issues/27),把 exec 与文件流量移出控制面)
+设计成两件事,并警告混淆两者已经导致过一次错误的方案。
+
+**那个警告对风险的判断是对的,对结论的判断是错的。** 它们是同一个机制,而让它们合并的
+是把 agent 从 vsock 移到 guest 内的一个 TCP 端口:一旦 agent 就是 *guest 上的一个端口*,
+「访问 agent」和「访问用户在 8000 上的服务」就是同一个请求,只是 Host 里的数字不同。
+
+| | 原设计(两件事) | 实际实现(一件事) |
+|---|---|---|
+| 如何寻址 | 域名 vs REST 路径 | 两者都是 `{port}-{sandbox}` |
+| 终点 | sandbox 的 IP:port vs noded 转给 agent | 始终是 sandbox 的 IP:port |
+| 路由器需要区分吗 | 需要 | **不需要** —— 它转发的是一个端口 |
+
+顺序是 `{port}-{sandbox}`,端口在前,与 e2b 的 `ParseHost` 一致:沙箱 id 长度可变且
+可能含分隔符,端口两者都不是。
+
+下面保留的是当初推理中站得住的部分 —— 动机是收窄接口,而不是负载。
+
+**第二件事更强的理由不是负载。** `SandboxService` 把 `DestroySandbox`、
+`SnapshotSandbox`、`CommitSandbox` 和 `Exec`、`ReadFile`、`WriteFile` 放在同一个服务里,
+共用一个 `--node-token`。所以"让客户端直连 noded"不是一个带性能收益的路由改动 ——
+它会把"销毁节点上任何沙箱"的能力交给每一个调用方。一个持有该 token、且**只**转发数据面方法的
+proxy,才是收窄这个接口的办法;字节路径是次要收益。
+
+e2b 从另一个方向到了同一个形状:`packages/client-proxy` 把 sandbox 解析到它所在的 node 再转发,
+而且它携带 `trafficAccessToken` 与 `envdAccessToken` 两个**分开的**凭据,而不是一个集群密钥
+(`internal/proxy/proxy.go`)。他们的 orchestrator 也监听自己的 proxy 端口(5007),
+而不是把控制面 RPC 暴露给客户端。
+
+**noded 到底需不需要认证**,取决于它监听在哪 —— 而今天的答案与 dockerd 相同:
+`cmd/noded/main.go` 在非 loopback 地址上没有 token 就拒绝启动,在 loopback 上则什么都不要求。
+网络位置替代了认证,正如 unix socket 对 Docker daemon 所做的那样。只要 noded 不被客户端直连,
+这就是自洽的 —— 而那正是数据面不能破坏的不变量。
 
 
 独立无状态服务，可与 gateway 合部或水平扩展。

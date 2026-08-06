@@ -67,10 +67,14 @@ Problems with existing options:
 implemented and measured on a real KVM machine (full / `--no-memory` /
 `--base` incremental, three variants; see snapshot-resume.md).
 
-**The real gap right now** is networking: the sandbox has no network capability
-at all, not even egress — this is not "no cross-node connectivity", it is "no
-network stack whatsoever" (noded-design §5, the entire section, is
-unimplemented).
+**Networking was the gap and is now built** (network.md): each sandbox gets its
+own namespace, tap and egress, the metadata range and RFC1918 are denied by
+default, and a port inside a sandbox is reachable from outside the node through
+bean-proxy. All of it verified on a real kernel.
+
+Cross-node sandbox connectivity remains a non-goal, and per-port access control
+is genuinely missing — any port on a sandbox is reachable by anything that can
+reach the proxy (api-design.md §3.4).
 
 ## 2. Overall Architecture ⚠️
 
@@ -115,7 +119,7 @@ unimplemented).
 | `api-gateway` | Go | ✅ REST + gRPC API, auth, quota (port reverse-proxying belongs to bean-proxy, which may be co-deployed) |
 | `scheduler` | Go | Node selection (image affinity + resource bin-packing), lease management — **a logical module of the control plane** (`internal/control/scheduler`, in the same process as bean-api: the scheduling decision, the transactional resource deduction and the command dispatch have to complete atomically; split it out once it becomes a bottleneck or needs leader election) |
 | `image-service` | Go | Image metadata index, format conversion orchestration, prewarm, S3 blob GC (a logical module of the control plane; embedded in bean-api through P0–P2) |
-| `bean-proxy` | Go | 📐 **Unimplemented**; there is no such binary under `cmd/`. Reverse proxy for port exposure: wildcard-domain TLS, routing to noded → agent. It depends on the network stack, and the network stack is unimplemented too |
+| `bean-proxy` | Go | ✅ Reverse proxy into sandboxes. Reads `{port}-{sandbox}` from the Host, looks up which node holds it, forwards. Carries both a user's exposed port and the agent's own interface, so port exposure and the data plane are one mechanism. Performs no user authentication (an external layer does; see A7) and refuses a public bind. TLS and DNS are the hosting layer's, not bean's |
 | `noded` | Go | Node daemon: sandbox lifecycle, networking, image cache, volume mounts, health reporting |
 | `beand` | Go (statically linked) | PID1 inside the sandbox: exec, PTY, file read/write, port forwarding |
 | `sdk-python` | Python | Primary SDK for the evaluation/rollout side |
@@ -236,11 +240,22 @@ Nydus is kept as a fallback option for the container tier.
 
 Hot state (sandbox metadata, leases, scheduling state) lands in a relational
 database, not in S3. ⚠️ **Today that is SQLite** (`modernc.org/sqlite`, pure Go
-with no cgo, `SetMaxOpenConns(1)` for single-writer). There is no store
-interface — callers hold the concrete `*store.Store`; what is contained is the
-SQL itself, which appears only inside `internal/control/store`. Postgres is not
-yet implemented — a multi-replica control plane needs it, a single-machine
-deployment does not.
+with no cgo, `SetMaxOpenConns(1)` for single-writer) or Postgres, chosen by
+whether `bean-api --postgres` is set. SQLite suits a single machine; a
+multi-replica control plane needs Postgres, because SQLite is one file and two
+replicas cannot share it.
+
+The second engine is a dialect rather than a second implementation: one body of
+statements written with `?`, rewritten per engine. That was sized by measurement
+(103 placeholders and a handful of DDL constructs, every `ON CONFLICT` portable)
+and the alternative was rejected on evidence — two bodies of SQL that must agree,
+checked by a suite that can only report afterwards which one drifted.
+
+What made the swap safe was not the interfaces but where atomicity lives. Each
+operation's conditions are in its statement, so the database arbitrates rather
+than a process-local lock; the store holds no mutex at all. A lock inside one
+process could never have ordered writes from a second replica, and while it was
+there it hid a genuine lost-update bug.
 
 ### D5. Agent injection: init/PID1 override (nothing enters the user image) ✅
 
@@ -478,7 +493,7 @@ bean/
 │   ├── bean-api/           ✅ gateway (scheduler / image / snapshot modules embedded)
 │   ├── noded/              ✅ node daemon
 │   ├── beand/              ✅ in-sandbox agent
-│   └── bean-proxy/         📐 unimplemented
+│   └── bean-proxy/         ✅ reverse proxy into sandboxes (Host-routed)
 ├── internal/
 │   ├── control/            ✅ api / scheduler / store / snapshot / s3
 │   ├── node/               ✅ manager / runtime / image / vsock (no network module)

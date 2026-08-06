@@ -41,6 +41,16 @@ type snapCache struct {
 // the same instant compare equal.
 var timeNow = time.Now
 
+// afterCacheMiss runs when Lookup finds nothing, and exists only so a test can hold
+// a caller in the window between observing the entry absent and taking the lock.
+//
+// A hook rather than a sleep in the test, because the window cannot be reached from
+// outside: it is one instruction wide, and CI hit it while 400 race-enabled runs on
+// two pinned cores did not. Without a way to open it deliberately, the fix would be
+// justified by a failure nobody could reproduce -- and the test would go back to
+// passing against the bug.
+var afterCacheMiss = func() {}
+
 // snapUnpack is one in-flight unpack. Callers that arrive while it runs read its
 // result instead of starting their own.
 type snapUnpack struct {
@@ -74,6 +84,7 @@ func (c *snapCache) Lookup(id string) (snapEntry, bool) {
 	for _, p := range []string{e.StatePath, e.MemPath} {
 		st, err := os.Stat(p)
 		if err != nil || st.Size() == 0 {
+			afterCacheMiss()
 			return snapEntry{}, false
 		}
 	}
@@ -109,6 +120,23 @@ func (c *snapCache) Fill(id string, unpack func(dir string) (snapEntry, error)) 
 		}
 
 		c.mu.Lock()
+		if _, ok := c.Lookup(id); ok {
+			// Published while this caller sat between the Lookup above and this
+			// lock. The first builder renames the entry into place and only then
+			// deletes its pending marker, so a caller arriving in that gap finds no
+			// marker, concludes nothing is cached, and rebuilds the same hundreds of
+			// megabytes.
+			//
+			// Checked while holding the lock, which is what closes it: the marker is
+			// deleted under this same lock and strictly after the rename, so either
+			// the marker is still visible (wait for it) or the entry is (use it).
+			// There is no ordering in which both are absent while a build is running.
+			//
+			// This is what the enclosing loop was always for. It had no continue, so
+			// it never ran twice.
+			c.mu.Unlock()
+			continue
+		}
 		if inflight, ok := c.pending[id]; ok {
 			c.mu.Unlock()
 			// This caller's per-restore work happens before the wait, not after:

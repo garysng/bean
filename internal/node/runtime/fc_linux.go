@@ -27,6 +27,43 @@ import (
 // independent of host state.
 const agentVsockPort = 1024
 
+// agentListenArg renders the address the guest's agent binds, and agentDialAddr
+// below renders the address noded reaches it on. They are a pair and must agree;
+// keeping them adjacent is the only thing enforcing that.
+//
+// A sandbox with no networking keeps vsock. Not for compatibility -- for isolation:
+// on vsock no process inside the guest can dial the agent at all, because the
+// address family is host-to-guest. That is a stronger guarantee than any credential,
+// and it is available for free whenever the sandbox has no interface, so it is kept.
+//
+// A networked sandbox uses TCP, which gives that up in exchange for one addressing
+// scheme covering both the agent and any user port. What replaces it is the token
+// the agent requires on that transport.
+func agentListenArg(spec *Spec) string {
+	if spec.Network == nil {
+		return fmt.Sprintf("vsock:%d", agentVsockPort)
+	}
+	// 0.0.0.0 rather than the guest's own address: the address is assigned by the
+	// kernel's ip= parameter during boot, and binding a specific one races that.
+	// Inside the guest there is one interface and one loopback, so the difference is
+	// whether a process in the sandbox can reach it over loopback -- and it can
+	// either way, since it could equally dial the interface address.
+	return fmt.Sprintf("tcp:0.0.0.0:%d", AgentGuestPort)
+}
+
+// agentDialAddr renders the address noded connects to. The result is handed to
+// dialAgentAddr, which dispatches on the prefix.
+func agentDialAddr(vm *fcVM, spec *Spec) string {
+	if spec.Network == nil {
+		return vsock.Addr{SocketPath: vm.vsockHostPath(), Port: agentVsockPort}.Target()
+	}
+	// Reachable only from inside the sandbox's namespace, which is why the dialer
+	// enters it. The guest address is identical in every sandbox by design, so this
+	// string alone does not identify a sandbox -- the namespace does.
+	return fmt.Sprintf("netns:%s|%s:%d", netnsPathFor(spec),
+		spec.Network.GuestIP, AgentGuestPort)
+}
+
 // guestCID is the context id assigned to every guest. Like the port, it is
 // per-VM and so needs no allocation. 3 is the lowest id available to guests —
 // 0 through 2 are reserved by the vsock protocol.
@@ -163,6 +200,14 @@ type FCRuntime struct {
 	// credentials, which is root -- see vmmcreds.go for what the drop does and does
 	// not buy without a mount namespace.
 	VMMCreds *vmmCreds
+
+	// VMMIsolation narrows what the VMM sees of the host.
+	//
+	// The zero value applies nothing. That is deliberately not the same as noded's
+	// default, which turns all three on: a zero value has to mean "as it was before
+	// this existed" so that a caller constructing this struct directly -- a test, or
+	// another entry point -- does not silently acquire behaviour it did not ask for.
+	VMMIsolation VMMIsolation
 
 	// snapshots holds unpacked snapshot state, so restoring the same checkpoint
 	// twice does not unpack it twice.
@@ -525,7 +570,7 @@ func (r *FCRuntime) create(ctx context.Context, spec *Spec, layers []SnapshotLay
 
 	return &Handle{
 		SandboxID:  spec.SandboxID,
-		AgentAddr:  vsock.Addr{SocketPath: vm.vsockHostPath(), Port: agentVsockPort}.Target(),
+		AgentAddr:  agentDialAddr(vm, spec),
 		StartedAt:  time.Now(),
 		PID:        vm.cmd.Process.Pid,
 		RuntimeTag: r.Name(),
@@ -583,6 +628,10 @@ func (r *FCRuntime) startVMM(ctx context.Context, vm *fcVM, apiSocket string) er
 	// survive, because killVMM signals the negative pid and depends on the VMM
 	// leading its own group.
 	applyCreds(cmd, r.VMMCreds)
+	// Namespaces and parent-death cleanup, applied by the kernel during this fork so
+	// that no wrapper process comes between noded and Firecracker -- which is what
+	// keeps cmd.Process.Pid the VMM's own. See vmmisolation_linux.go.
+	isolateVMM(cmd, r.VMMIsolation)
 	// The console log is opened by noded as root and inherited as an fd, so the
 	// dropped uid writes to it without needing to open it. The fd is already open
 	// at the point of the drop, which is what makes that work.
@@ -695,16 +744,31 @@ func (r *FCRuntime) configureAndBoot(ctx context.Context, vm *fcVM, spec *Spec) 
 	// Panic reboots are disabled so a crashed guest stays inspectable rather
 	// than looping.
 	//
-	// "quiet" rather than a serial console: writing to the 8250 UART is
-	// synchronous, so every log line the kernel emits stalls the boot. See
-	// DebugConsole for recovering the output when a guest will not start.
-	console := "quiet"
+	// A console is attached even in the default configuration, at a loglevel that
+	// carries errors and nothing else.
+	//
+	// "quiet" alone was the earlier choice, to avoid the 8250 UART's synchronous
+	// writes stalling the boot -- every line the kernel emits costs time. But it
+	// attaches no console device at all, so a guest that dies during boot writes its
+	// reason nowhere. Measured: a failing boot produced zero explanatory lines under
+	// quiet and the cause under console=ttyS0, while noded reported only "agent not
+	// healthy after 20s" either way. The console log then held Firecracker's own
+	// output, which describes the VMM's reaction rather than the guest's failure and
+	// reads like a hardware fault -- misleading in a way that silence is not.
+	//
+	// loglevel=3 is KERN_ERR and above, which excludes the several hundred lines of
+	// initialisation that made a full console expensive while keeping panics, mount
+	// failures and anything init prints on its way out. Measured at 1108-1119ms for a
+	// cold create before this change; the check below re-measures it.
+	console := "console=ttyS0 loglevel=3"
 	if r.DebugConsole {
+		// Everything, including the initialisation chatter, for the case where a
+		// guest fails before it reaches the point of logging an error.
 		console = "console=ttyS0"
 	}
 	bootArgs := fmt.Sprintf(
-		"%s reboot=k panic=-1 pci=off%s init=/bean/beand -- --listen vsock:%d --pivot %s%s",
-		console, guestIPBootArg(spec.Network), agentVsockPort, guestRootfsDevice,
+		"%s reboot=k panic=-1 pci=off%s init=/bean/beand -- --listen %s --pivot %s%s",
+		console, guestIPBootArg(spec.Network), agentListenArg(spec), guestRootfsDevice,
 		GuestDNSBootArgs(r.GuestDNS))
 	if err := vm.client.put(ctx, "/boot-source", fcBootSource{
 		KernelImagePath: r.KernelPath, BootArgs: bootArgs,
@@ -766,6 +830,32 @@ func (r *FCRuntime) configureAndBoot(ctx context.Context, vm *fcVM, spec *Spec) 
 			}); err != nil {
 			return fmt.Errorf("register network interface on tap %s: %w",
 				spec.Network.TapName, err)
+		}
+
+		// Bound to this one interface, and configured here because the binding is
+		// pre-boot state that a snapshot carries -- unlike the metadata contents,
+		// which are written per restore. Splitting them is what lets a restored
+		// guest be handed a fresh token without reconfiguring a booted machine.
+		//
+		// Inside the sandbox's namespace 169.254.169.254 is Firecracker's own
+		// service, not a cloud provider's: the guest has no route off its /30
+		// except through the tap, and the host filter drops the metadata range
+		// (see network/rules.go), so this address cannot reach anything else.
+		if err := vm.client.put(ctx, "/mmds/config", fcMmdsConfig{
+			Version:           "V2",
+			NetworkInterfaces: []string{guestIfaceID},
+		}); err != nil {
+			return fmt.Errorf("configure the metadata service: %w", err)
+		}
+	}
+
+	// Written before the machine starts so the agent can read it during its own
+	// startup. The agent gates every request on this value, so a guest that began
+	// running before it existed would answer requests it cannot yet authenticate.
+	if spec.AgentTokenHash != "" {
+		if err := vm.client.put(ctx, "/mmds",
+			fcMmds{AgentTokenHash: spec.AgentTokenHash}); err != nil {
+			return fmt.Errorf("publish the agent token hash: %w", err)
 		}
 	}
 

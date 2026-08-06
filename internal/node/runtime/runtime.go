@@ -10,6 +10,23 @@ import (
 	"github.com/garysng/bean/internal/node/network"
 )
 
+// AgentGuestPort is the TCP port the agent listens on inside a networked guest.
+//
+// It exists so the agent is reached exactly the way any port a user exposes is
+// reached -- connect to the guest on a port -- which is what lets one router serve
+// both instead of a rule plus a special case.
+//
+// Fixed rather than allocated: each sandbox has its own namespace and its own guest,
+// so there is nothing to collide with, and a constant keeps the guest's command line
+// independent of host state.
+//
+// Reserved. A user exposing this port would be exposing the agent, so anything that
+// maps ports on a user's behalf must refuse it.
+//
+// Declared in the portable file rather than beside the microVM code because it is a
+// protocol constant that the forwarder and the proxy also need, on every platform.
+const AgentGuestPort = 10001
+
 // State mirrors the sandbox state machine (subset owned by the node).
 type State string
 
@@ -53,6 +70,16 @@ type Spec struct {
 	// only the caller that reserved that index knows which one this sandbox got.
 	// Everything else here is per-sandbox for the same reason.
 	Network *network.Layout
+
+	// AgentTokenHash is what the guest should expect from callers of its agent. It
+	// is published through the metadata service, which the sandbox's own root can
+	// read -- hence the hash rather than the token, which is enough to verify one
+	// that is presented and useless for constructing one.
+	//
+	// Empty leaves the agent unauthenticated, which is correct only where reaching
+	// it does not depend on a credential: the container runtime's agent listens on a
+	// Unix socket outside the sandbox's mount namespace.
+	AgentTokenHash string
 }
 
 // Handle represents a created sandbox instance.
@@ -95,6 +122,29 @@ type Runtime interface {
 	// checkpoint is a single layer; an incremental one is its whole chain, since
 	// a diff holds only what changed since its base and cannot be used alone.
 	Fork(ctx context.Context, spec *Spec, layers []SnapshotLayer) (*Handle, error)
+}
+
+// BootDiagnoser reports what a sandbox's console said, for runtimes that have one.
+//
+// It exists because of a specific failure that cost an afternoon: the agent was
+// passed a flag it did not recognise, exited immediately, and the guest kernel
+// panicked with "Attempted to kill init!". What noded reported was "agent not
+// healthy after 20s" -- the timeout is the *symptom* of any guest that never
+// finishes booting, and it names none of them. The cause was one line of
+// console.log, on disk, in a directory the failure path then deleted.
+//
+// So this is not a convenience. A boot failure that leaves no diagnosis in the
+// error is indistinguishable from a slow boot, a broken vsock, an unbootable image
+// and a wrong kernel, and every one of those has been mistaken for another.
+//
+// Optional because only the microVM tier has a console at all; the container
+// runtime's agent failures surface through the container's own logs.
+type BootDiagnoser interface {
+	// BootLogTail returns the last few lines of the guest console, or "" if there
+	// is nothing to report. Errors are not returned: this is called on a path that
+	// is already failing, and a diagnostic that can itself fail the create would
+	// replace one confusing error with another.
+	BootLogTail(id string, lines int) string
 }
 
 // SnapshotLayer is one checkpoint in a restore chain.
