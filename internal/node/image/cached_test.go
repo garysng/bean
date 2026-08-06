@@ -7,12 +7,12 @@ import (
 	"time"
 )
 
-// The sidecar mechanism is what makes a node's image cache visible to the
+// The per-image metadata file is what makes a node's image cache visible to the
 // scheduler, so its failure modes matter: reporting an image that is not usable
 // would send placement to a node that then has to pull anyway, and reporting
 // nothing makes image affinity silently useless.
 
-// seedCachedImage writes an image file and its sidecar, as a conversion does.
+// seedCachedImage writes an image file and its metadata record, as a conversion does.
 func seedCachedImage(t *testing.T, dir, ref string, size int64) {
 	t.Helper()
 	name, err := refToFilename(ref)
@@ -22,7 +22,7 @@ func seedCachedImage(t *testing.T, dir, ref string, size int64) {
 	if err := createSparse(filepath.Join(dir, name+".ext4"), size); err != nil {
 		t.Fatal(err)
 	}
-	if err := recordRef(dir, ref, "", nil); err != nil {
+	if err := recordRef(dir, ImageRecord{Ref: ref}); err != nil {
 		t.Fatal(err)
 	}
 }
@@ -40,7 +40,7 @@ func TestCachedImagesReportsRefsAndSizes(t *testing.T) {
 		t.Fatalf("reported %d images, want 2: %v", len(got), got)
 	}
 	// The reference has to survive the round trip: the filename encoding is not
-	// reversible, which is why the sidecar exists at all.
+	// reversible, which is why the metadata file exists at all.
 	if got["alpine:3.20"].SizeBytes != 64<<20 {
 		t.Errorf("alpine size = %d, want %d", got["alpine:3.20"].SizeBytes, 64<<20)
 	}
@@ -59,9 +59,9 @@ func TestCachedImagesOnMissingDirectory(t *testing.T) {
 	}
 }
 
-// TestCachedImagesSkipsSidecarWithoutImage covers a deleted image whose sidecar
+// TestCachedImagesSkipsRecordWithoutImage covers a deleted image whose record
 // remains. Reporting it would advertise an image the node cannot actually use.
-func TestCachedImagesSkipsSidecarWithoutImage(t *testing.T) {
+func TestCachedImagesSkipsRecordWithoutImage(t *testing.T) {
 	dir := t.TempDir()
 	seedCachedImage(t, dir, "gone:1", 64)
 
@@ -82,10 +82,10 @@ func TestCachedImagesSkipsSidecarWithoutImage(t *testing.T) {
 	}
 }
 
-// TestCachedImagesSkipsImageWithoutSidecar covers the reverse: an image file
+// TestCachedImagesSkipsImageWithoutRecord covers the reverse: an image file
 // with no record of its reference. Guessing the reference from the filename is
 // impossible, so it is skipped rather than reported wrongly.
-func TestCachedImagesSkipsImageWithoutSidecar(t *testing.T) {
+func TestCachedImagesSkipsImageWithoutRecord(t *testing.T) {
 	dir := t.TempDir()
 	if err := createSparse(filepath.Join(dir, "mystery.ext4"), 64); err != nil {
 		t.Fatal(err)
@@ -96,11 +96,11 @@ func TestCachedImagesSkipsImageWithoutSidecar(t *testing.T) {
 		t.Fatal(err)
 	}
 	if len(got) != 0 {
-		t.Errorf("reported %v for an image with no sidecar", got)
+		t.Errorf("reported %v for an image with no metadata file", got)
 	}
 }
 
-func TestCachedImagesIgnoresMalformedSidecar(t *testing.T) {
+func TestCachedImagesIgnoresMalformedRecord(t *testing.T) {
 	dir := t.TempDir()
 	if err := createSparse(filepath.Join(dir, "broken.ext4"), 64); err != nil {
 		t.Fatal(err)
@@ -198,11 +198,11 @@ func TestCachedRefsReturnsACopy(t *testing.T) {
 	}
 }
 
-// TestRecordRefIsAtomic checks a sidecar is never left half-written: a truncated
+// TestRecordRefIsAtomic checks a record is never left half-written: a truncated
 // one would make a perfectly usable image invisible.
 func TestRecordRefIsAtomic(t *testing.T) {
 	dir := t.TempDir()
-	if err := recordRef(dir, "atomic:1", "", nil); err != nil {
+	if err := recordRef(dir, ImageRecord{Ref: "atomic:1"}); err != nil {
 		t.Fatal(err)
 	}
 	entries, err := os.ReadDir(dir)
@@ -216,13 +216,13 @@ func TestRecordRefIsAtomic(t *testing.T) {
 	}
 
 	// Recording again must overwrite cleanly rather than fail.
-	if err := recordRef(dir, "atomic:1", "", nil); err != nil {
+	if err := recordRef(dir, ImageRecord{Ref: "atomic:1"}); err != nil {
 		t.Errorf("second recordRef: %v", err)
 	}
 }
 
 func TestRecordRefRejectsEmptyRef(t *testing.T) {
-	if err := recordRef(t.TempDir(), "", "", nil); err == nil {
+	if err := recordRef(t.TempDir(), ImageRecord{Ref: ""}); err == nil {
 		t.Error("recordRef accepted an empty reference")
 	}
 }
@@ -232,7 +232,7 @@ func TestCachedDigestRoundTrips(t *testing.T) {
 	dir := t.TempDir()
 	const ref = "python:3.12"
 	const digest = "sha256:1111111111111111111111111111111111111111111111111111111111111111"
-	if err := recordRef(dir, ref, digest, nil); err != nil {
+	if err := recordRef(dir, ImageRecord{Ref: ref, Digest: digest}); err != nil {
 		t.Fatal(err)
 	}
 	got, err := cachedDigest(dir, ref)
@@ -254,7 +254,7 @@ func TestCachedDigestRoundTrips(t *testing.T) {
 // have broken every image already on a node.
 func TestCachedDigestOfAnImageWithoutOne(t *testing.T) {
 	dir := t.TempDir()
-	if err := recordRef(dir, "built:1", "", nil); err != nil {
+	if err := recordRef(dir, ImageRecord{Ref: "built:1"}); err != nil {
 		t.Fatal(err)
 	}
 	got, err := cachedDigest(dir, "built:1")
@@ -291,11 +291,11 @@ func TestMovedTagGetsADistinctDigest(t *testing.T) {
 	const before = "sha256:aaaa111111111111111111111111111111111111111111111111111111111111"
 	const after = "sha256:bbbb222222222222222222222222222222222222222222222222222222222222"
 
-	if err := recordRef(dir, tag, before, nil); err != nil {
+	if err := recordRef(dir, ImageRecord{Ref: tag, Digest: before}); err != nil {
 		t.Fatal(err)
 	}
 	// The tag moves and the image is converted again under the same name.
-	if err := recordRef(dir, tag, after, nil); err != nil {
+	if err := recordRef(dir, ImageRecord{Ref: tag, Digest: after}); err != nil {
 		t.Fatal(err)
 	}
 	got, err := cachedDigest(dir, tag)
@@ -312,11 +312,11 @@ func TestMovedTagGetsADistinctDigest(t *testing.T) {
 	}
 }
 
-// TestCachedDigestReportsACorruptSidecar keeps a damaged cache from hiding behind
-// the slow path. An unparseable sidecar means the image is present but its
+// TestCachedDigestReportsACorruptRecord keeps a damaged cache from hiding behind
+// the slow path. An unparseable record means the image is present but its
 // identity is unknown, which is worth surfacing rather than treating as "no
 // digest" and quietly booting forever.
-func TestCachedDigestReportsACorruptSidecar(t *testing.T) {
+func TestCachedDigestReportsACorruptRecord(t *testing.T) {
 	dir := t.TempDir()
 	name, err := refToFilename("broken:1")
 	if err != nil {
@@ -326,6 +326,49 @@ func TestCachedDigestReportsACorruptSidecar(t *testing.T) {
 		t.Fatal(err)
 	}
 	if _, err := cachedDigest(dir, "broken:1"); err == nil {
-		t.Error("a corrupt sidecar was reported as an image without a digest")
+		t.Error("a corrupt record was reported as an image without a digest")
+	}
+}
+
+// An overlaybd image has no file named after its reference: it is a chain of layer
+// files shared with other images. The listing therefore has to trust a recorded size,
+// and before it did, every overlaybd image reported as uncached -- the scheduler could
+// not see them, and a prewarm job never reached done because it waits on this count.
+func TestCachedImagesReportsAnImageWithNoFileOfItsOwn(t *testing.T) {
+	dir := t.TempDir()
+	if err := recordRef(dir, ImageRecord{Ref: "python:3.12-slim", Digest: "sha256:abc", SizeBytes: 4096}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := cachedImages(dir)
+	if err != nil {
+		t.Fatalf("cachedImages: %v", err)
+	}
+	img, ok := got["python:3.12-slim"]
+	if !ok {
+		t.Fatalf("image not reported as cached: %v", got)
+	}
+	if img.SizeBytes != 4096 {
+		t.Errorf("size = %d, want the recorded 4096", img.SizeBytes)
+	}
+	if img.Digest != "sha256:abc" {
+		t.Errorf("digest = %q", img.Digest)
+	}
+}
+
+// Without a recorded size the listing still requires the flattened file, so a record
+// whose image was deleted does not advertise an image the node cannot start.
+func TestCachedImagesSkipsARecordWithNoSizeAndNoFile(t *testing.T) {
+	dir := t.TempDir()
+	if err := recordRef(dir, ImageRecord{Ref: "alpine:3.20"}); err != nil {
+		t.Fatal(err)
+	}
+
+	got, err := cachedImages(dir)
+	if err != nil {
+		t.Fatalf("cachedImages: %v", err)
+	}
+	if _, ok := got["alpine:3.20"]; ok {
+		t.Error("reported an image with neither a recorded size nor a file")
 	}
 }

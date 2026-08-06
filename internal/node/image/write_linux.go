@@ -87,10 +87,10 @@ func writeBaseImage(imageDir, workDir, imageRef, digest string, cfg *Config, siz
 		return "", fmt.Errorf("image: publish base image: %w", err)
 	}
 
-	// The sidecar records which reference this file came from, which is how the
-	// node reports what it holds. It is written after the image, so a sidecar
+	// The metadata file records which reference this file came from, which is how
+	// the node reports what it holds. It is written after the image, so a record
 	// never advertises an image that is not yet usable.
-	if err = recordRef(imageDir, imageRef, digest, cfg); err != nil {
+	if err = recordRef(imageDir, ImageRecord{Ref: imageRef, Digest: digest, Config: cfg}); err != nil {
 		return "", fmt.Errorf("image: record reference: %w", err)
 	}
 	return final, nil

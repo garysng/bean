@@ -124,10 +124,10 @@ func TestMergeConfigFollowsDockerRunSemantics(t *testing.T) {
 	}
 }
 
-// A config has to survive the sidecar round trip, since that is the only thing
+// A config has to survive the metadata round trip, since that is the only thing
 // carrying it from conversion (where the registry is reachable) to create (where it
 // is not).
-func TestConfigSurvivesTheSidecarRoundTrip(t *testing.T) {
+func TestConfigSurvivesTheMetadataRoundTrip(t *testing.T) {
 	dir := t.TempDir()
 	want := &Config{
 		Env:        []string{"PATH=/usr/bin", "LANG=C.UTF-8"},
@@ -137,7 +137,7 @@ func TestConfigSurvivesTheSidecarRoundTrip(t *testing.T) {
 		User:       "nobody",
 	}
 
-	if err := recordRef(dir, "python:3.12", "sha256:abc", want); err != nil {
+	if err := recordRef(dir, ImageRecord{Ref: "python:3.12", Digest: "sha256:abc", Config: want}); err != nil {
 		t.Fatalf("recordRef: %v", err)
 	}
 
@@ -149,7 +149,7 @@ func TestConfigSurvivesTheSidecarRoundTrip(t *testing.T) {
 		t.Errorf("cachedConfig()\n got %+v\nwant %+v", got, want)
 	}
 
-	// The digest must still be readable: config and digest share one sidecar, and
+	// The digest must still be readable: config and digest share one file, and
 	// writing one must not displace the other.
 	digest, err := cachedDigest(dir, "python:3.12")
 	if err != nil || digest != "sha256:abc" {
@@ -163,7 +163,7 @@ func TestConfigSurvivesTheSidecarRoundTrip(t *testing.T) {
 // genuinely declares no entrypoint.
 func TestCachedConfigIsNilWhenNoneWasRecorded(t *testing.T) {
 	dir := t.TempDir()
-	if err := recordRef(dir, "built:1", "", nil); err != nil {
+	if err := recordRef(dir, ImageRecord{Ref: "built:1"}); err != nil {
 		t.Fatalf("recordRef: %v", err)
 	}
 
