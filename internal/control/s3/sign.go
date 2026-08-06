@@ -122,10 +122,7 @@ func canonicalRequest(req *http.Request, payloadHash string) (string, string) {
 	}
 	signedHeaders := strings.Join(names, ";")
 
-	canonicalURI := req.URL.EscapedPath()
-	if canonicalURI == "" {
-		canonicalURI = "/"
-	}
+	canonicalURI := canonicalPath(req.URL.Path)
 
 	// Query parameters are sorted by key, and each key and value is
 	// individually escaped.
@@ -140,6 +137,37 @@ func canonicalRequest(req *http.Request, payloadHash string) (string, string) {
 		payloadHash,
 	}, "\n"), signedHeaders
 }
+
+// canonicalPath percent-encodes a path the way SigV4 requires: everything
+// except the unreserved set and the segment separator.
+//
+// net/url is not usable here. EscapedPath leaves a colon literal because a
+// colon is legal in a path segment, but S3 canonicalises it to %3A, so any key
+// containing one -- an OCI digest, for instance -- signs differently from how
+// the server reads it. PathEscape has the same gap and also escapes the
+// separators.
+func canonicalPath(path string) string {
+	if path == "" {
+		return "/"
+	}
+	var b strings.Builder
+	b.Grow(len(path))
+	for i := 0; i < len(path); i++ {
+		c := path[i]
+		switch {
+		case c >= 'A' && c <= 'Z', c >= 'a' && c <= 'z', c >= '0' && c <= '9',
+			c == '-', c == '_', c == '.', c == '~', c == '/':
+			b.WriteByte(c)
+		default:
+			b.WriteByte('%')
+			b.WriteByte(upperhex[c>>4])
+			b.WriteByte(upperhex[c&0x0f])
+		}
+	}
+	return b.String()
+}
+
+const upperhex = "0123456789ABCDEF"
 
 func dedupe(sorted []string) []string {
 	if len(sorted) < 2 {
