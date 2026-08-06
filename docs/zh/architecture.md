@@ -209,10 +209,17 @@ disk-diff 直接取宿主 overlaybd 可写层、guest 内零 union 复杂度。
 
 选 overlaybd（块级，DADI/阿里，AgentENV 已在 FC 场景验证）而非 Nydus（文件级）的关键原因：**块设备链路同时服务容器档（overlaybd-snapshotter → overlayfs）与 microVM 档（virtio-blk 直挂 guest），一条镜像链路通吃全部 runtime 档位**；Nydus 的文件系统语义进不了 microVM，FC 档需另走 virtiofs（FC 支持弱）。Nydus 保留为容器档备选。
 
-热状态（sandbox 元数据、租约、调度状态）落关系库,不进 S3。⚠️ **当前是 SQLite**
-(`modernc.org/sqlite`,纯 Go 无 cgo,`SetMaxOpenConns(1)` 单写)。**没有 store 接口** ——
-调用方持有的是具体类型 `*store.Store`;被收住的是 SQL 本身,只出现在
-`internal/control/store` 包内。Postgres 尚未实现 —— 多副本控制面需要它,单机部署不需要。
+热状态（sandbox 元数据、租约、调度状态）落关系库,不进 S3。引擎由 `bean-api --postgres`
+是否给出决定:SQLite(`modernc.org/sqlite`,纯 Go 无 cgo,`SetMaxOpenConns(1)` 单写)
+适合单机;多副本控制面需要 Postgres —— SQLite 是一个文件,两个副本没法共享它。
+
+第二个引擎是一层方言,不是第二套实现:一套用 `?` 写的语句,按引擎改写。这个选择基于实测
+(103 处占位符加少数 DDL 构造,八条 `ON CONFLICT` 全部原样可移植),而不是基于口味 ——
+两套必须保持一致的 SQL、再配一个只能事后告诉你哪一套漂了的套件,是更糟的处境。
+
+真正让换引擎成立的不是接口,而是原子性放在哪里。每个操作的条件都在它自己的语句里,
+由数据库裁决而不是进程内的锁;store 里已经没有任何 mutex。进程内的锁本来就无法为
+第二个副本的写入定序,而它还在的时候掩盖了一个真实的丢更新 bug。
 
 ### D5. Agent 注入：init/PID1 override（不进用户镜像）✅
 

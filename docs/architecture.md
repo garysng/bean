@@ -240,11 +240,22 @@ Nydus is kept as a fallback option for the container tier.
 
 Hot state (sandbox metadata, leases, scheduling state) lands in a relational
 database, not in S3. ⚠️ **Today that is SQLite** (`modernc.org/sqlite`, pure Go
-with no cgo, `SetMaxOpenConns(1)` for single-writer). There is no store
-interface — callers hold the concrete `*store.Store`; what is contained is the
-SQL itself, which appears only inside `internal/control/store`. Postgres is not
-yet implemented — a multi-replica control plane needs it, a single-machine
-deployment does not.
+with no cgo, `SetMaxOpenConns(1)` for single-writer) or Postgres, chosen by
+whether `bean-api --postgres` is set. SQLite suits a single machine; a
+multi-replica control plane needs Postgres, because SQLite is one file and two
+replicas cannot share it.
+
+The second engine is a dialect rather than a second implementation: one body of
+statements written with `?`, rewritten per engine. That was sized by measurement
+(103 placeholders and a handful of DDL constructs, every `ON CONFLICT` portable)
+and the alternative was rejected on evidence — two bodies of SQL that must agree,
+checked by a suite that can only report afterwards which one drifted.
+
+What made the swap safe was not the interfaces but where atomicity lives. Each
+operation's conditions are in its statement, so the database arbitrates rather
+than a process-local lock; the store holds no mutex at all. A lock inside one
+process could never have ordered writes from a second replica, and while it was
+there it hid a genuine lost-update bug.
 
 ### D5. Agent injection: init/PID1 override (nothing enters the user image) ✅
 

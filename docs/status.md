@@ -35,6 +35,7 @@ guest kernel 6.1.102, Alpine 3.20.
 | VMM pid namespace | ✅ | `--fc-pid-namespace`, **on by default**: the VMM cannot see or signal any host process. Verified by inode on a live VMM, simultaneously with the sandbox's network namespace -- the two compose because the netns is joined before the fork and the clone flags apply during it |
 | VMM mount namespace | ✅ | `--fc-mount-namespace`, **on by default**. Held back at first on the expectation that bean's device-mapper rootfs would stop being openable inside one. That was wrong: a booted guest has a working `eth0` and its own mnt, pid and net namespaces at once |
 | VMM killed if noded dies | ✅ | `--fc-kill-on-exit`, **on by default**. Reconciliation already reclaimed such a VMM, but only at the next startup, and until then it holds memory promised elsewhere. Measured with a negative control: with the flag the VMM is gone after `kill -9` on noded, without it it survives |
+| Postgres | ✅ | `bean-api --postgres`, which is what allows more than one replica: SQLite is one file, so two replicas cannot share it. A dialect rather than a second implementation, sized by measurement — 103 placeholders plus a few DDL constructs, with all eight `ON CONFLICT` clauses porting unchanged. `hack/postgres-conformance.sh` runs the requirements against a real Postgres 16; the suite skips loudly rather than reporting a pass earned by SQLite. **Reading the SQL was not enough** — see below |
 
 ## Not delivered
 
@@ -46,7 +47,6 @@ guest kernel 6.1.102, Alpine 3.20.
 | Container tiers (runc/gVisor) | 📐 | microVM, plus a no-isolation `local` tier for development, are the only options |
 | Volumes | 📐 | |
 | Host resource reconciliation | 📐 | A crashed noded leaves dm mappings and sandbox directories behind |
-| Postgres | ⚠️ | SQLite in use, but the store is now behind seven interfaces cut by who may write what, and `database/sql` appears only inside `internal/control/store`. So a second engine is an addition to one package rather than an extraction from callers. **What mattered more than the interfaces**: 37 of 39 methods relied on a process-local mutex for atomicity, which switching engines would not have fixed. The two with a genuine read-then-write (`AcquireSnapshot`, `DeleteSnapshot`) now express their conditions in SQL and decide from `RowsAffected`, as `Reserve` always did |
 | Build logs and cancellation | ⚠️ | A build reports no progress and cannot be stopped |
 | overlaybd lazy-pull | ⚠️ | **Verified working** (7 ms mount, 19.6% of layer bytes transferred to read a file) but not wired into the image provider — dm-snapshot is the live path |
 
@@ -218,6 +218,12 @@ holding deleted files all return to their baseline. The loop-device leak fix
 - **S3 against a real MinIO** in CI, not a fake server — `ErrBlobNotFound`
   mapping, abort leaving no object, and range-read boundaries are server
   behaviours
+- **The store's requirements against a real Postgres 16**, not a mock: nine
+  requirements plus a per-method smoke test, via
+  `hack/postgres-conformance.sh`. Confirmed the pass is earned by the database
+  rather than by the engine's locking — replacing the conditional `UPDATE` with a
+  `SELECT` fails the reference-count requirement on Postgres too. Both engines are
+  also run under `-race`, which matters because the store now holds no mutex
 
 ### Two testing rules earned the hard way
 
@@ -233,6 +239,39 @@ assertion was green against the broken implementation, so this was the only way 
 know the new test was worth anything. Applied since to the loop-device leak, the
 merge ordering, snapshot cache pinning, and the queue's transient-vs-lifetime
 distinction.
+
+### A third: a statement no test calls is a statement no engine has parsed
+
+Adding Postgres was scoped by reading the SQL: 103 placeholders, one
+`AUTOINCREMENT`, one `INTEGER`-as-bool, every `ON CONFLICT` portable. That survey
+was right about the shape and wrong about the inventory. Running `migrate()`
+against a real Postgres 16 found four more differences, and the reading could
+never have found the last two:
+
+- `secret BLOB` — Postgres has no such type and rejected the whole schema.
+- `ADD COLUMN` idempotency — only Postgres can say `IF NOT EXISTS`, so the
+  duplicate case is per engine rather than one error-text match applied to both.
+- `INTEGER` — 64 bits in SQLite, 32 in Postgres, and every timestamp column
+  stores Unix milliseconds. Five of seven requirements failed on overflow. **This
+  is unreadable by inspection**: the spelling is identical and the meaning is not.
+- **`Reserve` had no GPU guard at all.** Eight placeholders, nine arguments;
+  SQLite ignored the extra one, so `gpu_committed` was never compared against
+  `gpu_count`. A one-GPU node would hand the same device to two guests, and the
+  failure surfaces inside a guest as a device already in use. Only an engine that
+  counts placeholders objected.
+
+Then the suite passed 8/8 while `Release` and `FinishCreate` had never executed on
+Postgres — both used SQLite's two-argument `MAX(x - ?, 0)`, which Postgres cannot
+run. No requirement called either. Had that shipped, capacity would be committed
+at `Reserve` and never returned: nodes fill permanently and later placements
+report `NO_CAPACITY` for resources nothing is using, with an error naming capacity
+rather than the statement.
+
+Measured afterwards: **23 of 38 interface methods were never executed against
+Postgres by any test.** So there is now a smoke test calling every method once,
+plus a reflection-based guard that fails when a method is missing from it — the
+hand-written call list would otherwise decay exactly as the interfaces did. The
+guard caught three snapshot methods left out of its own first draft.
 
 ## Open gaps worth naming
 
