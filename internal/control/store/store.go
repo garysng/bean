@@ -336,7 +336,6 @@ func (s *Store) addMissingColumns() error {
 	return nil
 }
 
-
 // marshalJSON encodes a value for a JSON column, using an empty object or
 // array rather than SQL NULL so scans never have to handle nulls.
 func marshalJSON(v any) (string, error) {

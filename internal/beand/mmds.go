@@ -73,7 +73,7 @@ func newMMDSClient() *mmdsClient {
 				// snapshot restore as a descriptor to a machine that no longer
 				// exists.
 				DisableKeepAlives: true,
-				DialContext: (&net.Dialer{Timeout: mmdsTimeout}).DialContext,
+				DialContext:       (&net.Dialer{Timeout: mmdsTimeout}).DialContext,
 			},
 		},
 		cacheFor: 5 * time.Second,

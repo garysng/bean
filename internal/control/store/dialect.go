@@ -138,7 +138,7 @@ func (sqliteDialect) addColumn(table, definition string) string {
 func (sqliteDialect) isDuplicateColumn(err error) bool {
 	return strings.Contains(err.Error(), "duplicate column name")
 }
-func (sqliteDialect) journalPragma() string   { return "PRAGMA journal_mode=WAL" }
+func (sqliteDialect) journalPragma() string { return "PRAGMA journal_mode=WAL" }
 
 // postgresDialect targets Postgres 12 or later.
 //
@@ -219,4 +219,4 @@ func (postgresDialect) addColumn(table, definition string) string {
 // Always false: the IF NOT EXISTS above means a duplicate is not an error here, so any
 // error that does arrive is a real failure and must not be swallowed.
 func (postgresDialect) isDuplicateColumn(error) bool { return false }
-func (postgresDialect) journalPragma() string   { return "" }
+func (postgresDialect) journalPragma() string        { return "" }
