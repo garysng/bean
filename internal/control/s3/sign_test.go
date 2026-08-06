@@ -112,6 +112,71 @@ func TestCanonicalRequestSortsAndTrims(t *testing.T) {
 	}
 }
 
+// SigV4 requires the canonical URI to percent-encode every character that is not
+// unreserved or a path separator. Go's url.EscapedPath leaves a colon alone, because a
+// colon is legal in a path segment -- so a key containing one gets signed differently
+// from how the server canonicalises it, and the request fails with
+// SignatureDoesNotMatch.
+//
+// Found by publishing overlaybd layers, whose keys are OCI digests: every PUT of
+// "blobs/sha256:..." failed while the same code worked for snapshot keys, which happen
+// never to contain a colon.
+func TestCanonicalRequestEscapesCharactersGoLeavesLiteral(t *testing.T) {
+	tests := []struct {
+		name, path, want, reject string
+	}{
+		{
+			name:   "colon in an object key",
+			path:   "/bucket/blobs/sha256:e2f5b9a1",
+			want:   "/bucket/blobs/sha256%3Ae2f5b9a1",
+			reject: "sha256:e2f5b9a1",
+		},
+		{
+			// Slashes separate segments and must stay literal, or every nested key
+			// breaks. This is the case that makes a blanket url.QueryEscape wrong.
+			name: "slashes stay separators",
+			path: "/bucket/a/b/c",
+			want: "/bucket/a/b/c",
+		},
+		{
+			name:   "space is encoded as %20, not +",
+			path:   "/bucket/with space",
+			want:   "/bucket/with%20space",
+			reject: "with+space",
+		},
+		{
+			// Unreserved characters must not be encoded, or the signature differs
+			// from the server's canonical form in the other direction.
+			name: "unreserved characters are left alone",
+			path: "/bucket/a-b_c.d~e",
+			want: "/bucket/a-b_c.d~e",
+		},
+	}
+
+	for _, tc := range tests {
+		t.Run(tc.name, func(t *testing.T) {
+			req, err := http.NewRequest(http.MethodPut, "https://h"+tc.path, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			req.Header.Set("Host", "h")
+
+			canonical, _ := canonicalRequest(req, emptyPayload)
+			// The canonical URI is the second line.
+			lines := strings.Split(canonical, "\n")
+			if len(lines) < 2 {
+				t.Fatalf("canonical request has no URI line:\n%s", canonical)
+			}
+			if got := lines[1]; got != tc.want {
+				t.Errorf("canonical URI = %q, want %q", got, tc.want)
+			}
+			if tc.reject != "" && strings.Contains(canonical, tc.reject) {
+				t.Errorf("canonical request still contains the unencoded form %q", tc.reject)
+			}
+		})
+	}
+}
+
 // TestSignatureCoversTheBody guards against signing a body-carrying request as
 // if it were empty, which authenticates the wrong bytes.
 func TestSignatureCoversTheBody(t *testing.T) {

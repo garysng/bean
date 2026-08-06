@@ -104,7 +104,7 @@ func (k warmKey) snapshotID() string {
 //
 // A directory of files, with no index. The filename is derived from the key, so a
 // lookup is a stat rather than a read of shared state that could disagree with the
-// filesystem -- the same reasoning as the image sidecars in internal/node/image:
+// filesystem -- the same reasoning as the image metadata files in internal/node/image:
 // an entry deleted by hand takes its own record with it, and a half-written one
 // cannot corrupt the record of any other.
 type warmStore struct {

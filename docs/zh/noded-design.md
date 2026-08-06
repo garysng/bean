@@ -142,9 +142,10 @@ local 档跑宿主进程,没有「缓存镜像」这个概念,让它 stub 掉四
 要点：
 
 - **fc 热路径零 containerd** ✅:image 模块自己管块设备,纯 fc 节点不装 containerd。
-  但当前后端是 **dm-snapshot 而非 overlaybd ublk** —— overlaybd 能力已实测跑通
-  (挂载 7ms、只传 19.6% 层字节)但尚未接进 `image.Provider`
-  (`docs/decisions.md` §3.1)。
+  默认后端是 **dm-snapshot**;overlaybd 已接进 `image.Provider`(`OverlaybdProvider`),
+  用 `--fc-overlaybd` 开启,走 TCMU 而非 ublk(验证机内核 5.15 无 ublk)。
+  真机验证过:层构建封装、TCMU 挂载、挂载后能读到层内容。
+  详见 [image-pipeline.md](image-pipeline.md) §7。
 - `image.Rootfs` 由 image 模块产出(见 §4),带 `Device`(VM 挂的路径)与
   `Writable`(快照要抓的 CoW 层)两个字段。**`Writable` 是关键**:
   快照捕获它,而 restore 通过 `PrepareOptions.SeedWritable` 在设备组装前回填。

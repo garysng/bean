@@ -196,7 +196,8 @@ sandbox token（JWT）：签名密钥控制面持有，绑定 sandbox-id + 过�
 
 冷镜像目标未达成也未走 lazy-pull:当前是「拉全量 + 转换 + CoW 共享」,
 实测 busybox 5-10s、alpine 在网络不稳时 **2m45s** —— 所以 prewarm 是必需的
-而不是优化。overlaybd lazy-pull 能力已实测(B2),但尚未接进 `image.Provider`。
+而不是优化。overlaybd 路径已实现(B2),用 `--fc-overlaybd` 开启;
+但真正能消掉这段等待的 lazy-pull 尚未测过。
 
 **这些数字都是单个 sandbox 手工测的。** 并发下如何退化没有测过 ——
 见 `docs/status.md` 的压测待办。

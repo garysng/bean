@@ -42,8 +42,12 @@ func NewFCTier(cfg FCTierConfig) (Runtime, error) {
 		}
 	}
 
+	provider, err := selectProvider(cfg)
+	if err != nil {
+		return nil, err
+	}
 	rt := NewFCRuntime(cfg.FirecrackerBin, cfg.KernelPath, cfg.AgentDiskPath,
-		cfg.BaseDir, selectProvider(cfg))
+		cfg.BaseDir, provider)
 	rt.DebugConsole = cfg.DebugConsole
 	if cfg.DebugConsole {
 		slog.Warn("guest serial console on", "costPerBoot", "~500ms")
@@ -232,7 +236,53 @@ func NewFCTier(cfg FCTierConfig) (Runtime, error) {
 // nothing, and a write costs kilobytes instead of the image's size. Copying the
 // base image works everywhere but makes a fan-out of clones cost the image size
 // each time, so it is the fallback rather than the default.
-func selectProvider(cfg FCTierConfig) image.Provider {
+func selectProvider(cfg FCTierConfig) (image.Provider, error) {
+	// overlaybd, when asked for, replaces the whole chain rather than sitting under
+	// the pulling wrapper: it resolves an image to its layers itself, because
+	// deciding which layers to fetch is the same decision as deciding whether to
+	// fetch them at all. Wrapping it in PullingProvider would have the ext4
+	// converter run first and produce an artifact overlaybd has no use for.
+	if cfg.Overlaybd {
+		layerDir := cfg.OverlaybdLayerDir
+		if layerDir == "" {
+			layerDir = filepath.Join(cfg.ImageDir, "layers")
+		}
+		p := image.NewOverlaybdProvider(cfg.BaseDir, layerDir, cfg.ImageDir,
+			image.NewRegistry(cfg.RegistryAuth),
+			image.NewOverlaybdBuilder(cfg.OverlaybdBinDir, layerDir,
+				filepath.Join(cfg.ImageDir, ".work")),
+			cfg.DefaultDiskMiB)
+		p.LazyPull = cfg.OverlaybdLazyPull
+		p.Blobs = cfg.OverlaybdBlobs
+		p.Index = cfg.OverlaybdIndex
+		// Reported as a startup failure rather than a fallback. A node asked for
+		// overlaybd and given device-mapper instead would differ from the cluster's
+		// expectation in storage cost and in whether layers are shared, and nothing
+		// downstream can see that.
+		if err := p.Available(); err != nil {
+			return nil, fmt.Errorf("fc tier: overlaybd requested but %w", err)
+		}
+		// The blob store is logged because lazy pull without one silently does nothing
+		// for ordinary images, and that is worth seeing at startup rather than
+		// discovering from a create that converted when it was expected not to.
+		blobs := "none"
+		if cfg.OverlaybdBlobs != nil {
+			blobs = cfg.OverlaybdBlobs.BlobURL()
+		}
+		slog.Info("rootfs via overlaybd", "lazyPull", cfg.OverlaybdLazyPull,
+			"layerDir", layerDir, "blobStore", blobs,
+			// Logged because it is the difference between the store being a source an
+			// image can be resolved from and being a bare layer cache that still needs
+			// the registry -- a distinction invisible from a create that succeeded.
+			"imageIndex", cfg.OverlaybdIndex != nil)
+		if cfg.OverlaybdLazyPull && cfg.OverlaybdBlobs == nil {
+			slog.Warn("lazy pull is on with no blob store: only images whose registry " +
+				"blobs are already sealed overlaybd layers can be read remotely, so " +
+				"ordinary images will still be converted locally")
+		}
+		return p, nil
+	}
+
 	var assembler image.Provider
 	dm := image.NewDevMapperProvider(cfg.BaseDir, cfg.ImageDir, cfg.DefaultDiskMiB)
 	if err := dm.Available(); err != nil {
@@ -255,7 +305,7 @@ func selectProvider(cfg FCTierConfig) image.Provider {
 		ImageDir:       cfg.ImageDir,
 		WorkDir:        filepath.Join(cfg.ImageDir, ".work"),
 		DefaultSizeMiB: cfg.DefaultDiskMiB,
-	})
+	}), nil
 }
 
 // checkSnapshotSupport verifies the host can save a vCPU's state.

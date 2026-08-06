@@ -232,7 +232,8 @@ target is met.
 The cold-image target is not met and does not go through lazy-pull: today it is "pull the
 whole thing + convert + share CoW", measured at 5-10s for busybox and **2m45s** for alpine on
 an unstable network — which makes prewarm a requirement rather than an optimisation. The
-overlaybd lazy-pull capability is measured (B2) but has not been wired into `image.Provider`.
+overlaybd path is now implemented (B2) and opt-in with `--fc-overlaybd`, but lazy pull
+against a registry — the part that would remove this wait — is untested.
 
 **All of these numbers were measured by hand on a single sandbox.** How they degrade under
 concurrency has never been measured — see the load-testing to-do in `docs/status.md`.
@@ -266,15 +267,21 @@ userfaultfd, and FC's `/snapshot/load` accounts for only 7ms.
 
 ### B2. overlaybd lazy-pull from S3 ⚠️
 
-**The capability is measured working on the verification machine but is not wired into the
-code yet.** The current production path is dm-snapshot: pull the whole thing + convert +
-share a read-only base + one CoW per sandbox (measured at 44 KiB per sandbox).
-Measured on the overlaybd side: 7ms to mount, only 19.6% of the layer bytes transferred
-before it mounts and files can be read, 8 HTTP 206s, and the writable upper layer occupying
-40 KiB in practice (`docs/decisions.md` §3.1). What remains is writing an
-`OverlaybdProvider` and wiring it into `image.Provider`.
+**`OverlaybdProvider` exists and is verified on hardware; lazy pull specifically is
+implemented but untested.** The default path remains dm-snapshot: pull the whole thing +
+convert + share a read-only base + one CoW per sandbox (measured at 44 KiB per sandbox).
+overlaybd is opt-in with `--fc-overlaybd`, and `--fc-overlaybd-lazy-pull` selects
+range-reading layers from the registry instead of converting them locally.
 
-What follows describes that target form, not the current one.
+What is verified in code (`overlaybd_hw_linux_test.go`): layers are built and sealed,
+attached through TCMU, and the mounted device serves the layer's contents. What is not:
+the lazy-pull path against a real registry. The numbers below — 7ms to mount, 19.6% of
+layer bytes transferred before files can be read, 8 HTTP 206s, a writable upper layer
+occupying 40 KiB — come from the manual verification in `docs/decisions.md` §3.1, **not**
+from this implementation.
+
+See [image-pipeline.md](image-pipeline.md) §7 for the layer pipeline, the configfs
+sequence, and the four constraints that only real hardware revealed.
 
 ```
 Image publishing path (image-service, once, offline):

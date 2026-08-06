@@ -1,0 +1,80 @@
+package image
+
+import (
+	"context"
+	"net/http"
+	"os"
+	"testing"
+
+	"github.com/garysng/bean/internal/control/s3"
+)
+
+// End-to-end against the real store: resolve a real published image with a registry that
+// cannot be reached, from the manifests/ and tags/ objects prewarm wrote.
+//
+// The unreachable registry is expressed by pointing the client at a port nothing listens
+// on, rather than by changing the host's DNS -- this runs on a shared machine.
+//
+// Not a committed test: it depends on an image having been prewarmed into a specific
+// bucket. Copied into the package to run, then removed. Kept here so the check is
+// repeatable.
+func TestResolveRealImageFromStoreWithNoRegistry(t *testing.T) {
+	ep := os.Getenv("BEAN_S3_ENDPOINT")
+	if ep == "" {
+		t.Skip("BEAN_S3_ENDPOINT not set")
+	}
+	c, err := s3.New(s3.Config{
+		Endpoint: ep, Region: "us-east-1", PathStyle: true,
+		AccessKey: os.Getenv("BEAN_S3_ACCESS_KEY"),
+		SecretKey: os.Getenv("BEAN_S3_SECRET_KEY"),
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	blobs, err := NewS3BlobStore(c, "bean-obd-layers", "blobs", ep)
+	if err != nil {
+		t.Fatal(err)
+	}
+	idx, err := NewS3ImageIndex(c, "bean-obd-layers")
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	builder := NewOverlaybdBuilder("/opt/overlaybd/bin", t.TempDir(), t.TempDir())
+	p := NewOverlaybdProvider(t.TempDir(), builder.LayerDir, t.TempDir(),
+		NewRegistry(nil), builder, 512)
+	p.LazyPull = true
+	p.Blobs = blobs
+	p.Index = idx
+	// Nothing listens on port 9, so any registry access fails with connection refused.
+	p.Registry.Client = &http.Client{Transport: redirectTo{host: "127.0.0.1:9"}}
+
+	ref := "docker.m.daocloud.io/library/python:3.11-slim"
+	lowers, err := p.lowersFor(context.Background(), ref)
+	if err != nil {
+		t.Fatalf("resolve from store with no registry: %v", err)
+	}
+	if len(lowers) == 0 {
+		t.Fatal("no layers resolved")
+	}
+	for i, l := range lowers {
+		if l.File != "" {
+			t.Errorf("layer %d resolved to a local file %q; this node holds none", i, l.File)
+		}
+		if l.RepoBlobURL == "" {
+			t.Errorf("layer %d has no blob URL", i)
+		}
+		if l.Size <= 0 {
+			t.Errorf("layer %d has no size; a range read needs one", i)
+		}
+	}
+	cfg, err := p.Config(ref)
+	if err != nil || cfg == nil {
+		t.Fatalf("config = %v, %v", cfg, err)
+	}
+	if len(cfg.Env) == 0 && len(cfg.Entrypoint) == 0 && len(cfg.Cmd) == 0 {
+		t.Error("config came back empty; the guest would start with nothing set")
+	}
+	t.Logf("resolved %d layers with no registry; cmd=%v env=%d entries",
+		len(lowers), cfg.Cmd, len(cfg.Env))
+}

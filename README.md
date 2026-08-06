@@ -137,7 +137,7 @@ checkpoint fan out to many sandboxes without collisions.
 | Container tiers (runc/gVisor) | 📐 microVM, plus a no-isolation `local` tier for development, are the only options |
 | Volumes | 📐 |
 | Per-port access control | 📐 Any port on a sandbox is reachable by anything that can reach bean-proxy — [#50](https://github.com/garysng/bean/issues/50) |
-| overlaybd lazy-pull | ⚠️ **verified working** (7 ms mount, 19.6% of layer bytes transferred to read a file) but not wired into the image provider — dm-snapshot is the live path |
+| overlaybd | ⚠️ Wired in and measured on one host. **3.32x less disk** for three images sharing a base, and a shared layer converted once per node rather than once per image (0.49 s of CPU for the second image against 2.24 s). With layers published to an object store a create is **1.3 s against dm-snapshot's 14.3 s**; a *cold* create is unchanged, and cannot be improved — a gzipped tar has no block index to seek into, so the first encounter anywhere always converts. Opt-in via `--fc-overlaybd`; dm-snapshot remains the default. `commit` on this backend is unexercised, and the cross-node path has only been exercised on one machine. [docs/image-pipeline.md](docs/image-pipeline.md) §7 |
 
 ---
 

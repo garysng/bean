@@ -104,7 +104,7 @@ func (c *Committer) Commit(ctx context.Context, device, tag, sourceRef string) (
 	if err = os.Rename(tmpPath, final); err != nil {
 		return "", fmt.Errorf("image: publish committed image: %w", err)
 	}
-	if err = recordRef(c.ImageDir, tag, "", cfg); err != nil {
+	if err = recordRef(c.ImageDir, ImageRecord{Ref: tag, Config: cfg}); err != nil {
 		return "", fmt.Errorf("image: record reference: %w", err)
 	}
 	return final, nil

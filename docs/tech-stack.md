@@ -823,7 +823,7 @@ FAILED proactively.
 ⑥ applyLayer × N     unpack in order, honouring whiteouts
 ⑦ add guest dirs     /proc /sys /dev and the rest of the mountpoints
 ⑧ unmount → rename   atomic publish
-⑨ write sidecar      record which ref this file came from
+⑨ write metadata     record which ref this file came from
 ```
 
 **The node pulls images itself** rather than shelling out to a container runtime.
@@ -835,7 +835,7 @@ containerd being installed and healthy. This is the same conclusion architecture
 D2 states as "no containerd on the hot path," and unlike the "overlaybd driven
 directly" half of that claim, **this half is delivered**.
 
-Two orderings that are deliberate: the **sidecar is written after the image**,
+Two orderings that are deliberate: the **metadata file is written after the image**,
 because `Cached()` reports from it and writing it first would have the node claim
 an image that cannot yet be used — the scheduler would send work and the create
 would fail. And **rename is what makes an image visible**, so an interrupted

@@ -679,7 +679,7 @@ dmsetup status: 0 524288 snapshot Invalid
 ⑥ applyLayer × N     按顺序解压,处理 whiteout
 ⑦ 补 guest 必需目录  /proc /sys /dev 等挂载点
 ⑧ 卸载 → rename      原子发布
-⑨ 写 sidecar         记录这个文件来自哪个 ref
+⑨ 写元数据文件       记录这个文件来自哪个 ref
 ```
 
 **节点自己拉镜像**,不 shell out 给容器运行时。sandbox 的 rootfs 是文件系统镜像
@@ -689,7 +689,7 @@ dmsetup status: 0 524288 snapshot Invalid
 这与 architecture D2 说的「热路径无 containerd」是同一个结论,
 而不同于「直接驱动 overlaybd」那一半,**这一半是交付了的**。
 
-两处刻意的顺序:**sidecar 在镜像之后写**,因为 `Cached()` 据它上报,
+两处刻意的顺序:**元数据文件在镜像之后写**,因为 `Cached()` 据它上报,
 先写会让节点宣称持有一个还不能用的镜像 —— 调度器据此把工作放过来,然后 create 失败。
 以及**rename 才让镜像可见**,所以中断的转换不会留下一个看起来完整的半成品。
 

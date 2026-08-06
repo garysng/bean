@@ -2,6 +2,7 @@ package image
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -15,74 +16,135 @@ import (
 //
 // The reference cannot be recovered from the filename: refToFilename encodes
 // separators to keep the name safe as a path, and that mapping is deliberately
-// not reversible. So each image is accompanied by a small sidecar naming the
-// reference it came from. Storing it beside the image rather than in a single
-// index means a half-written conversion cannot corrupt the record of every other
-// image, and a manually deleted image takes its own record with it.
+// not reversible. So each image gets a small metadata file naming the reference it
+// came from. One file per image rather than a single index means a half-written
+// conversion cannot corrupt the record of every other image, and a manually
+// deleted image takes its own record with it.
+//
+// These were called sidecars while the flattening path was the only one, and that
+// name has been dropped: it implied a main artefact to sit beside. On the ext4 path
+// there was one -- `<ref>.ext4`, with `<ref>.ref` next to it. Under overlaybd there
+// is not: layers are named by digest and shared between images, so nothing here
+// belongs to one reference. Reading the name literally is what led listCached to
+// stat a `<ref>.ext4` that overlaybd never creates, which made every overlaybd
+// image report as uncached.
 
 const (
-	// imageSuffix is the extension of a base image file.
+	// imageSuffix is the extension of a base image file, on the backends that
+	// flatten an image into one.
 	imageSuffix = ".ext4"
-	// refSuffix is the extension of the sidecar naming its reference.
+	// refSuffix is the extension of the per-image metadata file.
 	refSuffix = ".ref"
 )
 
-// recordRef notes which reference an image file corresponds to.
+// ImageRecord is what a node knows about one image it holds, as written to disk.
 //
-// cfg is the image's OCI configuration, or nil for an image that has none. It is
-// stored here because the conversion flattens layers into a filesystem and leaves
-// the config blob behind: without this the guest never learns the image's ENV,
-// ENTRYPOINT, CMD or WORKDIR. Written to the same sidecar as the reference rather
-// than a second file, so one atomic write publishes everything the node knows
-// about an image and a reader cannot see the two disagree.
-func recordRef(imageDir, imageRef, digest string, cfg *Config) error {
-	name, err := refToFilename(imageRef)
+// A struct rather than a growing parameter list: this started as (ref, digest) and
+// reached five positional arguments, at which point a caller passing the size where the
+// digest belonged would still compile.
+type ImageRecord struct {
+	// Ref is the reference the image was fetched under. Required -- a record without
+	// it names nothing, and the listing skips it.
+	Ref string `json:"ref"`
+	// Digest is the manifest digest the reference resolved to, or "" for an image with
+	// no manifest: a build's output, or a commit of a sandbox's filesystem.
+	Digest string `json:"digest,omitempty"`
+	// Config is the image's OCI configuration, or nil for an image that has none.
+	Config *Config `json:"config,omitempty"`
+	// SizeBytes is what the image costs on this node, for backends whose image is not
+	// a single file the listing can stat. Zero means "stat the flattened file", which
+	// is what the ext4 path does.
+	SizeBytes int64 `json:"sizeBytes,omitempty"`
+	// Layers is the resolved layer chain, base first, for backends that assemble one.
+	//
+	// Recorded so a repeat create does not have to re-resolve the manifest. Without
+	// it every overlaybd create fetches the manifest from the registry -- which the
+	// flattening path does not, since its Prepare only looks for a local file. That
+	// difference is an availability one, not a latency one: with the registry
+	// unreachable, dm-snapshot starts a cached image and overlaybd does not.
+	//
+	// Empty for the flattening backends, which have no chain to record.
+	Layers []RecordedLayer `json:"layers,omitempty"`
+}
+
+// RecordedLayer is one layer of a resolved chain, as much of it as is worth keeping.
+//
+// Deliberately not obdLayer: that type carries local paths and cache directories,
+// which are this node's current arrangement rather than facts about the image. Storing
+// them would make the record wrong as soon as a layer were reclaimed. What is kept is
+// what the registry said, so the chain can be rebuilt against whatever the node holds
+// at the time.
+type RecordedLayer struct {
+	Digest    string `json:"digest"`
+	Size      int64  `json:"size"`
+	MediaType string `json:"mediaType,omitempty"`
+}
+
+// recordRef notes what a node knows about one image.
+//
+// Everything goes into one file rather than several, so a single atomic write
+// publishes it all and a reader cannot catch two parts disagreeing. The config in
+// particular has to be here because conversion flattens layers into a filesystem and
+// drops the config blob: without it the guest never learns the image's ENV,
+// ENTRYPOINT, CMD or WORKDIR.
+//
+// Absent fields are omitted rather than written as null or zero, so a reader can tell
+// "this image predates the field" from "this image genuinely has none" -- which is why
+// a build, whose output never had a manifest, does not claim a digest.
+func recordRef(imageDir string, rec ImageRecord) error {
+	if rec.Ref == "" {
+		return errors.New("image: record needs a reference")
+	}
+	name, err := refToFilename(rec.Ref)
 	if err != nil {
 		return err
 	}
-	rec := map[string]any{"ref": imageRef}
-	// Omitted rather than written as null when absent, matching how digest is
-	// handled: a reader can then tell an image that predates this field from one
-	// whose config was genuinely empty.
-	if cfg != nil {
-		rec["config"] = cfg
-	}
-	// The digest is what makes an image identifiable independently of the name it
-	// was fetched under, and nothing else on the node records it: refToFilename is
-	// a string encoding that does not resolve anything, so python:3.12 and
+	// The digest is what makes an image identifiable independently of the name it was
+	// fetched under, and nothing else on the node records it: refToFilename is a
+	// string encoding that does not resolve anything, so python:3.12 and
 	// python@sha256:... are unrelated cache entries even for the same image.
 	//
-	// A warm snapshot (GitHub #26) has to be keyed on it rather than on the
-	// reference, because a tag that moves must not serve the environment captured
-	// from the image it used to name. That failure is silent -- the wrong snapshot
-	// restores successfully -- which is why the digest is recorded at the moment it
-	// is known instead of being re-resolved later against a registry that may have
-	// moved on.
-	//
-	// Omitted rather than written empty when unknown, so a reader can tell "this
-	// image predates the field" from "this image has no digest", and a build, whose
-	// output never had a manifest, does not claim one.
-	if digest != "" {
-		rec["digest"] = digest
-	}
+	// A warm snapshot (GitHub #26) has to be keyed on it rather than on the reference,
+	// because a tag that moves must not serve the environment captured from the image
+	// it used to name. That failure is silent -- the wrong snapshot restores
+	// successfully -- which is why the digest is recorded at the moment it is known
+	// instead of being re-resolved later against a registry that may have moved on.
 	data, err := json.Marshal(rec)
 	if err != nil {
 		return err
 	}
-	// Written atomically: a truncated sidecar would make the image invisible to
+	// Written atomically: a truncated metadata file would make the image invisible to
 	// the scheduler even though it is usable.
+	//
+	// The temporary name is unique per call rather than derived from the final one.
+	// Concurrent creates of the same image do reach here together -- layer
+	// conversion is deduplicated, recording is not -- and with a shared temp name
+	// one writer's rename pulls the file out from under the other, which then fails
+	// with ENOENT on a path it had just written. The records are identical, so the
+	// fix is to let each writer own its temp file and let the renames overwrite.
 	path := filepath.Join(imageDir, name+refSuffix)
-	tmp := path + ".tmp"
-	if err := os.WriteFile(tmp, data, 0o600); err != nil {
+	tmp, err := os.CreateTemp(imageDir, name+refSuffix+".*.tmp")
+	if err != nil {
 		return err
 	}
-	return os.Rename(tmp, path)
+	defer os.Remove(tmp.Name())
+	if _, err := tmp.Write(data); err != nil {
+		tmp.Close()
+		return err
+	}
+	if err := tmp.Close(); err != nil {
+		return err
+	}
+	if err := os.Chmod(tmp.Name(), 0o600); err != nil {
+		return err
+	}
+	return os.Rename(tmp.Name(), path)
 }
 
 // CachedImage is what a node knows about one image it holds.
 //
 // The digest is carried alongside the size because both come from the same
-// sidecar read, and separating them would mean scanning the directory twice to
+// metadata read, and separating them would mean scanning the directory twice to
 // answer two questions about the same file.
 type CachedImage struct {
 	// SizeBytes is the apparent size of the prepared image file.
@@ -102,7 +164,7 @@ type CachedImage struct {
 
 // cachedImages lists the images in a directory with their sizes and digests.
 //
-// An image without a sidecar is skipped rather than guessed at: reporting a
+// An image without a metadata file is skipped rather than guessed at: reporting a
 // wrong reference would send the scheduler's affinity scoring after an image
 // that is not there.
 func cachedImages(imageDir string) (map[string]CachedImage, error) {
@@ -128,15 +190,24 @@ func cachedImages(imageDir string) (map[string]CachedImage, error) {
 			// Read here rather than through cachedDigest, which would re-open the
 			// same file this loop has already read, once per image.
 			Digest string `json:"digest"`
+			// Set by backends whose image is not a single file next to this record.
+			SizeBytes int64 `json:"sizeBytes"`
 		}
 		if err := json.Unmarshal(raw, &rec); err != nil || rec.Ref == "" {
+			continue
+		}
+
+		if rec.SizeBytes > 0 {
+			// An overlaybd image: layer files shared with other images, so there is
+			// nothing here to stat and the writer recorded the size instead.
+			out[rec.Ref] = CachedImage{SizeBytes: rec.SizeBytes, Digest: rec.Digest}
 			continue
 		}
 
 		base := strings.TrimSuffix(e.Name(), refSuffix)
 		info, err := os.Stat(filepath.Join(imageDir, base+imageSuffix))
 		if err != nil {
-			// The sidecar outlived its image; nothing is cached.
+			// The record outlived its image; nothing is cached.
 			continue
 		}
 		out[rec.Ref] = CachedImage{SizeBytes: info.Size(), Digest: rec.Digest}
@@ -147,7 +218,7 @@ func cachedImages(imageDir string) (map[string]CachedImage, error) {
 // cachedDigest reports the manifest digest an image reference resolved to when
 // it was converted, or "" if that is not recorded.
 //
-// Read from the sidecar rather than from a registry, deliberately. Re-resolving
+// Read from the metadata file rather than from a registry, deliberately. Re-resolving
 // the tag would ask what it points at now, while the question is what the local
 // file was built from -- and those differ precisely when it matters, after a tag
 // has moved. A lookup keyed on the answer from the registry would then match a
@@ -173,7 +244,7 @@ func cachedDigest(imageDir, imageRef string) (string, error) {
 		Digest string `json:"digest"`
 	}
 	if err := json.Unmarshal(raw, &rec); err != nil {
-		// A corrupt sidecar is reported: it means the image is present but its
+		// A corrupt metadata file is reported: it means the image is present but its
 		// identity is unknown, and silently treating that as "no digest" would hide
 		// a damaged cache behind a slow path that still works.
 		return "", fmt.Errorf("image: read digest for %s: %w", imageRef, err)
@@ -210,11 +281,43 @@ func cachedConfig(imageDir, imageRef string) (*Config, error) {
 	return rec.Config, nil
 }
 
+// cachedRecord reads everything the node recorded about an image, or nil if it has no
+// record.
+//
+// Whole-record rather than one field at a time, because a caller that wants the layer
+// chain wants the digest with it: the chain is only meaningful as "what this digest
+// resolved to", and reading them separately would let a reader pair a chain with a
+// digest from a later write.
+func cachedRecord(imageDir, imageRef string) (*ImageRecord, error) {
+	name, err := refToFilename(imageRef)
+	if err != nil {
+		return nil, err
+	}
+	raw, err := os.ReadFile(filepath.Join(imageDir, name+refSuffix))
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil, nil
+		}
+		return nil, err
+	}
+	var rec ImageRecord
+	if err := json.Unmarshal(raw, &rec); err != nil {
+		return nil, fmt.Errorf("image: read record for %s: %w", imageRef, err)
+	}
+	if rec.Ref == "" {
+		// A record naming no reference is not usable, and is reported rather than
+		// returned empty: it means the file is present but damaged, which a caller
+		// treating nil as "not cached" would silently convert into a re-pull.
+		return nil, fmt.Errorf("image: record for %s names no reference", imageRef)
+	}
+	return &rec, nil
+}
+
 // cachedRefs caches the image listing so a heartbeat, which fires every few
 // seconds, does not scan the directory each time.
 //
 // Staleness is detected from the directory's modification time rather than by
-// explicit invalidation. Publishing an image writes a sidecar into this
+// explicit invalidation. Publishing an image writes a metadata file into this
 // directory, which updates its mtime — so every path that adds an image
 // invalidates the cache by construction. The earlier design had each writer call
 // an invalidate method, and the build path was added without one: a built image

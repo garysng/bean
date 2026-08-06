@@ -80,6 +80,52 @@ func TestObjectRoundTrip(t *testing.T) {
 	}
 }
 
+// TestKeyWithColonRoundTrips signs and reads back a key shaped like an OCI
+// digest. The colon has to reach the server as %3A in the canonical request but
+// stay a colon in the stored key, since overlaybd asks for the digest verbatim.
+// A unit test can only check the canonical form we produce; this checks it is
+// the form the server agrees with.
+func TestKeyWithColonRoundTrips(t *testing.T) {
+	c, bucket := testClient(t)
+	ctx := context.Background()
+	key := "blobs/sha256:e2f5b9a1c3d47e8f"
+	body := []byte("sealed overlaybd layer")
+
+	if err := c.PutObject(ctx, bucket, key, body); err != nil {
+		t.Fatalf("put: %v", err)
+	}
+	t.Cleanup(func() { _ = c.DeleteObject(ctx, bucket, key) })
+
+	r, err := c.GetObject(ctx, bucket, key)
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	got, err := io.ReadAll(r)
+	r.Close()
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if !bytes.Equal(got, body) {
+		t.Errorf("read back %q, want %q", got, body)
+	}
+
+	// The key must be listed under its unencoded name, or the digest overlaybd
+	// requests would not resolve.
+	objs, err := c.ListObjects(ctx, bucket, "blobs/")
+	if err != nil {
+		t.Fatalf("list: %v", err)
+	}
+	found := false
+	for _, o := range objs {
+		if o.Key == key {
+			found = true
+		}
+	}
+	if !found {
+		t.Errorf("listing does not contain %q: %v", key, objs)
+	}
+}
+
 // TestGetRangeReadsSlice covers the read pattern lazy block loading depends
 // on: fetching an interior slice rather than the whole object.
 func TestGetRangeReadsSlice(t *testing.T) {
