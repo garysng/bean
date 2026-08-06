@@ -338,15 +338,27 @@ SELECT node_id, cpu, mem_mib, disk_mib, gpu FROM reservations WHERE sandbox_id=?
 		return err
 	}
 
-	// MAX(...) guards against a committed value drifting negative if a
-	// node row were ever rewritten out from under a reservation.
+	// Clamped per column so a committed value cannot drift negative if a node row were
+	// ever rewritten out from under a reservation. A negative commitment is worse than a
+	// leaked one: it makes a node advertise more capacity than it has.
+	//
+	// CASE rather than MAX(column - ?, 0). The two-argument scalar MAX is a SQLite
+	// extension; Postgres reserves MAX for aggregation and answers "function max(bigint,
+	// integer) does not exist", so this statement could never run there. GREATEST is the
+	// Postgres spelling and would need a dialect method for one construct -- CASE is
+	// standard on both and says the same thing.
+	//
+	// This went unnoticed because no requirement called Release. The suite passed 7/7 on
+	// Postgres while the two methods that give capacity back had never executed on it,
+	// which is why ReleaseReturnsCapacity now exists.
 	if _, err := tx.Exec(`
 UPDATE nodes SET
-  cpu_committed = MAX(cpu_committed - ?, 0),
-  mem_committed = MAX(mem_committed - ?, 0),
-  disk_committed = MAX(disk_committed - ?, 0),
-  gpu_committed = MAX(gpu_committed - ?, 0)
-WHERE id = ?`, cpu, mem, disk, gpu, nodeID); err != nil {
+  cpu_committed = CASE WHEN cpu_committed - ? < 0 THEN 0 ELSE cpu_committed - ? END,
+  mem_committed = CASE WHEN mem_committed - ? < 0 THEN 0 ELSE mem_committed - ? END,
+  disk_committed = CASE WHEN disk_committed - ? < 0 THEN 0 ELSE disk_committed - ? END,
+  gpu_committed = CASE WHEN gpu_committed - ? < 0 THEN 0 ELSE gpu_committed - ? END
+WHERE id = ?`,
+		cpu, cpu, mem, mem, disk, disk, gpu, gpu, nodeID); err != nil {
 		return err
 	}
 	if _, err := tx.Exec(`DELETE FROM reservations WHERE sandbox_id=?`, sandboxID); err != nil {
@@ -360,8 +372,11 @@ WHERE id = ?`, cpu, mem, disk, gpu, nodeID); err != nil {
 func (s *Store) FinishCreate(nodeID string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	// Clamped in the WHERE clause: the decrement is by a constant, so a condition is
+	// enough and no CASE is needed. See Release for why the two-argument MAX is gone.
 	_, err := s.exec(
-		`UPDATE nodes SET create_in_flight = MAX(create_in_flight - 1, 0) WHERE id=?`, nodeID)
+		`UPDATE nodes SET create_in_flight = create_in_flight - 1
+WHERE id=? AND create_in_flight > 0`, nodeID)
 	return err
 }
 

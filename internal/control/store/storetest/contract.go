@@ -65,6 +65,9 @@ func Run(t *testing.T, open OpenFunc) {
 	t.Run("ReserveDoesNotOversell", func(t *testing.T) {
 		reserveDoesNotOversell(t, open)
 	})
+	t.Run("ReleaseReturnsCapacity", func(t *testing.T) {
+		releaseReturnsCapacity(t, open)
+	})
 	t.Run("CiphertextSurvivesRoundTrip", func(t *testing.T) {
 		ciphertextSurvivesRoundTrip(t, open)
 	})
@@ -441,5 +444,102 @@ func ciphertextSurvivesRoundTrip(t *testing.T, open OpenFunc) {
 	}
 	if got != nil {
 		t.Error("credential survived deletion, so revoking access does not revoke it")
+	}
+}
+
+// releaseReturnsCapacity requires that a released reservation's capacity comes back.
+//
+// The suite ran seven requirements against Postgres and passed without ever calling
+// Release or FinishCreate. Both use MAX(column - ?, 0), the two-argument scalar form --
+// the same construct that had to be removed from ReleaseSnapshot because Postgres reserves
+// MAX for aggregation and answers "function max(bigint, integer) does not exist". So the
+// two methods that give capacity back were untested on the engine that cannot run them.
+//
+// The consequence is worse than a failed call: capacity is committed at Reserve and never
+// returned, so a node fills up permanently and every subsequent placement reports
+// NO_CAPACITY for resources nothing is using. A fleet would drain to zero schedulable
+// nodes over hours, and the error names capacity rather than the statement.
+//
+// Asserted as a round trip to zero rather than a successful call, since a statement that
+// updates nothing also returns no error.
+func releaseReturnsCapacity(t *testing.T, open OpenFunc) {
+	s := open(t)
+
+	if err := s.UpsertNode(&store.NodeRecord{
+		ID: "node-rel", Region: "local", State: "READY",
+		Runtimes:          []string{"fc"},
+		CPUAllocatable:    8,
+		MemoryAllocateMiB: 8192,
+		DiskAllocateMiB:   32768,
+		GPUCount:          2,
+		LastHeartbeat:     time.Now(),
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	res := &store.Reservation{
+		SandboxID: "sbx-rel", CPU: 2, MemoryMiB: 2048, DiskMiB: 8192, GPU: 1,
+	}
+	if err := s.Reserve("node-rel", res); err != nil {
+		t.Fatalf("reserve: %v", err)
+	}
+
+	// Confirmed committed first, so a Release that does nothing cannot be mistaken for a
+	// Reserve that did nothing.
+	node, err := s.GetNode("node-rel")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if node.MemoryCommitMiB != 2048 || node.GPUCommitted != 1 {
+		t.Fatalf("after reserve: mem=%d gpu=%d, want 2048 and 1",
+			node.MemoryCommitMiB, node.GPUCommitted)
+	}
+
+	if err := s.FinishCreate("node-rel"); err != nil {
+		t.Fatalf("finish create: %v", err)
+	}
+	if err := s.Release("sbx-rel"); err != nil {
+		t.Fatalf("release: %v", err)
+	}
+
+	node, err = s.GetNode("node-rel")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if node.CPUCommitted != 0 || node.MemoryCommitMiB != 0 ||
+		node.DiskCommitMiB != 0 || node.GPUCommitted != 0 {
+		t.Errorf("capacity did not come back after release: cpu=%.1f mem=%d disk=%d gpu=%d, "+
+			"want all zero. The node fills up permanently and later placements report "+
+			"NO_CAPACITY for resources nothing is using",
+			node.CPUCommitted, node.MemoryCommitMiB, node.DiskCommitMiB, node.GPUCommitted)
+	}
+	if node.CreateInFlight != 0 {
+		t.Errorf("create_in_flight is %d after FinishCreate, want 0", node.CreateInFlight)
+	}
+
+	// Idempotent by design, so cleanup paths and retries do not have to coordinate. A
+	// second release must not push a committed value negative -- which is what the
+	// clamping in these statements is for, and the reason they used MAX at all.
+	if err := s.Release("sbx-rel"); err != nil {
+		t.Fatalf("second release: %v", err)
+	}
+	if err := s.FinishCreate("node-rel"); err != nil {
+		t.Fatalf("second finish create: %v", err)
+	}
+	node, err = s.GetNode("node-rel")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if node.MemoryCommitMiB < 0 || node.GPUCommitted < 0 || node.CreateInFlight < 0 {
+		t.Errorf("a repeated release drove a counter negative: mem=%d gpu=%d in_flight=%d; "+
+			"a node would then appear to have more capacity than it has",
+			node.MemoryCommitMiB, node.GPUCommitted, node.CreateInFlight)
+	}
+
+	// And the capacity is genuinely reusable, not merely reported as zero.
+	if err := s.Reserve("node-rel", &store.Reservation{
+		SandboxID: "sbx-rel-2", CPU: 2, MemoryMiB: 2048, DiskMiB: 8192, GPU: 1,
+	}); err != nil {
+		t.Errorf("reserving released capacity failed: %v", err)
 	}
 }
