@@ -243,11 +243,17 @@ func (r *Reconciler) mappings(expected map[string]bool, st *state, rep *Report) 
 		slog.Info("reclaiming orphaned device-mapper mapping",
 			logging.KeySandbox, id, "mapping", name)
 		if err := r.Host.RemoveDM(name); err != nil {
-			// Almost always a busy device, which means something still has it
-			// open — most likely a firecracker process that outlived the noded
-			// that started it. Forcing the removal here would take the device out
-			// from under a guest that is still writing to it, so the mapping stays
-			// and the operator gets told.
+			// A busy device: something still has it open, most likely a firecracker
+			// process that outlived the noded that started it. Forcing the removal
+			// here would take the device out from under a guest that is still
+			// writing to it, so the mapping stays and the operator gets told.
+			//
+			// This used to say the failure is "almost always" busy. It was not: on a
+			// 300-sandbox burst, 109 of these were "No such device or address" --
+			// the mapping had already been removed by the sandbox destroying itself
+			// concurrently. RemoveDM now reports that case as success, because
+			// marking an absent mapping alive blocks the loop device and directory
+			// behind it and turns one harmless race into two leaked resources.
 			rep.Failed[kindMapping]++
 			st.markMappingAlive(id)
 			rep.Suspect = append(rep.Suspect, fmt.Sprintf(
