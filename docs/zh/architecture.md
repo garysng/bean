@@ -56,8 +56,12 @@ AI evaluation / agent rollout 场景（如 SWE-bench 类任务）的特点：
 **已交付、不再是非目标**:pause/resume 与 snapshot 都已实装并在真 KVM 机器实测
 (full / `--no-memory` / `--base` 增量三种,见 snapshot-resume.md)。
 
-**当前真正的空白**是网络:sandbox 没有任何网络能力,连出网都没有 ——
-不是「跨节点不互通」,是「完全没有网络栈」(noded-design §5 全节未实现)。
+**网络曾是最大空白,现已建成**(network.md):每个 sandbox 有独立 namespace、tap
+与出网,元数据网段与 RFC1918 默认拒绝,沙箱内的端口可以从节点外经 bean-proxy 到达。
+全部在真实内核上验证过,包括那些拒绝规则。
+
+跨节点 sandbox 互通仍是非目标。真正缺的是**按端口的访问控制** —— 沙箱上的任何端口,
+只要能连到 proxy 就能访问(api-design.md §3.4)。
 
 ## 2. 总体架构 ⚠️
 
@@ -102,7 +106,7 @@ AI evaluation / agent rollout 场景（如 SWE-bench 类任务）的特点：
 | `api-gateway` | Go | ✅ REST + gRPC API、鉴权、配额（端口反代由 bean-proxy 承担,可合部） |
 | `scheduler` | Go | 节点选择（镜像亲和 + 资源 bin-packing）、租约管理——**control plane 逻辑模块**（`internal/control/scheduler`,与 bean-api 同进程:调度决策与事务扣量、指令下发需原子完成;成为瓶颈或需选主时再拆） |
 | `image-service` | Go | 镜像元数据索引、格式转换编排、prewarm、S3 blob GC（control plane 逻辑模块，P0–P2 内嵌 bean-api） |
-| `bean-proxy` | Go | 📐 **未实现**,`cmd/` 下没有这个二进制。端口暴露反向代理:通配域名 TLS、路由到 noded → agent。依赖网络栈,而网络栈也未实现 |
+| `bean-proxy` | Go | ✅ 进入 sandbox 的反向代理。从 Host 读 `{port}-{sandbox}`,查出沙箱所在节点后转发。用户暴露的端口和 agent 自己的接口走同一条路——端口暴露和数据面是一个机制而非两个。不做用户认证(外部层负责,见 A7),拒绝绑公网地址。TLS 与 DNS 属于托管层,不在 bean 内 |
 | `noded` | Go | 节点 daemon：sandbox 生命周期、网络、镜像缓存、卷挂载、健康上报 |
 | `beand` | Go（静态编译） | sandbox 内 PID1：exec、PTY、文件读写、端口转发 |
 | `sdk-python` | Python | evaluation/rollout 侧主 SDK |
@@ -205,10 +209,17 @@ disk-diff 直接取宿主 overlaybd 可写层、guest 内零 union 复杂度。
 
 选 overlaybd（块级，DADI/阿里，AgentENV 已在 FC 场景验证）而非 Nydus（文件级）的关键原因：**块设备链路同时服务容器档（overlaybd-snapshotter → overlayfs）与 microVM 档（virtio-blk 直挂 guest），一条镜像链路通吃全部 runtime 档位**；Nydus 的文件系统语义进不了 microVM，FC 档需另走 virtiofs（FC 支持弱）。Nydus 保留为容器档备选。
 
-热状态（sandbox 元数据、租约、调度状态）落关系库,不进 S3。⚠️ **当前是 SQLite**
-(`modernc.org/sqlite`,纯 Go 无 cgo,`SetMaxOpenConns(1)` 单写)。**没有 store 接口** ——
-调用方持有的是具体类型 `*store.Store`;被收住的是 SQL 本身,只出现在
-`internal/control/store` 包内。Postgres 尚未实现 —— 多副本控制面需要它,单机部署不需要。
+热状态（sandbox 元数据、租约、调度状态）落关系库,不进 S3。引擎由 `bean-api --postgres`
+是否给出决定:SQLite(`modernc.org/sqlite`,纯 Go 无 cgo,`SetMaxOpenConns(1)` 单写)
+适合单机;多副本控制面需要 Postgres —— SQLite 是一个文件,两个副本没法共享它。
+
+第二个引擎是一层方言,不是第二套实现:一套用 `?` 写的语句,按引擎改写。这个选择基于实测
+(103 处占位符加少数 DDL 构造,八条 `ON CONFLICT` 全部原样可移植),而不是基于口味 ——
+两套必须保持一致的 SQL、再配一个只能事后告诉你哪一套漂了的套件,是更糟的处境。
+
+真正让换引擎成立的不是接口,而是原子性放在哪里。每个操作的条件都在它自己的语句里,
+由数据库裁决而不是进程内的锁;store 里已经没有任何 mutex。进程内的锁本来就无法为
+第二个副本的写入定序,而它还在的时候掩盖了一个真实的丢更新 bug。
 
 ### D5. Agent 注入：init/PID1 override（不进用户镜像）✅
 
@@ -435,7 +446,7 @@ bean/
 │   ├── bean-api/           ✅ gateway（内嵌 scheduler / image / snapshot 模块）
 │   ├── noded/              ✅ node daemon
 │   ├── beand/              ✅ sandbox 内 agent
-│   └── bean-proxy/         📐 未实现
+│   └── bean-proxy/         ✅ 进入 sandbox 的反向代理(按 Host 路由)
 ├── internal/
 │   ├── control/            ✅ api / scheduler / store / snapshot / s3
 │   ├── node/               ✅ manager / runtime / image / vsock（无网络模块）

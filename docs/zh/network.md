@@ -160,10 +160,16 @@ netns 内:  POSTROUTING -s 172.31.0.0/30 -o veth-in -j MASQUERADE
 误删是灾难性的。所以每条规则按 `-s <本 sandbox 的 /30>` 精确匹配,
 删除时用同样的参数 `-D` —— 不用 `-F`,永远不用。
 
-**入网(DNAT)不做。** eval 任务需要的是出网(`pip install`、`git clone`),
-不是被外部访问。要暴露端口就是 `bean-proxy` 那条路
-(architecture.md),经过控制面而不是给每个 sandbox 一个宿主端口 ——
-后者会让端口分配成为另一个需要在重启后重建的池。
+**没有 DNAT,入网照样通。** 沙箱内的端口可以从节点外到达,但不是靠改写目的地址:
+noded 进入该沙箱的 namespace 后从里面发起连接,所以 guest 地址从头到尾不需要在
+别处可路由。
+
+这个区别省掉了一笔代价。DNAT 需要「每沙箱每暴露端口一条规则」加一个宿主端口池,
+而池就是重启后要重建的东西 —— 正是本设计想避免的。进 namespace 两者都不需要:
+guest 地址在每个沙箱里都一样,靠 namespace 区分。
+
+路径是 `bean-proxy` → noded 的转发端口 → namespace → `172.31.0.2:{port}`,
+`{port}` 从 Host 头读出。见 api-design.md §6。
 
 ## 6. DNS 📐
 

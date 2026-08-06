@@ -1,7 +1,11 @@
 package store
 
 import (
+	"errors"
+	"fmt"
 	"path/filepath"
+	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -196,5 +200,180 @@ func TestListEventsEmpty(t *testing.T) {
 func TestOpenInvalidPath(t *testing.T) {
 	if _, err := Open("/nonexistent-dir-xyz/sub/test.db"); err == nil {
 		t.Error("expected error opening store in a missing directory")
+	}
+}
+
+func TestOpenReadOnlyWorksWhileTheWriterHoldsTheFile(t *testing.T) {
+	// The case bean-proxy needs: two processes, one writing and one reading. Calling
+	// Open from the reader failed with "database is locked (SQLITE_BUSY)" and the
+	// proxy never started, because Open runs migrate() -- DDL against a file another
+	// process owns.
+	path := filepath.Join(t.TempDir(), "bean.db")
+	writer, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer writer.Close()
+
+	if err := writer.PutSandbox(&Sandbox{ID: "sbx_ro", State: SandboxRunning,
+		NodeID: "node-1"}); err != nil {
+		t.Fatalf("write: %v", err)
+	}
+
+	reader, err := OpenReadOnly(path)
+	if err != nil {
+		t.Fatalf("OpenReadOnly while the writer is open: %v", err)
+	}
+	defer reader.Close()
+
+	got, err := reader.GetSandbox("sbx_ro")
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	if got == nil || got.NodeID != "node-1" {
+		t.Fatalf("read back %+v, want the record the writer stored", got)
+	}
+
+	// And a write through the read-only handle must fail, rather than making the
+	// proxy a second writer to the placement ledger.
+	if err := reader.PutSandbox(&Sandbox{ID: "sbx_forbidden"}); err == nil {
+		t.Fatal("a write succeeded through the read-only handle")
+	}
+
+	// The writer keeps working with a reader attached, which is what WAL buys.
+	if err := writer.PutSandbox(&Sandbox{ID: "sbx_after", State: SandboxRunning}); err != nil {
+		t.Fatalf("writer blocked while a reader was attached: %v", err)
+	}
+}
+
+func TestOpenSetsWALSoAReaderDoesNotBlockTheWriter(t *testing.T) {
+	// OpenReadOnly refuses a database that is not in WAL, so this pins the writer's
+	// side of that contract: without it the refusal would be correct and every
+	// deployment would hit it.
+	path := filepath.Join(t.TempDir(), "bean.db")
+	st, err := Open(path)
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	defer st.Close()
+
+	var mode string
+	if err := st.db.QueryRow("PRAGMA journal_mode").Scan(&mode); err != nil {
+		t.Fatalf("read journal_mode: %v", err)
+	}
+	if !strings.EqualFold(mode, "wal") {
+		t.Fatalf("journal_mode is %q, want wal: in rollback-journal mode a reader and "+
+			"the writer lock each other out, which presents as bean-proxy stalling "+
+			"whenever a sandbox is created", mode)
+	}
+}
+
+// TestConcurrentAcquiresCountEveryReference is the test a process-local mutex made
+// impossible to write honestly.
+//
+// A mutex serialises every caller inside one Store, so no arrangement of goroutines
+// through a single handle could fail -- and a concurrency test that cannot fail proves
+// nothing. Two Store instances over one file are two callers the mutex cannot see,
+// which is exactly what two bean-api replicas are.
+//
+// Measured first, so the test is known to discriminate: two connections each doing an
+// unguarded read-then-write to the same row lost 194 of 200 updates. SQLite does not
+// serialise this for us.
+//
+// The invariant: N successful acquires must leave ref_count at N. A lost increment
+// means a restore holds a reference the database does not know about, and the snapshot
+// becomes deletable while it is being read.
+func TestConcurrentAcquiresCountEveryReference(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "acquire.db")
+	stores := make([]*Store, 4)
+	for i := range stores {
+		st, err := Open(path)
+		if err != nil {
+			t.Fatalf("open %d: %v", i, err)
+		}
+		defer st.Close()
+		stores[i] = st
+	}
+
+	const rounds = 20
+	for r := 0; r < rounds; r++ {
+		id := fmt.Sprintf("snap-acq-%d", r)
+		if err := stores[0].PutSnapshot(&Snapshot{
+			ID: id, SandboxID: "sbx", State: SnapshotReady,
+		}); err != nil {
+			t.Fatalf("seed: %v", err)
+		}
+
+		var wg sync.WaitGroup
+		var mu sync.Mutex
+		ok := 0
+		start := make(chan struct{})
+		for _, st := range stores {
+			s := st
+			wg.Add(1)
+			go func() {
+				defer wg.Done()
+				<-start
+				if _, err := s.AcquireSnapshot(id); err == nil {
+					mu.Lock()
+					ok++
+					mu.Unlock()
+				}
+			}()
+		}
+		close(start)
+		wg.Wait()
+
+		snap, err := stores[0].GetSnapshot(id)
+		if err != nil {
+			t.Fatalf("read back: %v", err)
+		}
+		if snap == nil {
+			t.Fatalf("%s vanished", id)
+		}
+		if snap.RefCount != ok {
+			t.Fatalf("%s: %d acquires reported success but ref_count is %d; a restore "+
+				"holds a reference the database does not know about, so the snapshot "+
+				"can be deleted while it is being read", id, ok, snap.RefCount)
+		}
+	}
+}
+
+// TestAcquireRefusesWhatDeleteRemoved pins the pair from the other side: once a
+// snapshot is gone, an acquire must fail rather than resurrect a reference to it.
+func TestAcquireRefusesWhatDeleteRemoved(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "pair.db")
+	a, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer a.Close()
+	b, err := Open(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+
+	if err := a.PutSnapshot(&Snapshot{ID: "s1", SandboxID: "sbx", State: SnapshotReady}); err != nil {
+		t.Fatal(err)
+	}
+	if err := b.DeleteSnapshot("s1"); err != nil {
+		t.Fatalf("delete through the second store: %v", err)
+	}
+	if _, err := a.AcquireSnapshot("s1"); err == nil {
+		t.Fatal("acquired a snapshot the other store deleted")
+	}
+
+	// And the converse: a held reference must block the delete, across stores.
+	if err := a.PutSnapshot(&Snapshot{ID: "s2", SandboxID: "sbx", State: SnapshotReady}); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.AcquireSnapshot("s2"); err != nil {
+		t.Fatalf("acquire: %v", err)
+	}
+	if err := b.DeleteSnapshot("s2"); err == nil {
+		t.Fatal("deleted a snapshot another store holds a reference to")
+	} else if !errors.Is(err, ErrInUse) {
+		t.Fatalf("got %v, want ErrInUse so the API answers 409", err)
 	}
 }

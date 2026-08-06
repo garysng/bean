@@ -26,6 +26,7 @@ import (
 	"github.com/garysng/bean/internal/node/network"
 	"github.com/garysng/bean/internal/node/runtime"
 	"github.com/garysng/bean/internal/obs"
+	"github.com/garysng/bean/internal/sbxtoken"
 )
 
 // Provisioner assigns and removes one sandbox's networking.
@@ -53,6 +54,22 @@ type Sandbox struct {
 	conn         *grpc.ClientConn
 	lastActivity time.Time
 	inFlight     int // data-plane requests in progress; idle sweep skips these
+
+	// net is the addressing this sandbox was given, or nil on a node without
+	// networking. Retained because reaching any port inside the guest needs both
+	// halves -- the namespace and the address -- and the address alone is the same
+	// for every sandbox on the node.
+	net *network.Layout
+
+	// agentToken is the plaintext credential this node presents to the sandbox's
+	// agent. Only its hash is given to the guest, so this field is the only copy
+	// that can actually authenticate a call.
+	//
+	// Held in memory and deliberately not persisted: it guards a running agent, and
+	// a sandbox that outlives this process is reconciled or dropped rather than
+	// re-adopted. Writing it down would create a credential with a longer life than
+	// the thing it protects.
+	agentToken string
 }
 
 // Manager owns all sandboxes on this node.
@@ -186,6 +203,27 @@ func (m *Manager) Create(ctx context.Context, spec *nodev1.SandboxSpec) (*Sandbo
 			return nil, fmt.Errorf("sandbox %s: %w", spec.SandboxId, err)
 		}
 		rspec.Network = layout
+
+		// Minted here, inside the networking branch, because the credential exists to
+		// guard an agent that the sandbox itself can dial. Without networking the
+		// agent is on a Unix socket outside the guest's mount namespace and nothing
+		// inside can reach it, so a token there would be ceremony -- and issuing one
+		// anyway would mean the "no credential configured" state stopped being a
+		// signal that something is wrong.
+		token, terr := sbxtoken.New()
+		if terr != nil {
+			m.dropFailed(spec.SandboxId)
+			return nil, fmt.Errorf("sandbox %s: mint agent token: %w", spec.SandboxId, terr)
+		}
+		// The plaintext stays on the node and the guest is given only the hash, which
+		// is what makes the value in MMDS safe for the sandbox's own root to read.
+		rspec.AgentTokenHash = sbxtoken.Hash(token)
+		m.mu.Lock()
+		if cur, ok := m.sandboxes[spec.SandboxId]; ok {
+			cur.agentToken = token
+			cur.net = layout
+		}
+		m.mu.Unlock()
 	}
 
 	rtStart := time.Now()
@@ -1139,6 +1177,24 @@ func (m *Manager) ForkSandbox(ctx context.Context, spec *nodev1.SandboxSpec,
 			return nil, fmt.Errorf("sandbox %s: %w", spec.SandboxId, err)
 		}
 		rspec.Network = layout
+
+		// A fresh token, not the source's. This is the reason /mmds is rewritten after
+		// a restore rather than carried in the snapshot: a fork is a different sandbox
+		// with different contents and possibly a different owner, and letting it accept
+		// its ancestor's credential would make one leaked token good for every sandbox
+		// descended from that checkpoint.
+		token, terr := sbxtoken.New()
+		if terr != nil {
+			m.dropFailed(spec.SandboxId)
+			return nil, fmt.Errorf("sandbox %s: mint agent token: %w", spec.SandboxId, terr)
+		}
+		rspec.AgentTokenHash = sbxtoken.Hash(token)
+		m.mu.Lock()
+		if cur, ok := m.sandboxes[spec.SandboxId]; ok {
+			cur.agentToken = token
+			cur.net = layout
+		}
+		m.mu.Unlock()
 	}
 
 	// Unpacking the bundle and loading it into a VMM are measured apart from
@@ -1189,6 +1245,24 @@ func (m *Manager) dialAgent(ctx context.Context, id string, handle *runtime.Hand
 // touching the sandbox record. Reconnecting to a healthy sandbox must not
 // destroy it on failure, which is why this is separate from dialAgent.
 func (m *Manager) connectAgent(ctx context.Context, handle *runtime.Handle) (*grpc.ClientConn, error) {
+	// The credential is read per call rather than captured now, because a restore
+	// mints a new one for an existing record: a value bound at dial time would be
+	// the pre-fork token, and the agent would reject every call on a resumed
+	// sandbox. Reading through the record means the connection always presents
+	// whatever the guest was last told to expect.
+	//
+	// An interceptor rather than each call site remembering. There are six
+	// data-plane methods plus health checks, and a credential that has to be
+	// attached by hand is one that will be missing from whichever call is added
+	// next -- and the symptom would be a permission error blamed on the agent.
+	tokenFor := func() string {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		if sb, ok := m.sandboxes[handle.SandboxID]; ok {
+			return sb.agentToken
+		}
+		return ""
+	}
 	// The address is handed to the dialer verbatim rather than parsed by gRPC:
 	// a vsock target carries a socket path and a port, which gRPC's name
 	// resolution rejects as "too many colons". passthrough turns off that
@@ -1219,8 +1293,20 @@ func (m *Manager) connectAgent(ctx context.Context, handle *runtime.Handle) (*gr
 		// spans. Injecting the trace context anyway means the agent's own logs
 		// carry the same trace id as the surrounding spans, which is what makes
 		// "the slow part was inside the guest" a followable claim.
-		grpc.WithChainUnaryInterceptor(obs.UnaryClientTrace()),
-		grpc.WithChainStreamInterceptor(obs.StreamClientTrace()))
+		grpc.WithChainUnaryInterceptor(obs.UnaryClientTrace(),
+			func(ctx context.Context, method string, req, reply any,
+				cc *grpc.ClientConn, invoker grpc.UnaryInvoker,
+				opts ...grpc.CallOption) error {
+				return invoker(sbxtoken.WithAgentToken(ctx, tokenFor()), method, req,
+					reply, cc, opts...)
+			}),
+		grpc.WithChainStreamInterceptor(obs.StreamClientTrace(),
+			func(ctx context.Context, desc *grpc.StreamDesc, cc *grpc.ClientConn,
+				method string, streamer grpc.Streamer,
+				opts ...grpc.CallOption) (grpc.ClientStream, error) {
+				return streamer(sbxtoken.WithAgentToken(ctx, tokenFor()), desc, cc,
+					method, opts...)
+			}))
 	if err != nil {
 		return nil, fmt.Errorf("agent dial: %w", err)
 	}
@@ -1237,6 +1323,16 @@ func (m *Manager) connectAgent(ctx context.Context, handle *runtime.Handle) (*gr
 	m.observePhase(ctx, "agent_ready", time.Since(healthStart))
 	if err != nil {
 		conn.Close()
+		// A timeout here names the symptom and no cause. Every way a guest can fail
+		// to finish booting produces this same error -- a kernel that found no root
+		// device, an agent that rejected its own arguments, a misconfigured vsock, or
+		// a sandbox that is merely slow -- and the evidence that separates them is in
+		// the guest console, which the cleanup below is about to delete.
+		if d, ok := m.rt.(runtime.BootDiagnoser); ok {
+			if tail := d.BootLogTail(handle.SandboxID, 6); tail != "" {
+				return nil, fmt.Errorf("agent health: %w (guest console: %s)", err, tail)
+			}
+		}
 		return nil, fmt.Errorf("agent health: %w", err)
 	}
 	return conn, nil

@@ -21,6 +21,9 @@ import (
 	"github.com/garysng/bean/internal/beand"
 	"github.com/garysng/bean/internal/control/s3"
 	nodev1 "github.com/garysng/bean/internal/gen/bean/node/v1"
+	"golang.org/x/net/http2"
+	"golang.org/x/net/http2/h2c"
+
 	"github.com/garysng/bean/internal/logging"
 	"github.com/garysng/bean/internal/node"
 	"github.com/garysng/bean/internal/node/image"
@@ -51,6 +54,13 @@ func main() {
 	diskAlloc := flag.Int64("disk-mib", 102400, "allocatable sandbox disk (MiB)")
 	labelsFlag := flag.String("labels", "", "comma-separated node labels, e.g. pool=nvme,zone=a")
 	metricsAddr := flag.String("metrics", "", "HTTP address for /metrics (empty = disabled)")
+	sandboxPortAddr := flag.String("sandbox-port-listen", "",
+		"HTTP address serving Host-routed access into sandboxes, as "+
+			"{port}-{sandboxID}.<anything>. One port covers both the agent's interface "+
+			"and any port a user's process listens on. Empty disables it. Callers must "+
+			"present --node-token, the same secret the gRPC surface requires; what it "+
+			"does not do is distinguish one user from another, so it is reached by "+
+			"bean-proxy rather than by users directly, and a public bind is refused")
 	fcBin := flag.String("firecracker-bin", "firecracker", "Firecracker binary (fc runtime)")
 	fcKernel := flag.String("kernel", "/var/lib/bean/assets/vmlinux",
 		"guest kernel image (fc runtime)")
@@ -101,6 +111,29 @@ func main() {
 			"only with measurements, and only with --fc-cgroups on: without a cgroup "+
 			"around the VMM there is nothing in the kernel enforcing fairness when "+
 			"the host comes under pressure")
+	fcPidNS := flag.Bool("fc-pid-namespace", true,
+		"give each sandbox's VMM its own PID namespace, so it cannot see or signal "+
+			"any process on the host (fc runtime). Firecracker talks to noded over a "+
+			"socket and to the guest over KVM, and spawns no children, so it has no "+
+			"use for the host's process table. Applied as a clone flag during the "+
+			"fork, so no wrapper process appears and destroy stays reliable. On by "+
+			"default: measured at no cost, and verified by namespace inode on a "+
+			"running VMM. Pass =false to turn it off")
+	fcKillOnExit := flag.Bool("fc-kill-on-exit", true,
+		"have the kernel SIGKILL a sandbox's VMM if noded dies (fc runtime). "+
+			"Reconciliation already reclaims such a VMM, but only at the next startup: "+
+			"until then it holds memory the scheduler has promised to something else. "+
+			"SIGKILL rather than SIGTERM because in a PID namespace the VMM is PID 1, "+
+			"and PID 1 ignores signals it has no handler for. On by default because "+
+			"this fixes a leak that was measured rather than supposed: without it, "+
+			"kill -9 on noded leaves the VMM running. Pass =false to turn it off")
+	fcMountNS := flag.Bool("fc-mount-namespace", true,
+		"give each sandbox's VMM a private mount namespace, so mounts it makes do "+
+			"not reach the host and the host's later mounts do not reach it (fc "+
+			"runtime). On by default, but verified on a guest rather than assumed: "+
+			"bean's rootfs is a device-mapper node under /dev rather than a file, and "+
+			"the concern was that it would stop being openable in here. It does not. "+
+			"Pass =false to turn it off")
 	fcCgroups := flag.Bool("fc-cgroups", false,
 		"put each sandbox's VMM in a cgroup with a memory ceiling, CPU quota and "+
 			"pid cap from its own spec (fc runtime). Off by default because the "+
@@ -251,6 +284,32 @@ func main() {
 		log.Fatalf("refusing to listen on %s without --node-token (or BEAN_NODE_TOKEN)", *listen)
 	}
 
+	// The forwarding port requires the node token, but that distinguishes the cluster
+	// from everyone else -- not one user from another. Whoever holds it reaches every
+	// sandbox on this node, including the agent's own interface, which runs commands
+	// as root.
+	//
+	// Two guards, and the second is the one that matters more.
+	if *sandboxPortAddr != "" && *nodeToken == "" && !isLoopback(*sandboxPortAddr) {
+		// Off-loopback without a token is the same refusal the gRPC listener makes,
+		// and for the same reason: with no credential, network position is the only
+		// authentication, and a private network is not one.
+		log.Fatalf("refusing to serve --sandbox-port-listen on %s without "+
+			"--node-token: with no credential, anything on that network can reach "+
+			"every sandbox on this node", *sandboxPortAddr)
+	}
+	// And never on a public address, token or not. A shared cluster secret is not
+	// something to expose to the internet, and the failure is silent -- the port
+	// works perfectly bound to 0.0.0.0, and nothing surfaces until someone else is on
+	// the network. A private address is permitted because that is where bean-proxy
+	// reaches it in a real deployment; requiring loopback would rule out multi-node.
+	if *sandboxPortAddr != "" && isPubliclyRoutable(*sandboxPortAddr) {
+		log.Fatalf("refusing to serve --sandbox-port-listen on %s: it grants access "+
+			"to every sandbox on this node and applies no user authorization, so it "+
+			"must not be reachable from a public network. Bind it to loopback or a "+
+			"private address and put bean-proxy in front", *sandboxPortAddr)
+	}
+
 	// A misspelled template must stop the node rather than fall back to none:
 	// the fallback silently produces snapshots bound to this host's CPU, and
 	// nothing surfaces that until a restore elsewhere misbehaves.
@@ -396,24 +455,27 @@ func main() {
 			log.Fatalf("--fc-overlaybd-s3-endpoint: %v", err)
 		}
 		fcRT, err := runtime.NewFCTier(runtime.FCTierConfig{
-			FirecrackerBin:  *fcBin,
-			KernelPath:      *fcKernel,
-			AgentDiskPath:   *fcAgentDisk,
-			BaseDir:         *baseDir,
-			ImageDir:        *imageDir,
-			DefaultDiskMiB:  *defaultDiskMiB,
-			BuildkitAddr:    *buildkitAddr,
-			BuildctlBin:     *buildctlBin,
-			DebugConsole:    *debugConsole,
-			CPUTemplate:     tmpl,
-			TrackDirtyPages: *trackDirtyPages,
-			SnapshotCache:   snapCache,
-			GuestDNS:        *guestDNS,
-			Cgroups:         *fcCgroups,
-			WarmSnapshots:   *fcWarmSnapshots,
-			WarmEviction:    warmEvict,
-			VMMUid:          *fcVMMUid,
-			VMMGid:          *fcVMMGid,
+			FirecrackerBin:    *fcBin,
+			KernelPath:        *fcKernel,
+			AgentDiskPath:     *fcAgentDisk,
+			BaseDir:           *baseDir,
+			ImageDir:          *imageDir,
+			DefaultDiskMiB:    *defaultDiskMiB,
+			BuildkitAddr:      *buildkitAddr,
+			BuildctlBin:       *buildctlBin,
+			DebugConsole:      *debugConsole,
+			CPUTemplate:       tmpl,
+			TrackDirtyPages:   *trackDirtyPages,
+			SnapshotCache:     snapCache,
+			GuestDNS:          *guestDNS,
+			Cgroups:           *fcCgroups,
+			VMMPidNamespace:   *fcPidNS,
+			VMMKillOnExit:     *fcKillOnExit,
+			VMMMountNamespace: *fcMountNS,
+			WarmSnapshots:     *fcWarmSnapshots,
+			WarmEviction:      warmEvict,
+			VMMUid:            *fcVMMUid,
+			VMMGid:            *fcVMMGid,
 
 			Overlaybd:         *fcOverlaybd,
 			OverlaybdLazyPull: *fcOverlaybdLazyPull,
@@ -505,6 +567,35 @@ func main() {
 		slog.Info("metrics listening", "addr", *metricsAddr)
 	}
 
+	// Host-routed forwarding into sandboxes: one port serving both the agent's
+	// interface and any port a user's process listens on.
+	if *sandboxPortAddr != "" {
+		fwdSrv := &http.Server{
+			Addr: *sandboxPortAddr,
+			// Wrapped for cleartext HTTP/2, because gRPC to the agent's port arrives
+			// here as h2c and a plain http.Server answers an HTTP/2 preface with
+			// "HTTP/1.1 400 Bad Request" -- which a gRPC client reports as a bad
+			// server preface, naming neither the port nor the protocol. Measured, not
+			// anticipated: sending a preface by hand returned exactly that 400.
+			//
+			// Both halves are needed and they are separate. This is the inbound side;
+			// the forwarder's own transport is the outbound side. Fixing only one
+			// leaves gRPC broken with a different error.
+			Handler: h2c.NewHandler(node.NewPortForwarder(mgr, *nodeToken), &http2.Server{}),
+			// Deliberately no write or read deadline beyond the headers. What comes
+			// through here is a user's own application: a long poll, a websocket
+			// upgrade, a slow download. A timeout appropriate for an API call would cut
+			// those off, and the symptom would be blamed on their code.
+			ReadHeaderTimeout: 10 * time.Second,
+		}
+		go func() {
+			if err := fwdSrv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+				slog.Error("sandbox port server stopped", logging.KeyError, err)
+			}
+		}()
+		slog.Info("sandbox port forwarding listening", "addr", *sandboxPortAddr)
+	}
+
 	// Multi-node mode: dial out to the control plane, register, then keep
 	// the heartbeat alive. Nodes need no inbound path for this.
 	if *controlPlane != "" {
@@ -531,6 +622,10 @@ func main() {
 				MaxCreates:           int32(maxCreates),
 			})
 		reg.Advertise = adv
+		// Advertised only when the listener exists. A node without it cannot serve
+		// port exposure, and the proxy needs to be able to say that rather than dial
+		// a port nothing is on.
+		reg.SandboxPortAddr = *sandboxPortAddr
 
 		// Host reconciliation is enabled only for the microVM tier, and only in
 		// multi-node mode. It is deliberately not a standalone startup step: what
@@ -646,6 +741,38 @@ func isLoopback(addr string) bool {
 	}
 	ip := net.ParseIP(strings.Trim(host, "[]"))
 	return ip != nil && ip.IsLoopback()
+}
+
+// isPubliclyRoutable reports whether addr binds somewhere reachable from outside the
+// operator's own network.
+//
+// Conservative in the direction that matters: an unparseable address, or a wildcard
+// bind, counts as public. A wildcard is the case worth naming -- 0.0.0.0 is what a
+// container image or a hastily written unit file uses, it works perfectly in testing,
+// and it puts an unauthenticated path into every sandbox on whatever network the host
+// happens to sit on.
+func isPubliclyRoutable(addr string) bool {
+	host, _, err := net.SplitHostPort(addr)
+	if err != nil {
+		return true
+	}
+	if host == "" {
+		// ":8080" -- every interface, including any public one.
+		return true
+	}
+	if host == "localhost" {
+		return false
+	}
+	ip := net.ParseIP(strings.Trim(host, "[]"))
+	if ip == nil {
+		// A hostname that has to be resolved. Refusing rather than resolving, because
+		// what it resolves to at startup is not necessarily what it resolves to later.
+		return true
+	}
+	if ip.IsUnspecified() {
+		return true
+	}
+	return !(ip.IsLoopback() || ip.IsPrivate() || ip.IsLinkLocalUnicast())
 }
 
 // derivedMaxCreates is how many creates a node with this many cores will run at

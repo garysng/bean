@@ -129,32 +129,61 @@ path-rewriting logic.
 ## 6. Every item in the cmdline ✅
 
 ```
-quiet reboot=k panic=-1 pci=off init=/bean/beand -- --listen vsock:1024 --pivot /dev/vdb
+console=ttyS0 loglevel=3 reboot=k panic=-1 pci=off ip=... init=/bean/beand -- --listen tcp:0.0.0.0:10001 --pivot /dev/vdb
 ```
 
 | Parameter | Purpose | Basis |
 |---|---|---|
-| `quiet` | do not attach the serial console | **Measured saving of 493ms** (1193ms → 700ms). 8250 UART writes are synchronous, and the kernel waits on hardware for every line it prints |
+| `console=ttyS0 loglevel=3` | attach the console, carry errors only | Was `quiet`, which measured 493ms cheaper (1193ms → 700ms) than a full console. But `quiet` attaches **no console device at all**, so a guest that dies during boot writes its reason nowhere: measured zero explanatory lines under `quiet` against the actual cause under `console=ttyS0`, while noded reported only "agent not healthy after 20s" either way. `loglevel=3` is KERN_ERR and above, which excludes the initialisation chatter that made a console expensive — **measured 1062-1122ms against a 1108-1119ms baseline**, so the UART cost does not appear at this level. `--debug-console` still drops the loglevel for a guest that fails before it can log an error |
 | `reboot=k` | use keyboard reset | FC has no ACPI, and this is the minimal usable reset method |
 | `panic=-1` | do not reboot on panic | A crashed guest stays inspectable instead of entering a reboot loop |
 | `pci=off` | skip PCI enumeration | FC has no PCI bus, so enumeration is pure waste |
 | `init=/bean/beand` | the agent as PID 1 | See §4 |
 | everything after `--` | arguments passed to beand | The kernel hands the part after `--` to init verbatim |
 
-**The trade-off between `quiet` and debuggability**: the kernel still has the 8250 driver
-compiled in — `--debug-console` just adds `console=ttyS0` back. A failed boot has no other
-source of evidence, so that capability cannot be given up, but it should not cost 493ms on every
-boot. This one is learned from e2b (in its `fc-kernels` config `CONFIG_SERIAL_8250=y` is on).
+**How the console trade-off was resolved.** The original reasoning — a failed boot has no other
+source of evidence, so the capability cannot be given up, but should not cost 493ms per boot —
+was right, and the conclusion drawn from it was wrong. `quiet` was treated as "suppress the
+output", but it attaches no console device at all, so the evidence was not merely quiet, it did
+not exist.
 
-## 7. Why vsock can use constants ✅
+That was found the expensive way. noded passed the agent a flag it did not recognise, the agent
+exited, the guest panicked with "Attempted to kill init!", and what noded reported was "agent not
+healthy after 20s". The cause was one line the guest would have written had there been anywhere
+to write it. Worse, the console log did hold Firecracker's own output — which describes the VMM's
+reaction and reads like a hardware fault (`MissingAddressRange`), and cost real time before it
+was identified as noise. Misleading evidence is worse than none.
+
+The resolution is a loglevel rather than a switch: the console is attached, errors get through,
+initialisation chatter does not, and the measured cost is inside the noise. `--debug-console`
+remains for a guest that fails before it can log an error. The 8250 driver is compiled in either
+way, as in e2b's `fc-kernels` config (`CONFIG_SERIAL_8250=y`).
+
+## 7. Why the agent's address can be a constant ✅
 
 ```go
-const agentVsockPort = 1024
+const agentVsockPort = 1024   // a sandbox with no networking
 const guestCID = 3
+const AgentGuestPort = 10001  // a networked sandbox
 ```
 
-Neither needs allocating: **every VM has its own vsock namespace**, so there is nothing to
-collide with. CID 3 is the smallest value available to a guest (0–2 are reserved by the protocol).
+None of them needs allocating: **every VM has its own vsock namespace and its own network
+namespace**, so there is nothing to collide with. CID 3 is the smallest value available to a
+guest (0–2 are reserved by the protocol).
+
+**Which one is used depends on whether the sandbox has a network**, and this is a security
+boundary rather than a preference:
+
+| | no networking | networked |
+|---|---|---|
+| Agent listens on | `vsock:1024` | `tcp:0.0.0.0:10001` |
+| Reachable from inside the sandbox | **no** — the address family is host-to-guest | **yes** |
+| What keeps the sandbox out | the kernel | a per-sandbox token (A7) |
+
+vsock is kept where it is available because a structural guarantee beats a credential. TCP is
+used where a network exists because it makes the agent *a port on the guest*, which is what
+allows one addressing scheme to cover both it and any port a user exposes — see api-design.md §6.
+`10001` is therefore reserved: a user exposing it would be exposing the agent.
 
 The benefit of constants is that the guest's cmdline does not depend on host state — which makes
 the cmdline identical before and after a snapshot, one fewer thing to line up at restore.
@@ -213,11 +242,69 @@ a fixed sleep would either waste time or be unreliable.
 
 Absent from the assembly path:
 
-- **A NIC**. There is no network device in `fcMachineConfig`, and sandboxes have no network (GitHub #21)
+- ~~**A NIC**~~. Built: the interface is registered before `InstanceStart`, the VMM runs in the sandbox's namespace, and MMDS is bound to that interface. See network.md
 - **balloon**. Memory reclamation cannot lean on it, so memory overcommit is one mechanism short (see noded-design §3.2)
-- **jailer**. firecracker is exec'd directly, with no chroot / privilege drop / device allowlist (GitHub #20)
-- **cgroup**. The FC process has no resource limit on the host
+- ~~**cgroup**~~. Built: `--fc-cgroups`, v2 only, memory ceiling and CPU quota and pid cap per sandbox
+- ~~**privilege drop**~~. Built: `--fc-vmm-uid`, the VMM is not root
+- **chroot and a device allowlist**. Still absent, and this is the remaining half of GitHub #20
 
-The first two are missing capabilities and the last two are missing defence in depth — the
-hardware virtualisation boundary is still there, but the consequence of an FC/KVM vulnerability
-is host root rather than a low-privilege user inside a chroot.
+**The consequence of an FC/KVM vulnerability is no longer host root.** It is an
+unprivileged uid, in its own pid namespace, in the sandbox's network namespace where
+egress to RFC1918 and the metadata range is dropped, under a cgroup that caps its
+memory and pids. What is missing from that list is a filesystem view of its own -- the
+VMM still sees the host's mount namespace, so it can read whatever that uid can read.
+
+The usual name for the missing piece is jailer, and it is worth saying why that is not
+simply "add jailer". jailer's `pivot_root` requires **mknod'ing** device nodes into a
+per-sandbox jail, because device nodes cannot be symlinked into a chroot -- and bean's
+rootfs is a device-mapper node. e2b gets the namespace half without any of that, by
+`unshare`ing a mount namespace and using tmpfs plus symlinks, which work where a chroot
+would not. bean already has the namespace isolation e2b gets that way, applied as clone
+flags instead of a wrapper process (see §12); the private mount namespace is
+implemented behind `--fc-mount-namespace` and left off until the dm node is verified
+inside one.
+
+## 12. Isolation without a wrapper process ✅
+
+The VMM is started with clone flags rather than under `unshare`, and the difference is
+about **which pid noded records**, not about which namespaces exist.
+
+e2b's equivalent is a three-deep command
+(`packages/orchestrator/internal/sandbox/fc/process.go`):
+
+```
+unshare -pfm --kill-child -- bash -c "mount --make-rprivate / && ... && ip netns exec <ns> firecracker"
+```
+
+That works, and `--kill-child` covers the parent dying. But `cmd.Process.Pid` names
+`unshare`, so whether signalling it reaches Firecracker depends on whether each layer
+execs in place or forks. The failure that arrangement risks is specific: **a destroy
+that reports success while the microVM keeps running**, holding memory the scheduler
+has already handed to something else.
+
+bean asks the kernel for the same namespaces during the fork instead:
+
+| | e2b | bean |
+|---|---|---|
+| pid namespace | `unshare -p` | `Cloneflags: CLONE_NEWPID` |
+| mount namespace | `unshare -m` + `mount --make-rprivate /` | `Cloneflags` + `Unshareflags: CLONE_NEWNS` |
+| parent death | `--kill-child` | `Pdeathsig: SIGKILL` |
+| network namespace | `ip netns exec` | `setns` on a pinned thread (§ netns_linux.go) |
+| processes between noded and the VMM | 2 | **0** |
+
+**Why the network namespace is the odd one out**: `CLONE_NEWNET` creates an *empty*
+namespace, and this sandbox's namespace already exists with its tap in it. Joining an
+existing namespace is `setns`, which is per-thread — so the thread is pinned, the
+namespace joined, and the fork happens on that same thread. The clone flags then apply
+during that fork, which is why both take effect at once. Measured on a live VMM by
+inode: its pid namespace differs from the host's and its network namespace is the
+sandbox's, simultaneously.
+
+**Why `Pdeathsig` is SIGKILL** and not SIGTERM: in a pid namespace the VMM is pid 1,
+and pid 1 ignores signals it has no handler for. A catchable signal would be dropped
+exactly when the sandbox most needs to die.
+
+Both are off by default. `--fc-pid-namespace` and `--fc-kill-on-exit` turn them on;
+`--fc-mount-namespace` exists but is unverified, because bean's rootfs is a
+device-mapper node rather than a file and a guest that cannot resolve it reports
+nothing but a boot that did not finish.

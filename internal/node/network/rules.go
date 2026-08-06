@@ -30,6 +30,12 @@ import (
 // the whole link-local range has no legitimate use from inside a sandbox, and
 // naming only the metadata address invites a variant address being reachable.
 //
+// Denying the whole range does not cut off Firecracker's own metadata service, which
+// the agent reads its credential from. With /mmds/config applied the VMM answers
+// 169.254.169.254 on the tap, below the forwarding path, so that request is not
+// subject to this list at all -- verified by counters on a live guest. See SetupPlan
+// for the measurement and for why an exception was written and then removed.
+//
 // IPv4 only, deliberately. The guest is given no IPv6 address anywhere in this
 // package, so the IPv6 metadata address (fd00:ec2::254) has no route out of the
 // namespace. If a guest ever gains an IPv6 address, this list stops being
@@ -183,6 +189,18 @@ func SetupPlan(l *Layout, uplink string) ([]Rule, error) {
 			Match: []string{"-s", guest, "-d", dst, "-j", "DROP"},
 		})
 	}
+	// No carve-out for Firecracker's metadata service, and the reason is measured
+	// rather than assumed. With /mmds/config applied, the VMM answers
+	// 169.254.169.254 on the tap itself, so the request never enters this chain: an
+	// ACCEPT for it sat at position 1 on a live guest across a successful read and
+	// counted zero packets, while the link-local DROP counted only a probe aimed at a
+	// different address in the range.
+	//
+	// The denial and the metadata service therefore do not conflict, and the
+	// exception would have opened a hole in a security boundary that nothing
+	// traverses. Worth recording because the first measurement suggested the
+	// opposite: a build *without* /mmds/config does have that packet forwarded and
+	// dropped, which is indistinguishable from the filter being at fault.
 	// An explicit ACCEPT so the outcome does not depend on the namespace's default
 	// policy, which a future change to how namespaces are created could alter
 	// without anyone connecting it to sandbox egress. It is appended, so it is
@@ -224,6 +242,15 @@ func SetupPlan(l *Layout, uplink string) ([]Rule, error) {
 	// Same denials as in the namespace, matched on the source the host actually
 	// sees. Inserted last so they sit ahead of everything above, including the
 	// ACCEPTs just added and whatever Docker already had.
+	//
+	// No metadata exception here, unlike the namespace side. The VMM answers
+	// 169.254.169.254 itself, inside the namespace, so that packet never arrives on
+	// the host at all -- and on a cloud instance the host's own link-local address
+	// is a real metadata service holding real credentials. Punching the same hole
+	// here would expose that, to buy nothing.
+	//
+	// The asymmetry is therefore deliberate. If a sandbox is ever observed reaching
+	// the host's metadata service, this is the comment that was wrong.
 	for _, dst := range deniedDestinations {
 		rules = append(rules, Rule{
 			Scope: ScopeHost, Table: "filter", Chain: "FORWARD", Op: OpInsert,

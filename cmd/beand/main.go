@@ -5,8 +5,11 @@ package main
 
 import (
 	"flag"
+	"fmt"
 	"log"
 	"log/slog"
+	"os"
+	"strings"
 
 	"google.golang.org/grpc"
 
@@ -29,7 +32,25 @@ func main() {
 			"127.0.0.53, which inside a guest names the guest")
 	logFormat := flag.String("log-format", "text", "log format: text|json")
 	logLevel := flag.String("log-level", "info", "log level: debug|info|warn|error")
-	flag.Parse()
+
+	// An unrecognised flag must not be fatal, because this process is PID 1 in a
+	// microVM and its arguments come from a noded that may be newer than the agent
+	// image on disk. Go's default is to print usage and exit(2); as init that is an
+	// immediate "Attempted to kill init!" panic, and the sandbox surfaces as an agent
+	// that never answered rather than as a version mismatch.
+	//
+	// Continuing is the safe direction here. The flags this could skip configure the
+	// guest's resolver and its listen address -- degradations, not privileges -- and
+	// an agent that boots without one is diagnosable, while a guest that panicked is
+	// only diagnosable if someone reads its console. A flag that ever grants
+	// something must not be added to this set.
+	flag.CommandLine.Init(os.Args[0], flag.ContinueOnError)
+	if err := flag.CommandLine.Parse(os.Args[1:]); err != nil {
+		fmt.Fprintf(os.Stderr,
+			"beand: ignoring unusable arguments (%v); this agent image predates a "+
+				"flag noded passed it, so the sandbox may lack what that flag configures\n",
+			err)
+	}
 
 	logging.Setup(*logFormat, *logLevel)
 
@@ -75,12 +96,37 @@ func main() {
 		log.Fatalf("listen %s: %v", *listenAddr, err)
 	}
 
+	unary := []grpc.UnaryServerInterceptor{beand.UnaryTraceLogging()}
+	stream := []grpc.StreamServerInterceptor{beand.StreamTraceLogging()}
+
+	// Authentication is required by the transport, not by a flag.
+	//
+	// A TCP listener is reachable from inside the sandbox: any process there can
+	// dial it, and this agent runs as root and will setuid to whatever the image
+	// asks for. So a token check is not hardening on that transport, it is the only
+	// thing separating noded from the sandbox's own root.
+	//
+	// Deriving it from the address rather than accepting a --require-auth flag means
+	// the unauthenticated combination cannot be produced by a caller at all. A flag
+	// would eventually be omitted by a script, and the result would be a sandbox
+	// that works -- and hands its own occupant the agent API.
+	//
+	// vsock and Unix sockets need none: the first is a host-to-guest address family
+	// no guest process can dial, and the second is a path outside the guest's mount
+	// namespace.
+	if authRequired := strings.HasPrefix(*listenAddr, "tcp:"); authRequired {
+		auth := beand.NewAuthenticator()
+		unary = append(unary, auth.Unary())
+		stream = append(stream, auth.Stream())
+	}
+
 	srv := grpc.NewServer(
-		grpc.ChainUnaryInterceptor(beand.UnaryTraceLogging()),
-		grpc.ChainStreamInterceptor(beand.StreamTraceLogging()),
+		grpc.ChainUnaryInterceptor(unary...),
+		grpc.ChainStreamInterceptor(stream...),
 	)
 	agentv1.RegisterAgentServiceServer(srv, beand.NewServer(version, *rootDir))
-	slog.Info("beand listening", "version", version, "addr", *listenAddr, "root", *rootDir)
+	slog.Info("beand listening", "version", version, "addr", *listenAddr, "root", *rootDir,
+		"authenticated", strings.HasPrefix(*listenAddr, "tcp:"))
 	if err := srv.Serve(lis); err != nil {
 		log.Fatal(err)
 	}

@@ -42,6 +42,21 @@ lint: vet
 	test -z "$$(gofmt -l . | grep -v internal/gen)" || (gofmt -l . | grep -v internal/gen; exit 1)
 	hack/check-ascii.sh
 
+# preflight is exactly what CI's go job runs, in the same order.
+#
+# It exists because a hand-assembled sweep is not the same check. A PR failed on
+# gofmt after build, vet and the ascii check had all passed locally -- the one
+# step not replicated was the one that failed, and the whole point of checking
+# before pushing is defeated by a list that is almost the CI list.
+#
+# --commits matches CI, which checks unpushed commit messages too, so a Chinese
+# character in a commit message is caught while the rewrite is still free.
+preflight: build
+	test -z "$$(gofmt -l . | grep -v internal/gen)" || (gofmt -l . | grep -v internal/gen; exit 1)
+	go vet ./...
+	hack/check-ascii.sh --commits
+	$(MAKE) cover
+
 clean:
 	rm -f coverage.out
 	go clean ./...

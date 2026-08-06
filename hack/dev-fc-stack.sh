@@ -21,11 +21,42 @@ API_PORT=${API_PORT:-18080}
 NODE_GRPC_PORT=${NODE_GRPC_PORT:-17440}
 NODED_PORT=${NODED_PORT:-17443}
 NODE_METRICS_PORT=${NODE_METRICS_PORT:-17444}
+SANDBOX_PORT_PORT=${SANDBOX_PORT_PORT:-17450}
+PROXY_PORT=${PROXY_PORT:-17460}
 
 # Extra noded flags, e.g. NODED_FLAGS="--track-dirty-pages" to allow incremental
 # snapshots. Dirty tracking has to be on from boot, so it cannot be turned on for
 # a sandbox that is already running.
 NODED_FLAGS=${NODED_FLAGS:-}
+
+# Sandbox networking, off unless GUEST_SUBNET is set.
+#
+# Off by default because turning it on writes iptables rules into the host's own
+# tables, and this script is run on developer machines and shared hosts where that
+# is not a decision a convenience script should make silently.
+#
+# But off means sandboxes have no interface at all: no eth0, no routes, no egress.
+# Anything exercising the network path -- and anything reading the guest's resolver
+# or the metadata service -- passes locally for the wrong reason and is first
+# exercised on a real node. Set GUEST_SUBNET to a /30 (every sandbox sees the same
+# one, by design) and UPLINK to the interface holding the default route:
+#
+#   GUEST_SUBNET=172.31.0.0/30 UPLINK=eth0 ./hack/dev-fc-stack.sh
+#
+# noded refuses to start if the range is already routed on the host, so a collision
+# with Docker's bridges is a startup error rather than traffic quietly going to the
+# wrong place.
+GUEST_SUBNET=${GUEST_SUBNET:-}
+UPLINK=${UPLINK:-}
+GUEST_DNS=${GUEST_DNS:-}
+if [ -n "$GUEST_SUBNET" ]; then
+  if [ -z "$UPLINK" ]; then
+    echo "GUEST_SUBNET needs UPLINK: the MASQUERADE rule matches on it" >&2
+    exit 2
+  fi
+  NODED_FLAGS="$NODED_FLAGS --guest-subnet $GUEST_SUBNET --uplink $UPLINK"
+  [ -n "$GUEST_DNS" ] && NODED_FLAGS="$NODED_FLAGS --guest-dns $GUEST_DNS"
+fi
 
 # Extra gateway flags, e.g. API_FLAGS="--create-wait 60s" to queue a burst larger
 # than a node's create concurrency instead of rejecting the overflow.
@@ -57,6 +88,7 @@ case "${1:-start}" in
 stop)
   pkill -f "$BIN/bean-api" 2>/dev/null || true
   pkill -f "$BIN/noded" 2>/dev/null || true
+  pkill -f "$BIN/bean-proxy" 2>/dev/null || true
   echo "stopped"
   exit 0
   ;;
@@ -66,6 +98,7 @@ esac
 
 pkill -f "$BIN/bean-api" 2>/dev/null || true
 pkill -f "$BIN/noded" 2>/dev/null || true
+pkill -f "$BIN/bean-proxy" 2>/dev/null || true
 sleep 1
 
 mkdir -p "$RUN"
@@ -113,16 +146,29 @@ nohup "$BIN/noded" \
   --cpu "$NODE_CPU" --memory-mib "$NODE_MEM_MIB" --disk-mib "$NODE_DISK_MIB" \
   --labels tier=fc \
   --metrics "127.0.0.1:$NODE_METRICS_PORT" \
+  --sandbox-port-listen "127.0.0.1:$SANDBOX_PORT_PORT" \
   --buildkit-addr "${BUILDKIT_ADDR-unix:///run/bean/buildkitd.sock}" \
   ${NODED_FLAGS:-} \
   >"$RUN/noded.log" 2>&1 &
+
+# bean-proxy is what a client reaches a sandbox's ports through. Started
+# unconditionally, even without GUEST_SUBNET: with no networking it answers that the
+# sandbox has no interface, which is a truthful answer and a better one than a
+# connection refused that looks like the proxy being absent.
+nohup "$BIN/bean-proxy" \
+  --listen 127.0.0.1:$PROXY_PORT \
+  --control-plane "http://127.0.0.1:$API_PORT" \
+  --api-key "$API_KEY" \
+  --node-token "$NODE_TOKEN" \
+  >"$RUN/proxy.log" 2>&1 &
 
 # Registration is what makes the node placeable, so waiting for it here means a
 # following CLI call does not race the handshake.
 for _ in $(seq 1 40); do
   if curl -sf -H "Authorization: Bearer $API_KEY" \
       http://127.0.0.1:$API_PORT/v1/nodes | grep -q READY; then
-    echo "stack up: gateway 127.0.0.1:$API_PORT, node registered"
+    echo "stack up: gateway 127.0.0.1:$API_PORT, proxy 127.0.0.1:$PROXY_PORT, node registered"
+    echo "  reach a sandbox port: curl -H \"Host: 8000-\$SBX.sandbox.local\" http://127.0.0.1:$PROXY_PORT/"
     exit 0
   fi
   sleep 0.25
@@ -132,5 +178,5 @@ echo "node did not register; logs:" >&2
 # -n 20 rather than -20: GNU tail rejects the obsolescent form when more than one
 # file is named, so this printed "option used in invalid context" instead of the
 # logs -- swallowing the diagnostic in the one situation it exists to produce.
-tail -n 20 "$RUN/api.log" "$RUN/noded.log" >&2
+tail -n 20 "$RUN/api.log" "$RUN/noded.log" "$RUN/proxy.log" >&2
 exit 1

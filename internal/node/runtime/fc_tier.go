@@ -113,6 +113,30 @@ type FCTierConfig struct {
 	// prerequisite overcommit.go names for raising memory overcommit above 1.0.
 	Cgroups bool
 
+	// VMMPidNamespace hides the host's process table from the VMM, and
+	// VMMKillOnExit has the kernel SIGKILL it if noded dies.
+	//
+	// Two flags rather than one because they buy different things. The first is
+	// containment -- Firecracker signals nothing on the host and spawns no children,
+	// so it has no reason to see host processes. The second is a leak fix:
+	// reconciliation already reclaims a VMM that outlived noded, but only at the next
+	// startup, and until then it holds memory the scheduler has promised elsewhere.
+	//
+	// Both are applied as clone flags during the fork that starts Firecracker, so no
+	// wrapper process is introduced and the recorded pid stays the VMM's own -- which
+	// is what keeps destroy reliable. See vmmisolation_linux.go for why that matters
+	// and how it differs from e2b's `unshare ... bash -c ...` arrangement.
+	VMMPidNamespace bool
+	VMMKillOnExit   bool
+
+	// VMMMountNamespace gives the VMM a private mount namespace.
+	//
+	// Separate from the two above because its failure mode is worse and quieter:
+	// bean's rootfs is a device-mapper node under /dev rather than a file, so a guest
+	// that cannot resolve it finds no root device, and that appears only in the guest
+	// console. Left off until measured on real hardware.
+	VMMMountNamespace bool
+
 	// VMMUid and VMMGid run the VMM as an unprivileged user instead of root. Zero
 	// leaves it as noded's own identity, which is the pre-existing behaviour.
 	//

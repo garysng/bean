@@ -38,10 +38,18 @@ type LostHandler func(nodeID string)
 // serve a node's heartbeat and any replica can route to it. The only
 // in-memory state is the node-token map, which is a cache: a node whose
 // token this replica has not seen re-registers, which is cheap.
+// Store is what node registration needs: the node registry, and nothing else. A
+// registration path that could write a sandbox record or move a reservation would be
+// able to contradict the scheduler, and the narrowing is what makes that impossible
+// rather than merely unusual.
+type Store interface {
+	store.Nodes
+}
+
 type Service struct {
 	nodev1.UnimplementedNodeServiceServer
 
-	store          *store.Store
+	store          Store
 	sched          *scheduler.Scheduler
 	bootstrapToken string
 	lister         SandboxLister
@@ -60,7 +68,7 @@ type Options struct {
 	OnLost            LostHandler
 }
 
-func New(st *store.Store, sched *scheduler.Scheduler, opts Options) *Service {
+func New(st Store, sched *scheduler.Scheduler, opts Options) *Service {
 	hb := opts.HeartbeatInterval
 	if hb <= 0 {
 		hb = 3 * time.Second

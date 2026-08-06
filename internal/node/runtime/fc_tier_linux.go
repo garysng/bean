@@ -172,6 +172,19 @@ func NewFCTier(cfg FCTierConfig) (Runtime, error) {
 	}
 	rt.VMMCreds = creds
 	slog.Info("VMM privileges: " + creds.Summary())
+
+	rt.VMMIsolation = VMMIsolation{
+		PIDNamespace:     cfg.VMMPidNamespace,
+		KillOnNodedDeath: cfg.VMMKillOnExit,
+		MountNamespace:   cfg.VMMMountNamespace,
+	}
+	// Logged rather than assumed, because these are clone flags: they either applied
+	// during the fork or the process is not isolated, and there is no later moment at
+	// which that becomes visible from the outside.
+	slog.Info("VMM isolation: "+rt.VMMIsolation.Summary(),
+		"pidNamespace", cfg.VMMPidNamespace,
+		"killOnNodedDeath", cfg.VMMKillOnExit,
+		"mountNamespace", cfg.VMMMountNamespace)
 	if creds.Enabled() {
 		// Checked at startup, fatally, because each of these fails every create on
 		// the node and none of them is diagnosable from the symptom: no /dev/kvm is
