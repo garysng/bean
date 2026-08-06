@@ -131,6 +131,14 @@ type Manifest struct {
 	Layers []Descriptor `json:"layers"`
 	// Digest is the manifest's own digest, which is the image's identity.
 	Digest string `json:"-"`
+	// storedConfig is the already-parsed configuration, set when this manifest came
+	// from somewhere that had it -- bean's object store rather than a registry.
+	//
+	// Unexported and never serialised: it is not part of an OCI manifest, only a way to
+	// carry an answer already obtained. A manifest resolved offline has no config
+	// *blob* to fetch, so without this the config lookup would go to the registry and
+	// undo the offline resolution one step later.
+	storedConfig *Config `json:"-"`
 }
 
 // Descriptor points at one blob.

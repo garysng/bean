@@ -240,6 +240,8 @@ func selectProvider(cfg FCTierConfig) (image.Provider, error) {
 				filepath.Join(cfg.ImageDir, ".work")),
 			cfg.DefaultDiskMiB)
 		p.LazyPull = cfg.OverlaybdLazyPull
+		p.Blobs = cfg.OverlaybdBlobs
+		p.Index = cfg.OverlaybdIndex
 		// Reported as a startup failure rather than a fallback. A node asked for
 		// overlaybd and given device-mapper instead would differ from the cluster's
 		// expectation in storage cost and in whether layers are shared, and nothing
@@ -247,8 +249,24 @@ func selectProvider(cfg FCTierConfig) (image.Provider, error) {
 		if err := p.Available(); err != nil {
 			return nil, fmt.Errorf("fc tier: overlaybd requested but %w", err)
 		}
+		// The blob store is logged because lazy pull without one silently does nothing
+		// for ordinary images, and that is worth seeing at startup rather than
+		// discovering from a create that converted when it was expected not to.
+		blobs := "none"
+		if cfg.OverlaybdBlobs != nil {
+			blobs = cfg.OverlaybdBlobs.BlobURL()
+		}
 		slog.Info("rootfs via overlaybd", "lazyPull", cfg.OverlaybdLazyPull,
-			"layerDir", layerDir)
+			"layerDir", layerDir, "blobStore", blobs,
+			// Logged because it is the difference between the store being a source an
+			// image can be resolved from and being a bare layer cache that still needs
+			// the registry -- a distinction invisible from a create that succeeded.
+			"imageIndex", cfg.OverlaybdIndex != nil)
+		if cfg.OverlaybdLazyPull && cfg.OverlaybdBlobs == nil {
+			slog.Warn("lazy pull is on with no blob store: only images whose registry " +
+				"blobs are already sealed overlaybd layers can be read remotely, so " +
+				"ordinary images will still be converted locally")
+		}
 		return p, nil
 	}
 

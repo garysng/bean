@@ -19,9 +19,11 @@ import (
 	"google.golang.org/grpc"
 
 	"github.com/garysng/bean/internal/beand"
+	"github.com/garysng/bean/internal/control/s3"
 	nodev1 "github.com/garysng/bean/internal/gen/bean/node/v1"
 	"github.com/garysng/bean/internal/logging"
 	"github.com/garysng/bean/internal/node"
+	"github.com/garysng/bean/internal/node/image"
 	"github.com/garysng/bean/internal/node/network"
 	"github.com/garysng/bean/internal/node/reclaim"
 	"github.com/garysng/bean/internal/node/runtime"
@@ -156,6 +158,29 @@ func main() {
 	fcOverlaybdBinDir := flag.String("fc-overlaybd-bin-dir", "/opt/overlaybd/bin",
 		"directory holding the overlaybd binaries (overlaybd-create, -apply, "+
 			"-commit). Empty resolves them on PATH")
+	fcOverlaybdS3Endpoint := flag.String("fc-overlaybd-s3-endpoint",
+		os.Getenv("BEAN_S3_ENDPOINT"),
+		"S3-compatible endpoint this node publishes sealed overlaybd layers to (or "+
+			"BEAN_S3_ENDPOINT). This is what makes --fc-overlaybd-lazy-pull work for "+
+			"ordinary images: a layer is converted once, published under its digest, "+
+			"and every later create reading the same store skips the conversion "+
+			"entirely -- including on other nodes. Credentials come from "+
+			"BEAN_S3_ACCESS_KEY and BEAN_S3_SECRET_KEY, never a flag, so the secret "+
+			"does not appear in the process command line")
+	fcOverlaybdS3Bucket := flag.String("fc-overlaybd-s3-bucket", "bean-obd-layers",
+		"bucket holding published overlaybd layers")
+	fcOverlaybdS3Region := flag.String("fc-overlaybd-s3-region", "us-east-1",
+		"S3 region for the published-layer bucket")
+	fcOverlaybdS3PathStyle := flag.Bool("fc-overlaybd-s3-path-style", true,
+		"address the bucket as a path rather than a subdomain, which MinIO and most "+
+			"self-hosted stores need")
+	fcOverlaybdReadURL := flag.String("fc-overlaybd-read-url", "",
+		"URL prefix the overlaybd daemon reads published layers from. Defaults to "+
+			"--fc-overlaybd-s3-endpoint, and is separate because the daemon resolves "+
+			"it rather than this process: a node may write through an internal "+
+			"endpoint while the daemon needs one reachable from where it runs. A "+
+			"wrong value produces a device whose reads fail with the cause only in "+
+			"overlaybd's log")
 	fcVMMUid := flag.Int("fc-vmm-uid", 0,
 		"run the VMM as this uid instead of root (fc runtime). 0 leaves it as "+
 			"noded's own identity, which is what it has always been. The uid needs "+
@@ -363,6 +388,13 @@ func main() {
 		localRT.GuestDNS = *guestDNS
 		rt = localRT
 	case "fc":
+		// Built before the tier so a misconfigured store fails at startup rather than
+		// on the first create that needed it.
+		obdBlobs, obdIndex, err := overlaybdBlobStore(*fcOverlaybdS3Endpoint, *fcOverlaybdS3Bucket,
+			*fcOverlaybdReadURL, *fcOverlaybdS3Region, *fcOverlaybdS3PathStyle)
+		if err != nil {
+			log.Fatalf("--fc-overlaybd-s3-endpoint: %v", err)
+		}
 		fcRT, err := runtime.NewFCTier(runtime.FCTierConfig{
 			FirecrackerBin:  *fcBin,
 			KernelPath:      *fcKernel,
@@ -386,6 +418,8 @@ func main() {
 			Overlaybd:         *fcOverlaybd,
 			OverlaybdLazyPull: *fcOverlaybdLazyPull,
 			OverlaybdBinDir:   *fcOverlaybdBinDir,
+			OverlaybdBlobs:    obdBlobs,
+			OverlaybdIndex:    obdIndex,
 		})
 		if err != nil {
 			log.Fatalf("fc runtime: %v", err)
@@ -528,6 +562,62 @@ func main() {
 }
 
 // parseLabels turns "k=v,k2=v2" into a map.
+// overlaybdBlobStore builds the store sealed layers are published to, or nil when no
+// endpoint is configured.
+//
+// Nil is the ordinary case and not an error: a node that converts layers locally needs
+// no store, and lazy pull without one still works for images whose registry blobs are
+// already sealed overlaybd layers. The tier logs a warning for that combination rather
+// than refusing it.
+//
+// Credentials come from the environment only. A flag would put the secret key in the
+// process command line, where every local user can read it -- the same reasoning the
+// gateway applies to its own snapshot bucket.
+func overlaybdBlobStore(endpoint, bucket, readURL, region string, pathStyle bool) (image.BlobStore, image.ImageIndex, error) {
+	if endpoint == "" {
+		return nil, nil, nil
+	}
+	client, err := s3.New(s3.Config{
+		Endpoint:  endpoint,
+		Region:    region,
+		AccessKey: os.Getenv("BEAN_S3_ACCESS_KEY"),
+		SecretKey: os.Getenv("BEAN_S3_SECRET_KEY"),
+		PathStyle: pathStyle,
+	})
+	if err != nil {
+		return nil, nil, err
+	}
+	if readURL == "" {
+		// Defaulted rather than required, because the two are the same whenever the
+		// daemon and this process reach the store the same way -- which is the common
+		// single-host case.
+		readURL = endpoint
+	}
+	store, err := image.NewS3BlobStore(client, bucket, "blobs", readURL)
+	if err != nil {
+		return nil, nil, err
+	}
+	index, err := image.NewS3ImageIndex(client, bucket)
+	if err != nil {
+		return nil, nil, err
+	}
+	// Probed at startup because the failure is otherwise invisible until a create, and
+	// then arrives as ENOENT from the kernel with the real reason only in overlaybd's
+	// log. The daemon reads without credentials, so a bucket this process can write is
+	// routinely one the daemon cannot read.
+	//
+	// A warning rather than fatal: the node still works, it just converts every layer
+	// locally instead of reading published ones. Refusing to start would turn a
+	// degraded optimisation into an outage.
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer cancel()
+	if err := store.CheckReadable(ctx); err != nil {
+		slog.Warn("overlaybd cannot read the blob store; layers will be converted locally "+
+			"instead of read on demand", logging.KeyError, err)
+	}
+	return store, index, nil
+}
+
 func parseLabels(s string) map[string]string {
 	if s == "" {
 		return nil

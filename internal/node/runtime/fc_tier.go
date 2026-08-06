@@ -71,6 +71,21 @@ type FCTierConfig struct {
 	OverlaybdLazyPull bool
 	// OverlaybdBinDir holds the overlaybd binaries. Empty resolves them on PATH.
 	OverlaybdBinDir string
+	// OverlaybdBlobs publishes sealed layers where the overlaybd daemon can
+	// range-read them, which is what makes lazy pull work for images that arrive as
+	// ordinary OCI: convert once, publish under the digest, and every later create
+	// reading the same store skips the conversion.
+	//
+	// Nil with OverlaybdLazyPull set restricts lazy reads to images whose registry
+	// blobs are already sealed overlaybd layers, which almost nothing is.
+	OverlaybdBlobs image.BlobStore
+	// OverlaybdIndex records which layers make up an image and what a tag points at,
+	// so a node that has never seen an image can resolve it from the store instead of
+	// the registry.
+	//
+	// Nil leaves the store a layer cache: the blobs are there, but nothing says which
+	// of them form an image, so every create resolves against the registry first.
+	OverlaybdIndex image.ImageIndex
 	// OverlaybdLayerDir holds sealed layers, shared across images. Empty puts them
 	// beside the base images.
 	OverlaybdLayerDir string
