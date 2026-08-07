@@ -135,6 +135,19 @@ type FCRuntime struct {
 	BaseDir string
 	// Images supplies the rootfs block device.
 	Images image.Provider
+	// ObservePhase records how long one step inside a create took. Nil discards,
+	// which is what every test and the local tier want.
+	//
+	// It exists because runtime_create was a single opaque number and that number is
+	// where the time goes: measured at 1000 concurrent creates, runtime_create
+	// averaged 2.51s of a 2.90s create while agent_ready was 0.39s. Nothing could say
+	// which step inside it, so the attribution stopped at "somewhere in here" and the
+	// next question -- rootfs, VMM spawn, or API readiness -- had to be guessed.
+	//
+	// A callback rather than this package importing the metrics registry: the runtime
+	// is driven by the manager, and the manager already owns both the histogram and
+	// the span. See Manager.observePhase.
+	ObservePhase func(ctx context.Context, phase string, d time.Duration)
 	// Committer seals a sandbox's filesystem into a new base image. Nil
 	// disables commit, which is what a node that only runs sandboxes wants.
 	Committer *image.Committer
@@ -432,6 +445,19 @@ func (r *FCRuntime) Fork(ctx context.Context, spec *Spec, layers []SnapshotLayer
 	return r.create(ctx, spec, layers)
 }
 
+// phase times one step of a create and reports it through ObservePhase.
+//
+// Named "fc_" so the sub-phases cannot be confused with the manager's own phases in
+// the same histogram: runtime_create is the total this decomposes, and two series
+// that look like siblings but are parent and child would be added together by
+// anyone reading the metric.
+func (r *FCRuntime) phase(ctx context.Context, name string, start time.Time) {
+	if r.ObservePhase == nil {
+		return
+	}
+	r.ObservePhase(ctx, "fc_"+name, time.Since(start))
+}
+
 func (r *FCRuntime) create(ctx context.Context, spec *Spec, layers []SnapshotLayer) (handle *Handle, err error) {
 	if err := r.validate(); err != nil {
 		return nil, err
@@ -478,6 +504,7 @@ func (r *FCRuntime) create(ctx context.Context, spec *Spec, layers []SnapshotLay
 		defer stage.Close()
 	}
 
+	rootfsStart := time.Now()
 	rootfs, err := r.Images.Prepare(ctx, spec.SandboxID, spec.Image, image.PrepareOptions{
 		SizeMiB:      spec.DiskMiB,
 		SeedWritable: stage.SeedWritable,
@@ -485,6 +512,7 @@ func (r *FCRuntime) create(ctx context.Context, spec *Spec, layers []SnapshotLay
 	if err != nil {
 		return nil, fmt.Errorf("fc: prepare rootfs: %w", err)
 	}
+	r.phase(ctx, "rootfs", rootfsStart)
 	cleanup = append(cleanup, func() { _ = rootfs.Release() })
 
 	// The rootfs must sit in the sandbox directory for the relative drive path
@@ -509,10 +537,12 @@ func (r *FCRuntime) create(ctx context.Context, spec *Spec, layers []SnapshotLay
 	// not leave the directory behind -- an orphaned cgroup is the same class of leak
 	// as GitHub #16's loop devices, invisible to everything and permanent until the
 	// host reboots.
+	cgStart := time.Now()
 	cg, err := r.Cgroups.createCgroup(spec.SandboxID, limitsFor(spec))
 	if err != nil {
 		return nil, fmt.Errorf("fc: create cgroup: %w", err)
 	}
+	r.phase(ctx, "cgroup", cgStart)
 	cleanup = append(cleanup, func() { _ = cg.Remove() })
 
 	// Ownership of everything the dropped uid has to open. No-ops when no uid is
@@ -544,24 +574,32 @@ func (r *FCRuntime) create(ctx context.Context, spec *Spec, layers []SnapshotLay
 	}
 
 	apiSocket := filepath.Join(dir, "api.sock")
+	vmmStart := time.Now()
 	if err := r.startVMM(ctx, vm, apiSocket); err != nil {
 		return nil, err
 	}
+	r.phase(ctx, "vmm_spawn", vmmStart)
 	cleanup = append(cleanup, func() { r.killVMM(vm) })
 
 	vm.client = newFCClient(apiSocket)
+	apiStart := time.Now()
 	if err := waitAPIReady(ctx, apiSocket); err != nil {
 		return nil, fmt.Errorf("fc: api socket: %w", err)
 	}
+	r.phase(ctx, "api_ready", apiStart)
 
 	if stage != nil {
+		loadStart := time.Now()
 		if err = r.loadSnapshot(ctx, vm, spec, stage); err != nil {
 			return nil, err
 		}
+		r.phase(ctx, "snapshot_load", loadStart)
 	} else {
+		bootStart := time.Now()
 		if err = r.configureAndBoot(ctx, vm, spec); err != nil {
 			return nil, err
 		}
+		r.phase(ctx, "boot", bootStart)
 	}
 
 	r.mu.Lock()
@@ -879,4 +917,13 @@ func waitAPIReady(ctx context.Context, apiSocket string) error {
 		case <-time.After(5 * time.Millisecond):
 		}
 	}
+}
+
+// SetPhaseObserver installs the callback the create path reports sub-phases through.
+//
+// A setter rather than a constructor argument because the manager owns the histogram
+// and is built after the runtime. See Manager.NewManager for why this is discovered by
+// type assertion instead of sitting on the Runtime interface.
+func (r *FCRuntime) SetPhaseObserver(f func(context.Context, string, time.Duration)) {
+	r.ObservePhase = f
 }
