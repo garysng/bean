@@ -132,10 +132,12 @@ concerns, so a new backend does not reimplement the pull.
 - **TCMU/SCSI per sandbox.** A whole SCSI fabric (loopback nexus) per sandbox:
   fragile and slow, against `dm_snapshot` needing one kernel module.
 
-### overlaybd: measured working, deliberately not wired in ⚠️
+### overlaybd: wired in behind a flag, not the default ⚠️
 
-This one deserves its own explanation, because "it works and we are not using
-it" looks like an oversight and is not.
+This one deserves its own explanation, because the ordering that kept it out of the
+live path for a while was deliberate rather than an oversight — and the reasoning
+below was also **wrong about where the value is**, which is worth preserving rather
+than quietly editing.
 
 overlaybd (DADI, Alibaba) is block-level lazy-pull: layers are block-device
 diffs in a registry, and a mount range-reads only the blocks touched. Measured
@@ -152,19 +154,28 @@ writable upper layer, actual     40 KiB (1.1 GB nominal, genuinely sparse)
 The overlaybd log's `__open_ro_remote` confirms it opens an HTTP URL rather than
 a local file. Ready in 25 ms with no full-layer download.
 
-**Why it is not the live path.** The realisation that settles the ordering is
-that **overlaybd's value is wait time on first use of a large image, not
-per-sandbox cost — CoW already solved the latter at 44 KiB.** So it is an
-optimisation on the cold-image path, not infrastructure the platform needs to
-stand up, and it was ranked below snapshot capability accordingly. The cold-image
-number it would attack is real (5–10 s for busybox, up to 2 m 45 s for alpine on
-a poor network), but prewarm plus image-affinity scheduling covers the same case
-for a batch that knows its images in advance, which an eval batch does.
+**Why it was not the live path, and where that reasoning was wrong.** The argument
+used to be that **overlaybd's value is wait time on first use of a large image, not
+per-sandbox cost — CoW already solved the latter at 44 KiB**, making it an
+optimisation on the cold path rather than infrastructure, ranked below snapshot
+capability accordingly.
 
-What remains is writing an `OverlaybdProvider` behind the same four-method
-`Provider` interface: configfs orchestration, registry push, lifecycle. Two
-traps from the verification have to go into that code, because they will
-reproduce in production and documentation will not remember them:
+The ranking was right and the stated reason was not. Measuring the implementation
+(`hack/overlaybd-bench.sh`) showed the cold path **unchanged** — this backend still
+downloads and converts every layer before assembling a device, so a first use does
+strictly more work than flattening. The real wins are **conversion CPU and disk**:
+three images sharing a base go from 392 MiB to 118 MiB, and the shared base is
+converted once per node instead of once per image (2.2 s falling to 0.49 s and 0.44 s).
+For a SWE-bench-shaped set of 2000 images on one base, the flattening path rewrites
+that base 2000 times, and prewarm cannot hide it — prewarm pays the cost earlier, not
+less. The other win is concurrency: at 256 simultaneous creates it is 4.2× faster on
+rootfs setup, because dm-snapshot forks `losetup`/`dmsetup` per sandbox while attaching
+a TCMU device is configfs writes with no fork.
+
+`OverlaybdProvider` now exists behind the same `Provider` interface, enabled with
+`--fc-overlaybd`, with dm-snapshot still the default. Two traps from the verification
+are encoded in that code, because they will reproduce in production and documentation
+will not remember them:
 
 1. **The LUN must be linked after the nexus.** Wrong order and the kernel says
    `TCM_Loop I_T Nexus does not exist` — the SCSI host scans for LUNs at
@@ -177,12 +188,17 @@ reproduce in production and documentation will not remember them:
    symptom is not an error, it is **reading another image's data**, plus a busy
    device that will not mount directly.
 
-The tcmu backend is functionally complete, so **the host kernel does not need
-upgrading first**; ublk (≥ 6.0) is only faster. Wiring overlaybd in would also
-change the layer story: today conversion flattens the image into a single ext4
-and the layer structure is lost, so `commit` reads out a full image rather than
-sealing an incremental layer. With overlaybd, `overlaybd-commit` seals the LSMT
-writable layer and the promise of zero conversion becomes literal.
+The tcmu backend is functionally complete, so **the host kernel did not need upgrading
+first**. But "ublk (≥ 6.0) is only faster" turned out to understate it: tcmu takes 4.0 s
+to tear down 128 devices and does so identically on 5.15 and 6.8, because the daemon
+serialises on one netlink socket. That is a property of the transport, not of the kernel,
+so ublk became the intended replacement rather than an optimisation ([status.md](status.md)).
+
+overlaybd also changes the layer story: the dm-snapshot path flattens the image into a
+single ext4 and loses the layer structure, so `commit` reads out a full image rather than
+sealing an incremental layer. With overlaybd, `overlaybd-commit` seals the LSMT writable
+layer and the promise of zero conversion becomes literal — though `CommitSandbox` on this
+backend is implemented and still unexercised.
 
 **Nydus was rejected for the same reason overlayfs was**: it is file-level, its
 filesystem semantics cannot get into a microVM, and the fc tier would need
@@ -1034,7 +1050,7 @@ choose the technology.
 | Container tiers | runc / gVisor | 📐 |
 | Dev/CI tier | `local` process tree, no isolation | ✅ |
 | Rootfs | device-mapper snapshot, shared base + CoW | ✅ 44 KiB/sandbox |
-| Rootfs lazy-pull | overlaybd | ⚠️ measured, not wired in |
+| Rootfs lazy-pull | overlaybd | ⚠️ wired in behind `--fc-overlaybd` over TCMU; lazy pull itself untested against a registry |
 | Memory restore | Firecracker UFFD backend | ✅ 7 ms load |
 | Diff snapshots | Firecracker diff + merge at restore | ✅ 298 KB, depth capped at 8 |
 | `--track-dirty-pages` | | ⚠️ implemented, off by default, overhead unmeasured |

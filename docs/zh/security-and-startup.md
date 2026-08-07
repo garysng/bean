@@ -197,7 +197,8 @@ sandbox token（JWT）：签名密钥控制面持有，绑定 sandbox-id + 过�
 冷镜像目标未达成也未走 lazy-pull:当前是「拉全量 + 转换 + CoW 共享」,
 实测 busybox 5-10s、alpine 在网络不稳时 **2m45s** —— 所以 prewarm 是必需的
 而不是优化。overlaybd 路径已实现(B2),用 `--fc-overlaybd` 开启;
-但真正能消掉这段等待的 lazy-pull 尚未测过。
+但真正能消掉这段等待的 lazy-pull(`--fc-overlaybd-lazy-pull`)尚未对真 registry 测过,
+而且它只对已经封好的 overlaybd 层有效 —— 普通 OCI 层没有可 range-read 的块索引。
 
 **这些数字都是单个 sandbox 手工测的。** 并发下如何退化没有测过 ——
 见 `docs/status.md` 的压测待办。
@@ -229,13 +230,17 @@ FC `/snapshot/load` 只占 7ms。
 
 ### B2. overlaybd lazy-pull from S3 ⚠️
 
-**能力已在验证机实测跑通,但尚未接入代码**。当前生产路径是 dm-snapshot:
-拉全量 + 转换 + 共享只读 base + 每 sandbox CoW(实测每 sandbox 44 KiB)。
-overlaybd 侧实测:挂载 7ms、只传 19.6% 的层字节就能挂载并读文件、8 个 HTTP 206、
-可写上层实占 40 KiB(`docs/decisions.md` §3.1)。剩下的是写 `OverlaybdProvider`
-接进 `image.Provider`。
+**`OverlaybdProvider` 已存在并在真机验证过;单说 lazy pull 则是已实现、未测试。**
+默认路径仍是 dm-snapshot:拉全量 + 转换 + 共享只读 base + 每 sandbox CoW
+(实测每 sandbox 44 KiB)。overlaybd 用 `--fc-overlaybd` 显式开启,
+`--fc-overlaybd-lazy-pull` 则选择从 registry range-read 层而不是本地转换。
 
-下面描述的是那个目标形态,不是当前形态。
+代码层面验证过的(`overlaybd_hw_linux_test.go`):层能构建并封好、经 TCMU 挂上、
+挂载后的设备能提供该层的内容。没验证过的:对真 registry 的 lazy-pull 路径。
+下面那些数字 —— 挂载 7ms、只传 19.6% 的层字节、8 个 HTTP 206、可写上层实占 40 KiB
+(`docs/decisions.md` §3.1)—— 来自手工验证,针对的是已经封好的层。
+
+下面描述的部分内容是目标形态,不全是当前形态。
 
 ```
 镜像发布链路（image-service，离线一次）：
@@ -257,7 +262,9 @@ CreateSandbox → overlaybd/ublk 组装块设备（元数据数 MiB）→ 立即
   - S3 首字节延迟波动 → 按 trace 预取 + obd-cache 命中兜底
   - ublk 依赖较新内核（6.0+）→ 节点 OS 统一基线;**tcmu 后端在 5.15 上已实测
     功能完备**（挂载 7ms、只传 19.6% 层字节、HTTP 206 range read,
-    见 `docs/decisions.md` §3.1）,是可用的主路径而非降级路径,ublk 仅性能更优;
+    见 `docs/decisions.md` §3.1）,是可用的主路径而非降级路径。但「ublk 仅性能更优」
+    这句要修正:tcmu 拆 128 个设备要 4.0 s,且 5.15 和 6.8 上完全一样,
+    所以 ublk 是目标传输层,其底层已搭好并在 6.8 上验证过（见 `docs/status.md`）;
     两者皆不可用的节点不上报 fc 能力（fc 依赖块设备后端），仅容器档 overlayfs 兜底
   - tcmu 需给每个 backstore 设唯一 `vpd_unit_serial`,否则宿主 `multipathd`
     会合并不同镜像的设备并返回错误数据（静默,不报错）

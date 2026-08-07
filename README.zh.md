@@ -104,18 +104,24 @@ bean run --snapshot snap_...
 - **快照 blob 落 S3** —— 基于标准库自实现 SigV4,不用 AWS SDK;支持分片上传与 range 读
 - **追踪** —— OpenTelemetry,W3C `traceparent` 贯穿 gateway → noded → 沙箱内 agent,
   每个请求汇成一棵 span 树
+- **节点直连的数据面** —— Host 里的 `{port}-{sandbox}` 直达该 guest 的该端口,
+  用户的服务器和 agent 走同一条路。一个机制而不是两个:无需注册调用、无需宿主端口池,
+  `exec` 与文件传输也不再经控制面中转
+- **Warm snapshot** —— prewarm 产出一个可 resume 的基础快照,于是 create 变成 restore
+  而不是 boot,调度器也会偏向能这么做的节点。磁盘占用有上界,按 LRU 驱逐
+- **Postgres** —— `bean-api --postgres`,这才是多副本的前提:SQLite 是一个文件,
+  两个副本没法共享。requirement 由 `hack/postgres-conformance.sh` 对真 Postgres 16 跑;
+  store 里没有 mutex —— 原子性在语句里,由数据库裁决
 
 ### 尚未构建
 
 | | |
 |---|---|
-| jailer / mount namespace | 📐 VMM 已降到非 root uid 并跑在每沙箱 cgroup 里,但仍能看见宿主文件系统。硬件虚拟化是边界;`chroot` 收敛是 [#20](https://github.com/garysng/bean/issues/20) 第二阶段 |
+| jailer chroot | 📐 VMM 已降到非特权 uid、跑在每沙箱 cgroup 里,并且默认拥有自己的 pid、mount 和 network namespace。jailer 在此之上要加的是 `chroot` 和设备白名单 —— [#20](https://github.com/garysng/bean/issues/20) 第二阶段,而且大概不是对的形状 |
 | 容器档(runc/gVisor) | 📐 目前只有 microVM 档,以及开发用的无隔离 `local` 档 |
-| 卷、端口暴露 | 📐 |
-| Warm snapshot | 📐 剩下最大的吞吐杠杆。create 仍要 boot,烧约 5 CPU-秒,而 restore 几乎不吃 CPU —— 所以无论单次 create 多快,上限都是 `核数 / 5`。见 [docs/warm-snapshots.md](docs/warm-snapshots.md) |
-| 数据平面 | 📐 `exec` 与文件传输仍经控制面中转,没有直连节点 |
-| Postgres | ⚠️ 当前用 SQLite。没有 `Store` 接口 —— SQL 全部收在一个包里,但调用方持有具体类型 |
-| overlaybd 懒加载 | ⚠️ **已验证可用**(7 ms 挂载,读一个文件只传输 19.6% 的层字节),但还没接进 image provider —— 线上路径是 dm-snapshot |
+| 卷 | 📐 |
+| 按端口的访问控制 | 📐 任何能访问 bean-proxy 的东西都能访问沙箱的任意端口 —— [#50](https://github.com/garysng/bean/issues/50) |
+| overlaybd | ⚠️ 已接入并在一台机器上实测。三个共享 base 的镜像**省 3.32 倍磁盘**,共享层每节点只转换一次而不是每镜像一次(第二个镜像 0.49 s CPU,对比 2.24 s)。层发布到对象存储后,create 是 **1.3 s,对比 dm-snapshot 的 14.3 s**;而真正*冷*的 create 没有变快,也无法变快 —— gzip tar 没有可 seek 的块索引,所以任何地方的首次相遇都要转换。`--fc-overlaybd` 开启,dm-snapshot 仍是默认。**128 核机器 256 并发 create 下 rootfs 组装快 4.2 倍**(3.809 s → 0.908 s)、吞吐快 1.9 倍(47.5 → 88.0 creates/s),因为 dm-snapshot 每沙箱 fork `losetup`/`dmsetup` 而 overlaybd 只写 configfs。这个后端上的 `commit` 未验证,跨节点路径也只在一台机器上跑过。[docs/image-pipeline.md](docs/image-pipeline.md) §7 |
 
 ---
 

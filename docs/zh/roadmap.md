@@ -11,8 +11,10 @@
   OCI 拉取转换、commit、BuildKit 构建、OTel trace 全链路
 - ✅ **已提前做完 P3/P4 的快照部分**:pause/resume、full / `--no-memory` /
   `--base` 增量三种快照、UFFD 按需供页、CPU template 与调度器 CPU 过滤
-- ⚠️ **P0 里说的 overlaybd ublk 直驱没做**:走的是 dm-snapshot(每 sandbox 44 KiB)。
-  overlaybd 能力已实测但未接入 —— 它变成了优化项而非基础
+- ⚠️ **P0 里说的 overlaybd ublk 直驱做了一半**:默认仍是 dm-snapshot(每 sandbox 44 KiB),
+  overlaybd 已接在 `--fc-overlaybd` 后面 —— 但走 TCMU,不是 P0 描述的 ublk 直驱。
+  ublk 不再是「优化项而非基础」:TCMU 拆 128 个设备的 4.0 s 在 5.15 和 6.8 上一模一样,
+  那是传输层的限制而不是内核的(见 [status.md](status.md))
 - ⚠️ **P0 里说的 jailer 没做**:noded 直接 exec firecracker
 - ✅ **P0/P1 里说的网络已做完**,而它曾是最大的空白:每沙箱 namespace、tap、
   NAT 出网,元数据网段与 RFC1918 默认拒绝,沙箱内端口可从节点外经 bean-proxy 到达。

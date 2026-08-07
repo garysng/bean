@@ -130,15 +130,28 @@ quiet reboot=k panic=-1 pci=off init=/bean/beand -- --listen vsock:1024 --pivot 
 所以这个能力不能丢,但不该每次 boot 都付 493ms。这一点学的是 e2b
 (它的 `fc-kernels` config 里 `CONFIG_SERIAL_8250=y` 是开着的)。
 
-## 7. vsock 为什么可以用常量 ✅
+## 7. agent 的地址为什么可以是常量 ✅
 
 ```go
-const agentVsockPort = 1024
+const agentVsockPort = 1024   // 无网络的 sandbox
 const guestCID = 3
+const AgentGuestPort = 10001  // 有网络的 sandbox
 ```
 
-两个都不需要分配:**每个 VM 有自己的 vsock 命名空间**,所以没有可冲突的对象。
-CID 3 是 guest 可用的最小值(0–2 被协议保留)。
+三个都不需要分配:**每个 VM 有自己的 vsock 命名空间和自己的网络命名空间**,
+所以没有可冲突的对象。CID 3 是 guest 可用的最小值(0–2 被协议保留)。
+
+**用哪一个取决于 sandbox 有没有网络**,而这是安全边界而非偏好:
+
+| | 无网络 | 有网络 |
+|---|---|---|
+| agent 监听在 | `vsock:1024` | `tcp:0.0.0.0:10001` |
+| sandbox 内部能否访问 | **不能** —— 该地址族是 host-to-guest | **能** |
+| 靠什么把 sandbox 挡在外面 | 内核 | 每 sandbox 一个 token(A7) |
+
+能用 vsock 的地方就保留 vsock,因为结构性保证胜过凭证。有网络的地方用 TCP,
+因为那让 agent 成为 *guest 上的一个端口* —— 这才使得一套寻址方案同时覆盖它和用户暴露的
+任意端口,见 api-design.md §6。因此 `10001` 是保留端口:用户暴露它就等于暴露 agent。
 
 常量的好处是 guest 的 cmdline 不依赖宿主状态 —— 这让 cmdline 在快照前后完全一致,
 少一个恢复时要对齐的东西。
@@ -191,10 +204,62 @@ Firecracker 启动到创建 API socket 之间有个窗口,这期间发请求得�
 
 组装链路里**没有**:
 
-- **网卡**。`fcMachineConfig` 里没有网络设备,sandbox 没有网络(GitHub #21)
+- ~~**网卡**~~。已做:网卡在 `InstanceStart` 之前注册,VMM 跑在该 sandbox 的命名空间里,
+  MMDS 绑在那张网卡上。见 network.md
 - **balloon**。内存回收靠不了它,所以内存超卖缺一个手段(见 noded-design §3.2)
-- **jailer**。直接 exec firecracker,没有 chroot / 降权 / 设备白名单(GitHub #20)
-- **cgroup**。FC 进程在宿主上没有资源限制
+- ~~**cgroup**~~。已做:`--fc-cgroups`,仅 v2,每 sandbox 的内存上限、CPU 配额、pid 上限
+- ~~**降权**~~。已做:`--fc-vmm-uid`,VMM 不再是 root
+- **chroot 和设备白名单**。仍然没有,这是 GitHub #20 剩下的那一半
 
-前两个是能力缺失,后两个是纵深防御缺失 —— 硬件虚拟化边界仍然在,
-但一个 FC/KVM 漏洞的后果是宿主 root 而不是一个被 chroot 的低权用户。
+**一个 FC/KVM 漏洞的后果不再是宿主 root。** 它是一个非特权 uid,在自己的 pid 命名空间里,
+在该 sandbox 的网络命名空间里(去 RFC1918 和元数据地址段的出向流量被丢弃),
+在一个限制其内存和 pid 的 cgroup 之下。这份清单里缺的是它自己的文件系统视图 ——
+私有 mount 命名空间现在默认开(见 §12)。
+
+补上这块的通常做法叫 jailer,而「直接加 jailer」并不成立,值得说清原因:jailer 的
+`pivot_root` 要求把设备节点 **mknod** 进每 sandbox 的 jail,因为设备节点无法用符号链接进
+chroot —— 而 bean 的 rootfs 正是一个 device-mapper 节点。e2b 不做这些也拿到了命名空间那一半:
+`unshare` 一个 mount 命名空间,再用 tmpfs 加符号链接,这在 chroot 里行不通而在命名空间里可行。
+bean 已经有 e2b 那样拿到的命名空间隔离,只是用 clone flags 而非包装进程实现(见 §12)。
+
+## 12. 不用包装进程做隔离 ✅
+
+VMM 是用 clone flags 起的,而不是套在 `unshare` 下面。差别在于 **noded 记下的是哪个 pid**,
+不在于存在哪些命名空间。
+
+e2b 的等价物是一条三层深的命令(`packages/orchestrator/internal/sandbox/fc/process.go`):
+
+```
+unshare -pfm --kill-child -- bash -c "mount --make-rprivate / && ... && ip netns exec <ns> firecracker"
+```
+
+那样能用,`--kill-child` 也覆盖了父进程死亡。但 `cmd.Process.Pid` 指的是 `unshare`,
+于是给它发信号能不能到达 Firecracker,取决于每一层是原地 exec 还是 fork。
+这种安排的失败模式很具体:**destroy 报成功而 microVM 还在跑**,
+占着调度器已经许给别人的内存。
+
+bean 改成在 fork 期间向内核索取同样的命名空间:
+
+| | e2b | bean |
+|---|---|---|
+| pid 命名空间 | `unshare -p` | `Cloneflags: CLONE_NEWPID` |
+| mount 命名空间 | `unshare -m` + `mount --make-rprivate /` | `Cloneflags` + `Unshareflags: CLONE_NEWNS` |
+| 父进程死亡 | `--kill-child` | `Pdeathsig: SIGKILL` |
+| 网络命名空间 | `ip netns exec` | 在钉住的线程上 `setns`(见 netns_linux.go) |
+| noded 与 VMM 之间的进程数 | 2 | **0** |
+
+**网络命名空间为什么是例外**:`CLONE_NEWNET` 创建的是一个*空*命名空间,
+而这个 sandbox 的命名空间已经存在、里面已经有它的 tap。加入一个已存在的命名空间要用
+`setns`,而 `setns` 是按线程生效的 —— 所以先钉住线程、加入命名空间、再在同一个线程上 fork。
+clone flags 于是在那次 fork 期间生效,这就是两者能同时成立的原因。
+在运行中的 VMM 上按 inode 实测过:它的 pid 命名空间与宿主不同,
+同时它的网络命名空间是该 sandbox 的。
+
+**`Pdeathsig` 为什么是 SIGKILL** 而不是 SIGTERM:在 pid 命名空间里 VMM 是 pid 1,
+而 pid 1 会忽略自己没装处理器的信号。可捕获的信号恰好会在 sandbox 最需要死掉的时候被丢弃。
+
+三个开关**默认都开**:`--fc-pid-namespace`、`--fc-kill-on-exit`、`--fc-mount-namespace`。
+被压着最久的是 mount 命名空间,当时预期 bean 的 device-mapper rootfs 在里面会打不开;
+那个预期是错的,起来的 guest 同时拥有可用的 `eth0` 和自己的 mnt / pid / net 命名空间。
+它之所以必须用 guest 而不是靠检查来验证:VMM 解析不到 rootfs 时什么都不报,
+只表现为一次没走完的启动。

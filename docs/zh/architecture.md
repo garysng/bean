@@ -123,9 +123,10 @@ microVM（见 D9）——两种形态共享同一条镜像链路，用户无感�
 
 ### D2. overlaybd 直驱,无 containerd 热路径 ⚠️
 
-> **「无 containerd」已达成,「overlaybd 直驱」未达成。** 当前后端是 dm-snapshot:
+> **「无 containerd」已达成,「overlaybd 直驱」做了一半。** 默认后端仍是 dm-snapshot:
 > 拉全量 + 转换 + 共享只读 base + 每 sandbox CoW(实测 44 KiB/sandbox)。
-> overlaybd 能力已在 tcmu 后端实测跑通但未接入 `image.Provider`。
+> overlaybd **已接入 `image.Provider`**,即 `--fc-overlaybd` 后面的 `OverlaybdProvider`
+> (PR #49)—— 但走 TCMU,不是本节描述的 ublk 直驱。见 [status.md](status.md)。
 
 fc 主路径**不引入 containerd**（AgentENV 同款,其源码已在本地 /Users/mac/project/agentenv
 可参考）：noded 直接驱动 overlaybd 的 ublk daemon 组装块设备（S3 backing + 本地

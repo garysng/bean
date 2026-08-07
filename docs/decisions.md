@@ -289,6 +289,12 @@ The consequence is not an error but **reading another image's data**, and on top
 Writing a unique serial per backstore is enough.
 
 **Conclusion**: the tcmu backend is functionally complete; there is no need to upgrade the kernel first. ublk (≥6.0) is only better performing.
+
+**Superseded on 2026-08-07.** "Only better performing" was true of throughput and false of
+teardown: TCMU takes 4.0 s to tear down 128 devices and does so on 5.15 and 6.8 alike, because
+the serialisation is the daemon's single netlink socket. ublk is now the intended transport
+rather than an optimisation, and its lower layers are verified on 6.8 — see §4 and
+[status.md](status.md).
 Both of these must be encoded into the `image.Provider` implementation — documentation will not remember them for us.
 
 ## 3.5 trace: OTel + W3C traceparent, but the agent does not link the SDK
@@ -553,10 +559,14 @@ Deliberately short-circuiting the pin check turned two tests red immediately —
 - **Wiring overlaybd lazy-pull into `image.Provider`**: the capability itself has been measured working (§3.1),
   what remains is writing `OverlaybdProvider` — configfs orchestration + registry push + lifecycle.
   It is no longer a question of "can this work", it is the engineering effort of "wire it in".
-- **Upgrading the host kernel to 6.8**: 20.04's apt has no 6.x (HWE tops out at 5.15).
-  It needs the mainline PPA or a distribution upgrade. The payoff is ublk (overlaybd's faster backend).
-  This machine is a VM (`/dev/vda2`), and whether nested KVM stays usable after a kernel change is unverified.
-  **Priority has been lowered** — the tcmu backend is functionally complete, and ublk is only a performance optimisation.
+- **Upgrading the host kernel to 6.8**: ~~20.04's apt has no 6.x (HWE tops out at 5.15)~~ —
+  **done**, and nested KVM survived it. The payoff was ublk, and the reason it stopped being
+  "only a performance optimisation" is a measurement: TCMU teardown is 4.0 s for 128 devices
+  on 5.15 **and unchanged on 6.8**, because the cost is the daemon's single netlink socket
+  rather than the kernel. That is not something a newer kernel fixes, so ublk went from a
+  nice-to-have to the only route past it. The io_uring, ABI, control-plane and queue layers
+  are built and verified on 6.8; wiring them into `image.Provider` is what remains
+  ([status.md](status.md)).
 - **AVX-512 masking is unmeasured**: the verification machine (Zen 2) has no AVX-512,
   so the 5 avx512 bits in the mask table are only "written correctly according to the CPUID specification";
   the effect of masking them has never been verified on real hardware. It needs a machine with AVX-512 to run

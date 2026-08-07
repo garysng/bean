@@ -302,7 +302,8 @@ loop device 全部归零 —— loop 泄漏的修复(#16)在并发下成立。
 | 项 | 状态 |
 |---|---|
 | build image：声明式 steps（Modal 风格链式 API） | ⛔ 未开始;Dockerfile 路径已通,steps 只是另一个前端编译到同一个 plan（`docs/image-build.md` §3.2、§5） |
-| overlaybd lazy-pull | ⚠️ **能力已实测跑通,尚未接入代码**。当前生产路径是「拉全量 + 转换 + CoW 共享」（每 sandbox 44 KiB）。overlaybd 侧已在验证机上验证:挂载 7ms、只传 19.6% 的层字节就能挂载并读文件、8 个 HTTP 206、可写上层实占 40 KiB（`docs/decisions.md` §3.1）。剩下的是写 `OverlaybdProvider` 接进 `image.Provider` |
+| overlaybd | ⚠️ **已接入并在真机端到端验证**(PR #49)。`OverlaybdProvider` 走 TCMU,`--fc-overlaybd` 开启,**dm-snapshot 仍是默认**。实测:sandbox 从 overlaybd 设备启动、guest 从自己的 rootfs 读到 `PRETTY_NAME="Alpine Linux v3.20"`、写落在可写层、`bean kill` 后无 backstore 无 multipath 残留(`hack/overlaybd-e2e.sh`)。同机对比 dm-snapshot(`hack/overlaybd-bench.sh`):三个共享 base 的镜像 **392 MiB → 118 MiB**,转换 CPU 从每镜像平均 2.2 s 降到 1.37 / 0.49 / 0.44 s。**冷启动延迟没有改善** —— 这条路径依然先下载再转换每一层才能组设备,首次使用比拍平做的功还多,收益在第二个镜像和磁盘上。128 核机器 256 并发 create 是它真正发挥的地方:`fc_rootfs` 3.809 s → 0.908 s,吞吐 47.5 → 88.0 creates/s,零失败零泄漏 —— 原因是子进程数,dm-snapshot 每 sandbox fork 两次 `losetup` 一次 `dmsetup`(每次约 26 ms),而 `attachTCMU` 全是 configfs 写、完全不 fork。**未测**:这个后端上的 `commit` |
+| overlaybd lazy-pull | ⚠️ **已实现,未对真 registry 验证过**。`--fc-overlaybd-lazy-pull`。挂载 7ms、只传 19.6% 的层字节就能挂载并读文件、8 个 HTTP 206 —— 这些数字来自 `docs/decisions.md` §3.1 的手工验证,针对的是**已经封好的 overlaybd 层**,不是来自这份代码。普通 OCI 层是 gzip tar,没有可 seek 的块索引,所以指名这种镜像的 create 会被**拒绝**而不是悄悄建一个打不开的 config。产出封好的层是 `Prewarm` 的活:它转换镜像并把每一层按 OCI digest 发布到 bean 自己的对象存储(`--fc-overlaybd-s3-endpoint`),之后任何读同一个存储的节点直接远端读、不再转换。**create 从不发布** —— 几十 MiB 的 S3 上传不该压在 sandbox 的延迟路径上。所以真正冷的 create 仍然是一次转换,但那是**每机群每镜像一次**而不是每节点一次,前提是有人 prewarm |
 | diff snapshot（增量） | ✅ `--base SNAP` 只存自 base 以来改动的 guest 内存。实测 base 15.5 MB → diff 298 KB(52×);深度 2 的链 restore 后文件全在且 `uptime 57`(载入内存态而非重新开机 —— 新 sandbox 接着被采集那个 guest 的 uptime 走)。合并在 restore 时物化成平坦镜像,**UFFD 缺页路径零改动**;链深超 8 自动转 full;删 base 有子代时返回 409。需 `--track-dirty-pages`(默认关,boot 前生效) |
 | 端口暴露与数据面 | ✅ 一个机制而非两个:Host 里的 `{port}-{sandbox}` 直达该 guest 的该端口,用户的服务器和 agent 走同一条路。无需注册调用、无需宿主端口池 —— noded 进入 namespace 后直连。缺的是按端口的访问控制 |
 | shared-fs 卷 | ⛔ P3–P4 范围,未开始 |
@@ -325,9 +326,11 @@ fc 档需要：
   MSR 0x3a,AMD 上 KVM 会拒绝。`NewFCTier` 启动时检查并给出修复命令,
   而不是等到快照失败才暴露。
 
-overlaybd 需要 ublk（内核 ≥ 6.0)或 tcmu 后端。当前验证机是 Ubuntu 20.04 +
-内核 5.15,无 `/dev/ublk-control`,所以走 **tcmu**（`target_core_user` +
-`tcm_loop` 模块）—— **已实测功能完备**,ublk 只是性能更好,不是前提。
+overlaybd 需要 ublk（内核 ≥ 6.0)或 tcmu 后端。已接入的那个后端是 **tcmu**
+（`target_core_user` + `tcm_loop` 模块）—— 当时验证机是 Ubuntu 20.04 + 内核 5.15,
+没有 `/dev/ublk-control`。**tcmu 已实测功能完备**。验证机现在已升到 6.8,
+但「ublk 只是性能更好」这句话要修正:tcmu 拆 128 个设备的 4.0 s 在两个内核上完全一样,
+那是传输层的限制而不是内核的,所以 ublk 是目标传输层而不是可选优化(见上表)。
 
 tcmu 路径另需注意宿主上的 `multipathd`:TCMU 设备默认无唯一序列号,
 multipathd 会把多个 overlaybd 设备合并成一条 multipath,
@@ -335,13 +338,13 @@ multipathd 会把多个 overlaybd 设备合并成一条 multipath,
 
 ## 4. 下一步
 
-1. **overlaybd 接入 `image.Provider`**:能力已在验证机上实测跑通
-   (tcmu 后端,`docs/decisions.md` §3.1),不再是「能不能用」的问题。
-   要写的是 `OverlaybdProvider`:configfs 编排(**LUN 必须在 nexus 之后建、
-   必须设唯一 `vpd_unit_serial`**,两个坑都会静默失败)、
-   转换产物推 registry、设备生命周期与释放。
-   CoW 已经解决「每 sandbox 的成本」,overlaybd 解决的是
-   「首次使用一个大镜像的等待时间」。
+1. **ublk 接进 `image.Provider`**:overlaybd 本身已经接完了(PR #49,TCMU 后端),
+   所以这一条剩下的是换传输层 —— io_uring / ABI / 控制面 / 队列都在 6.8 上验证过。
+   做它的**全部理由**是 TCMU 拆 128 个设备的 4.0 s,而那个数换内核修不掉
+   (5.15 和 6.8 一样慢),所以接完之后必须复测它,没量出来就等于收益未证实。
+   顺带纠正一个早先写错的价值排序:overlaybd 的收益是**转换 CPU 和磁盘**,
+   不是「首次使用一个大镜像的等待时间」—— 冷路径没有变快,
+   真正能砍掉它的是 lazy pull,而那需要已经封好的层。
 2. **build 的构建日志与取消**：现在 build 是「起了就等」,失败只能从 image state
    看到 FAILED。日志落存储 + 可流式查看 + `cancel` 才算完整（`docs/image-build.md` §6）。
 3. **guest 内日志的出口**:beand 已把 trace id 写进日志,但默认关串口
