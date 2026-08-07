@@ -109,6 +109,20 @@ rm -f "$RUN/bean.db"
 # Colon-less defaults for the same reason as BUILDKIT_ADDR above: the gateway treats
 # an unreachable S3 endpoint as fatal and falls back to a local snapshot directory
 # only when no endpoint is set at all, so BEAN_S3_ENDPOINT= has to mean "no object
+# The state store. SQLite by default because it needs nothing running, and Postgres
+# when BEAN_POSTGRES_DSN is set.
+#
+# This existed only as --db until a stress run made the gap visible: the engine that
+# allows more than one bean-api replica had no way to be exercised by the script that
+# drives load at it, so every measurement was taken against the single-writer engine
+# whether or not that was the intent. A flag nothing can select is a flag nothing tests.
+if [ -n "${BEAN_POSTGRES_DSN:-}" ]; then
+  STORE_FLAG="--postgres ${BEAN_POSTGRES_DSN}"
+  echo "state store: postgres"
+else
+  STORE_FLAG="--db $RUN/bean.db"
+fi
+
 # storage" rather than being replaced by the default.
 BEAN_S3_ENDPOINT=${BEAN_S3_ENDPOINT-http://127.0.0.1:9000} \
 BEAN_S3_ACCESS_KEY=${BEAN_S3_ACCESS_KEY-beanadmin} \
@@ -116,7 +130,7 @@ BEAN_S3_SECRET_KEY=${BEAN_S3_SECRET_KEY-beansecret123} \
 nohup "$BIN/bean-api" \
   --listen 127.0.0.1:$API_PORT \
   --node-grpc 127.0.0.1:$NODE_GRPC_PORT \
-  --db "$RUN/bean.db" \
+  $STORE_FLAG \
   --api-key "$API_KEY" \
   --node-token "$NODE_TOKEN" \
   --bootstrap-token "$BOOTSTRAP_TOKEN" \
