@@ -67,14 +67,25 @@ type ioUringParams struct {
 // ioUringSQE is struct io_uring_sqe. The last 16 bytes are the uring_cmd payload for
 // commands whose data fits inline, which is what ublk's control commands use.
 type ioUringSQE struct {
-	Opcode      uint8
-	Flags       uint8
-	IOPrio      uint16
-	FD          int32
-	Off         uint64
+	Opcode uint8
+	Flags  uint8
+	IOPrio uint16
+	FD     int32
+	// CmdOp is at offset 8, inside the union the kernel shares with off/addr2. This
+	// is where IORING_OP_URING_CMD's command number goes.
+	//
+	// Getting this wrong is what made every ublk command return EINVAL. The command
+	// number was being written at offset 28 instead, which the kernel reads as
+	// uring_cmd_flags -- and io_uring_cmd_prep rejects any value outside
+	// IORING_URING_CMD_MASK. Six variations of the command's contents were tried
+	// against that, all failing identically, because none of them was the problem.
+	CmdOp uint32
+	// Pad1 must be zero: io_uring_cmd_prep starts with `if (sqe->__pad1) return
+	// -EINVAL`, so a stale value here fails the request before the driver sees it.
+	Pad1        uint32
 	Addr        uint64
 	Len         uint32
-	OpFlags     uint32 // cmd_op for IORING_OP_URING_CMD
+	CmdFlags    uint32 // uring_cmd_flags; must be 0 or IORING_URING_CMD_FIXED
 	UserData    uint64
 	BufIndex    uint16
 	Personality uint16
@@ -258,9 +269,9 @@ func (r *ioURing) uringCmd(fd int, cmdOp uint32, payload []byte) (int32, error) 
 	}
 	s := r.sqe()
 	*s = ioUringSQE{
-		Opcode:  ioringOpUringCmd,
-		FD:      int32(fd),
-		OpFlags: cmdOp,
+		Opcode: ioringOpUringCmd,
+		FD:     int32(fd),
+		CmdOp:  cmdOp,
 	}
 	copy(s.Cmd[:], payload)
 	return r.submitAndWait()
