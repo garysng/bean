@@ -80,15 +80,23 @@ func (r *FCRuntime) Destroy(ctx context.Context, id string, force bool) error {
 	// nothing receives the event, and the agent is PID 1 with no signal handler.
 	// Flushing is done by the manager over the agent connection before it gets
 	// here, which confirms the write-out instead of waiting on a guess.
+	// Timed as phases as well as spans. The spans show one destroy; the phases
+	// aggregate, which is what was needed to see that destroys serialise: wall time
+	// is linear in count at a flat ~57 ms each, and a per-destroy trace cannot
+	// distinguish "each step is fast" from "the steps are fast but never overlap".
+	killStart := time.Now()
 	_, kSpan := tracer.Start(ctx, "fc.killVMM")
 	r.killVMM(vm)
 	kSpan.End()
+	r.phase(ctx, "destroy_kill_vmm", killStart)
 
 	var errs []error
+	releaseStart := time.Now()
 	rCtx, rSpan := tracer.Start(ctx, "fc.releaseRootfs")
 	if err := vm.rootfs.Release(); err != nil {
 		errs = append(errs, fmt.Errorf("release rootfs: %w", err))
 	}
+	r.phase(ctx, "destroy_release_rootfs", releaseStart)
 	obs.Fail(rCtx, errors.Join(errs...))
 	rSpan.End()
 
