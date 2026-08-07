@@ -241,20 +241,36 @@ func (r *ioURing) submitAndWaitCQE() (ioUringCQE, error) {
 	// what the kernel's memory-ordering contract requires of userspace.
 	atomic.AddUint32(r.sqTail, 1)
 
-	_, _, errno := unix.Syscall6(unix.SYS_IO_URING_ENTER,
-		uintptr(r.fd), 1, 1, ioringEnterGetEvents, 0, 0)
-	if errno != 0 {
-		return ioUringCQE{}, fmt.Errorf("io_uring_enter: %w", errno)
-	}
+	// Looped rather than entered once. io_uring_enter can return having submitted the
+	// SQE without a completion being ready -- a signal, or the kernel choosing to
+	// complete the work asynchronously, both do that. Treating the first return as
+	// proof of a completion produced "enter returned with no completion" on 195 of 256
+	// concurrent creates, an error that describes the symptom and accuses nothing.
+	//
+	// Bounded rather than infinite: a command that never completes is a bug worth an
+	// error, not a hang. The limit is generous because a ublk control command waits on
+	// the driver, and START_DEV in particular waits for a queue to arm.
+	const maxEnters = 1000
+	for i := 0; i < maxEnters; i++ {
+		toSubmit := uintptr(0)
+		if i == 0 {
+			toSubmit = 1
+		}
+		_, _, errno := unix.Syscall6(unix.SYS_IO_URING_ENTER,
+			uintptr(r.fd), toSubmit, 1, ioringEnterGetEvents, 0, 0)
+		if errno != 0 && errno != unix.EINTR {
+			return ioUringCQE{}, fmt.Errorf("io_uring_enter: %w", errno)
+		}
 
-	head := atomic.LoadUint32(r.cqHead)
-	if head == atomic.LoadUint32(r.cqTail) {
-		return ioUringCQE{}, fmt.Errorf("io_uring: enter returned with no completion")
+		head := atomic.LoadUint32(r.cqHead)
+		if head != atomic.LoadUint32(r.cqTail) {
+			cqe := *(*ioUringCQE)(unsafe.Pointer(uintptr(r.cqes) +
+				uintptr(head&atomic.LoadUint32(r.cqMask))*unsafe.Sizeof(ioUringCQE{})))
+			atomic.StoreUint32(r.cqHead, head+1)
+			return cqe, nil
+		}
 	}
-	cqe := *(*ioUringCQE)(unsafe.Pointer(uintptr(r.cqes) +
-		uintptr(head&atomic.LoadUint32(r.cqMask))*unsafe.Sizeof(ioUringCQE{})))
-	atomic.StoreUint32(r.cqHead, head+1)
-	return cqe, nil
+	return ioUringCQE{}, fmt.Errorf("io_uring: no completion after %d enters", maxEnters)
 }
 
 // uringCmd submits one IORING_OP_URING_CMD against fd and returns the kernel's result.

@@ -8,6 +8,8 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strconv"
+	"strings"
 	"sync"
 )
 
@@ -48,7 +50,14 @@ type UblkProvider struct {
 	// providers so Cached costs the same whichever backend a node runs.
 	cache cachedRefs
 
+	// limit is ublks_max, read from the kernel once.
+	limitOnce sync.Once
+	limit     int
+
 	mu sync.Mutex
+	// inFlight counts devices this provider holds or is creating, checked against limit
+	// before anything is allocated.
+	inFlight int
 	// attached tracks live devices so teardown can find them and a leak is attributable
 	// to a sandbox rather than only to a device id.
 	attached map[string]*ublkDevice
@@ -121,6 +130,29 @@ func (p *UblkProvider) Prepare(ctx context.Context, sandboxID, imageRef string, 
 		return nil, err
 	}
 
+	// Refused here rather than left to the kernel, and this is the guard that was
+	// missing when it mattered.
+	//
+	// ublks_max is a hard ceiling on how many ublk devices can exist, and it defaults to
+	// 64. A create beyond it does not fail cleanly: ADD_DEV succeeds until the limit,
+	// and past it the failures come from further along the sequence, each one leaving a
+	// device allocated. Measured on a 128-core host asked for 256 concurrent sandboxes:
+	// 141 devices accumulated against a limit of 64, and they could not be removed --
+	// STOP_DEV waits for a queue that has died and DEL_DEV blocks behind the kernel
+	// retrying IO against a server that is gone. The host reached load 68 with 37
+	// processes unkillable in D state and needed a reboot.
+	//
+	// So the limit is enforced before anything is allocated. Refusing a create is
+	// recoverable; a leaked kernel object on a shared host is not.
+	if err := p.admit(); err != nil {
+		return nil, err
+	}
+	defer func() {
+		if err != nil {
+			p.release()
+		}
+	}()
+
 	dir := filepath.Join(p.BaseDir, sandboxID)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("image: create sandbox dir: %w", err)
@@ -187,6 +219,11 @@ func (p *UblkProvider) Prepare(ctx context.Context, sandboxID, imageRef string, 
 			p.mu.Lock()
 			delete(p.attached, sandboxID)
 			p.mu.Unlock()
+			// The slot goes back here rather than in the deferred guard above, which only
+			// covers a failed create. Forgetting this would make the node refuse every
+			// create after ublks_max sandboxes had ever existed, rather than after that
+			// many exist at once -- a ceiling that only ever falls.
+			p.release()
 
 			var errs []error
 			// Ordered device-then-backend: the device is still serving reads from the
@@ -255,3 +292,50 @@ func (p *UblkProvider) Config(imageRef string) (*Config, error) {
 // would still build until something assigned it, at which point the error names the
 // assignment rather than the gap.
 var _ Provider = (*UblkProvider)(nil)
+
+// maxDevices is read from the kernel once, so the ceiling this enforces is the one the
+// kernel actually has rather than a number written down here.
+func (p *UblkProvider) maxDevices() int {
+	p.limitOnce.Do(func() {
+		// The default when the parameter cannot be read. 64 is ublk_drv's own default, so
+		// guessing it wrong in the safe direction means refusing creates the kernel would
+		// have allowed -- which is the right way to be wrong.
+		p.limit = 64
+		b, err := os.ReadFile("/sys/module/ublk_drv/parameters/ublks_max")
+		if err != nil {
+			return
+		}
+		if n, err := strconv.Atoi(strings.TrimSpace(string(b))); err == nil && n > 0 {
+			p.limit = n
+		}
+	})
+	return p.limit
+}
+
+// admit reserves a device slot, or refuses.
+//
+// Counted in this process rather than by listing /dev, because two concurrent creates
+// both listing an empty-enough directory would both proceed -- the same race the tcmu
+// path produced with device serials.
+func (p *UblkProvider) admit() error {
+	limit := p.maxDevices()
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.inFlight >= limit {
+		return fmt.Errorf("image: this node already holds %d ublk devices, which is "+
+			"ublks_max on this kernel; a further device cannot be created and attempting "+
+			"one leaks kernel objects that cannot be removed while their server is gone. "+
+			"Raise ublks_max (modprobe ublk_drv ublks_max=N) or place this sandbox "+
+			"elsewhere", limit)
+	}
+	p.inFlight++
+	return nil
+}
+
+func (p *UblkProvider) release() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.inFlight > 0 {
+		p.inFlight--
+	}
+}

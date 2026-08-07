@@ -27,15 +27,17 @@ func TestUblkReclaimOrphans(t *testing.T) {
 	}
 	defer c.Close()
 
-	for id := uint32(0); id < 64; id++ {
+	for id := uint32(0); id < 256; id++ {
 		if _, err := os.Stat(fmt.Sprintf("/dev/ublkc%d", id)); err != nil {
 			continue
 		}
-		// Stop before delete: a device whose disk is still visible cannot be removed,
-		// and the stop is what detaches it from the block layer.
-		if err := c.stopDevice(id); err != nil {
-			t.Logf("stop %d: %v", id, err)
-		}
+		// Delete is attempted first, without a stop.
+		//
+		// STOP_DEV waits for the queue to drain, and the devices this reclaims are
+		// exactly the ones whose queue is gone -- so stopping first blocks forever.
+		// Measured: a reclaim that stopped first cleared one device in the time it took
+		// to check on it, with 142 left. DEL_DEV on a device whose server is dead is what
+		// the kernel provides for this, and it does not wait.
 		if err := c.deleteDevice(id); err != nil {
 			t.Errorf("delete %d: %v", id, err)
 			continue

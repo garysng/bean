@@ -166,6 +166,16 @@ func main() {
 			"bound that, or a node with many prewarmed images will fill its disk. A "+
 			"miss always boots, so enabling this cannot make a create fail that "+
 			"would otherwise have worked")
+	fcUblk := flag.Bool("fc-ublk", false,
+		"serve each sandbox's rootfs from a ublk block device instead of a "+
+			"device-mapper snapshot. The same copy-on-write over the same converted "+
+			"ext4; what changes is that creating the device writes io_uring commands "+
+			"rather than forking losetup twice and dmsetup once per sandbox -- measured "+
+			"at ~26ms per call and 3.8s of a 4.5s create at 256-way concurrency. Needs "+
+			"kernel 6.0 or later with ublk_drv loaded, and a node started with this on "+
+			"a kernel without it refuses to start rather than falling back, because a "+
+			"silent fallback would differ from the cluster's expectation in create "+
+			"latency with nothing downstream able to see it")
 	fcOverlaybd := flag.Bool("fc-overlaybd", false,
 		"assemble rootfs devices from overlaybd layers instead of flattening each "+
 			"image into its own ext4 (fc runtime). Layers are shared by digest, so a "+
@@ -477,6 +487,7 @@ func main() {
 			VMMUid:            *fcVMMUid,
 			VMMGid:            *fcVMMGid,
 
+			Ublk:              *fcUblk,
 			Overlaybd:         *fcOverlaybd,
 			OverlaybdLazyPull: *fcOverlaybdLazyPull,
 			OverlaybdBinDir:   *fcOverlaybdBinDir,
