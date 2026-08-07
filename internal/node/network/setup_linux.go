@@ -21,6 +21,9 @@ import (
 type Commander interface {
 	Run(name string, args ...string) error
 	Output(name string, args ...string) ([]byte, error)
+	// RunInput runs a command with stdin, which is how iptables-restore takes a
+	// whole table's rules -- one lock acquisition instead of one per rule.
+	RunInput(stdin, name string, args ...string) error
 }
 
 // execCommander runs commands for real.
@@ -44,6 +47,24 @@ func (execCommander) Run(name string, args ...string) error {
 
 func (execCommander) Output(name string, args ...string) ([]byte, error) {
 	return exec.Command(name, args...).Output()
+}
+
+// RunInput feeds stdin and folds stderr into the error, for the same reason Run does:
+// iptables-restore reports a rejected line by number, and the number means nothing
+// without the script it refers to. So the script is included in the error.
+func (execCommander) RunInput(stdin, name string, args ...string) error {
+	cmd := exec.Command(name, args...)
+	cmd.Stdin = strings.NewReader(stdin)
+	var stderr strings.Builder
+	cmd.Stderr = &stderr
+	if err := cmd.Run(); err != nil {
+		if msg := strings.TrimSpace(stderr.String()); msg != "" {
+			return fmt.Errorf("%s %s: %s (script was: %s)", name, strings.Join(args, " "),
+				msg, strings.ReplaceAll(strings.TrimSpace(stdin), "\n", "; "))
+		}
+		return fmt.Errorf("%s %s: %w", name, strings.Join(args, " "), err)
+	}
+	return nil
 }
 
 // LinuxSetup builds and destroys one sandbox's networking.
@@ -87,7 +108,7 @@ func iptArgs(netns string, r Rule) (string, []string) {
 	// forever on a stuck lock is worse than one that fails: the scheduler can retry a
 	// failure and has nothing to do with a hang. 5s is far above the milliseconds a
 	// rule insert takes and far below the create timeout.
-	args := append([]string{"-w", "5"}, r.Args()...)
+	args := append([]string{"-w", iptablesLockWaitSeconds}, r.Args()...)
 	if r.Scope == ScopeNetns {
 		return "ip", append([]string{"netns", "exec", netns, "iptables"}, args...)
 	}
@@ -146,10 +167,16 @@ func (s *LinuxSetup) build(l *Layout, rules []Rule) error {
 		}
 	}
 
-	for _, r := range rules {
-		name, args := iptArgs(ns, r)
-		if err := c.Run(name, args...); err != nil {
-			return fmt.Errorf("network: apply %s: %w", r, err)
+	// Batched: one iptables-restore per scope rather than one iptables per rule.
+	//
+	// Thirteen rules meant thirteen acquisitions of a lock shared with every other
+	// writer on the host, and that is where a concurrent batch spent 78% of its wall
+	// clock. restore.go covers why --noflush is what makes this safe to do at all.
+	for _, b := range batchRules(rules) {
+		name, args := restoreArgs(b.Scope, ns)
+		if err := c.RunInput(restoreScript(b), name, args...); err != nil {
+			return fmt.Errorf("network: apply %d %s rule(s) for %s: %w",
+				len(b.Rules), b.Scope, l.Netns, err)
 		}
 	}
 	return nil
@@ -185,6 +212,17 @@ func (s *LinuxSetup) Teardown(l *Layout) error {
 	if err != nil {
 		return err
 	}
+	// Deliberately one call per rule, unlike Setup.
+	//
+	// iptables-restore is transactional, and that is exactly wrong here. Teardown has
+	// to delete whatever is present and tolerate whatever is not: it runs after a
+	// half-finished Setup, and on the reconciliation path against a sandbox whose
+	// namespace is already gone. A batch containing one absent rule fails as a whole,
+	// which would leave the rules that *were* there installed -- a host-scope leak
+	// that accumulates in FORWARD for the life of the node.
+	//
+	// So the lock cost stays here. It is the right trade: teardown is not on the
+	// create path, so it is not what a burst of thirty contends over.
 	for _, r := range rules {
 		name, args := iptArgs(l.Netns, r)
 		if err := c.Run(name, args...); err != nil && r.Scope == ScopeHost {

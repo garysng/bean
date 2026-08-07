@@ -11,15 +11,30 @@ import (
 // in setup_linux.go are a rule applied in the wrong namespace and a teardown that
 // flushes, and both are visible in the command list without a kernel.
 type recorder struct {
-	cmds   []string
-	failOn string
-	out    []byte
+	cmds []string
+	// scripts holds what was fed to iptables-restore, in call order.
+	scripts []string
+	failOn  string
+	out     []byte
 }
 
 func (r *recorder) Run(name string, args ...string) error {
 	line := name + " " + strings.Join(args, " ")
 	r.cmds = append(r.cmds, line)
 	if r.failOn != "" && strings.Contains(line, r.failOn) {
+		return errFake
+	}
+	return nil
+}
+
+// RunInput records the script alongside the command, because with batching the script
+// *is* the rules -- a test that only saw the command line would no longer be able to
+// tell a rule applied in the wrong namespace from one not applied at all.
+func (r *recorder) RunInput(stdin, name string, args ...string) error {
+	line := name + " " + strings.Join(args, " ")
+	r.cmds = append(r.cmds, line)
+	r.scripts = append(r.scripts, stdin)
+	if r.failOn != "" && (strings.Contains(line, r.failOn) || strings.Contains(stdin, r.failOn)) {
 		return errFake
 	}
 	return nil
@@ -81,19 +96,24 @@ func TestSetupInsertsDropsAtPositionOne(t *testing.T) {
 	if err := s.Setup(l); err != nil {
 		t.Fatal(err)
 	}
+	// The rules now arrive as iptables-restore scripts rather than as command lines,
+	// so this walks what was fed to stdin. The property is unchanged and is the one
+	// that matters: a DROP behind Docker's ACCEPT never matches.
 	drops := 0
-	for _, c := range rec.cmds {
-		if !strings.Contains(c, "-j DROP") {
-			continue
-		}
-		drops++
-		if !strings.Contains(c, "-I FORWARD 1") {
-			t.Errorf("DROP not inserted at the head of FORWARD: %s\nBehind Docker's "+
-				"ACCEPT it never matches", c)
+	for _, script := range rec.scripts {
+		for _, line := range strings.Split(script, "\n") {
+			if !strings.Contains(line, "-j DROP") {
+				continue
+			}
+			drops++
+			if !strings.Contains(line, "-I FORWARD 1") {
+				t.Errorf("DROP not inserted at the head of FORWARD: %s\nBehind Docker's "+
+					"ACCEPT it never matches", line)
+			}
 		}
 	}
 	if drops != len(deniedDestinations)*2 {
-		t.Errorf("ran %d DROP commands, expected %d (each denied range in both "+
+		t.Errorf("applied %d DROP rules, expected %d (each denied range in both "+
 			"scopes)", drops, len(deniedDestinations)*2)
 	}
 }
