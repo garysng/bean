@@ -133,3 +133,34 @@ type ublkIODesc struct {
 	StartSector uint64
 	Addr        uint64
 }
+
+// ublksrvCtrlDevInfo is struct ublksrv_ctrl_dev_info: what ADD_DEV takes and what
+// GET_DEV_INFO returns.
+//
+// Field order and padding are load-bearing -- the kernel copies this in and out
+// verbatim, so a field in the wrong place is read as its neighbour. Verified at 64 bytes
+// against the 6.8 header.
+type ublksrvCtrlDevInfo struct {
+	NRHWQueues    uint16
+	QueueDepth    uint16
+	State         uint16
+	Pad0          uint16
+	MaxIOBufBytes uint32
+	DevID         uint32
+	UBLKSRVPID    int32
+	Pad1          uint32
+	Flags         uint64
+	// TSData is ublksrv_flags: for the server's own use, invisible to the driver.
+	TSData    [1]uint64
+	OwnerUID  uint32
+	OwnerGID  uint32
+	Reserved1 uint64
+	Reserved2 uint64
+}
+
+// Device states from ublk_cmd.h.
+const (
+	ublkStateDevDead     = 0
+	ublkStateDevLive     = 1
+	ublkStateDevQuiesced = 2
+)
