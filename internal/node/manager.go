@@ -1297,8 +1297,17 @@ func (m *Manager) connectAgent(ctx context.Context, handle *runtime.Handle) (*gr
 		// device, an agent that rejected its own arguments, a misconfigured vsock, or
 		// a sandbox that is merely slow -- and the evidence that separates them is in
 		// the guest console, which the cleanup below is about to delete.
+		// 40 lines rather than 6. Measured: an overlaybd guest failed with
+		// "Kernel panic - not syncing: Attempted to kill init! exitcode=0x00000100"
+		// and 6 lines held the panic and nothing else -- the agent's own error, which
+		// is the line that says *why* init exited, had already scrolled past. A tail
+		// that shows the symptom and truncates the cause is the failure this whole
+		// block was added to prevent.
+		//
+		// The cost of the larger window is a longer error string on a path that has
+		// already failed, which is the cheapest place in the system to spend bytes.
 		if d, ok := m.rt.(runtime.BootDiagnoser); ok {
-			if tail := d.BootLogTail(handle.SandboxID, 6); tail != "" {
+			if tail := d.BootLogTail(handle.SandboxID, 40); tail != "" {
 				return nil, fmt.Errorf("agent health: %w (guest console: %s)", err, tail)
 			}
 		}
