@@ -16,6 +16,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"syscall"
 	"testing"
 	"time"
 )
@@ -1088,4 +1089,203 @@ func (f *fakeIndex) GetTag(_ context.Context, ref Reference) (string, error) {
 	f.mu.Lock()
 	defer f.mu.Unlock()
 	return f.byTag[ref.Host+"/"+ref.Repository+":"+ref.Tag], nil
+}
+
+// A configured disk size must be usable, not merely mountable.
+//
+// Two sizes are decided independently: the device is sized from the request, while the
+// filesystem lives in the base layer and was sized by vsizeForImage when that layer was
+// converted -- an estimate with a 2 GB floor. Nothing reconciled them, so a sandbox
+// asking for less than the estimate got a device smaller than its own filesystem and
+// the kernel refused to mount it: "bad geometry: block count 524288 exceeds size of
+// device (262144 blocks)". Measured before the fix: 1024 MiB failed, 2048 and 4096
+// worked -- and the default --default-disk-mib is 2048, exactly the floor, which is why
+// every end-to-end run passed while any smaller disk was unusable.
+//
+// Capacity is asserted, not just the mount, because a filesystem can mount and still
+// report the old size: that is the failure this would otherwise hide, where a caller
+// configures 20 GB and gets 2.
+func TestConfiguredSizeIsUsable(t *testing.T) {
+	builder := requireOverlaybd(t)
+	ctx := context.Background()
+	tarPath := filepath.Join(t.TempDir(), "layer.tar")
+	if err := writeTar(tarPath, map[string]string{"f": "x\n"}); err != nil {
+		t.Fatal(err)
+	}
+	layerGz, err := gzipFile(tarPath)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	// 1024 is below vsizeForImage's floor (the case that used to fail), 4096 above it.
+	for _, mib := range []int64{1024, 2048, 4096} {
+		t.Run(fmt.Sprintf("%dMiB", mib), func(t *testing.T) {
+			fake := &obdTestRegistry{digest: "sha256:" + strings.Repeat("ab", 32), layerGz: layerGz}
+			ref, reg := fake.serve(t)
+			p := NewOverlaybdProvider(t.TempDir(), builder.LayerDir, t.TempDir(), reg, builder, 512)
+			r, err := p.Prepare(ctx, fmt.Sprintf("sbxsz%d", mib), ref, PrepareOptions{SizeMiB: mib})
+			if err != nil {
+				t.Fatalf("prepare %d MiB: %v", mib, err)
+			}
+			defer r.Release()
+
+			real_, _ := os.Readlink(r.Device)
+			at := t.TempDir()
+			out, err := exec.Command("mount", "-t", "ext4", real_, at).CombinedOutput()
+			if err != nil {
+				t.Fatalf("%d MiB: cannot mount its own rootfs: %s",
+					mib, strings.TrimSpace(string(out)))
+			}
+			defer func() { _ = exec.Command("umount", at).Run() }()
+
+			var st syscall.Statfs_t
+			if err := syscall.Statfs(at, &st); err != nil {
+				t.Fatalf("statfs: %v", err)
+			}
+			totalMiB := int64(st.Blocks) * int64(st.Bsize) / (1 << 20)
+			// ext4 metadata and the reserved block percentage take a cut, so the
+			// filesystem is always somewhat smaller than the device. 85% catches "the
+			// resize did not happen" (which would leave it at 2048 regardless of the
+			// request) without asserting on ext4's exact overhead.
+			if want := mib * 85 / 100; totalMiB < want {
+				t.Errorf("%d MiB requested, filesystem reports %d MiB (want >= %d): "+
+					"the resize did not take", mib, totalMiB, want)
+			}
+			t.Logf("%d MiB requested -> filesystem %d MiB", mib, totalMiB)
+
+			// Written, not merely reported: a size that statfs claims but the device
+			// cannot hold would fail here instead.
+			target := mib * 60 / 100
+			big := filepath.Join(at, "fill")
+			if out, err := exec.Command("dd", "if=/dev/zero", "of="+big,
+				"bs=1M", fmt.Sprintf("count=%d", target)).CombinedOutput(); err != nil {
+				t.Errorf("%d MiB: could not write %d MiB: %v: %s",
+					mib, target, err, strings.TrimSpace(string(out)))
+				return
+			}
+			if err := exec.Command("sync").Run(); err != nil {
+				t.Fatalf("sync: %v", err)
+			}
+			info, err := os.Stat(big)
+			if err != nil {
+				t.Fatalf("stat written file: %v", err)
+			}
+			if got := info.Size() / (1 << 20); got != target {
+				t.Errorf("wrote %d MiB, file is %d MiB", target, got)
+			}
+			t.Logf("%d MiB requested -> wrote %d MiB successfully", mib, target)
+		})
+	}
+}
+
+// Two sandboxes from one image must not see each other's writes. This is the
+// question a container tier turns on: runc needs a mounted directory tree rather
+// than a block device, and if the isolation came from the VM boundary rather than
+// from the layer arrangement, mounting the same device twice would share writes.
+//
+// Checked by mounting both devices on the host and writing through one, which is
+// exactly what a container tier would do -- so a pass here is evidence about that
+// path and not only about the microVM one. Writes are synced before the comparison,
+// or a pass would only show that A's dirty pages had not reached B's cache yet.
+//
+// Two layers of protection turned up while confirming this test can fail. Pointing
+// both mounts at one device produces exactly the leak the assertions name, and
+// giving two sandboxes the same writable directory does not silently share it --
+// overlaybd-create refuses with "File exists" before a device is ever assembled.
+func TestWritableLayersAreIsolatedAcrossSandboxes(t *testing.T) {
+	builder := requireOverlaybd(t)
+	ctx := context.Background()
+
+	tarPath := filepath.Join(t.TempDir(), "layer.tar")
+	if err := writeTar(tarPath, map[string]string{"shared": "from the image\n"}); err != nil {
+		t.Fatalf("build tar: %v", err)
+	}
+	layerGz, err := gzipFile(tarPath)
+	if err != nil {
+		t.Fatalf("gzip: %v", err)
+	}
+
+	fake := &obdTestRegistry{digest: "sha256:" + strings.Repeat("f5", 32), layerGz: layerGz}
+	ref, reg := fake.serve(t)
+	p := NewOverlaybdProvider(t.TempDir(), builder.LayerDir, t.TempDir(), reg, builder, 512)
+
+	// Two sandboxes, same image.
+	first, err := p.Prepare(ctx, "sbxaaa1", ref, PrepareOptions{SizeMiB: 2048})
+	if err != nil {
+		t.Fatalf("prepare first: %v", err)
+	}
+	defer first.Release()
+	second, err := p.Prepare(ctx, "sbxbbb2", ref, PrepareOptions{SizeMiB: 2048})
+	if err != nil {
+		t.Fatalf("prepare second: %v", err)
+	}
+	defer second.Release()
+
+	if first.Device == second.Device {
+		t.Fatalf("both sandboxes got the same device %q; writes cannot be isolated", first.Device)
+	}
+	t.Logf("devices: %s and %s", first.Device, second.Device)
+	if first.Writable == second.Writable {
+		t.Errorf("both sandboxes share writable layer %q", first.Writable)
+	}
+
+	mountA := t.TempDir()
+	mountB := t.TempDir()
+	for _, m := range []struct {
+		dev, at string
+	}{{first.Device, mountA}, {second.Device, mountB}} {
+		real_, _ := os.Readlink(m.dev)
+		out, err := exec.Command("mount", "-t", "ext4", real_, m.at).CombinedOutput()
+		if err != nil {
+			t.Fatalf("mount %s (-> %s): %v: %s", m.dev, real_, err, out)
+		}
+		at := m.at
+		defer func() { _ = exec.Command("umount", at).Run() }()
+	}
+
+	// Both must start from the image.
+	for _, at := range []string{mountA, mountB} {
+		b, err := os.ReadFile(filepath.Join(at, "shared"))
+		if err != nil {
+			t.Fatalf("read image file at %s: %v", at, err)
+		}
+		if string(b) != "from the image\n" {
+			t.Errorf("image content at %s = %q", at, b)
+		}
+	}
+
+	// Write through A only.
+	if err := os.WriteFile(filepath.Join(mountA, "only-in-a"), []byte("a\n"), 0o644); err != nil {
+		t.Fatalf("write in A: %v", err)
+	}
+	if err := os.WriteFile(filepath.Join(mountA, "shared"), []byte("overwritten by a\n"), 0o644); err != nil {
+		t.Fatalf("overwrite in A: %v", err)
+	}
+	// Flushed to the device, not merely to the page cache: a pass that only reflects
+	// dirty pages in A's own cache would say nothing about what B's device holds.
+	if out, err := exec.Command("sync").CombinedOutput(); err != nil {
+		t.Fatalf("sync: %v: %s", err, out)
+	}
+
+	// B must see neither.
+	if _, err := os.Stat(filepath.Join(mountB, "only-in-a")); err == nil {
+		t.Error("B sees a file created in A; the writable layers are shared")
+	} else if !os.IsNotExist(err) {
+		t.Errorf("unexpected error checking B: %v", err)
+	}
+	b, err := os.ReadFile(filepath.Join(mountB, "shared"))
+	if err != nil {
+		t.Fatalf("read shared in B: %v", err)
+	}
+	if string(b) != "from the image\n" {
+		t.Errorf("B sees %q; A's overwrite leaked", b)
+	}
+
+	// And A must still see its own writes -- otherwise the isolation is really just
+	// both devices ignoring writes.
+	if b, err := os.ReadFile(filepath.Join(mountA, "shared")); err != nil {
+		t.Fatalf("re-read in A: %v", err)
+	} else if string(b) != "overwritten by a\n" {
+		t.Errorf("A does not see its own write: %q", b)
+	}
 }

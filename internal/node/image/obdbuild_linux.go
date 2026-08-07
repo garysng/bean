@@ -62,7 +62,10 @@ func (b *OverlaybdBuilder) bin(name string) string {
 // available reports whether this node can build overlaybd layers, so a node
 // refuses work it cannot do rather than failing the first create that needs it.
 func (b *OverlaybdBuilder) available() error {
-	for _, name := range []string{"overlaybd-create", "overlaybd-apply", "overlaybd-commit"} {
+	for _, name := range []string{"overlaybd-create", "overlaybd-apply", "overlaybd-commit",
+		// Needed on the create path, not just at conversion: every sandbox's
+		// filesystem is grown to the requested size before its device is attached.
+		"overlaybd-resize"} {
 		if _, err := exec.LookPath(b.bin(name)); err != nil {
 			return fmt.Errorf("image: overlaybd needs %s: %w", name, err)
 		}
@@ -206,6 +209,26 @@ func (b *OverlaybdBuilder) createWritable(ctx context.Context, dir string, vsize
 // sealed where it lies.
 func (b *OverlaybdBuilder) sealWritable(ctx context.Context, data, index, dest string) error {
 	return b.run(ctx, "overlaybd-commit", "-z", "-t", data, index, dest)
+}
+
+// resizeToGB grows the filesystem in an assembled chain to gb gigabytes.
+//
+// Takes the device config rather than a layer path because the filesystem spans the
+// whole chain: it lives in the base layer, and growing it writes the new metadata
+// through to the upper. That is what makes this safe to do per sandbox -- the shared
+// read-only layers are not modified, only the writable one on top.
+//
+// Called before the device is attached. overlaybd-resize opens the chain itself, and a
+// backstore already serving it would be a second writer to the same upper layer.
+func (b *OverlaybdBuilder) resizeToGB(ctx context.Context, configPath string, gb int64) error {
+	if gb <= 0 {
+		return fmt.Errorf("image: resize needs a positive size, got %d", gb)
+	}
+	args := []string{"--config", configPath, "--size", fmt.Sprint(gb)}
+	if b.ServiceConfig != "" {
+		args = append(args, "--service_config_path", b.ServiceConfig)
+	}
+	return b.run(ctx, "overlaybd-resize", args...)
 }
 
 func (b *OverlaybdBuilder) run(ctx context.Context, name string, args ...string) error {
