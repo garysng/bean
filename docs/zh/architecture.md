@@ -84,7 +84,7 @@ AI evaluation / agent rollout 场景（如 SWE-bench 类任务）的特点：
         │ noded    │         │ noded    │         │ noded    │   ← 每节点一个
         │ (裸金属) │         │ (云 VM)  │         │ (裸金属) │      node daemon
         └────┬─────┘         └──────────┘         └──────────┘
-             │ overlaybd(ublk) 直驱 + noded 自管 FC;containerd 仅容器档可选
+             │ overlaybd 直驱 + noded 自管 FC 与容器 runtime;不依赖 containerd
         ┌────▼─────────────────────────────┐
         │  ├── 镜像: overlaybd ublk daemon  │ ← 块级 lazy-pull from S3
         │  └── runtime: fc(默认)│runc│runsc │ ← 内部自动分档（D3）
@@ -92,7 +92,7 @@ AI evaluation / agent rollout 场景（如 SWE-bench 类任务）的特点：
              │
         ┌────▼──────────────────────┐
         │ sandbox                    │  fc: microVM（vsock 通 agent）
-        │  └── beand (init/PID1)│  container: runc/runsc（unix socket）
+        │  └── beand (init/PID1)│  container: runc/runsc（其 netns 内的 TCP）
         │      └── 用户进程           │  agent: exec/PTY/文件/端口转发
         └───────────────────────────┘
 
@@ -135,10 +135,19 @@ fc 主路径**不引入 containerd**（AgentENV 同款,其源码已在本地 /Us
 |---|---|
 | 镜像拉取/content store | blob 在 S3（image-service 离线转换）,元数据控制面下发;registry 不在热路径 |
 | snapshotter | overlaybd ublk daemon 直驱（AgentENV 的 uvm-ublk 实证） |
-| task 生命周期 | fc:noded 自管 FC 进程;容器档:containerd+runc（仅此处保留,可选依赖） |
+| task 生命周期 | fc:noded 自管 FC 进程;容器档:noded 直驱 runsc/runc（无 containerd,见下） |
 
-容器档（GPU/无 KVM 降级）保留 containerd——runc 生命周期与 overlayfs 组装
-不值得自研;纯 fc 节点可完全不装 containerd。runtime 抽象接口见 noded-design §3。
+> **已修正。** 容器档**不使用** containerd。这一段写于 overlaybd 尚未接入
+> `image.Provider` 之时;现在它接入了,再引入 containerd 会带来自己的 content store
+> 和 snapshotter,让节点出现两套互不知晓的镜像体系。这一档直驱 runsc/runc,
+> 并复用 fc 的 rootfs provider —— 见 D3。
+>
+> 具体的阻塞点是查证过的,不是推断:overlaybd 的 containerd snapshotter 要求镜像位于
+> registry 且 manifest 带 `containerd.io/snapshot/overlaybd/version` 注解,
+> 而 bean 发布到 S3 的是裸 blob 前缀,两者都没有。
+
+原本的理由仍然成立,故保留:runc 生命周期与 overlayfs 组装不值得自研,
+纯 fc 节点可完全不装 containerd。runtime 抽象接口见 noded-design §3。
 
 ### D3. 隔离分档 + 节点能力探测 ⚠️
 
@@ -161,13 +170,60 @@ noded 启动时探测节点能力并上报：
 ```
 
 - **fc**：隔离最强、snapshot/fork 原生、guest 真内核无 syscall 兼容性问题
-- **runsc**：无 KVM 环境的降级档（P5 生效;P0–P4 无 KVM 节点不可入池）
-- **runc**：GPU 路径 + 内部可信任务（P5 按需引入）
+- **runsc**：已实现 ✅ —— `--runtime runsc`，真机端到端验证通过
+- **runc**：同一份实现，`--runtime runc`。共享宿主内核，因此用于可信任务或 GPU，而非不可信代码
 - ~~kata~~：被 fc 取代，不再引入
 
 API 请求不含 isolation 字段（内部 proto 保留枚举，便于运维强制指定）;
 sandbox 详情返回实际档位（`runtime: fc|runsc|runc`）供排障。
 scheduler 按节点能力匹配。
+
+#### 容器档的实际实现 ✅
+
+一份实现、两个二进制：runsc 与 runc 都是 OCI runtime，接受相同的 bundle 和子命令，
+所以节点用哪个是配置而非第二条代码路径。`internal/node/runtime/oci_linux.go`。
+
+它复用**与 fc 相同的 rootfs provider**（`selectProvider`），因此同一节点上的容器与
+microVM 共享镜像缓存、已转换的 overlaybd 层和对象存储。这种共享正是「直驱 OCI runtime
+而不引入 containerd」的理由 —— containerd 会带来自己的 content store 和 snapshotter，
+让节点出现两套互不知晓的镜像体系。这也修正了 D2 的结论，那段写于 overlaybd 尚未接入
+`image.Provider` 之时。
+
+实测：**冷启动 create 9.8s，稳态 0.9s** —— 冷启动那部分是 overlaybd 转换，fc 档同样要付；
+0.9s 与 fc 已发布层的 0.8s 在噪声范围内。分阶段指标显示两次 create 合计 17.09s 中
+16.86s 在 `runtime_create`（几乎全在第一次），`agent_ready` 仅 0.072s。
+
+**四条约束，没有一条会给出点明原因的报错。** 每条都是驱动真实系统才发现的，
+且都在代码里连同理由一起固化：
+
+1. **unix socket 不穿透 bind mount。** 容器内 bind 成功，宿主永远看不到那个 socket ——
+   gVisor 在 Sentry 内部实现 unix socket。而写到同一挂载点的**普通文件确实可见**，
+   所以这是 socket 特有的。因此 agent 监听 TCP，node 经 sandbox 的网络命名空间拨入 ——
+   用的是 `dial.go` 早已有、`portforward.go` 早已在用的 `netns:` 传输。
+2. **地址要用 veth 的，不是 `GuestIP`。** `GuestIP` 是 guest 内核在 tap 上配的地址，
+   而容器没有 guest 内核：tap 保持 DOWN，那个地址在任何地方都不存在。拨它得到
+   「network is unreachable」，因为宿主把它按默认网关解析了。
+3. **runsc 需要 `--network=host`。** 它默认的用户态网络栈（netstack）接管了 veth，
+   于是 agent 打印 `beand listening` 而命名空间内 `ss` 看不到任何监听。安全代价见下。
+4. **agent 在 TCP 上强制要求 token，而 node 必须为它提供。** `cmd/beand` 把这个要求
+   绑定在传输上而非某个 flag，因为 TCP 地址**从 sandbox 内部可达**。期望的 hash 来自
+   169.254.169.254 上的 metadata service —— Firecracker 提供它，容器没有 ——
+   所以这一档在命名空间内跑一个**每 sandbox 独立**的实现（`oci_mmds_linux.go`）。
+   不共享：那份文档里是某一个 sandbox 的凭据。
+
+**`--network=host` 放弃了什么，明说。** netstack 是 gVisor 的隔离边界之一，
+host 网络放弃了它：sandbox 使用宿主内核的网络栈，因此那里的漏洞从内部可达。
+保留下来的是**整个 Sentry** —— 文件系统与进程类系统调用两种模式下都被拦截 ——
+并且 sandbox 仍限制在自己的网络命名空间里，只看到一对 veth 而非宿主的接口。
+替代方案是让 node **穿过** netstack 到达 agent，那意味着转发端口或代理 socket；
+两者都是额外工作量，且都不明显优于「接受一个命名空间范围内的网络栈」。
+
+**未实现**：`Checkpoint` 与 `Fork` 返回 `ErrCheckpointUnsupported` ——
+用独立错误，使调度器能区分「这一档做不到」与「这次尝试失败了」。CRIU 是独立工作量，
+而 warm snapshot 是 fc 的吞吐杠杆，容器档不是它的替代品。同样未验证的是 **GPU**：
+它的记账在 proto、调度器和 API 里都齐全，而 `internal/node/` 从不设置 `GpuCount` ——
+所以每个节点都上报 0，那条路径目前是死代码。gVisor 完全不支持透传，
+那正是 runc 存在的用途。
 
 ### D9. Firecracker 主档：容器 rootfs 直挂 microVM ✅
 
@@ -191,7 +247,7 @@ disk-diff 直接取宿主 overlaybd 可写层、guest 内零 union 复杂度。
   guest 是完整真实 Linux 内核，兼容性优于 gVisor 模拟层。唯一差异：内核
   由平台统一打包提供（非宿主内核），对纯用户态 eval 负载无感。
   详见 noded-design.md fcRuntime 节
-- agent 通信走 vsock（transport 抽象，与容器档 unix socket 同协议）
+- agent 通信走 vsock（transport 抽象；容器档同协议但走 netns 内的 TCP，见 D3）
 - 网络：tap 设备接入节点 bean0 桥，nftables 规则与容器档一致
 - 该路线已被 AgentENV（Kimi K3 训练基础设施）在生产验证；实现参考其
   overlaybd+ublk 集成与 snapshot 设计
@@ -228,7 +284,7 @@ eval 镜像任意、不可假设内含工具链。注入方式按档位：
 | 档 | 注入 | 通信 |
 |---|---|---|
 | fc（默认） | **agent 盘**：含 beand 的只读小盘（ext4）作为附加 virtio-blk，guest 内核 init=盘内 agent | vsock + gRPC |
-| 容器档 | bind mount 只读挂入 + entrypoint override，agent 作 PID1 | unix socket + gRPC |
+| 容器档 | overlaybd 设备挂成目录 + agent 作 PID1 | netns 内 TCP + gRPC |
 
 共同点：用户镜像零修改;原 entrypoint/cmd/env/user/workdir 序列化进 spec，
 由 agent 按 Docker 语义托管拉起（详见 noded-design.md §3.1/§6）。
@@ -388,7 +444,7 @@ GET    /v1/sandboxes/{id}/logs
 ### 4.2 内部 gRPC ✅
 
 - `control ↔ noded`：`NodeService`（Register/Heartbeat/SyncState）+ `SandboxService`（noded 实现，control 直连调用：Create/Destroy/Pause/Snapshot/Exec 转发/…）
-- `noded ↔ agent`：`AgentService`（Exec/StreamExec/ReadFile/WriteFile/ListDir/ForwardPort/…;容器档 unix socket、fc 档 vsock）
+- `noded ↔ agent`：`AgentService`（Exec/StreamExec/ReadFile/WriteFile/ListDir/ForwardPort/…;容器档走其 netns 内的 TCP、fc 档 vsock）
 
 proto 定义统一放 `proto/`，生成代码进各语言 SDK。
 
