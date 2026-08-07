@@ -10,24 +10,6 @@ import (
 	"golang.org/x/sys/unix"
 )
 
-// ublksrvCtrlDevInfo is struct ublksrv_ctrl_dev_info, the payload ADD_DEV takes.
-type ublksrvCtrlDevInfo struct {
-	NRHWQueues    uint16
-	QueueDepth    uint16
-	State         uint16
-	Pad0          uint16
-	MaxIOBufBytes uint32
-	DevID         uint32
-	UBLKSRVPID    int32
-	Pad1          uint32
-	Flags         uint64
-	TSData        [1]uint64
-	OwnerUID      uint32
-	OwnerGID      uint32
-	Reserved1     uint64
-	Reserved2     uint64
-}
-
 // TestUblkAddDevOnHardware tries the command that actually matters.
 //
 // GET_FEATURES returns EINVAL to every variation -- both ioctl directions, every field
