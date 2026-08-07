@@ -595,8 +595,10 @@ Target: P50 < 2s (image already cached) / P50 < 10s (lazy-pull of a cold image).
 ## 6. Security Model ⚠️
 
 - Untrusted code runs on fc by default (Firecracker microVM, a hardware virtualization boundary); nodes without KVM fall back to runsc
-- ⚠️ The fc tier currently has only FC's built-in seccomp; **the jailer and the host-side cgroup wrapper are unimplemented** (security §A3). The container tier is unimplemented as a whole
-- 📐 Network policy is unimplemented — the sandbox has no network stack today
+- ✅ The fc tier's host-side confinement is built: the VMM drops to an unprivileged uid (`--fc-vmm-uid`), runs in a per-sandbox cgroup with a memory ceiling, CPU quota and pid cap (`--fc-cgroups`), and has its own pid, mount and network namespaces by default. Firecracker's built-in seccomp is on top of that, not instead of it
+- ❌ ~~jailer~~ is not planned. With the namespaces, cgroup and uid drop above already in place, what jailer would add is a `chroot` and a device allowlist — [#20](https://github.com/garysng/bean/issues/20) phase 2, and probably not the right shape. Recorded as abandoned rather than pending so it stops reading as a gap
+- ✅ The container tier is implemented (D3): `--runtime runsc|runc`
+- ⚠️ Network policy between sandboxes is unimplemented. Each sandbox *does* have its own namespace, tap and egress, with the metadata range and RFC1918 denied by default (network.md) — what is missing is per-port access control, so any port on a sandbox is reachable by anything that can reach bean-proxy ([#50](https://github.com/garysng/bean/issues/50))
 - ⚠️ Nodes currently take their S3 credentials from environment variables; presigned URL / STS rotation is unimplemented
 - API auth: API key (caller identification + quota; no user/tenant system — this is an internal cluster service)
 

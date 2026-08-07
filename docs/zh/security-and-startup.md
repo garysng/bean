@@ -107,7 +107,7 @@ CPU 配额来自 machine config 拿到的
 启动时检查且是致命的,因为否则它们各自会让节点上每一次 create 都失败,而症状并不点名
 自己的成因。
 
-**容器档**（runc/runsc,📐 未实现,随 P5 引入）：
+**容器档**（runc/runsc,✅ 已实现,`--runtime runsc|runc`）：
 
 - cgroup v2 硬限制：cpu.max、memory.max（+ memory.swap.max=0）、pids.max（默认 4096，防 fork 炸弹）、io 权重
 - 磁盘写入上限：rootfs 可写层 XFS project quota（默认 20 GiB，可配）
