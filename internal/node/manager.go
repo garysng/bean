@@ -152,7 +152,7 @@ func (m *Manager) Close() {
 }
 
 // Create creates a sandbox and waits for the agent to be healthy.
-func (m *Manager) Create(ctx context.Context, spec *nodev1.SandboxSpec) (*Sandbox, error) {
+func (m *Manager) Create(ctx context.Context, spec *nodev1.SandboxSpec) (sb *Sandbox, createErr error) {
 	if spec.GetSandboxId() == "" {
 		return nil, fmt.Errorf("sandbox_id required")
 	}
@@ -181,7 +181,7 @@ func (m *Manager) Create(ctx context.Context, spec *nodev1.SandboxSpec) (*Sandbo
 		return nil, fmt.Errorf("sandbox %s already exists", spec.SandboxId)
 	}
 	// Reserve the slot to make Create idempotent-safe under concurrency.
-	sb := &Sandbox{Spec: spec, State: runtime.StateStarting, lastActivity: time.Now()}
+	sb = &Sandbox{Spec: spec, State: runtime.StateStarting, lastActivity: time.Now()}
 	m.sandboxes[spec.SandboxId] = sb
 	m.mu.Unlock()
 
@@ -194,6 +194,21 @@ func (m *Manager) Create(ctx context.Context, spec *nodev1.SandboxSpec) (*Sandbo
 			"Sandbox creates handled by this node.",
 			map[string]string{"outcome": outcome, "runtime": m.rt.Name()}, 1)
 		m.observePhase(ctx, "total", time.Since(createStart))
+		// A failed create used to increment a counter and say nothing. Measured: a
+		// create against a misconfigured overlaybd backend hung and returned
+		// "TIMEOUT: stream terminated by RST_STREAM" to the caller, while noded's
+		// log held 15 lines, all from startup. The node is the only party that knows
+		// which step failed, so a create that fails without saying why leaves the
+		// cause reachable from nowhere.
+		// Read from the named return rather than captured at each failure site. There
+		// are six error returns in this function and several wrap; assigning at each
+		// would mean remembering to, and a forgotten one is silent in exactly the way
+		// this whole block exists to prevent.
+		if outcome != "success" {
+			slog.Error("sandbox create failed", logging.KeySandbox, spec.GetSandboxId(),
+				logging.KeyError, createErr, "image", spec.GetImage(),
+				"elapsed", time.Since(createStart).Round(time.Millisecond))
+		}
 	}()
 
 	// Networking is built before the runtime starts, because the tap has to exist
@@ -499,6 +514,11 @@ func (m *Manager) Destroy(ctx context.Context, id string, force bool) error {
 	// nothing. Asking the agent to sync achieves the actual goal (the writable
 	// layer on the host matches what the sandbox wrote) and confirms it rather
 	// than assuming it happened.
+	// Timed because the destroy phase below covers only rt.Destroy, so a slow flush
+	// or a slow network teardown was invisible while still being paid by the caller.
+	// Measured at 256 concurrent creates, destroy was 2.5-3.1s -- worse than create --
+	// and nothing said which of the three parts that was.
+	flushStart := time.Now()
 	if !force {
 		if err := m.flushBeforeDestroy(ctx, id); err != nil {
 			// A sandbox being destroyed cannot be kept alive because its
@@ -507,6 +527,8 @@ func (m *Manager) Destroy(ctx context.Context, id string, force bool) error {
 				logging.KeySandbox, id, logging.KeyError, err)
 		}
 	}
+
+	m.observePhase(ctx, "destroy_flush", time.Since(flushStart))
 
 	m.mu.Lock()
 	sb, ok := m.sandboxes[id]
@@ -539,7 +561,9 @@ func (m *Manager) Destroy(ctx context.Context, id string, force bool) error {
 	// skipping the teardown because the runtime errored would leak the namespace and
 	// its index permanently, which is the loop-device failure (GitHub #16) in a
 	// resource whose reuse gives two sandboxes the same addresses.
+	netStart := time.Now()
 	m.releaseNetwork(id)
+	m.observePhase(ctx, "destroy_network", time.Since(netStart))
 
 	m.metrics.IncCounter("bean_node_destroys_total", "Sandbox destroys handled by this node.",
 		map[string]string{"outcome": boolOutcome(err == nil), "runtime": m.rt.Name()}, 1)

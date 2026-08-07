@@ -300,6 +300,18 @@ func writeAttr(path, value string) error {
 }
 
 // tcmuAvailable reports whether this host can attach overlaybd devices.
+//
+// Only the core directory is checked by existence. The loopback one is not, and that
+// is the whole point of this comment: configfs materialises a fabric's directory when
+// something first creates a target under it, so on a host where tcm_loop is loaded and
+// working but nothing has attached a device yet, /sys/kernel/config/target/loopback
+// does not exist. Measured on a 128-core host -- this function reported the loopback
+// fabric unavailable, and `mkdir .../loopback/naa.<wwn>/tpgt_1` then succeeded
+// immediately, which is exactly what attachTCMU does.
+//
+// So a node with working tcmu fell back to dm-snapshot and said the kernel was
+// missing a module it had loaded. Checking whether the module is registered rather
+// than whether a directory has been populated is the fix.
 func tcmuAvailable() error {
 	if _, err := os.Stat(configfsCore); err != nil {
 		return errors.New("image: configfs target unavailable (modprobe target_core_user)")
@@ -308,14 +320,39 @@ func tcmuAvailable() error {
 	// tcm_loop creates its configfs group on demand -- attach() does the MkdirAll
 	// (see step 3) -- so the group is absent on a capable host that has not attached
 	// a device yet. Gating on the group existing therefore rejected a host that could
-	// serve overlaybd fine; the loaded module is the signal that the group can be
-	// created, and the configfs path is accepted too for a host where a prior attach
-	// already materialised it.
-	if _, err := os.Stat("/sys/module/tcm_loop"); err == nil {
-		return nil
-	}
-	if _, err := os.Stat(configfsLoopback); err != nil {
-		return errors.New("image: loopback fabric unavailable (modprobe tcm_loop)")
+	// serve overlaybd fine, which is why this asks whether the fabric can be created
+	// rather than whether it already has been.
+	if err := loopbackFabricRegistered(); err != nil {
+		return err
 	}
 	return nil
+}
+
+// loopbackFabricRegistered reports whether tcm_loop is present, without requiring that
+// a target has already been created.
+//
+// The directory is accepted when it happens to exist, because that is the cheapest
+// possible proof. When it does not, the module list is consulted instead: tcm_loop
+// being loaded is what makes the mkdir in attachTCMU work, and an absent directory
+// says nothing either way.
+func loopbackFabricRegistered() error {
+	if _, err := os.Stat(configfsLoopback); err == nil {
+		return nil
+	}
+	mods, err := os.ReadFile("/proc/modules")
+	if err == nil {
+		for _, line := range strings.Split(string(mods), "\n") {
+			// Field 0 is the module name; tcm_loop is what provides the loopback
+			// fabric. Compared on the field rather than by substring so a module
+			// whose name merely contains it cannot satisfy this.
+			if name, _, found := strings.Cut(line, " "); found && name == "tcm_loop" {
+				return nil
+			}
+		}
+	}
+	// Built into the kernel rather than a module is the remaining possibility, and
+	// there is no cheap way to distinguish it from absent -- so the error names the
+	// action to take instead of asserting which of the two it is.
+	return errors.New("image: loopback fabric unavailable; tcm_loop is neither loaded " +
+		"nor has a target been created (modprobe tcm_loop)")
 }
