@@ -6,7 +6,6 @@ package main
 import (
 	"flag"
 	"fmt"
-	"log"
 	"log/slog"
 	"os"
 	"strings"
@@ -19,6 +18,32 @@ import (
 )
 
 var version = "dev"
+
+// fatalToConsole reports a fatal early-boot failure where it can actually be read,
+// then exits.
+//
+// As PID 1 before the pivot, stderr goes nowhere: there is no console attached to it
+// and no supervisor to collect it. So log.Fatalf here produced a guest whose only
+// visible symptom was the kernel's own reaction --
+// "Kernel panic - not syncing: Attempted to kill init! exitcode=0x00000100" -- with
+// the reason gone. Measured while bringing up overlaybd: the create failed, the tail
+// held the panic, and the line naming the cause did not exist anywhere.
+//
+// /dev/console is written directly rather than through the logger because the logger
+// writes to stderr, which is the thing that does not work here. Both are attempted:
+// the console is what a person reads, and stderr still helps in a test or on a tier
+// where the agent is an ordinary process.
+func fatalToConsole(format string, args ...any) {
+	msg := fmt.Sprintf("beand: "+format+"\n", args...)
+	fmt.Fprint(os.Stderr, msg)
+	// Best effort by construction: a guest booted without console= has no such
+	// device, and failing to report a failure must not change how it exits.
+	if f, err := os.OpenFile("/dev/console", os.O_WRONLY, 0); err == nil {
+		fmt.Fprint(f, msg)
+		f.Close()
+	}
+	os.Exit(1)
+}
 
 func main() {
 	listenAddr := flag.String("listen", "/run/bean/agent.sock", "unix socket path (or vsock:PORT on fc tier)")
@@ -59,7 +84,7 @@ func main() {
 	// bound and before any user process can observe a half-built root.
 	if *pivot != "" {
 		if err := beand.PivotToRootfs(*pivot); err != nil {
-			log.Fatalf("pivot to %s: %v", *pivot, err)
+			fatalToConsole("pivot to %s: %v", *pivot, err)
 		}
 	}
 
@@ -86,14 +111,14 @@ func main() {
 	// instead of letting the user's build report it.
 	if *guestDNS != "" {
 		if err := beand.WriteResolvConf(*rootDir, *guestDNS); err != nil {
-			log.Fatalf("guest dns: %v", err)
+			fatalToConsole("guest dns: %v", err)
 		}
 		slog.Info("guest resolver configured", "nameserver", *guestDNS)
 	}
 
 	lis, err := beand.Listen(*listenAddr)
 	if err != nil {
-		log.Fatalf("listen %s: %v", *listenAddr, err)
+		fatalToConsole("listen %s: %v", *listenAddr, err)
 	}
 
 	unary := []grpc.UnaryServerInterceptor{beand.UnaryTraceLogging()}
@@ -128,6 +153,6 @@ func main() {
 	slog.Info("beand listening", "version", version, "addr", *listenAddr, "root", *rootDir,
 		"authenticated", strings.HasPrefix(*listenAddr, "tcp:"))
 	if err := srv.Serve(lis); err != nil {
-		log.Fatal(err)
+		fatalToConsole("%v", err)
 	}
 }
