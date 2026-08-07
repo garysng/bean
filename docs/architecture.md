@@ -236,6 +236,35 @@ its own netns handling) that could have broken any single step. Phase metrics pu
 total in `runtime_create` (almost all of it in the first) and 0.072s in
 `agent_ready`.
 
+**Concurrency, measured.** `hack/oci-tier-concurrent.sh`:
+
+| | |
+|---|---|
+| 5 concurrent creates | 5/5, ~4s |
+| 30 concurrent creates | 25/30, 9.6s wall clock (fastest 2.0s, median 4.7s, slowest 9.6s) |
+
+Against a 0.9s steady-state create, 25 sandboxes serialised would take 22.5s, so
+there is roughly 2.3x parallelism rather than none. Phase metrics say where the rest
+goes:
+
+```
+network_setup   158.6s / 31 = 5.1s each   <- 78% of total
+runtime_create   43.2s / 31 = 1.4s each
+agent_ready       1.8s / 28 = 0.06s each
+```
+
+`network_setup` costs 0.165s for a single create and 5.1s under fan-out -- a 30x
+increase, and the reason parallelism is bounded. That is the xtables lock: each
+create inserts five iptables rules, and iptables serialises through a per-table lock
+shared with everything else on the host. `-w` is what makes the creates queue rather
+than fail (before it, five concurrent creates produced one success), but queueing is
+still serialisation.
+
+The fix, not attempted here, is to stop taking the lock five times per sandbox:
+`iptables-restore` applies a whole ruleset in one transaction. That is a change to
+the network layer, which both tiers share, and it wants its own measurement rather
+than being folded into a runtime change.
+
 **Four constraints, none of which produce an error naming the cause.** Each was
 found by driving the real thing, and each is enforced in code with the reasoning
 attached:

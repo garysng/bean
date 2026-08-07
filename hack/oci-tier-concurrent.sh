@@ -30,6 +30,17 @@ RUN=${RUN:-/tmp/beanrun}
 IMG=${IMG:-docker.m.daocloud.io/library/python:3.11-slim}
 UPLINK=${UPLINK:-$(ip route | awk '/^default/ {print $5; exit}')}
 GUEST_SUBNET=${GUEST_SUBNET:-172.31.0.0/30}
+# The node's advertised disk bounds how many sandboxes fit, at --default-disk-mib
+# each, so the default 100 GiB caps this at five -- a quota, not a concurrency limit.
+# Raising it is what lets the xtables lock window actually be exercised.
+#
+# Passed through to dev-fc-stack.sh, which already has this variable and renders it as
+# --disk-mib. Setting it in NODED_FLAGS instead put the flag on the command line twice
+# and the stack's own value won, which read as a concurrency ceiling that was not there.
+#
+# Safe to oversubscribe: an overlaybd writable layer is sparse, measured at 40 KiB for
+# an idle sandbox against a 20 GiB apparent size.
+NODE_DISK_MIB=${NODE_DISK_MIB:-}
 export BEAN_BASE_URL=http://127.0.0.1:18080
 export BEAN_API_KEY=devkey
 
@@ -49,6 +60,7 @@ echo "runtime: $RUNTIME  sandboxes: $N"
 rm -rf "$RUN" /var/lib/bean/images
 GUEST_SUBNET=$GUEST_SUBNET UPLINK=$UPLINK BIN=$BIN BUILDKIT_ADDR= \
   RUNTIME=$RUNTIME NODED_FLAGS="--fc-overlaybd" \
+  ${NODE_DISK_MIB:+NODE_DISK_MIB=$NODE_DISK_MIB} \
   bash "$STACK" start >"${TMPDIR:-/tmp}/oci-conc-stack.log" 2>&1 || {
     echo "stack failed to start"; tail -20 "${TMPDIR:-/tmp}/oci-conc-stack.log"; exit 1; }
 sleep 3
