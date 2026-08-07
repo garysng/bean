@@ -153,6 +153,80 @@ else
 fi
 
 echo
+echo "### file transfer through the agent"
+# cp exercises the agent's file streaming rather than exec, which is a separate RPC
+# path -- and the one a user hits when moving a task's inputs in and results out.
+printf 'payload from the host\n' > /tmp/oci-e2e-in.txt
+if "$BIN/bean" cp /tmp/oci-e2e-in.txt "sbx:$SBX:/in.txt" >/dev/null 2>&1 &&
+   back=$("$BIN/bean" exec "$SBX" -- cat /in.txt 2>&1 | tail -1) &&
+   [ "$back" = "payload from the host" ]; then
+  pass "cp host -> sandbox"
+else
+  fail "cp into the sandbox: $back"
+fi
+
+"$BIN/bean" exec "$SBX" -- sh -c 'echo result-from-sandbox > /out.txt' >/dev/null 2>&1
+rm -f /tmp/oci-e2e-out.txt
+if "$BIN/bean" cp "sbx:$SBX:/out.txt" /tmp/oci-e2e-out.txt >/dev/null 2>&1 &&
+   [ "$(cat /tmp/oci-e2e-out.txt 2>/dev/null)" = "result-from-sandbox" ]; then
+  pass "cp sandbox -> host"
+else
+  fail "cp out of the sandbox: $(cat /tmp/oci-e2e-out.txt 2>/dev/null)"
+fi
+rm -f /tmp/oci-e2e-in.txt /tmp/oci-e2e-out.txt
+
+echo
+echo "### a port inside the sandbox, reached through the proxy"
+# The claim this checks is that the container tier needs no proxy changes: the node
+# dials into the sandbox's netns either way. Asserted rather than assumed, because
+# "should work by construction" is how the veth-vs-tap mistake got made.
+"$BIN/bean" exec "$SBX" -- sh -c \
+  'nohup python3 -m http.server 8080 --bind 0.0.0.0 >/tmp/http.log 2>&1 &' >/dev/null 2>&1
+served=""
+for _ in $(seq 1 15); do
+  served=$(curl -fsS -m 3 -H "Host: 8080-$SBX.local" \
+    -H "Authorization: Bearer $BEAN_API_KEY" http://127.0.0.1:17460/ 2>/dev/null | head -c 80)
+  [ -n "$served" ] && break
+  sleep 1
+done
+if [ -n "$served" ]; then
+  pass "proxy reached a port inside the sandbox"
+else
+  fail "proxy could not reach port 8080 in the sandbox"
+  tail -5 "$RUN/proxy.log" 2>/dev/null
+fi
+
+echo
+echo "### pause and resume"
+if "$BIN/bean" pause "$SBX" >/dev/null 2>&1; then
+  # An exec after pause must still work: the manager wakes a paused sandbox rather
+  # than refusing, which is what makes idle-pause usable at all.
+  woke=$("$BIN/bean" exec "$SBX" -- echo awake 2>&1 | tail -1)
+  if [ "$woke" = "awake" ]; then
+    pass "paused, then woken by exec"
+  else
+    fail "exec after pause: $woke"
+  fi
+else
+  fail "pause was refused"
+fi
+
+echo
+echo "### logs and listing"
+if "$BIN/bean" ls 2>&1 | grep -q "$SBX"; then
+  pass "ls reports the sandbox"
+else
+  fail "ls does not list $SBX"
+fi
+# logs may legitimately be empty -- what matters is that the call is served rather
+# than erroring, since it goes through the same agent path.
+if "$BIN/bean" logs "$SBX" >/dev/null 2>&1; then
+  pass "logs served"
+else
+  fail "logs errored"
+fi
+
+echo
 echo "### destroy releases the mount and the device"
 mounts_before=$(grep -c "$RUN\|/var/lib/bean/sandboxes" /proc/mounts 2>/dev/null || echo 0)
 "$BIN/bean" kill "$SBX" >/dev/null 2>&1

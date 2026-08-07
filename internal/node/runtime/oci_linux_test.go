@@ -4,10 +4,13 @@ package runtime
 
 import (
 	"encoding/json"
+	"net"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+
+	"github.com/garysng/bean/internal/node/network"
 )
 
 // Nothing else checks this at compile time, and the mismatch it catches is not
@@ -219,5 +222,35 @@ func TestCheckpointReportsUnsupportedDistinctly(t *testing.T) {
 	}
 	if _, ferr := r.Fork(nil, &Spec{SandboxID: "sbx"}, nil); ferr == nil {
 		t.Error("Fork claimed to succeed")
+	}
+}
+
+// A container is reached at the veth, not the tap.
+//
+// The tap and its GuestIP belong to a guest kernel bringing them up; a container has
+// none, so the tap stays DOWN and GuestIP exists nowhere. Getting this wrong twice --
+// once for the agent's own address, once for port forwarding -- is why it is behind an
+// interface and asserted here.
+func TestSandboxIPIsTheVethNotTheTap(t *testing.T) {
+	r := NewOCIRuntime("runsc", "/bin/true", t.TempDir(), nil)
+	layout := &network.Layout{
+		GuestIP:     net.IPv4(172, 31, 0, 2),
+		NetnsLinkIP: net.IPv4(10, 0, 0, 2),
+	}
+	got := r.SandboxIP(layout)
+	if got == nil {
+		t.Fatal("SandboxIP returned nil; forwarding would fall back to the tap address")
+	}
+	if got.Equal(layout.GuestIP) {
+		t.Error("SandboxIP returned the tap address, which no container process listens on")
+	}
+	if !got.Equal(layout.NetnsLinkIP) {
+		t.Errorf("SandboxIP = %v, want the veth's %v", got, layout.NetnsLinkIP)
+	}
+
+	// Nil layout has to be survivable: a node without networking reaches this with
+	// nothing to report, and the caller falls back rather than panicking.
+	if r.SandboxIP(nil) != nil {
+		t.Error("SandboxIP invented an address for a sandbox with no network")
 	}
 }

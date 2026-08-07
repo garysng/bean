@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -16,6 +17,7 @@ import (
 
 	"github.com/garysng/bean/internal/logging"
 	"github.com/garysng/bean/internal/node/image"
+	"github.com/garysng/bean/internal/node/network"
 
 	"log/slog"
 )
@@ -175,7 +177,9 @@ func (r *OCIRuntime) Create(ctx context.Context, spec *Spec) (h *Handle, err err
 		return nil, errors.New("runtime: sandbox network has no namespace address; " +
 			"the container tier is reached through the veth, not the tap")
 	}
-	agentIP := spec.Network.NetnsLinkIP
+	// Through SandboxIP rather than reading the field again, so the agent's address
+	// and the one port forwarding dials cannot drift apart.
+	agentIP := r.SandboxIP(spec.Network)
 
 	dir := filepath.Join(r.BaseDir, spec.SandboxID)
 	if err := os.MkdirAll(dir, 0o700); err != nil {
@@ -517,4 +521,18 @@ func (r *OCIRuntime) BootLogTail(id string, lines int) string {
 		all = all[len(all)-lines:]
 	}
 	return strings.Join(all, " | ")
+}
+
+// SandboxIP reports the veth address, which is where a container's processes are
+// reachable.
+//
+// The tap and its GuestIP belong to a guest kernel bringing them up, and a container
+// has none: the tap stays DOWN. Create dials the agent at this address for the same
+// reason; this exposes it so port forwarding does not have to know which tier it is
+// talking to.
+func (r *OCIRuntime) SandboxIP(l *network.Layout) net.IP {
+	if l == nil {
+		return nil
+	}
+	return l.NetnsLinkIP
 }
