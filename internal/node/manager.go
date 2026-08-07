@@ -103,6 +103,19 @@ func NewManager(rt runtime.Runtime) *Manager {
 		sandboxes: map[string]*Sandbox{},
 		stopCh:    make(chan struct{}),
 	}
+	// The runtime reports its own sub-phases through the manager, so runtime_create
+	// decomposes instead of being one opaque number. Attached here rather than passed
+	// to the runtime's constructor because the runtime is built before the manager
+	// exists, and the histogram belongs to the manager.
+	//
+	// Type-asserted rather than added to the Runtime interface: only the microVM tier
+	// has steps worth naming, and widening the interface would oblige the local tier
+	// to report phases it does not have.
+	if pr, ok := rt.(interface {
+		SetPhaseObserver(func(context.Context, string, time.Duration))
+	}); ok {
+		pr.SetPhaseObserver(m.observePhase)
+	}
 	go m.idleLoop()
 	return m
 }
