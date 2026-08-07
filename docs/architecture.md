@@ -217,9 +217,22 @@ and snapshotter and leave the node with two image systems blind to each other's
 layers. It also revises D2's conclusion, which was written before overlaybd was
 wired into `image.Provider`.
 
-Measured: **cold create 9.8s, steady-state 0.9s** — where the cold figure is
-overlaybd conversion the fc tier pays too, and 0.9s is within noise of fc's own
-0.8s for a published-layer create. Phase metrics put 16.86s of a 17.09s two-create
+Measured, both binaries, same host and same 14-check end-to-end
+(`hack/oci-tier-e2e.sh`):
+
+| | cold create | steady state |
+|---|---|---|
+| runsc | 22.2s | 0.9s |
+| runc | 20.8s | **0.7s** |
+
+The cold figure is overlaybd conversion, which the fc tier pays too; the
+steady-state ones are within noise of fc's own 0.8s for a published-layer create.
+runc being marginally faster is the Sentry's startup, which is the cost of the
+isolation it buys.
+
+Both were run, not one and an assumption: "one implementation, two binaries" is a
+claim about behaviour, and runc differs from runsc in ways (host kernel, no Sentry,
+its own netns handling) that could have broken any single step. Phase metrics put 16.86s of a 17.09s two-create
 total in `runtime_create` (almost all of it in the first) and 0.072s in
 `agent_ready`.
 
