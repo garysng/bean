@@ -28,11 +28,24 @@ func TestUnknownFlagDoesNotStopTheAgent(t *testing.T) {
 	}
 
 	// A flag no version of the agent has, standing in for one a future noded adds.
-	// --listen points at a path in a directory that does not exist, so the agent
-	// fails at the listener rather than running forever: this test is about how far
-	// it gets past argument parsing, and a bind failure is past it.
+	//
+	// --listen has to fail, or the agent serves forever and this test never returns.
+	// It must fail for a stated reason, though: the previous version pointed at a
+	// path in a directory that does not exist, on the assumption that the bind would
+	// fail -- but Listen does MkdirAll on the parent (listen.go), so the directory is
+	// created and the bind succeeds.
+	//
+	// It passed anyway, on macOS, by accident: t.TempDir() there is under
+	// /var/folders/<...>/T/<TestName><digits>/, long enough that the socket path
+	// exceeds the ~104-byte sun_path limit and bind returns EINVAL. On Linux
+	// t.TempDir() is /tmp/<TestName><digits>/, short enough to succeed -- so the
+	// agent bound, served, and the test hung until its 15-minute timeout, leaving an
+	// orphan process behind each run.
+	//
+	// A path deliberately past the limit fails identically on both, and says so.
+	longEnoughToFailBind := filepath.Join(t.TempDir(), strings.Repeat("d", 120), "agent.sock")
 	cmd := exec.Command(bin,
-		"--listen", filepath.Join(t.TempDir(), "no-such-dir", "agent.sock"),
+		"--listen", longEnoughToFailBind,
 		"--flag-from-a-newer-noded", "value")
 	out, err := cmd.CombinedOutput()
 
