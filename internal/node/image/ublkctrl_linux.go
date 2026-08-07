@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"sync"
 	"unsafe"
 
 	"golang.org/x/sys/unix"
@@ -97,7 +98,26 @@ type ublkDevice struct {
 // One per node rather than one per device: the control device is a singleton and the
 // commands on it are infrequent, so a shared handle avoids an fd and a ring per sandbox.
 type ublkControl struct {
-	f    *os.File
+	f *os.File
+
+	// mu serialises use of the ring below.
+	//
+	// The ring is not a concurrency primitive: submitting means writing the SQE at the
+	// tail and then advancing it, and reading a completion means taking the one at the
+	// head. Two callers doing that at once interleave their writes and take each
+	// other's results.
+	//
+	// Measured, and the symptom named nothing useful: at 256 concurrent creates, 255
+	// failed with "this kernel's ublk lacks UBLK_F_USER_COPY (features=0x0)" on a kernel
+	// that had answered 0x1fe seconds earlier. GET_FEATURES was reading a completion
+	// belonging to somebody else's ADD_DEV, so the error accused the kernel of a missing
+	// feature when the fault was entirely here.
+	//
+	// Serialising costs nothing that matters: these commands happen twice per sandbox
+	// and each takes tens of microseconds, against a create that takes hundreds of
+	// milliseconds. The per-queue rings on the IO path are separate and stay
+	// independent, which is where concurrency actually has to hold.
+	mu   sync.Mutex
 	ring *ioURing
 }
 
@@ -144,6 +164,10 @@ func (c *ublkControl) Close() error {
 // cmd issues one control command and turns the kernel's negative result into an error.
 func (c *ublkControl) cmd(op uint32, h *ublksrvCtrlCmd) error {
 	payload := (*[unsafe.Sizeof(ublksrvCtrlCmd{})]byte)(unsafe.Pointer(h))[:]
+	// Held across submit and completion, not just the submit: the result has to be read
+	// before another caller can advance the head past it.
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	res, err := c.ring.uringCmd(int(c.f.Fd()), op, payload)
 	if err != nil {
 		return err

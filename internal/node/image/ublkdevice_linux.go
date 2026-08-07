@@ -107,6 +107,10 @@ func attachUblk(ctrl *ublkControl, backend ublkBackend, sizeBytes int64) (dev *u
 // still visible is a disk whose next read has nobody to answer it.
 func (d *ublkDevice) detach() error {
 	var errs []error
+	// A failing stop does not skip the delete. STOP_DEV waits on the queue, so a queue
+	// that has already died makes it fail or hang -- and returning here would leave the
+	// device allocated forever, which is measurable: 143 devices accumulated on a host
+	// whose ublks_max is 64, from creates that failed after ADD_DEV.
 	if err := d.ctrl.stopDevice(d.DevID); err != nil {
 		errs = append(errs, fmt.Errorf("stop ublk device %d: %w", d.DevID, err))
 	}

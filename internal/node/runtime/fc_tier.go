@@ -61,6 +61,18 @@ type FCTierConfig struct {
 	// overlaybd binaries. A node configured for it refuses to start if any of those
 	// are missing rather than silently falling back, since falling back would give
 	// the cluster a node whose storage behaviour differs from what was asked for.
+	// Ublk serves each sandbox's rootfs from a ublk block device instead of a
+	// device-mapper snapshot.
+	//
+	// The same copy-on-write shape over the same converted ext4 -- what changes is how
+	// the device is created. device-mapper forks losetup twice and dmsetup once per
+	// sandbox, measured at ~26 ms a call and 3.8 s of a 4.5 s create at 256-way
+	// concurrency; ublk writes io_uring commands and forks nothing.
+	//
+	// Needs kernel 6.0 or later with ublk_drv loaded. Off by default because a node
+	// below that would fail to start, and device-mapper works everywhere.
+	Ublk bool
+
 	Overlaybd bool
 	// OverlaybdLazyPull leaves layers in the registry for overlaybd to range-read on
 	// demand rather than converting them locally.

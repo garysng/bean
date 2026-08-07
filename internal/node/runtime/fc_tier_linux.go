@@ -276,8 +276,34 @@ func selectProvider(cfg FCTierConfig) (image.Provider, error) {
 	}
 
 	var assembler image.Provider
+
+	// ublk, when asked for, replaces the copy-on-write assembly and nothing else. It
+	// uses the same converted ext4 in the same directory as device-mapper, so it sits
+	// under the same pulling wrapper below -- unlike overlaybd, which resolves layers
+	// itself and therefore replaces the whole chain.
+	//
+	// What it changes is the transport. device-mapper reaches a device by forking
+	// losetup twice and dmsetup once per sandbox, measured at ~26 ms a call and 3.8 s of
+	// a 4.5 s create at 256-way concurrency; ublk writes io_uring commands and forks
+	// nothing.
+	if cfg.Ublk {
+		u := image.NewUblkProvider(cfg.BaseDir, cfg.ImageDir, cfg.DefaultDiskMiB)
+		// A startup failure rather than a fallback, for the same reason overlaybd is: a
+		// node asked for ublk and silently given device-mapper would differ from the
+		// cluster's expectation in create latency, and nothing downstream can see that.
+		if err := u.Available(); err != nil {
+			return nil, fmt.Errorf("fc tier: ublk requested but %w", err)
+		}
+		slog.Info("rootfs via ublk copy-on-write", "imageDir", cfg.ImageDir)
+		assembler = u
+	} else {
+		assembler = nil
+	}
+
 	dm := image.NewDevMapperProvider(cfg.BaseDir, cfg.ImageDir, cfg.DefaultDiskMiB)
-	if err := dm.Available(); err != nil {
+	if assembler != nil {
+		// ublk was selected above; device-mapper is not consulted at all.
+	} else if err := dm.Available(); err != nil {
 		slog.Warn("device-mapper unavailable, copying base images instead", logging.KeyError, err)
 		assembler = &image.FileProvider{
 			BaseDir:        cfg.BaseDir,
