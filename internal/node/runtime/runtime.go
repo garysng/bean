@@ -4,6 +4,7 @@ package runtime
 import (
 	"context"
 	"io"
+	"net"
 	"time"
 
 	"github.com/garysng/bean/internal/node/image"
@@ -247,6 +248,30 @@ type CacheReporter interface {
 	// blocks rather than apparent size: a merged memory image is sparse where no
 	// ancestor wrote, and its apparent size overstates it by orders of magnitude.
 	SnapshotCacheBytes() (int64, error)
+}
+
+// SandboxAddresser is implemented by runtimes whose sandboxes are not reached at the
+// guest address the network layout assigns.
+//
+// The layout gives every sandbox a tap with GuestIP on it and a veth pair joining the
+// namespace to the host. A microVM's guest kernel brings the tap up and configures
+// GuestIP, so that is where its processes listen. A container has no guest kernel: the
+// tap stays DOWN, GuestIP exists nowhere, and its processes are reachable at the
+// namespace end of the veth instead.
+//
+// Optional because the tap address is right for the tier that has been here longest,
+// and a caller that finds this unimplemented keeps using it -- which is what every
+// forward did before a container tier existed.
+//
+// This is the second place the distinction mattered. The first was the agent's own
+// address, fixed when a create failed with "network is unreachable"; port forwarding
+// is a separate path and kept dialling GuestIP, which surfaced as "no route to host"
+// on a port that was plainly listening. Behind one interface now, so a third caller
+// does not have to rediscover it.
+type SandboxAddresser interface {
+	// SandboxIP reports the address a sandbox's own processes listen on, or nil to
+	// use the layout's guest address.
+	SandboxIP(l *network.Layout) net.IP
 }
 
 // ImageConfigReader is implemented by runtimes that start sandboxes from OCI images

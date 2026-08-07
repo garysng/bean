@@ -69,10 +69,29 @@ func (s *LinuxSetup) cmd() Commander {
 // hinges on avoiding, and it should not be possible to introduce it by calling
 // this function with the wrong argument.
 func iptArgs(netns string, r Rule) (string, []string) {
+	// -w makes iptables wait for the xtables lock instead of failing when another
+	// invocation holds it.
+	//
+	// Without it, concurrent creates lose. iptables serialises through a lock and
+	// exits non-zero rather than blocking when it cannot take it, so five sandboxes
+	// starting at once produced one success and four "apply netns: iptables -t filter
+	// -I FORWARD ..." failures. That is the platform's own headline case -- a batch of
+	// evaluations creating hundreds of sandboxes at once -- and it failed at five.
+	//
+	// The lock is per-table and shared with anything else on the host that writes
+	// iptables, Docker included, so waiting is the only correct behaviour: the rules
+	// this applies are not optional, and a create that skipped them would be a sandbox
+	// with no egress restrictions at all.
+	//
+	// A bounded wait rather than an unbounded one, because a create that blocks
+	// forever on a stuck lock is worse than one that fails: the scheduler can retry a
+	// failure and has nothing to do with a hang. 5s is far above the milliseconds a
+	// rule insert takes and far below the create timeout.
+	args := append([]string{"-w", "5"}, r.Args()...)
 	if r.Scope == ScopeNetns {
-		return "ip", append([]string{"netns", "exec", netns, "iptables"}, r.Args()...)
+		return "ip", append([]string{"netns", "exec", netns, "iptables"}, args...)
 	}
-	return "iptables", r.Args()
+	return "iptables", args
 }
 
 // Setup creates the namespace, links and rules for one sandbox.

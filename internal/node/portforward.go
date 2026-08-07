@@ -109,9 +109,20 @@ func (m *Manager) TargetFor(sandboxID string, port int) (*PortTarget, error) {
 		return nil, fmt.Errorf("sandbox %s is %s, not running", sandboxID, state)
 	}
 
+	// The guest address unless the runtime says otherwise. A container's processes
+	// listen on the veth rather than the tap, because there is no guest kernel to
+	// bring the tap up -- dialling GuestIP there gives "no route to host" on a port
+	// that is plainly listening.
+	ip := net_.GuestIP
+	if addresser, ok := m.rt.(runtime.SandboxAddresser); ok {
+		if own := addresser.SandboxIP(net_); own != nil {
+			ip = own
+		}
+	}
+
 	return &PortTarget{
 		NetnsPath: netnsHandlePath(net_.Netns),
-		Addr:      fmt.Sprintf("%s:%d", net_.GuestIP, port),
+		Addr:      fmt.Sprintf("%s:%d", ip, port),
 		Port:      port,
 	}, nil
 }

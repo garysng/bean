@@ -97,7 +97,7 @@ reach the proxy (api-design.md §3.4).
         │ noded    │         │ noded    │         │ noded    │   ← one per node
         │ (bare)   │         │ (cloud)  │         │ (bare)   │      node daemon
         └────┬─────┘         └──────────┘         └──────────┘
-             │ overlaybd(ublk) direct + noded owns FC; containerd optional, container tier only
+             │ overlaybd direct + noded owns both FC and the container runtime; no containerd
         ┌────▼────────────────────────────────┐
         │  ├── image: overlaybd ublk daemon   │ ← block-level lazy-pull from S3
         │  └── runtime: fc(default)│runc│runsc│ ← internal tier selection (D3)
@@ -105,7 +105,7 @@ reach the proxy (api-design.md §3.4).
              │
         ┌────▼──────────────────────┐
         │ sandbox                   │  fc: microVM (vsock to agent)
-        │  └── beand (init/PID1)    │  container: runc/runsc (unix socket)
+        │  └── beand (init/PID1)    │  container: runc/runsc (TCP in its netns)
         │      └── user process     │  agent: exec/PTY/files/port-forward
         └───────────────────────────┘
 
@@ -154,11 +154,22 @@ containerd's responsibilities have a more direct replacement in this design:
 |---|---|
 | Image pull / content store | Blobs live in S3 (image-service converts offline), metadata pushed down by the control plane; the registry is not on the hot path |
 | snapshotter | overlaybd ublk daemon driven directly (demonstrated by AgentENV's uvm-ublk) |
-| Task lifecycle | fc: noded owns the FC process; container tier: containerd+runc (retained only here, an optional dependency) |
+| Task lifecycle | fc: noded owns the FC process; container tier: noded drives runsc/runc directly (no containerd -- see below) |
 
-The container tier (GPU / no-KVM fallback) keeps containerd — runc lifecycle
-and overlayfs assembly are not worth reimplementing; a pure fc node can skip
-containerd entirely. For the runtime abstraction interface see noded-design §3.
+> **Revised.** The container tier does **not** use containerd. This paragraph was
+> written while overlaybd was not yet wired into `image.Provider`; now that it is,
+> containerd would arrive with its own content store and snapshotter and leave a node
+> with two image systems blind to each other's layers. The tier drives runsc/runc
+> directly and shares fc's rootfs providers instead — see D3.
+>
+> The specific blocker, checked rather than assumed: overlaybd's containerd
+> snapshotter wants images in a registry with a
+> `containerd.io/snapshot/overlaybd/version` manifest annotation, and what bean
+> publishes to S3 is a bare blob prefix with neither.
+
+The original reasoning, kept because the trade is real: runc lifecycle and overlayfs
+assembly are not worth reimplementing, and a pure fc node can skip containerd
+entirely. For the runtime abstraction interface see noded-design §3.
 
 ### D3. Isolation tiers + node capability probing ⚠️
 
@@ -183,14 +194,120 @@ Tier rules (internal to the scheduler):
 ```
 
 - **fc**: strongest isolation, native snapshot/fork, a real guest kernel so no syscall compatibility problems
-- **runsc**: fallback tier for environments without KVM (active in P5; through P0–P4 a no-KVM node cannot join the pool)
-- **runc**: GPU path + internal trusted tasks (introduced in P5 as needed)
+- **runsc**: implemented ✅ — `--runtime runsc`, verified end to end on hardware
+- **runc**: the same implementation, `--runtime runc`. Shares the host kernel, so it is for trusted or GPU work rather than untrusted code
 - ~~kata~~: superseded by fc, will not be introduced
 
 API requests carry no isolation field (the internal proto keeps the enum so
 operators can force a tier); sandbox details return the actual tier
 (`runtime: fc|runsc|runc`) for troubleshooting. The scheduler matches on node
 capability.
+
+#### The container tier as built ✅
+
+One implementation, two binaries: both runsc and runc are OCI runtimes taking the
+same bundle and the same subcommands, so which one a node uses is configuration
+rather than a second code path. `internal/node/runtime/oci_linux.go`.
+
+It uses **the same rootfs providers as fc** (`selectProvider`), so a container and
+a microVM on one node share the image cache, the converted overlaybd layers and
+the object store. That sharing is the reason for driving the OCI runtime directly
+rather than bringing in containerd — which would arrive with its own content store
+and snapshotter and leave the node with two image systems blind to each other's
+layers. It also revises D2's conclusion, which was written before overlaybd was
+wired into `image.Provider`.
+
+Measured, both binaries, same host and same 14-check end-to-end
+(`hack/oci-tier-e2e.sh`):
+
+| | cold create | steady state |
+|---|---|---|
+| runsc | 22.2s | 0.9s |
+| runc | 20.8s | **0.7s** |
+
+The cold figure is overlaybd conversion, which the fc tier pays too; the
+steady-state ones are within noise of fc's own 0.8s for a published-layer create.
+runc being marginally faster is the Sentry's startup, which is the cost of the
+isolation it buys.
+
+Both were run, not one and an assumption: "one implementation, two binaries" is a
+claim about behaviour, and runc differs from runsc in ways (host kernel, no Sentry,
+its own netns handling) that could have broken any single step. Phase metrics put 16.86s of a 17.09s two-create
+total in `runtime_create` (almost all of it in the first) and 0.072s in
+`agent_ready`.
+
+**Concurrency, measured.** `hack/oci-tier-concurrent.sh`:
+
+| | |
+|---|---|
+| 5 concurrent creates | 5/5, ~4s |
+| 30 concurrent creates | 25/30, 9.6s wall clock (fastest 2.0s, median 4.7s, slowest 9.6s) |
+
+Against a 0.9s steady-state create, 25 sandboxes serialised would take 22.5s, so
+there is roughly 2.3x parallelism rather than none. Phase metrics say where the rest
+goes:
+
+```
+network_setup   158.6s / 31 = 5.1s each   <- 78% of total
+runtime_create   43.2s / 31 = 1.4s each
+agent_ready       1.8s / 28 = 0.06s each
+```
+
+`network_setup` costs 0.165s for a single create and 5.1s under fan-out -- a 30x
+increase, and the reason parallelism is bounded. That is the xtables lock: each
+create inserts five iptables rules, and iptables serialises through a per-table lock
+shared with everything else on the host. `-w` is what makes the creates queue rather
+than fail (before it, five concurrent creates produced one success), but queueing is
+still serialisation.
+
+The fix, not attempted here, is to stop taking the lock five times per sandbox:
+`iptables-restore` applies a whole ruleset in one transaction. That is a change to
+the network layer, which both tiers share, and it wants its own measurement rather
+than being folded into a runtime change.
+
+**Four constraints, none of which produce an error naming the cause.** Each was
+found by driving the real thing, and each is enforced in code with the reasoning
+attached:
+
+1. **A Unix socket does not cross a bind mount.** A process inside binds it
+   successfully and the host never sees it, because gVisor implements Unix sockets
+   inside the Sentry. An ordinary file written to the same mount *does* appear, so
+   this is specific to sockets. The agent therefore listens on TCP and the node
+   dials through the sandbox's network namespace — the `netns:` transport
+   `dial.go` already had and `portforward.go` already used.
+2. **The address is the veth's, not `GuestIP`'s.** `GuestIP` is what a guest
+   kernel configures on the tap, and a container has no guest kernel: the tap
+   stays DOWN and that address exists nowhere. Dialling it got "network is
+   unreachable" because the host resolved it through the default gateway.
+3. **runsc needs `--network=host`.** Its default userspace stack (netstack) takes
+   over the veth, so the agent logged `beand listening` while `ss` in the
+   namespace showed no listener. See the security note below.
+4. **The agent requires a token on TCP, and the node must serve it one.**
+   `cmd/beand` derives that requirement from the transport rather than a flag,
+   because a TCP address is reachable *from inside the sandbox*. The expected hash
+   comes from a metadata service at 169.254.169.254, which Firecracker provides
+   and a container does not — so this tier runs a per-sandbox one inside the
+   namespace (`oci_mmds_linux.go`). One per sandbox, not shared: the document
+   holds one sandbox's credential.
+
+**What `--network=host` gives up, stated plainly.** netstack is one of gVisor's
+isolation boundaries, and host networking forgoes it: the sandbox uses the host
+kernel's network stack, so a vulnerability there is reachable from inside. What
+remains is the whole Sentry — filesystem and process syscalls are intercepted
+either way — and the sandbox is still confined to its own network namespace,
+seeing one veth pair rather than the host's interfaces. The alternative is
+reaching the agent *through* netstack, which means a forwarded port or a proxied
+socket; both are work, and neither is obviously better than one namespace-scoped
+stack.
+
+**Not implemented**: `Checkpoint` and `Fork` return `ErrCheckpointUnsupported` —
+a distinct error so the scheduler can tell "this tier cannot" from "this attempt
+failed". CRIU is separate work, and warm snapshots are fc's throughput lever
+rather than something this tier substitutes for. Also unverified: **GPU**, whose
+accounting exists in the proto, scheduler and API while `internal/node/` never
+sets `GpuCount` — so every node reports zero and that path is currently dead
+code. gVisor does not support passthrough at all, which is what runc would be
+for.
 
 ### D9. Firecracker main tier: container rootfs attached straight to the microVM ✅
 

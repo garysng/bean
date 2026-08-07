@@ -37,7 +37,15 @@ var version = "dev"
 
 func main() {
 	listen := flag.String("listen", "127.0.0.1:7443", "gRPC listen address")
-	rtName := flag.String("runtime", "local", "runtime: local|fc")
+	rtName := flag.String("runtime", "local", "runtime: local|fc|runsc|runc. "+
+		"runsc and runc are the container tier -- one implementation, two binaries: "+
+		"runsc (gVisor) intercepts syscalls in a userspace kernel, runc shares the "+
+		"host's and so is for trusted or GPU work. Both need --guest-subnet, because "+
+		"the agent is reached through the sandbox's network namespace rather than vsock")
+	ociAgentPort := flag.Int("oci-agent-port", 8111,
+		"port the agent listens on inside a container sandbox. The same port in every "+
+			"sandbox, which is safe because each has its own network namespace -- the same "+
+			"reason the fc tier reuses one guest IP everywhere")
 	agentBin := flag.String("agent-bin", "beand", "path to beand binary (local runtime)")
 	baseDir := flag.String("base-dir", "/var/lib/bean/sandboxes", "sandbox base directory")
 	nodeToken := flag.String("node-token", os.Getenv("BEAN_NODE_TOKEN"),
@@ -487,8 +495,42 @@ func main() {
 			log.Fatalf("fc runtime: %v", err)
 		}
 		rt = fcRT
+	case "runsc", "runc":
+		// The two are one implementation: both are OCI runtimes taking the same
+		// bundle and subcommands, so which binary a node uses is configuration. They
+		// differ in what they buy -- runsc intercepts syscalls in a userspace kernel,
+		// runc shares the host's -- which is why the tier logs which one is active.
+		//
+		// The blob store is built first for the same reason as on the fc tier: a
+		// misconfigured store should fail at startup, not on the create that needed it.
+		obdBlobs, obdIndex, err := overlaybdBlobStore(*fcOverlaybdS3Endpoint, *fcOverlaybdS3Bucket,
+			*fcOverlaybdReadURL, *fcOverlaybdS3Region, *fcOverlaybdS3PathStyle)
+		if err != nil {
+			log.Fatalf("--fc-overlaybd-s3-endpoint: %v", err)
+		}
+		ociRT, err := runtime.NewOCITier(runtime.OCITierConfig{
+			Bin:            *rtName,
+			AgentBin:       *agentBin,
+			AgentPort:      *ociAgentPort,
+			BaseDir:        *baseDir,
+			ImageDir:       *imageDir,
+			DefaultDiskMiB: *defaultDiskMiB,
+			GuestDNS:       *guestDNS,
+			BuildkitAddr:   *buildkitAddr,
+			BuildctlBin:    *buildctlBin,
+
+			Overlaybd:         *fcOverlaybd,
+			OverlaybdLazyPull: *fcOverlaybdLazyPull,
+			OverlaybdBinDir:   *fcOverlaybdBinDir,
+			OverlaybdBlobs:    obdBlobs,
+			OverlaybdIndex:    obdIndex,
+		})
+		if err != nil {
+			log.Fatalf("%s runtime: %v", *rtName, err)
+		}
+		rt = ociRT
 	default:
-		log.Fatalf("runtime %q not supported (want local or fc)", *rtName)
+		log.Fatalf("runtime %q not supported (want local, fc, runsc or runc)", *rtName)
 	}
 
 	mgr := node.NewManager(rt)

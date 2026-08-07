@@ -48,6 +48,10 @@ NODED_FLAGS=${NODED_FLAGS:-}
 # wrong place.
 GUEST_SUBNET=${GUEST_SUBNET:-}
 UPLINK=${UPLINK:-}
+# Which runtime tier noded runs. fc by default, since that is what this script is for;
+# runsc or runc select the container tier, which needs GUEST_SUBNET set because its
+# agent is reached through the sandbox's network namespace rather than over vsock.
+RUNTIME=${RUNTIME:-fc}
 GUEST_DNS=${GUEST_DNS:-}
 if [ -n "$GUEST_SUBNET" ]; then
   if [ -z "$UPLINK" ]; then
@@ -120,7 +124,7 @@ nohup "$BIN/bean-api" \
   --api-key "$API_KEY" \
   --node-token "$NODE_TOKEN" \
   --bootstrap-token "$BOOTSTRAP_TOKEN" \
-  --runtime-tier fc \
+  --runtime-tier "$RUNTIME" \
   --region local \
   ${API_FLAGS:-} \
   >"$RUN/api.log" 2>&1 &
@@ -133,7 +137,7 @@ done
 
 nohup "$BIN/noded" \
   --listen 127.0.0.1:$NODED_PORT \
-  --runtime fc \
+  --runtime "$RUNTIME" \
   --control-plane 127.0.0.1:$NODE_GRPC_PORT \
   --node-token "$NODE_TOKEN" \
   --bootstrap-token "$BOOTSTRAP_TOKEN" \
