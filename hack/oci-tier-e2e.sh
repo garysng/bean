@@ -197,6 +197,50 @@ else
 fi
 
 echo
+echo "### egress from inside the sandbox"
+# The MASQUERADE rules are written against the guest subnet -- the tap side -- while a
+# container's traffic comes from the veth, so whether egress works is not something to
+# reason about after the GuestIP mistake. It is measured.
+#
+# The target is reached from the host first. An earlier version used 1.1.1.1:443, which
+# this host's own network policy blocks -- so the check reported a container-tier
+# failure for something the host could not do either, and the fc tier "failed" it too.
+# A probe whose target the host cannot reach measures nothing.
+EGRESS_HOST=${EGRESS_HOST:-docker.m.daocloud.io}
+if timeout 8 python3 -c "
+import socket, sys
+socket.setdefaulttimeout(5)
+socket.create_connection((sys.argv[1], 443)).close()
+" "$EGRESS_HOST" 2>/dev/null; then
+  if "$BIN/bean" exec "$SBX" -- timeout 10 python3 -c "
+import socket, sys
+socket.setdefaulttimeout(6)
+socket.create_connection((sys.argv[1], 443)).close()
+print('tcp-egress-ok')
+" "$EGRESS_HOST" 2>&1 | grep -q tcp-egress-ok; then
+    pass "TCP egress from the sandbox to $EGRESS_HOST"
+  else
+    fail "no TCP egress from the sandbox, though the host reaches $EGRESS_HOST"
+    ns=$(ls /var/run/netns 2>/dev/null | head -1)
+    [ -n "$ns" ] && ip netns exec "$ns" iptables -t nat -S 2>/dev/null | grep MASQ | head -3
+  fi
+else
+  echo "  SKIP  the host itself cannot reach $EGRESS_HOST:443; nothing to compare against"
+fi
+
+if "$BIN/bean" exec "$SBX" -- timeout 10 python3 -c "
+import socket
+socket.setdefaulttimeout(6)
+print('dns-ok', socket.gethostbyname('one.one.one.one'))
+" 2>&1 | grep -q dns-ok; then
+  pass "DNS resolves inside the sandbox"
+else
+  # Not this tier's failure on a node with no --guest-dns: the image keeps its own
+  # resolv.conf, which commonly names a server that does not exist here.
+  echo "  SKIP  DNS did not resolve; this stack sets no --guest-dns"
+fi
+
+echo
 echo "### pause and resume"
 if "$BIN/bean" pause "$SBX" >/dev/null 2>&1; then
   # An exec after pause must still work: the manager wakes a paused sandbox rather
