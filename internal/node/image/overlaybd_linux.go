@@ -151,6 +151,25 @@ func (p *OverlaybdProvider) Prepare(ctx context.Context, sandboxID, imageRef str
 	// up means a request for less than a gigabyte still gets a usable layer rather
 	// than a zero-sized one.
 	vsizeGB := (sizeMiB + 1023) / 1024
+
+	// Never smaller than the lower layer's own virtual size. The stack is one device:
+	// the writable layer sits over a base whose ext4 was formatted to vsizeForImage's
+	// figure, so a device sized under that presents a filesystem larger than itself.
+	//
+	// Measured, because the failure is remote from the cause: a create with
+	// diskMiB=512 produced a 1 GB device over a 2 GB base, and the guest kernel said
+	// "EXT4-fs (vdb): bad geometry: block count 524288 exceeds size of device
+	// (262144 blocks)". The agent's mount then failed with EINVAL, init exited 1, and
+	// the caller saw a 20-second agent-health timeout naming none of it.
+	//
+	// Raised rather than refused: the caller asked for a writable layer of a given
+	// size, and the base's size is an implementation detail of how the image was
+	// sealed. Refusing would make a 512 MiB sandbox impossible on an image whose
+	// floor happens to be 2 GB, and the extra is sparse -- it costs nothing until
+	// written.
+	if lowerGB := p.lowerVsizeGB(lowers); vsizeGB < lowerGB {
+		vsizeGB = lowerGB
+	}
 	data, index, err := p.Builder.createWritable(ctx, dir, vsizeGB)
 	if err != nil {
 		return nil, err
@@ -556,6 +575,7 @@ func (p *OverlaybdProvider) walk(ctx context.Context, imageRef string, opts reso
 				Size:        layer.Size,
 				RepoBlobURL: repoBlobURL(ref),
 				Dir:         p.layerCacheDir(layer.Digest),
+				VsizeGB:     vsizeGB,
 			})
 			continue
 		}
@@ -578,7 +598,8 @@ func (p *OverlaybdProvider) walk(ctx context.Context, imageRef string, opts reso
 			// 48859648 against a declared 29780765). Wrong here, a local layer still
 			// works because overlaybd reads the file, but a remote one is range-read
 			// against the declared length and either stops short or reads past the end.
-			lowers = append(lowers, obdLayer{File: path, Digest: layer.Digest, Size: sealedSize(path)})
+			lowers = append(lowers, obdLayer{File: path, Digest: layer.Digest,
+				Size: sealedSize(path), VsizeGB: vsizeGB})
 			continue
 		}
 
@@ -967,4 +988,18 @@ func (p *OverlaybdProvider) CommitSandbox(ctx context.Context, sandboxID, dest s
 func exists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
+}
+
+// lowerVsizeGB is the virtual size the image's filesystem was formatted to, or 0 when
+// the chain does not say.
+//
+// Only the first layer carries a filesystem, so only its figure matters; the rest are
+// changes over it and are created at 1 GB regardless. Zero is returned rather than a
+// guess, and the caller treats it as no constraint -- inventing a floor here would
+// silently enlarge every device on a chain that simply did not record its size.
+func (p *OverlaybdProvider) lowerVsizeGB(lowers []obdLayer) int64 {
+	if len(lowers) == 0 {
+		return 0
+	}
+	return lowers[0].VsizeGB
 }

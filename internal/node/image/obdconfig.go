@@ -78,6 +78,21 @@ type obdLayer struct {
 	// "empty repoBlobUrl for remote layer" followed by ENOENT on the enable write,
 	// which names neither the layer nor the key that was wrong.
 	RepoBlobURL string `json:"-"`
+	// VsizeGB is the virtual size the layer's filesystem was formatted to, and like
+	// RepoBlobURL it is *not* serialised: overlaybd reads the size from the layer
+	// itself, so this exists only to carry the figure from the resolver to the caller
+	// that has to size the device over it.
+	//
+	// Set on the first layer only, which is the one that carries a filesystem. Zero
+	// means unknown, and a caller must treat that as "no constraint" rather than as
+	// zero -- a remotely read chain does not always have a manifest to hand.
+	//
+	// It exists because the device and the filesystem were sized independently: the
+	// writable layer from the caller's diskMiB, the base from vsizeForImage's 2 GB
+	// floor. A create with diskMiB=512 then produced a 1 GB device over a 2 GB
+	// filesystem, and the guest kernel refused it -- "bad geometry: block count
+	// 524288 exceeds size of device (262144 blocks)".
+	VsizeGB int64 `json:"-"`
 	// Dir is a local cache directory for a remotely read layer.
 	//
 	// Set alongside a remote reference rather than instead of one: overlaybd serves
