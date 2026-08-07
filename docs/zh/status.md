@@ -297,6 +297,74 @@ loop device 全部归零 —— loop 泄漏的修复(#16)在并发下成立。
 所以现在有一个把每个方法各调一次的 smoke test,加一个基于反射的漂移守卫 ——
 手写的调用清单否则会跟接口一样腐烂。守卫立刻抓出它自己初稿漏掉的三个 snapshot 方法。
 
+## 归因笔记:create 与 destroy 关键路径的实测
+
+以下数字全部来自同一台 128 核机器(AMD EPYC,Ubuntu 22.04,503 GB),除注明外均为
+256 并发 create。记下来是因为每一条都推翻了一个此前未经实测就成立的说法。
+
+### create 的时间去哪了
+
+`runtime_create` 以前是一个覆盖了几乎整个 create 的不透明数字,所以归因只能停在
+「在这里面某处」。现在拆成六个子阶段:
+
+| 阶段 | dm-snapshot | overlaybd |
+|---|---|---|
+| `fc_rootfs` | 3.809s | 0.908s |
+| `fc_boot` | 0.133s | 0.050s |
+| `fc_vmm_spawn` | 0.066s | 0.025s |
+| `fc_api_ready` | 0.000s | 0.002s |
+| `fc_cgroup` | 0.000s | 0.000s |
+| `agent_ready` | 0.316s | 0.306s |
+| **总计** | **4.512s** | **1.299s** |
+
+`fc_rootfs` 是天花板,而且只有它随负载增长:n=16 时 0.863s,n=256 时 3.809s,
+boot 和 spawn 基本不变。
+
+成本是 subprocess 开销 —— 这是在宿主上把其他可能逐个排除掉得出的,不是推理出来的。
+裸 dm-snapshot 创建能并行(串行 10/s,并发 65/s);`losetup --find` 不随设备数退化
+(已有 0 / 100 / 200 个设备时每次调用都是 26ms)。所以是每个 sandbox 两次
+`losetup` 加一次 `dmsetup` 的 `fork`/`exec`,每次约 26ms。`attachTCMU` 写 configfs、
+完全不 fork,这就是 overlaybd 在这个阶段快 4.2 倍的原因。
+
+### `cores / cpu-per-create` 那个说法是错的
+
+README、本文和 `--create-wait` 的帮助文本都写着上限约 `cores / 5` —— 那是在一台
+16 核机器上、当时每个 create 都要 boot 时量的。实测成本是**每个 create 0.31–0.44
+CPU-秒**,小一个数量级;而实测吞吐只有该成本预测值的 0.16–0.28。也就是说在测过的
+任何并发下,宿主 CPU 都不是约束。
+
+在归因清楚之前有两个东西被错怪过,一并记下免得有人重走。**manager 的 mutex**:
+create 只短暂持锁,而我为抓 2N+1 访问模式写的测试在坏代码上照样通过,所以那个测试
+被删掉而不是留着。**SQLite 写争用**:300 个并发写入者下 `TouchNode` 从 119µs 涨到
+25ms —— 214 倍,但离产生影响还差三个数量级。之后同一轮实测 Postgres 吞吐只有
+SQLite 的**一半**(47.7 对 89.4 creates/s),这就彻底否掉了「单写连接在限制吞吐」
+的想法。Postgres 的价值是多副本共享一份状态,不是让单节点更快。
+
+### destroy 有一个永远不可能起作用的 2 秒地板
+
+`killVMM` 先发 `SIGTERM`、最多等 2 秒、再发 `SIGKILL`。而 Firecracker 装了
+`SIGTERM` 处理器且不会因它退出:活体 VMM 上实测 `SigCgt: 0000000441801449`,发信号
+3 秒后仍然存活,`SIGKILL` 则 59ms 死亡。去掉这个无用等待后,单次 destroy
+从 2184ms 降到约 200ms。
+
+这是这条路径上**第二个**完全同形状的等待 —— 之前那个 ACPI poweroff 等待占了
+5335ms destroy 中的 5001ms,同样不可能成功,因为 guest 内核没有编
+`CONFIG_ACPI_BUTTON`。两次被藏住的原因也一样:destroy 只有一个数字,固定地板看起来
+就像「拆设备本来就要这么久」。现在 `destroy_flush` 和 `destroy_network` 是独立阶段,
+分别是 0.418s 和 0.000s。
+
+**仍未解决**:高并发下 destroy 是串行的。wall 时间与数量成线性(31 → 1968ms、
+64 → 3445ms、128 → 7372ms),每个恒定约 57ms,而 57ms × 128 正好是那 7372ms。
+不是内核 —— 10 次串行 backstore `rmdir` 总共 15ms;`Destroy` 也在拆除之前就释放了
+runtime 锁。所以串行点在 configfs 之上的某处,尚未定位。
+
+### 一个健康的节点被判定为 LOST
+
+对账跑在心跳流打开**之前**,而它的耗时无界:每个残留的 device-mapper 映射,
+`dmsetup remove --retry` 要 4.806 秒才放弃,且严格串行。109 个残留就是 8.7 分钟才
+发出第一次心跳,而 lease 是 45 秒。按时间顺序读日志时它是明的 ——
+20:19:54 注册成功,20:20:44 lease 过期,中间一次心跳都没有。
+
 ## 2. 与设计的差距
 
 | 项 | 状态 |

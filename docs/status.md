@@ -48,7 +48,7 @@ guest kernel 6.1.102, Alpine 3.20.
 | Volumes | 📐 | |
 | Host resource reconciliation | 📐 | A crashed noded leaves dm mappings and sandbox directories behind |
 | Build logs and cancellation | ⚠️ | A build reports no progress and cannot be stopped |
-| overlaybd | ⚠️ | `OverlaybdProvider` is implemented and **verified end to end on hardware**: a sandbox boots from an overlaybd device, the guest reads `PRETTY_NAME="Alpine Linux v3.20"` from its own rootfs, writes land in the writable layer, and teardown leaks nothing (`hack/overlaybd-e2e.sh`, with `overlaybd_hw_linux_test.go` at the provider level and `hack/overlaybd-probe.sh` covering the negative cases). Measured against dm-snapshot on the same host (`hack/overlaybd-bench.sh`): **392 MiB → 118 MiB** of allocated disk for three images sharing a base, and conversion CPU dropping from a flat 2.2 s per image to 1.37 s / 0.49 s / 0.44 s as the shared layer is reused. **Cold-start latency is unchanged** — this path still downloads and converts every layer before assembling the device, so it does strictly more work than flattening on a first use and wins only on the second image and on disk. Lazy pull, the part that would cut the cold path, requires blobs that are already sealed overlaybd layers; a standard OCI layer has no block index to range-read, so a create naming one is now refused rather than silently building an unopenable config. Producing such images is a pipeline step (convert once centrally, push, let nodes range-read) that does not exist yet. Opt-in with `--fc-overlaybd`; dm-snapshot is still the default. **Untested**: `commit` on this backend, concurrent fan-out. See [image-pipeline.md](image-pipeline.md) §7 |
+| overlaybd | ⚠️ | `OverlaybdProvider` is implemented and **verified end to end on hardware**: a sandbox boots from an overlaybd device, the guest reads `PRETTY_NAME="Alpine Linux v3.20"` from its own rootfs, writes land in the writable layer, and teardown leaks nothing (`hack/overlaybd-e2e.sh`, with `overlaybd_hw_linux_test.go` at the provider level and `hack/overlaybd-probe.sh` covering the negative cases). Measured against dm-snapshot on the same host (`hack/overlaybd-bench.sh`): **392 MiB → 118 MiB** of allocated disk for three images sharing a base, and conversion CPU dropping from a flat 2.2 s per image to 1.37 s / 0.49 s / 0.44 s as the shared layer is reused. **Cold-start latency is unchanged** — this path still downloads and converts every layer before assembling the device, so it does strictly more work than flattening on a first use and wins only on the second image and on disk. Lazy pull, the part that would cut the cold path, requires blobs that are already sealed overlaybd layers; a standard OCI layer has no block index to range-read, so a create naming one is now refused rather than silently building an unopenable config. Producing such images is a pipeline step (convert once centrally, push, let nodes range-read) that does not exist yet. Opt-in with `--fc-overlaybd`; dm-snapshot is still the default. **Concurrent fan-out now measured** on a 128-core host at 256 simultaneous creates, and it is where this backend earns its keep: `fc_rootfs` 3.809 s -> 0.908 s, `runtime_create` 4.169 s -> 0.992 s, total 4.512 s -> 1.299 s, throughput 47.5 -> 88.0 creates/s, zero failures and no leaks on either backend. The cause is subprocess count: dm-snapshot forks `losetup` twice and `dmsetup` once per sandbox at ~26 ms a call, while `attachTCMU` is configfs writes with no fork at all. Two defects had to be fixed first -- the device was sized independently of the filesystem on it, so any request under 2 GiB built a device smaller than its own ext4 and the guest refused to boot; see "Attribution notes" below. **Untested**: `commit` on this backend. See [image-pipeline.md](image-pipeline.md) §7 |
 
 ## Measured latency
 
@@ -272,6 +272,82 @@ Postgres by any test.** So there is now a smoke test calling every method once,
 plus a reflection-based guard that fails when a method is missing from it — the
 hand-written call list would otherwise decay exactly as the interfaces did. The
 guard caught three snapshot methods left out of its own first draft.
+
+## Attribution notes: the create and destroy paths, measured
+
+Every figure here is from one 128-core host (AMD EPYC, Ubuntu 22.04, 503 GB) at
+256 concurrent creates unless stated. They are recorded because each one overturned
+something that had been asserted without measurement.
+
+### Where a create's time goes
+
+`runtime_create` used to be one opaque number covering almost the whole create, so
+attribution stopped at "somewhere in here". It is now six sub-phases:
+
+| phase | dm-snapshot | overlaybd |
+|---|---|---|
+| `fc_rootfs` | 3.809 s | 0.908 s |
+| `fc_boot` | 0.133 s | 0.050 s |
+| `fc_vmm_spawn` | 0.066 s | 0.025 s |
+| `fc_api_ready` | 0.000 s | 0.002 s |
+| `fc_cgroup` | 0.000 s | 0.000 s |
+| `agent_ready` | 0.316 s | 0.306 s |
+| **total** | **4.512 s** | **1.299 s** |
+
+`fc_rootfs` is the ceiling, and only it scales with load: 0.863 s at n=16 against
+3.809 s at n=256, while boot and spawn stay flat.
+
+The cost is subprocess work, established by ruling the alternatives out on the host
+rather than by reasoning. Raw dm-snapshot creation parallelises (10/s serial, 65/s
+concurrent). `losetup --find` does not degrade as devices accumulate (26 ms per call
+at 0, 100 and 200 existing devices). So it is the per-sandbox `fork`/`exec` of
+`losetup` twice plus `dmsetup` once, at ~26 ms each. `attachTCMU` writes configfs
+and forks nothing, which is why overlaybd is 4.2x faster on this phase.
+
+### The `cores / cpu-per-create` claim was wrong
+
+README, this file and `--create-wait`'s help text quoted a ceiling of `cores / 5`,
+from a 16-core host when every create booted. Measured cost is **0.31-0.44 CPU-seconds
+per create**, an order of magnitude less, and observed throughput is 0.16-0.28 of
+what that cost predicts -- so host CPU is not the binding constraint at any
+concurrency tested.
+
+Two things were wrongly blamed for the gap before it was attributed, and both are
+recorded so nobody re-runs them. The manager's mutex: the create path holds it only
+briefly, and a test built to catch the 2N+1 access pattern passed against the broken
+shape, so the test was deleted rather than kept. SQLite write contention: `TouchNode`
+goes from 119 us to 25 ms under 300 concurrent writers -- 214x, and three orders of
+magnitude short of mattering. Postgres was then measured at **half** SQLite's
+throughput on the same run (47.7 vs 89.4 creates/s), which retires the idea that the
+single-writer connection was limiting anything. Postgres is for multiple replicas
+sharing one store, not for a faster single node.
+
+### Destroy had a two-second floor that could never do anything
+
+`killVMM` sent `SIGTERM`, waited up to 2 s for a graceful exit, then sent `SIGKILL`.
+Firecracker installs a `SIGTERM` handler and does not exit on it: measured
+`SigCgt: 0000000441801449` on a live VMM, still alive 3 s later, dead in 59 ms from
+`SIGKILL`. Single destroy went 2184 ms -> ~200 ms once the futile wait was removed.
+
+This is the second wait of exactly this shape on this path -- an ACPI poweroff wait
+cost 5001 ms of a 5335 ms destroy and could never succeed either, because the guest
+kernel has no `CONFIG_ACPI_BUTTON`. Both were invisible for the same reason: destroy
+was a single number, so a fixed floor looked like the cost of tearing down a device.
+`destroy_flush` and `destroy_network` are now separate, and are 0.418 s and 0.000 s.
+
+**Still open**: destroys serialise at high concurrency. Wall time is linear in count
+(31 -> 1968 ms, 64 -> 3445 ms, 128 -> 7372 ms) at a flat ~57 ms each, and 57 ms x 128
+is the 7372 ms wall. It is not the kernel -- 10 serial backstore `rmdir`s take 15 ms
+total -- and `Destroy` releases the runtime lock before tearing anything down, so the
+serialisation is somewhere above configfs and has not been located yet.
+
+### A node was declared LOST while healthy
+
+Reconciliation ran synchronously before the heartbeat stream opened, and its duration
+is unbounded: each orphaned device-mapper mapping costs `dmsetup remove --retry`
+4.806 s before giving up, strictly serially. 109 orphans is 8.7 minutes before the
+first heartbeat, against a 45-second lease. The log showed it plainly once read in
+order -- registered at 20:19:54, lease expired at 20:20:44, no heartbeat between.
 
 ## Open gaps worth naming
 
