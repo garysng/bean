@@ -296,3 +296,48 @@ func (r *ioURing) submitAndWaitUser(wantUserData uint64) (int32, error) {
 	}
 	return res.Res, nil
 }
+
+// publish makes the SQE at the tail visible to the kernel without entering it.
+//
+// Split from submission because a queue's whole purpose is to have many requests in
+// flight: submitAndWait would serialise the depth back down to one.
+func (r *ioURing) publish() {
+	atomic.AddUint32(r.sqTail, 1)
+}
+
+// enter submits the published SQEs and optionally waits for completions.
+//
+// A thin wrapper on the syscall, so a caller decides whether it wants to block. EINTR is
+// returned rather than retried: the caller knows whether it is in a loop that can simply
+// go round again, and swallowing it here would hide a stop signal.
+func (r *ioURing) enter(toSubmit, minComplete uint32) error {
+	var flags uintptr
+	if minComplete > 0 {
+		flags = ioringEnterGetEvents
+	}
+	_, _, errno := unix.Syscall6(unix.SYS_IO_URING_ENTER,
+		uintptr(r.fd), uintptr(toSubmit), uintptr(minComplete), flags, 0, 0)
+	if errno != 0 {
+		return errno
+	}
+	return nil
+}
+
+// waitCQE blocks for the next completion and consumes it.
+//
+// Checks the ring before entering the kernel: under load the completion is usually
+// already there, and a syscall to discover that is the cost this avoids on the IO path.
+func (r *ioURing) waitCQE() (ioUringCQE, error) {
+	for {
+		head := atomic.LoadUint32(r.cqHead)
+		if head != atomic.LoadUint32(r.cqTail) {
+			cqe := *(*ioUringCQE)(unsafe.Pointer(uintptr(r.cqes) +
+				uintptr(head&atomic.LoadUint32(r.cqMask))*unsafe.Sizeof(ioUringCQE{})))
+			atomic.StoreUint32(r.cqHead, head+1)
+			return cqe, nil
+		}
+		if err := r.enter(0, 1); err != nil {
+			return ioUringCQE{}, err
+		}
+	}
+}

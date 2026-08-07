@@ -82,6 +82,14 @@ type ublkDevice struct {
 	// Size is what the device reports, so a caller can check it matches what it asked
 	// for rather than trusting the sequence silently worked.
 	Size int64
+
+	ctrl *ublkControl
+	// cdev is the char device: the queue's descriptor mapping and every data transfer
+	// go through it, so it outlives attach and is closed by detach.
+	cdev *os.File
+	// queue serves this device's IO. Stopped between stopDevice and deleteDevice --
+	// see detach for why that order is the only safe one.
+	queue *ublkQueue
 }
 
 // ublkControl is a handle on /dev/ublk-control plus the ring commands go through.
