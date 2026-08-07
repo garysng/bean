@@ -67,7 +67,7 @@ bootstrapToken: <...>   # ✅ exists, as --bootstrap-token
 controlPlane: grpcs://<hosted-gateway>:443   # ⚠️ --control-plane exists, but there is no TLS
 s3:
   endpoint: https://...  # ⚠️ comes from environment variables rather than config (credentials stay off the command line)
-containerd: null        # 📐 the container tier is unimplemented
+containerd: null        # ✅ the container tier is implemented and needs no containerd (D2/D3)
 cidr: 10.100.0.0/24     # 📐 there is no network stack
 cache:
   dir: /var/lib/bean/cache

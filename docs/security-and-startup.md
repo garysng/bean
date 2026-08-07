@@ -24,7 +24,9 @@ What has to be defended:
 
 **Only the `fc` and `local` tiers exist today.** `local` is a process-level sandbox for
 development and CI only, with **no isolation whatsoever**; it is not in the table below and
-should not be used for untrusted code. The container tiers (runc/runsc) are unimplemented.
+should not be used for untrusted code. The container tiers (runc/runsc) are implemented
+(`--runtime runsc|runc`); runsc is the one to reach for with untrusted code, since runc
+shares the host kernel.
 
 | Actual tier | Runtime | Escape defence | When it is used |
 |---|---|---|---|
@@ -123,7 +125,7 @@ be world-readable and the uid to be in the group owning `/dev/kvm`; both are che
 and are fatal, because each otherwise fails every create on the node with a symptom that does
 not name its cause.
 
-**Container tier** (runc/runsc, 📐 unimplemented, arriving with P5):
+**Container tier** (runc/runsc, ✅ implemented, `--runtime runsc|runc`):
 
 - cgroup v2 hard limits: cpu.max, memory.max (+ memory.swap.max=0), pids.max (4096 by default, against fork bombs), io weights
 - Disk-write ceiling: XFS project quota on the rootfs writable layer (20 GiB by default, configurable)

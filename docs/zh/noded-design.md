@@ -60,7 +60,7 @@ bootstrapToken: <...>   # ✅ 有,是 --bootstrap-token
 controlPlane: grpcs://<hosted-gateway>:443   # ⚠️ 有 --control-plane,但无 TLS
 s3:
   endpoint: https://...  # ⚠️ 走环境变量而非配置(凭证不进命令行)
-containerd: null        # 📐 容器档未实现
+containerd: null        # ✅ 容器档已实现,且不需要 containerd(D2/D3)
 cidr: 10.100.0.0/24     # 📐 无网络栈
 cache:
   dir: /var/lib/bean/cache

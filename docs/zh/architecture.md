@@ -519,9 +519,16 @@ RUNNING,restore 造出另一个。见 [snapshot-resume.md](snapshot-resume.md) �
 ## 6. 安全模型 ⚠️
 
 - 默认 fc（Firecracker microVM，硬件虚拟化边界）运行不可信代码;无 KVM 节点降级 runsc
-- ⚠️ fc 档目前只有 FC 内置 seccomp;**jailer 与宿主 cgroup 包裹未实现**(security §A3)。
-  容器档整体未实现
-- 📐 网络策略未实现 —— 当前 sandbox 没有网络栈
+- ✅ fc 档的宿主侧收束已经做了:VMM 降到非特权 uid(`--fc-vmm-uid`)、跑在每 sandbox
+  的 cgroup 里(内存上限、CPU 配额、pid 上限,`--fc-cgroups`),并默认拥有自己的
+  pid、mount 与 network 命名空间。Firecracker 内置的 seccomp 叠在这些之上,而非替代它们
+- ❌ ~~jailer~~ 不再计划引入。上面的命名空间、cgroup 与 uid 下放都已具备,
+  jailer 额外带来的只是 `chroot` 和设备白名单 —— [#20](https://github.com/garysng/bean/issues/20)
+  phase 2,且大概不是对的形态。记为「已放弃」而不是「待做」,这样它不再被读成缺口
+- ✅ 容器档已实现(D3):`--runtime runsc|runc`
+- ⚠️ sandbox 之间的网络策略未实现。每个 sandbox **确实**有自己的命名空间、tap 与出网,
+  且元数据网段与 RFC1918 默认拒绝(network.md) —— 缺的是**按端口的访问控制**,
+  所以能到 bean-proxy 的东西可以访问 sandbox 的任意端口([#50](https://github.com/garysng/bean/issues/50))
 - ⚠️ 节点当前经环境变量拿 S3 凭证;presigned URL / STS 轮换未实现
 - API 鉴权：API key（调用方识别+配额;不做用户/租户体系——集群内部服务）
 
