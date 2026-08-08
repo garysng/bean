@@ -299,10 +299,10 @@ func TestE2EFullLoop(t *testing.T) {
 	}
 }
 
-func TestE2EIdleKill(t *testing.T) {
+func TestE2EIdleDelete(t *testing.T) {
 	code, out := api(t, "POST", "/v1/sandboxes", map[string]any{
 		"image":     "x",
-		"lifecycle": map[string]any{"idleTimeout": "1s", "onIdle": "kill"},
+		"lifecycle": map[string]any{"idleTimeout": "1s", "onIdle": "delete"},
 	})
 	if code != 201 {
 		t.Fatalf("create: %d %v", code, out)
@@ -317,7 +317,7 @@ func TestE2EIdleKill(t *testing.T) {
 			break
 		}
 		if time.Now().After(deadline) {
-			t.Fatalf("idle kill did not happen, state=%s", state)
+			t.Fatalf("idle delete did not happen, state=%s", state)
 		}
 		time.Sleep(300 * time.Millisecond)
 	}

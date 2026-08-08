@@ -2,7 +2,12 @@
 
 > 中文版:[zh/architecture.md](zh/architecture.md)
 
-> Container-native sandbox platform for AI evaluation workloads.
+> A sandbox platform for AI agents: hosting agents (e.g. running Claude Code),
+> agent-invoked sandboxes (code execution, data analysis), RL rollouts and
+> benchmark evaluation. Firecracker microVMs serve the agent and RL workloads
+> (hardware isolation, snapshot/fork); gVisor/OCI serves benchmarks (any image,
+> image build, lifecycle management). One self-contained stack, no Kubernetes
+> and no containerd on the hot path.
 
 ## 0. Reading Convention: Delivery Status Markers
 

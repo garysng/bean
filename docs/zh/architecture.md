@@ -1,6 +1,11 @@
 # Bean 技术架构设计
 
-> Container-native sandbox platform for AI evaluation workloads.
+> English: [../architecture.md](../architecture.md)
+
+> 面向 AI agent 的 sandbox 平台:托管 agent(如运行 Claude Code)、供 agent 按需拉起
+>(代码执行、数据分析)、RL rollout 与 benchmark 评测。Firecracker microVM 服务 agent 与 RL
+> 负载(硬件隔离、快照/fork),gVisor/OCI 服务 benchmark(任意镜像、镜像构建、生命周期管理)。
+> 一套自包含的栈,热路径上没有 Kubernetes、也没有 containerd。
 
 ## 0. 阅读约定:交付状态标注
 
