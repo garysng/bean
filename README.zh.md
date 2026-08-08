@@ -1,27 +1,35 @@
+<div align="center">
+
+<img src="docs/assets/banner.svg" alt="bean" width="560">
+
 # bean
 
-> English: [README.md](README.md)
+**面向 AI agent 的 sandbox 平台** —— 在硬件隔离里跑不可信代码:创建、exec 进去、快照、扇出。
+任意 OCI 镜像,不需要模板构建步骤。
 
-**面向 AI agent 的 sandbox 平台** —— 一个在硬件隔离里跑不可信代码的地方:创建、exec 进去、
-快照、扇出。任意 OCI 镜像,不需要模板构建步骤。
+`952 ms 到 agent 可达` · `每沙箱 44 KiB 磁盘` · `无 Kubernetes、无 containerd`
+
+[English](README.md) · [已经可用的部分](#已经可用的部分) · [架构](#架构) · [文档](#文档)
+
+</div>
+
+---
+
+## 这是做什么的
 
 四类工作,底层是同一套能力:
 
-| 场景 | 长什么样 |
-|---|---|
-| **Agent 托管** | agent 就住在 sandbox 里 —— 在一个它可以随意改动的隔离环境里运行 Claude Code 或别的 coding agent |
-| **Agent 按需拉起** | agent 或 agent 平台按需拉起一个 sandbox 干活 —— 执行代码、跑一个数据分析任务,用完即弃 |
-| **RL rollout** | 按百扇出的长活训练环境,一份备好的 checkpoint 克隆成许多 |
-| **Benchmark / 评测** | SWE-bench 类套件,成千上万个异构、数 GB 的镜像,每个跑在自己的 sandbox 里 |
+- **Agent 托管** —— agent 就住在 sandbox 里;在一个它可随意改动的隔离环境里运行 Claude Code 或别的 coding agent。
+- **Agent 按需拉起** —— agent 或平台按需拉起一个 sandbox 执行代码、跑数据分析任务,用完即弃。
+- **RL rollout** —— 按百扇出的长活训练环境,一份备好的 checkpoint 克隆成许多。
+- **Benchmark / 评测** —— SWE-bench 类套件,成千上万个异构、数 GB 的镜像,每个跑在自己的 sandbox 里。
 
 两条 runtime 覆盖这些,按负载各取所需 —— 谁都不是二等公民:
 
-| runtime | 服务 | 为什么 |
-|---|---|---|
-| **Firecracker microVM**(`fc`) | agent 托管、agent 按需拉起、RL rollout | 给不可信或长活代码一道硬件隔离边界,快照/restore 与 fork 让一份备好的环境克隆成许多 |
-| **OCI + gVisor**(`runsc`/`runc`) | benchmark / 评测 | 任意镜像直接跑,不需每镜像一次模板构建;OCI 直驱不经 containerd,外加镜像构建与完整生命周期管理 |
+- **Firecracker microVM**(`fc`) —— agent 托管、agent 按需拉起、RL rollout。给不可信或长活代码一道硬件隔离边界,快照/restore 与 fork 让一份备好的环境克隆成许多。
+- **OCI + gVisor**(`runsc`/`runc`) —— benchmark 与评测。任意镜像直接跑,不需每镜像一次模板构建;OCI 直驱不经 containerd,外加镜像构建与完整生命周期管理。
 
-两者共用一套自包含的栈 —— 控制面、节点守护进程、沙箱内 agent、CLI、SDK —— 共享同一条镜像
+底层共用一套自包含的栈 —— 控制面、节点守护进程、沙箱内 agent、CLI、SDK —— 共享同一条镜像
 流水线、快照机制、调度器与网络隔离,**热路径上没有 Kubernetes,也没有 containerd**。
 
 > **状态:系统能跑,平台未完。** microVM 档在真机上启动真的 Firecracker VM,下面每个数字
