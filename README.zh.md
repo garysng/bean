@@ -82,6 +82,11 @@ stateDiagram-v2
   PAUSED --> RUNNING: request arrives<br>(wake / resume)
   RUNNING --> [*]: on_idle=delete (idle_timeout)<br>or DELETE
   PAUSED --> [*]: DELETE
+
+  classDef running fill:#E6F4EA,stroke:#34A853,color:#111;
+  classDef paused fill:#FEF7E0,stroke:#F9AB00,color:#111;
+  class RUNNING running
+  class PAUSED paused
 ```
 
 | 操作 | 实测 | 说明 |
