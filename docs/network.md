@@ -171,6 +171,55 @@ whether an `ip neigh flush` has to be added in the agent.
 
 ## 5. Egress: two layers of MASQUERADE ✅
 
+```mermaid
+---
+config:
+  look: handDrawn
+  theme: neutral
+  flowchart:
+    curve: basis
+---
+flowchart LR
+  subgraph NETNS["per-sandbox netns"]
+    direction TB
+    GUEST["guest eth0<br>172.31.0.2/30"]
+    TAP["tap"]
+    NAT1["MASQUERADE #1<br>172.31.0.0/30 &rarr; veth"]
+    DROP1{{"netns FORWARD DROP<br>denies the NODE's own address"}}
+    GUEST --- TAP --> NAT1 --> DROP1
+  end
+
+  subgraph HOST["host"]
+    direction TB
+    NAT2["MASQUERADE #2<br>10.a.b.0/30 &rarr; uplink"]
+    DROP2{{"host FORWARD DROP<br>169.254/16 &middot; 10/8 &middot; 172.16/12 &middot; 192.168/16"}}
+    NAT2 --> DROP2
+  end
+
+  UP(["uplink &rarr; internet"])
+  META["169.254.169.254<br>metadata"]
+  NODE["node's own address"]
+
+  DROP1 -- "veth pair" --> NAT2
+  DROP2 --> UP
+  DROP2 -. "denied" .-> META
+  DROP1 -. "denied" .-> NODE
+
+  classDef guest fill:#E8F0FE,stroke:#4285F4,color:#111;
+  classDef nat fill:#FEF7E0,stroke:#F9AB00,color:#111;
+  classDef deny fill:#FCE8E6,stroke:#D93025,color:#111;
+  classDef ok fill:#E6F4EA,stroke:#34A853,color:#111;
+  class GUEST,TAP guest;
+  class NAT1,NAT2 nat;
+  class DROP1,DROP2,META,NODE deny;
+  class UP ok;
+```
+
+Two layers of MASQUERADE, and **two filter scopes that deny different things**: the host
+scope denies the metadata service and the RFC1918 ranges, while the node's own address is
+denied by the netns-scope rule instead — a packet delivered locally never traverses the
+host FORWARD chain (§5a).
+
 ```
 Inside the netns:  POSTROUTING -s 172.31.0.0/30 -o veth-in -j MASQUERADE
 Host:              POSTROUTING -s 10.<a>.<b>.0/30 -o <uplink> -j MASQUERADE

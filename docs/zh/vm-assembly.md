@@ -11,6 +11,62 @@
 
 ## 1. 全序 ✅
 
+```mermaid
+---
+config:
+  look: handDrawn
+  theme: neutral
+  flowchart:
+    curve: basis
+---
+flowchart TB
+  subgraph SHARED["共享准备 &middot; 两条路都走"]
+    direction TB
+    PREP["image.Prepare<br>/dev/mapper/bean-&lt;id&gt;<br>(restore: CoW 在此回填 &middot; 约束 A)"]
+    EXEC["在 netns 内 exec firecracker<br>cwd = sandbox 目录"]
+    WAIT["waitAPIReady<br>轮询 API socket"]
+    PREP --> EXEC --> WAIT
+  end
+
+  BRANCH{"带快照层?"}
+
+  subgraph COLD["冷启动 &middot; 有序 pre-boot PUT"]
+    direction TB
+    MC["/machine-config"]
+    CPU["/cpu-config<br>CPU 掩码 &middot; 约束 B"]
+    BOOT["/boot-source"]
+    DRV["/drives/agent (vda root)<br>/drives/rootfs (vdb)<br>/vsock"]
+    START["/actions InstanceStart"]
+    MC --> CPU --> BOOT --> DRV --> START
+  end
+
+  subgraph WARM["restore &middot; 不做任何 pre-boot 配置"]
+    direction TB
+    LOAD["PUT /snapshot/load<br>Uffd backend &middot; ResumeVM"]
+  end
+
+  GB["guest 启动<br>beand PID1 pivot 进用户 rootfs"]
+  GR["guest 恢复运行<br>缺页时按需供页"]
+
+  WAIT --> BRANCH
+  BRANCH -- "否 &middot; 冷启动" --> MC
+  BRANCH -- "是 &middot; restore" --> LOAD
+  LOAD -. "bundle 里无内存" .-> MC
+  START --> GB
+  LOAD --> GR
+
+  classDef prep fill:#FEF7E0,stroke:#F9AB00,color:#111;
+  classDef cold fill:#E6F4EA,stroke:#34A853,color:#111;
+  classDef warm fill:#F3E8FD,stroke:#A142F4,color:#111;
+  classDef out fill:#E8F0FE,stroke:#4285F4,color:#111;
+  class PREP,EXEC,WAIT prep;
+  class MC,CPU,BOOT,DRV,START cold;
+  class LOAD warm;
+  class GB,GR out;
+```
+
+下面带编号的全序是冷启动主干;restore 复用共享准备,把 PUT 序列换成单个 `/snapshot/load`。
+
 ```
 ① image.Prepare        组出 /dev/mapper/bean-<id>(共享 base + 每 sandbox CoW)
                        restore 时:CoW 必须在此步之内回填 ← 顺序约束 A

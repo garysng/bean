@@ -16,7 +16,7 @@ guest kernel 6.1.102, Alpine 3.20.
 
 | Area | | Notes |
 |---|---|---|
-| Lifecycle | ✅ | create → exec → cp → pause → resume → snapshot → restore → destroy. Resume wakes **this** sandbox; restore builds a **new** one from the snapshot, and N restores of one snapshot are N independent sandboxes ([snapshot-resume.md](snapshot-resume.md) §0) |
+| Lifecycle | ✅ | create → exec → cp → pause → resume → snapshot → create-from-snapshot → destroy. Resume wakes **this** sandbox; creating from a snapshot builds a **new** one (the internal restore/Fork path), and N such creates from one snapshot are N independent sandboxes ([snapshot-resume.md](snapshot-resume.md) §0) |
 | Images | ✅ | OCI pull and conversion to ext4, private registries (AES-256-GCM at rest), prewarm with image-affinity scheduling |
 | Rootfs | ✅ | Shared read-only base + per-sandbox copy-on-write through device-mapper. **44 KiB of actual disk per sandbox** (see the note below on why other figures were quoted) |
 | Snapshots | ✅ | Three kinds with different semantics — see below |

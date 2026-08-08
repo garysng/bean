@@ -5,7 +5,7 @@
 > Diagrams follow the code, not older docs — e.g. the image block layer is TCMU
 > (`internal/node/image/obdtcmu_linux.go`), not ublk.
 >
-> Rendered preview: `preview-all.png`. Standalone page: `bean-architecture.html`.
+> These render natively on GitHub. Each ```mermaid block below is the source.
 
 ## 1. Overall architecture
 

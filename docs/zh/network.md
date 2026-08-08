@@ -153,6 +153,53 @@ netns 里的地址可以全都一样(那是 netns 的意义),但 **veth 的宿�
 
 ## 5. 出网:两层 MASQUERADE ✅
 
+```mermaid
+---
+config:
+  look: handDrawn
+  theme: neutral
+  flowchart:
+    curve: basis
+---
+flowchart LR
+  subgraph NETNS["每 sandbox 的 netns"]
+    direction TB
+    GUEST["guest eth0<br>172.31.0.2/30"]
+    TAP["tap"]
+    NAT1["MASQUERADE #1<br>172.31.0.0/30 &rarr; veth"]
+    DROP1{{"netns FORWARD DROP<br>拦的是节点自身地址"}}
+    GUEST --- TAP --> NAT1 --> DROP1
+  end
+
+  subgraph HOST["宿主"]
+    direction TB
+    NAT2["MASQUERADE #2<br>10.a.b.0/30 &rarr; uplink"]
+    DROP2{{"宿主 FORWARD DROP<br>169.254/16 &middot; 10/8 &middot; 172.16/12 &middot; 192.168/16"}}
+    NAT2 --> DROP2
+  end
+
+  UP(["上行 &rarr; 公网"])
+  META["169.254.169.254<br>元数据"]
+  NODE["节点自身地址"]
+
+  DROP1 -- "veth pair" --> NAT2
+  DROP2 --> UP
+  DROP2 -. "拒绝" .-> META
+  DROP1 -. "拒绝" .-> NODE
+
+  classDef guest fill:#E8F0FE,stroke:#4285F4,color:#111;
+  classDef nat fill:#FEF7E0,stroke:#F9AB00,color:#111;
+  classDef deny fill:#FCE8E6,stroke:#D93025,color:#111;
+  classDef ok fill:#E6F4EA,stroke:#34A853,color:#111;
+  class GUEST,TAP guest;
+  class NAT1,NAT2 nat;
+  class DROP1,DROP2,META,NODE deny;
+  class UP ok;
+```
+
+两层 MASQUERADE,以及**两个作用域拦不同的东西**:宿主作用域拦元数据服务和 RFC1918 段,
+而节点自身地址是被 netns 作用域的规则拦下的 —— 本地投递的包根本不经过宿主 FORWARD 链(§5a)。
+
 ```
 netns 内:  POSTROUTING -s 172.31.0.0/30 -o veth-in -j MASQUERADE
 宿主:      POSTROUTING -s 10.<a>.<b>.0/30 -o <uplink> -j MASQUERADE

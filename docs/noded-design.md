@@ -14,8 +14,9 @@
 
 ```
 internal/node/
-├── manager.go       ✅ Manager: lifecycle orchestration (create/destroy/pause/resume/
-│                       snapshot/restore, transparent wake, idle reclaim, in-flight guard)
+├── manager.go       ✅ Manager: lifecycle orchestration (create incl. create-from-snapshot/
+│                       destroy/pause/resume/snapshot, transparent wake, idle reclaim,
+│                       in-flight guard)
 ├── grpc.go          ✅ SandboxService implementation + data-plane pass-through to the agent
 ├── register.go      ✅ Outbound registration, heartbeat, SyncState reconciliation
 ├── auth.go / dial.go ✅ node token auth, agent connection

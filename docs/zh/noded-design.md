@@ -12,8 +12,8 @@
 
 ```
 internal/node/
-├── manager.go       ✅ Manager:生命周期编排(创建/销毁/pause/resume/snapshot/
-│                       restore、透明唤醒、idle 回收、in-flight 保护)
+├── manager.go       ✅ Manager:生命周期编排(创建 含从快照创建/销毁/pause/resume/
+│                       snapshot、透明唤醒、idle 回收、in-flight 保护)
 ├── grpc.go          ✅ SandboxService 实现 + 数据面透传到 agent
 ├── register.go      ✅ 出向注册、心跳、SyncState 对账
 ├── auth.go / dial.go ✅ node token 鉴权、agent 连接

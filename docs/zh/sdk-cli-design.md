@@ -101,7 +101,7 @@ client.volumes.list(labels={...}); vol.delete()
 sbx.pause(); sbx.resume()                                  # 同一个 sandbox,冻住再唤回
 snap = sbx.snapshot(name="after-setup", keep_running=True)
 client.snapshots.list(); snap.delete()
-sbx2 = client.sandboxes.create(snapshot=snap.id)           # restore：从快照造一个新 sandbox
+sbx2 = client.sandboxes.create(snapshot=snap.id)           # 从快照创建:一个新 sandbox
 kids = [client.sandboxes.create(snapshot=snap.id) for _ in range(8)]   # 8 路扇出,彼此独立
 children = sbx.fork(count=8)                               # 📐 上一行的语法糖,省掉持久快照
                                                            #    (snapshot-resume.md 4.5)
@@ -199,7 +199,7 @@ bean logs SBX [--tail N]
 bean events SBX             # 历史;`-f [SBX] [--label k=v]` 跟随实时流(SSE)
 bean kill SBX [--force]
 bean pause SBX / bean resume SBX   # 冻住并唤回同一个 sandbox
-bean run --snapshot SNAP           # restore：每调一次产出一个新 sandbox
+bean run --snapshot SNAP           # 从快照创建:每调一次产出一个新 sandbox
 bean build  --tag REF [--file Dockerfile] [CONTEXT]   # 平台上构建镜像
 bean commit SBX --tag REF                             # 把文件系统固化成镜像
 bean snapshot create SBX [--name N] [--no-keep-running]

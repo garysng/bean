@@ -348,7 +348,7 @@ complexity inside the guest.
 | Node cache | Local NVMe as a block-chunk LRU on top of S3; bare metal (big disks) and cloud VMs (small disks) differ only in hit rate, the architecture is the same |
 | Eval artifacts | agent/noded push straight to S3 via presigned URL (issued by the control plane; nodes hold no long-lived credentials) |
 | Large downloads | The API returns a presigned URL redirect rather than proxying through the gateway |
-| Snapshots (P3–P4) | FC memory snapshot / rootfs diff land in S3, enabling cross-node **restore** (a new sandbox on any node; resume is same-process and same-node, see snapshot-resume.md §0) |
+| Snapshots (P3–P4) | FC memory snapshot / rootfs diff land in S3, enabling cross-node **create-from-snapshot** (a new sandbox on any node, via the internal restore/Fork path; resume is same-process and same-node, see snapshot-resume.md §0) |
 | Volumes | shared-fs volume backend (JuiceFS on S3) mounted on the host and exported over nfsd (see D10); dataset volumes reserved |
 
 overlaybd (block-level, DADI/Alibaba, already validated by AgentENV in the FC

@@ -97,11 +97,28 @@ POST   /sandboxes/{id}/fork     { "count": 3, "labels": {...} }    // separate A
        // Semantics: take an instantaneous CoW snapshot of a running sandbox and clone N
        // independent instances (no persistent snapshot object is produced; use /snapshot
        // if you want one kept). The container tier returns 501.
-       // NOTE: this is a convenience over the snapshot+restore pair, not a new capability.
+       // NOTE: this is a convenience over snapshot + create-from-snapshot, not a new capability.
        // POST /snapshot then N x POST /sandboxes{snapshot} already yields N independent
        // sandboxes today; fork saves the persistent object and the round trip.
        // See snapshot-resume.md 4.5
 ```
+
+**There is one creation endpoint, and it branches internally.** `POST /sandboxes` takes
+*either* an `image` *or* a `snapshot` (mutually exclusive). Which one is present decides how
+the guest comes up, and nothing else about the call changes:
+
+- **from an image** — a cold boot. The runtime's `Create` path assembles a rootfs and boots
+  the guest kernel (vm-assembly.md).
+- **from a snapshot** — the runtime's `Fork` path: it seeds the CoW layer and brings the guest
+  back through UFFD page-in instead of booting. This path is what earlier docs call *restore*;
+  it is an internal branch of create, not a separate call or endpoint. It always produces a
+  **new** sandbox with a new id — never a revival of the one that was snapshotted — and calling
+  it N times is how one snapshot fans out to N independent sandboxes.
+
+So "restore" names an internal path (`rt.Fork`, as opposed to the cold-boot `rt.Create`), not
+a user-facing verb: there is no `/restore`. `resume` is a different thing entirely — it wakes a
+PAUSED sandbox whose process never left (§3.1 `resume`), creating nothing. The distinction is
+drawn in full in [snapshot-resume.md](snapshot-resume.md) §0.
 
 The sandbox detail response carries `runtime: fc|runsc|runc` (the actual tier, for troubleshooting).
 
@@ -288,10 +305,10 @@ POST   /sandboxes/{id}/snapshot  { "name": "after-setup", "labels": {},
 GET    /snapshots?label=k%3Dv&state=READY   → list
 GET    /snapshots/{id}
 DELETE /snapshots/{id}      // RefCount>0 or has descendants → 409 SNAPSHOT_IN_USE
-POST   /sandboxes    { "snapshot": "snap_..." }   // restore: a NEW sandbox with a new id,
-                                                  // not a revival of the one snapshotted.
-                                                  // Call it N times for N independent
-                                                  // sandboxes from one snapshot
+POST   /sandboxes    { "snapshot": "snap_..." }   // create from a snapshot: a NEW sandbox with
+                                                  // a new id, not a revival of the one snapshotted
+                                                  // (internally the Fork path). Call it N times
+                                                  // for N independent sandboxes from one snapshot
                                                   // image and snapshot are mutually exclusive
                      // incompatible CPU → 409 INCOMPATIBLE_CPU
 ```

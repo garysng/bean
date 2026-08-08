@@ -107,7 +107,7 @@ client.volumes.list(labels={...}); vol.delete()
 sbx.pause(); sbx.resume()                                  # the SAME sandbox, frozen and woken
 snap = sbx.snapshot(name="after-setup", keep_running=True)
 client.snapshots.list(); snap.delete()
-sbx2 = client.sandboxes.create(snapshot=snap.id)           # restore: a NEW sandbox from the snapshot
+sbx2 = client.sandboxes.create(snapshot=snap.id)           # create from a snapshot: a NEW sandbox
 kids = [client.sandboxes.create(snapshot=snap.id) for _ in range(8)]   # fan-out of 8, all independent
 children = sbx.fork(count=8)                               # 📐 sugar for the line above, without the
                                                            #    persistent snapshot (snapshot-resume.md 4.5)
@@ -210,7 +210,7 @@ bean logs SBX [--tail N]
 bean events SBX             # history; `-f [SBX] [--label k=v]` follows the live stream (SSE)
 bean kill SBX [--force]
 bean pause SBX / bean resume SBX   # freeze and wake the same sandbox
-bean run --snapshot SNAP           # restore: a new sandbox each time it is called
+bean run --snapshot SNAP           # create from a snapshot: a new sandbox each time it is called
 bean build  --tag REF [--file Dockerfile] [CONTEXT]   # build an image on the platform
 bean commit SBX --tag REF                             # freeze the filesystem into an image
 bean snapshot create SBX [--name N] [--no-keep-running]

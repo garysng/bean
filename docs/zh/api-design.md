@@ -92,11 +92,26 @@ POST   /sandboxes/{id}/fork     { "count": 3, "labels": {...} }    // 独立 API
        → 202 { "sandboxes": [ ...N 个新 sandbox... ] }
        // 语义：对运行中 sandbox 做瞬时 CoW 快照并克隆 N 个独立实例（不产生
        // 持久 snapshot 对象;要留存用 /snapshot）。容器档返回 501。
-       // 注意:这是 snapshot+restore 这对操作的便利封装,不是一项新能力。
+       // 注意:这是 snapshot + 从快照创建 这对操作的便利封装,不是一项新能力。
        // 今天 POST /snapshot 再 N 次 POST /sandboxes{snapshot} 已经能得到 N 个
        // 互相独立的 sandbox;fork 省掉的是那个持久对象和那一圈往返。
        // 见 snapshot-resume.md 4.5
 ```
+
+**只有一个创建端点，它在内部分叉。** `POST /sandboxes` 接受 `image` 或 `snapshot`
+二者之一（互斥）。带哪个决定 guest 怎么起来，调用的其它部分都不变:
+
+- **从 image** —— 冷启动。运行时的 `Create` 路径组出 rootfs 并 boot guest 内核
+  （vm-assembly.md）。
+- **从 snapshot** —— 运行时的 `Fork` 路径:回填 CoW 层，用 UFFD 缺页供页把 guest 带回来，
+  而不是 boot。这条路径就是早期文档里说的 *restore*;它是 create 的一条内部分支，
+  不是单独的调用或端点。它永远产出一个**新的** sandbox、新 id —— 绝不是把被快照的那个唤回来 ——
+  调 N 次就是一份快照扇出成 N 个互相独立的 sandbox。
+
+所以 "restore" 是一条内部路径的名字（`rt.Fork`，相对于冷启动的 `rt.Create`），
+不是面向用户的动词:没有 `/restore`。`resume` 完全是另一回事 —— 它唤醒一个进程从未离开的
+PAUSED sandbox（见 `resume`），什么都不创建。完整区分见
+[snapshot-resume.md](snapshot-resume.md) §0。
 
 sandbox 详情返回 `runtime: fc|runsc|runc`（实际档位，排障用）。
 
@@ -273,14 +288,14 @@ POST   /sandboxes/{id}/snapshot  { "name": "after-setup", "labels": {},
 GET    /snapshots?label=k%3Dv&state=READY   → 列表
 GET    /snapshots/{id}
 DELETE /snapshots/{id}      // RefCount>0 或有子代 → 409 SNAPSHOT_IN_USE
-POST   /sandboxes    { "snapshot": "snap_..." }   // restore:一个**新的** sandbox、新 id,
-                                                  // 不是把被快照的那个救回来。
+POST   /sandboxes    { "snapshot": "snap_..." }   // 从快照创建:一个**新的** sandbox、新 id,
+                                                  // 不是把被快照的那个救回来(内部走 Fork 路径)。
                                                   // 调 N 次就是一份快照出 N 个独立 sandbox
                                                   // image 与 snapshot 互斥
                      // CPU 不兼容 → 409 INCOMPATIBLE_CPU
 ```
 
-restore 是 `POST /sandboxes` —— 一次创建 —— 而 `resume` 是打在已存在的
+从快照创建走 `POST /sandboxes` —— 一次创建 —— 而 `resume` 是打在已存在的
 `/sandboxes/{id}` 上的 POST。两者是作用在不同对象上的不同操作,见
 [snapshot-resume.md](snapshot-resume.md) §0。
 
