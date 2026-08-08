@@ -1,6 +1,6 @@
 <div align="center">
 
-# bean
+# 🫛 bean
 
 **面向 AI agent 的 sandbox 平台** —— 在硬件隔离里跑不可信代码:创建、exec 进去、打快照、成批克隆。
 任意 OCI 镜像,不需要模板构建步骤。
@@ -95,7 +95,7 @@ stateDiagram-v2
 | create(冷镜像) | busybox 5–10 s … 网络差时 alpine 2 分 45 秒 | 这就是 prewarm 是必需项而非优化项的原因 |
 | destroy | **214 ms** | 曾是 5.25 s —— [decisions §1](docs/zh/decisions.md) |
 | snapshot(全量) | 1.5 s,15.5 MB | |
-| restore | 节点本地缓存命中 **392 ms** | 其中 `/snapshot/load` 只占 7 ms;首次 restore 要付约 950 ms 解包,该节点后续每次都不用再付 |
+| create-from-snapshot | 节点本地缓存命中 **392 ms** | 该节点首次约 950 ms 解包 bundle,之后缓存命中不再付 |
 
 ### 快照 —— 三种语义,不是三种大小
 

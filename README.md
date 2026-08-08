@@ -1,6 +1,6 @@
 <div align="center">
 
-# bean
+# 🫛 bean
 
 **A sandbox platform for AI agents** — run untrusted code in hardware isolation:
 create it, exec into it, snapshot it, fan it out. Any OCI image, no template build step.
@@ -100,7 +100,7 @@ stateDiagram-v2
 | create (cold image) | 5–10 s busybox … 2 m 45 s alpine on poor network | why prewarm is required, not an optimisation |
 | destroy | **214 ms** | was 5.25 s — [decisions §1](docs/decisions.md) |
 | snapshot (full) | 1.5 s, 15.5 MB | |
-| restore | **392 ms** on a node-local cache hit | `/snapshot/load` is 7 ms of it; a first restore pays ~950 ms to unpack, and every later one on that node does not |
+| create-from-snapshot | **392 ms** on a node-local cache hit | first time on a node ~950 ms to unpack the bundle, cached after |
 
 ### Snapshots — three kinds, different semantics
 
