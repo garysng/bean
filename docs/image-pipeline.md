@@ -813,8 +813,13 @@ claim as a guest that boots from it, and only this closes the gap.
 **Not yet exercised**: lazy pull against a registry (`--fc-overlaybd-lazy-pull` is
 implemented and untested — the measured 7 ms mount and 19.6% transfer come from the
 manual verification in decisions §3.1, not from this code), `commit` through
-`CommitSandbox`, and behaviour under concurrent fan-out. ublk would be a faster backend
-than TCMU but needs kernel ≥ 6.0; TCMU is functionally complete.
+`CommitSandbox`, and behaviour under concurrent fan-out.
+
+**On ublk**: it needs kernel ≥ 6.0, and the verification host is now on 6.8. TCMU is
+functionally complete but its teardown is not merely slower — 4.0 s for 128 devices, and the
+same on both kernels, because the daemon serialises on one netlink socket. So ublk is the
+intended transport rather than an optimisation, and overlaybd is still served over TCMU
+([status.md](status.md)).
 
 One number worth knowing before using this: **first use of an image is slower than the
 CLI's default wait**, because the layer is converted before the device can be assembled.

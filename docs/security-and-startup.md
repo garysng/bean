@@ -306,7 +306,9 @@ CreateSandbox → overlaybd (over TCMU) assembles the block device (a few MiB of
   - ublk requires a newer kernel (6.0+) → a uniform node OS baseline; **the tcmu backend is
     measured functionally complete on 5.15** (7ms to mount, only 19.6% of the layer bytes
     transferred, HTTP 206 range reads; see `docs/decisions.md` §3.1), which makes it a usable
-    main path rather than a degraded one, with ublk merely performing better;
+    main path rather than a degraded one. It is not merely slower, though: its teardown is 4.0 s
+    for 128 devices and identical on 5.15 and 6.8, so ublk is the intended transport and its
+    lower layers are now built and verified on 6.8 ([status.md](status.md));
     a node where neither is available does not report the fc capability (fc depends on a block-device backend), leaving only the container tier's overlayfs as the fallback
   - tcmu needs a unique `vpd_unit_serial` per backstore, otherwise the host's `multipathd`
     will merge the devices of different images and return wrong data (silently, with no error)

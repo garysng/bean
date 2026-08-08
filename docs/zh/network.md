@@ -222,6 +222,56 @@ guest 地址在每个沙箱里都一样,靠 namespace 区分。
 路径是 `bean-proxy` → noded 的转发端口 → namespace → `172.31.0.2:{port}`,
 `{port}` 从 Host 头读出。见 api-design.md §6。
 
+## 5a. MASQUERADE 会碰到的、不该碰到的东西 ✅
+
+上面那两条规则是出网能用的原因。它们同时也单凭自身就让沙箱能访问节点的内网和云元数据服务
+—— 因为那不是一项单独的能力,而是「能路由出宿主」这件事的**自然副作用**。
+
+已经有三份文档承诺这是默认拒绝的([architecture.md](architecture.md)、
+[security-and-startup.md](security-and-startup.md) A4、[noded-design.md](noded-design.md) §5)。
+上面的 §5 只描述了 MASQUERADE 规则,所以一个忠实照它实现的版本会交付一个能访问
+`169.254.169.254` 的沙箱,上述每一条承诺都被悄悄破掉,而代码看起来是完成的。
+这种遗漏正是 [architecture.md](architecture.md) §0.1 存在要抓的东西,
+而它是在 review 里被抓到的,不是被设计抓到的。
+
+所以过滤是这个特性的一部分,不是后续项:
+
+```
+FORWARD -s <guest subnet> -d 169.254.0.0/16 -j DROP     # 元数据、link-local
+FORWARD -s <guest subnet> -d 10.0.0.0/8     -j DROP     # RFC1918
+FORWARD -s <guest subnet> -d 172.16.0.0/12  -j DROP
+FORWARD -s <guest subnet> -d 192.168.0.0/16 -j DROP
+```
+
+顺序是承重的:DROP 规则必须**插到**宿主已有的 ACCEPT **之前**,而跑着 Docker 的宿主上就有
+这样一条规则。append 会把它们放在那条之后,于是永远不匹配。这就是要专门测的失败模式,
+因为 append 和 insert 在 diff 里长得一模一样,区别只在于特性到底有没有生效。
+
+有两个后果值得写出来而不是留给后人踩:
+
+- **veth 链路网段在 `10/8` 里面**,而那正是上面规则拒绝的。guest 的流量在被转发之前
+  已经 MASQUERADE 成链路地址,所以 DROP 不能匹配转换后的源地址。搞错这点会打断所有出网
+  而不只是被拒的目的地址 —— 至少这种错是响亮的。
+- **节点自己的地址是被 namespace 内的规则拒绝的,不是宿主的规则。** 宿主本地交付的包
+  从不经过宿主的 FORWARD 链,所以任何 host scope 的规则都拒不到它 —— 这是实测的,
+  证据是规则自己的包计数器(`hack/netns-hostlocal-probe.sh`)。真正拒掉它的是 netns
+  scope 的 DROP:包还在沙箱 namespace *内部*被转发、宿主还什么都没看到的时候它就命中了。
+  所以节点是被保护的,但靠的是第一层作用域而不是第二层,且仅在 netns 规则存在时成立。
+  沙箱之间的隔离是另一回事,来自「每沙箱一个 netns 且彼此之间没有路由」,
+  地址布局已经给了这一点。
+
+  这点值得知道,是因为那个显而易见的加固手段 ——「把缺的宿主侧规则加上」—— 根本不是加固:
+  host scope 的 FORWARD 规则无论怎么写都碰不到这类流量。两个可比的 Firecracker 平台
+  都选择重构:E2B 在 **prerouting priority −150** 挂 nftables 且只匹配入向网卡,
+  于是一条规则同时覆盖本地交付和转发的包;AgentENV 保留 FORWARD 但在每条规则上写
+  `-o vpeer`,让规则对自己的作用域诚实。见 [competitive-analysis.md](competitive-analysis.md) §2a。
+  改用 prerouting 钩子能消除 bean 对「netns 规则是 guest 与节点之间唯一屏障」的依赖,
+  作为加固记在 [#21](https://github.com/garysng/bean/issues/21)。
+
+这里没有处理 IPv6。如果上行有 IPv6,对应的元数据地址(`fd00:ec2::254`)是可达的,
+而这些 v4 规则对它什么都没说。要么 guest 完全拿不到 IPv6 地址 —— 这是当前状态,也是安全的
+那个 —— 要么在那件事改变之前,本节需要补上 v6 那一半。
+
 ## 6. DNS ✅
 
 guest 的 `/etc/resolv.conf` 来自用户镜像,而镜像里写的可能是任何东西。

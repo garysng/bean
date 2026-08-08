@@ -159,8 +159,8 @@ local 档跑宿主进程,没有「缓存镜像」这个概念,让它 stub 掉四
 1. image 模块产出 rootfs 块设备:**dm-snapshot** —— 共享只读 base(loop 挂载)
    + 每 sandbox 稀疏 CoW 文件,合成单一 `/dev/mapper/bean-<id>`。
    配额 = CoW 文件大小;快照抓的就是这个 CoW 层。
-   (overlaybd 已接进 `image.Provider`(`OverlaybdProvider`),用 `--fc-overlaybd`
-    经 TCMU 开启、真机验证过;dm-snapshot 仍是默认)
+   (overlaybd 是目标形态,现已接在 `--fc-overlaybd` 后面、走 TCMU;
+   lazy pull 本身已实现但未对真 registry 测过)
 2. noded 直接 exec firecracker(**无 jailer**,见 security §A3):
    virtio-blk: **agent 盘为 root device**(`agent.ext4`,含 beand)
                + 用户镜像为第二盘(guest 内 `/dev/vdb`)

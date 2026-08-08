@@ -124,7 +124,7 @@ bean run --snapshot snap_...
 | jailer chroot | 📐 VMM 已降到非 root uid、跑在每沙箱 cgroup 里,默认也有自己的 pid、mount、network 命名空间。jailer 在此之上还能加的是一个 `chroot` 和设备白名单 —— [#20](https://github.com/garysng/bean/issues/20) 第二阶段,而且未必是对的形态 |
 | 卷 | 📐 |
 | 按端口访问控制 | 📐 沙箱上任何端口,只要能到达 bean-proxy 就能访问 —— [#50](https://github.com/garysng/bean/issues/50) |
-| overlaybd | ⚠️ 已接入,在一台宿主上实测过。三个镜像共享一个 base 时**磁盘少 3.32 倍**,共享层每节点只转换一次而非每镜像一次(第二个镜像 0.49 s CPU,对比 2.24 s)。层发布到对象存储后,create 是 **1.3 s,对比 dm-snapshot 的 14.3 s**;*冷* create 不变,也无法改进 —— gzip tar 没有块索引可 seek,所以任何地方首次遇到都要转换。用 `--fc-overlaybd` 开启,dm-snapshot 仍是默认。这个后端上的 `commit` 未经检验,跨节点路径也只在一台机器上跑过。[docs/image-pipeline.md](docs/image-pipeline.md) §7 |
+| overlaybd | ⚠️ 已接入,在一台宿主上实测过。三个镜像共享一个 base 时**磁盘少 3.32 倍**,共享层每节点只转换一次而非每镜像一次(第二个镜像 0.49 s CPU,对比 2.24 s)。层发布到对象存储后,create 是 **1.3 s,对比 dm-snapshot 的 14.3 s**;*冷* create 不变,也无法改进 —— gzip tar 没有块索引可 seek,所以任何地方首次遇到都要转换。用 `--fc-overlaybd` 开启,dm-snapshot 仍是默认。**128 核机器 256 并发 create 下 rootfs 组装快 4.2 倍**(3.809 s → 0.908 s)、吞吐快 1.9 倍(47.5 → 88.0 creates/s),因为 dm-snapshot 每沙箱 fork `losetup`/`dmsetup` 而 overlaybd 只写 configfs。这个后端上的 `commit` 未经检验,跨节点路径也只在一台机器上跑过。[docs/image-pipeline.md](docs/image-pipeline.md) §7 |
 
 ---
 

@@ -557,9 +557,10 @@ e2b 从另一个方向到了同一个形状:`packages/client-proxy` 把 sandbox 
 
 ```
 浏览器 → {sbxId}-{port}.{region}.sandbox.<domain>（DNS 直达该 region 的 proxy）
-       → regional proxy：解析 Host → 鉴权（6.3）
-       → 路由查询：state store 查 sandbox → nodeId → noded 地址
-         （本地 LRU 缓存 30s + 心跳失效推送;PAUSED → 触发透明唤醒后重路由）
+       → regional proxy：从 Host 解析 {port}-{sandbox}
+       → 路由查询：GET /v1/sandboxes/{id} 取 nodeId,再查 /v1/nodes 取该节点的
+         转发地址（以 bean.io/sandbox-port-addr 发布）
+         （默认缓存 5s;--placement-cache）
        → HTTP 反代 → noded 内嵌 sandbox-proxy（节点侧反代）
        → 直连 sandbox IP:port（fc 档 tap IP / 容器档 veth IP,节点内路由）
 ```
@@ -569,14 +570,33 @@ e2b 从另一个方向到了同一个形状:`packages/client-proxy` 把 sandbox 
 - agent 的 `ForwardPort` 保留为兜底路径（未来 localhost-only 服务等场景）
 - WebSocket 天然升级透传;连接级超时（>620s,躲上游 LB）、per-sandbox
   并发/带宽限制;proxy 侧连接活跃度喂 idle 判定（lifecycle）
-- noded 侧 sandbox-proxy 亦做 nftables 之外的第二层校验（仅放行已暴露端口）
+- 节点侧要求集群的 node token,这才是阻止「能访问那个端口的东西就能访问该节点上每个
+  sandbox」的机制 —— 包括以 root 执行命令的 agent。它在解析 Host **之前**就校验,
+  所以未鉴权的调用方无法区分真实 sandbox 和编造的:一个回 404、另一个回 401
+  就成了枚举预言机
+- **它不按「已暴露端口」过滤**,本节早先的草稿曾这么承诺过。并不存在已暴露端口的注册表
+  （§3.4）,所以没有可过滤的依据:有进程监听的端口就能访问,没有的回 502。
+  per-port 访问控制才是真正的缺口
 
 ### 6.3 端口鉴权 📐
 
-- `auth=public`：任何持有 URL 者可访问（内部演示用）
-- `auth=token`（默认）：要求 `?bean_token=<sandbox JWT>` 或 Cookie；proxy 校验 JWT
-  签名与 sandbox-id 匹配后种 Cookie（1h），后续请求免 query
-- proxy 注入 `X-Bean-Sandbox-Id` 头，剥离入站的同名头
+**没有做,而且这是这条路径上唯一真正的缺口。** 今天任何能访问 bean-proxy 的东西,
+都能访问它能叫出名字的任意 sandbox 的任意端口。所以不能给 sandbox 一个
+它不希望调用方看到的端口。
+
+实际存在的是两个凭证,而且都不是「用户」这一级:
+
+| 跳 | 凭证 | 区分的是 |
+|---|---|---|
+| client → bean-proxy | 外部鉴权层要求什么就是什么（Traefik middleware） | 一个用户和另一个用户 —— **在 bean 之外** |
+| bean-proxy → noded | 集群的 node token | 集群和其他所有人 |
+
+bean 是平台层底下的基础设施,用户身份属于那一层(architecture.md §2.1、
+security-and-startup.md A7)。bean 无法委托出去的是更底下那部分:一个越过平台层的调用方
+会拿到它被授权那个 sandbox 的*每一个*端口,而这正是 per-port 控制要修的东西。
+
+这里起草过的设计 —— `auth=public` / `auth=token` 配 sandbox 作用域的 JWT ——
+依赖 §3.4 说明了「故意不存在」的端口注册表,所以它需要重新设计而不是直接实现。
 
 ### 6.4 生命周期联动 📐
 

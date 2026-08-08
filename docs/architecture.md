@@ -138,13 +138,12 @@ one image path, and the user never notices the difference.
 
 ### D2. overlaybd driven directly, no containerd on the hot path ⚠️
 
-> **"No containerd" is achieved; "overlaybd driven directly" is wired in but not
-> the default (⚠️).** The default backend is dm-snapshot: pull the whole image,
-> convert it, share a read-only base, one CoW per sandbox (measured at 44
-> KiB/sandbox). overlaybd is now wired into `image.Provider` as `OverlaybdProvider`
-> (`internal/node/image/overlaybd_linux.go`), driven over TCMU and enabled with
-> `--fc-overlaybd`; dm-snapshot remains the default until overlaybd is the proven
-> main path.
+> **"No containerd" is achieved; "overlaybd driven directly" is half done.** The
+> default backend is still dm-snapshot: pull the whole image, convert it, share a
+> read-only base, one CoW per sandbox (measured at 44 KiB/sandbox). overlaybd **is
+> now wired into `image.Provider`** as `OverlaybdProvider` behind `--fc-overlaybd`
+> (PR #49) — but over TCMU, not the ublk direct drive this section describes.
+> See [status.md](status.md).
 
 The fc main path **does not bring in containerd** (same as AgentENV, whose
 source is available locally at /Users/mac/project/agentenv for reference):

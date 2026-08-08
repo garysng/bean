@@ -16,10 +16,11 @@ points:
 - ✅ **The snapshot part of P3/P4 is already done, ahead of schedule**: pause/resume, three
   snapshot variants (full / `--no-memory` / `--base` incremental), UFFD on-demand page serving,
   CPU templates and scheduler CPU filtering
-- ⚠️ **The overlaybd ublk direct drive P0 talks about runs on TCMU, not ublk**: the default is
-  still dm-snapshot (44 KiB per sandbox). overlaybd is now wired into `image.Provider` as
-  `OverlaybdProvider`, opt-in with `--fc-overlaybd` and verified on hardware — it has become an
-  optimisation rather than a foundation, ublk (≥ 6.0) only being the faster alternative
+- ⚠️ **The overlaybd ublk direct drive P0 talks about is partly done**: the default is still
+  dm-snapshot (44 KiB per sandbox), and overlaybd is wired in behind `--fc-overlaybd` — but over
+  TCMU, not the ublk drive P0 described. ublk stopped being "an optimisation rather than a
+  foundation" once TCMU's 4.0 s teardown for 128 devices turned out to be identical on 5.15
+  and 6.8: that is a transport limit, not a kernel one ([status.md](status.md))
 - ⚠️ **The jailer P0 talks about is not done**: noded execs firecracker directly
 - ✅ **The networking P0/P1 talk about is done**, and it was the largest gap: per-sandbox
   namespace, tap and NAT egress, metadata and RFC1918 denied by default, and a port inside a

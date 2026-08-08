@@ -318,8 +318,9 @@ rootfs is a device-mapper node. e2b gets the namespace half without any of that,
 `unshare`ing a mount namespace and using tmpfs plus symlinks, which work where a chroot
 would not. bean already has the namespace isolation e2b gets that way, applied as clone
 flags instead of a wrapper process (see §12); the private mount namespace is
-implemented behind `--fc-mount-namespace` and left off until the dm node is verified
-inside one.
+`--fc-mount-namespace`, and it is **now on by default** — holding it back assumed bean's
+device-mapper rootfs would stop being openable inside one, and a booted guest showed
+otherwise.
 
 ## 12. Isolation without a wrapper process ✅
 
@@ -361,7 +362,9 @@ sandbox's, simultaneously.
 and pid 1 ignores signals it has no handler for. A catchable signal would be dropped
 exactly when the sandbox most needs to die.
 
-Both are off by default. `--fc-pid-namespace` and `--fc-kill-on-exit` turn them on;
-`--fc-mount-namespace` exists but is unverified, because bean's rootfs is a
-device-mapper node rather than a file and a guest that cannot resolve it reports
-nothing but a boot that did not finish.
+All three are **on by default** — `--fc-pid-namespace`, `--fc-kill-on-exit` and
+`--fc-mount-namespace`. The mount namespace was the one held back, on the expectation that
+bean's device-mapper rootfs would stop being openable inside one; that was wrong, and a booted
+guest has a working `eth0` and its own mnt, pid and net namespaces at once. The reason it needed
+a guest rather than an inspection is that a rootfs the VMM cannot resolve reports nothing except
+a boot that did not finish.

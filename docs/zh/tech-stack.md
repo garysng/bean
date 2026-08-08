@@ -859,7 +859,7 @@ restore  1500 ms → 950 ms(首次 1617ms)
 | 容器档 | runc / gVisor | ✅ noded 直驱 OCI runtime,无 containerd |
 | 开发/CI 档 | `local` 进程树,无隔离 | ✅ |
 | Rootfs | device-mapper snapshot,共享 base + CoW | ✅ 每 sandbox 44 KiB |
-| Rootfs 按需拉取 | overlaybd | ⚠️ 已接进 `image.Provider`,dm-snapshot 仍默认 |
+| Rootfs 按需拉取 | overlaybd | ⚠️ 已接在 `--fc-overlaybd` 后面(走 TCMU);lazy pull 本身未对真 registry 测过 |
 | 内存恢复 | Firecracker UFFD 后端 | ✅ load 7 ms |
 | 增量快照 | Firecracker diff + 恢复时合并 | ✅ 298 KB,链深上限 8 |
 | `--track-dirty-pages` | | ⚠️ 已实现,默认关,开销未测 |
