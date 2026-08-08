@@ -2,10 +2,14 @@
 
 # bean
 
-**面向 AI agent 的 sandbox 平台** —— 在硬件隔离里跑不可信代码:创建、exec 进去、快照、扇出。
+**面向 AI agent 的 sandbox 平台** —— 在硬件隔离里跑不可信代码:创建、exec 进去、打快照、成批克隆。
 任意 OCI 镜像,不需要模板构建步骤。
 
-`952 ms 到 agent 可达` · `每沙箱 44 KiB 磁盘` · `无 Kubernetes、无 containerd`
+![runtime: Firecracker microVM](https://img.shields.io/badge/runtime-Firecracker%20microVM-E24329?style=flat-square)
+![runtime: gVisor](https://img.shields.io/badge/runtime-gVisor%20%2F%20OCI-4285F4?style=flat-square)
+![952 ms 到 agent 可达](https://img.shields.io/badge/boot-952%20ms%20to%20agent-3FB950?style=flat-square)
+![每沙箱 44 KiB 磁盘](https://img.shields.io/badge/disk-44%20KiB%20%2F%20sandbox-3FB950?style=flat-square)
+![无 Kubernetes、无 containerd](https://img.shields.io/badge/hot%20path-no%20k8s%20%C2%B7%20no%20containerd-6E7781?style=flat-square)
 
 [English](README.md) · [已经可用的部分](#已经可用的部分) · [架构](#架构) · [文档](#文档)
 
@@ -19,12 +23,12 @@
 
 - **Agent 托管** —— agent 就住在 sandbox 里;在一个它可随意改动的隔离环境里运行 Claude Code 或别的 coding agent。
 - **Agent 按需拉起** —— agent 或平台按需拉起一个 sandbox 执行代码、跑数据分析任务,用完即弃。
-- **RL rollout** —— 按百扇出的长活训练环境,一份备好的 checkpoint 克隆成许多。
+- **RL rollout** —— 成百上千的常驻训练环境,一份备好的 checkpoint 克隆成许多。
 - **Benchmark / 评测** —— SWE-bench 类套件,成千上万个异构、数 GB 的镜像,每个跑在自己的 sandbox 里。
 
 两条 runtime 覆盖这些,按负载各取所需 —— 谁都不是二等公民:
 
-- **Firecracker microVM**(`fc`) —— agent 托管、agent 按需拉起、RL rollout。给不可信或长活代码一道硬件隔离边界,快照/restore 与 fork 让一份备好的环境克隆成许多。
+- **Firecracker microVM**(`fc`) —— agent 托管、agent 按需拉起、RL rollout。给不可信或长期运行的代码一道硬件隔离边界,快照/恢复与 fork 让一份备好的环境克隆出许多份。
 - **OCI + gVisor**(`runsc`/`runc`) —— benchmark 与评测。任意镜像直接跑,不需每镜像一次模板构建;OCI 直驱不经 containerd,外加镜像构建与完整生命周期管理。
 
 底层共用一套自包含的栈 —— 控制面、节点守护进程、沙箱内 agent、CLI、SDK —— 共享同一条镜像
@@ -39,7 +43,7 @@
 
 ## 为什么不用 e2b / Modal / 裸容器
 
-| | 做法 | 规模化时的代价 |
+| 方案 | 做法 | 规模化时的代价 |
 |---|---|---|
 | e2b | Firecracker + 每镜像一次模板构建 | 每个镜像一次模板构建,每次数分钟 —— 成千上万镜像下不可用 |
 | Modal | 自研容器运行时 + 懒加载文件系统 | 不可自托管 |
@@ -47,8 +51,8 @@
 | **bean** | Firecracker + 共享基础镜像 + 每沙箱 CoW | **每沙箱 44 KiB 磁盘**,952 ms 到 agent 可达 |
 
 关键转折是:沙箱**不会**拿到镜像的自有副本。每节点一份只读基础镜像 loop 挂载后共享,
-每个沙箱通过 device-mapper 在其上获得一个稀疏的写时复制层。扇出一百个 agent 沙箱 ——
-或把一个 eval 镜像扇出成一百个克隆 —— 代价就是一百个稀疏文件。
+每个沙箱通过 device-mapper 在其上获得一个稀疏的写时复制层。一次拉起一百个 agent 沙箱 ——
+或把一个 eval 镜像克隆成一百份 —— 代价就是一百个稀疏文件。
 
 ---
 
@@ -128,7 +132,7 @@ bean run --snapshot snap_...
 [docs/zh/network.md](docs/zh/network.md) §5a 说明了两个规则作用域里究竟是哪一个在拒绝什么。
 
 每个沙箱的 guest 地址都相同,这是有意为之:恢复出的快照会带着被捕获时的地址回来,
-所以用一个常量才能让同一份 checkpoint 扇出成许多沙箱而不冲突。
+所以用一个常量才能让同一份 checkpoint 克隆成许多沙箱而不冲突。
 
 ### 其他已可用
 

@@ -106,7 +106,7 @@ POST   /sandboxes/{id}/fork     { "count": 3, "labels": {...} }    // 独立 API
 - **从 snapshot** —— 运行时的 `Fork` 路径:回填 CoW 层，用 UFFD 缺页供页把 guest 带回来，
   而不是 boot。这条路径就是早期文档里说的 *restore*;它是 create 的一条内部分支，
   不是单独的调用或端点。它永远产出一个**新的** sandbox、新 id —— 绝不是把被快照的那个唤回来 ——
-  调 N 次就是一份快照扇出成 N 个互相独立的 sandbox。
+  调 N 次就是一份快照克隆成 N 个互相独立的 sandbox。
 
 所以 "restore" 是一条内部路径的名字（`rt.Fork`，相对于冷启动的 `rt.Create`），
 不是面向用户的动词:没有 `/restore`。`resume` 完全是另一回事 —— 它唤醒一个进程从未离开的

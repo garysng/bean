@@ -27,7 +27,7 @@ flowchart TB
     RP -- "PATCH /vm Resumed &middot; 毫秒级" --> RS
   end
 
-  subgraph RESTORE["restore &middot; 与 snapshot 配对 &middot; 唯一能扇出的"]
+  subgraph RESTORE["restore &middot; 与 snapshot 配对 &middot; 唯一能一份变多份的"]
     direction TB
     BLOB[("快照 blob<br>disk / S3 &middot; 熬得过重启, 能跨机器")]
     N1["新 sandbox &middot; 新 id"]
@@ -57,7 +57,7 @@ flowchart TB
 
 `create(snapshot)` 是 API 动词,"restore" 是它走的那条路径的名字。只有一个 create 端点,
 按 spec 里带不带快照分叉 —— 所以 restore 不是一个单独的调用,但它**是**这三者里唯一能从一个
-持久对象扇出成 N 个互相独立 sandbox 的那一个。
+持久对象克隆成 N 个互相独立 sandbox 的那一个。
 
 | | **resume** | **restore** | **fork** |
 |---|---|---|---|
@@ -68,13 +68,13 @@ flowchart TB
 | 开销 | 毫秒级 —— 一次 `PATCH /vm {Resumed}` | 节点本地缓存命中 **392 ms** | restore 的开销,减去打包与传输 |
 | 熬得过 noded 重启 | ❌ 进程一死就没了 | ✅ blob 本身就是状态 | ❌ 派生自一个活进程 |
 | 能跨机器 | ❌ 绑在那个进程的宿主上 | ✅ 这正是它的用途 | ❌ 同节点;跨节点走 snapshot + 从快照创建 |
-| 扇出(1 → N) | ❌ 从头到尾只有一个 | ✅ **一份快照造出 N 个互相独立的 sandbox** | ✅ 天生如此 |
+| 一份变多份(1 → N) | ❌ 从头到尾只有一个 | ✅ **一份快照造出 N 个互相独立的 sandbox** | ✅ 天生如此 |
 | 约束 | 除「进程还在」之外没有 | 钉死在采集内存时那颗 CPU 的 vendor+family 上 | 同 restore |
 | 配对操作 | `pause` | `snapshot` | — |
 
 ### 为什么这个区分重要
 
-**扇出只有 restore 做得到。** 从一份快照创建 N 个 sandbox 得到 N 个互相独立的实例,
+**一份变多份只有 restore 做得到。** 从一份快照创建 N 个 sandbox 得到 N 个互相独立的实例,
 这正是 eval 的核心负载:环境只装一次,然后跑 N 个实验,而它们不能看见彼此的写入。
 resume 根本做不到这件事 —— 一个 paused sandbox 就是一个 sandbox,resume 它得到的
 就是那一个。引用计数恰好反映了这点:快照上的 `ref_count` 是**计数器而不是标志位**,
@@ -313,7 +313,7 @@ POST /sandboxes { "snapshot": "snap_...", ... }
 
 - snapshot 独立对象、独立配额（总字节数 per key）；TTL 可选，S3 lifecycle 兜底
 - 引用计数：有 RESTORING 进行中的 snapshot 不可删。这个计数是**计数器而非标志位**,正因为同一快照被并发 restore 才是预期情形
-- 同一 snapshot 可多次用于创建 sandbox、每次产出一个独立 sandbox → 这就是「装好环境 snapshot 一次,跑 N 个实验」所需要的扇出,也是 eval 场景的核心价值点。resume 替代不了:它只会还你被 pause 的那一个
+- 同一 snapshot 可多次用于创建 sandbox、每次产出一个独立 sandbox → 这就是「装好环境 snapshot 一次,跑 N 个实验」所需要的一份变多份,也是 eval 场景的核心价值点。resume 替代不了:它只会还你被 pause 的那一个
 
 ## 4. 两档对比与接口统一 ⚠️
 
@@ -328,7 +328,7 @@ POST /sandboxes { "snapshot": "snap_...", ... }
 
 - Runtime 接口 Checkpoint/Restore 签名两档通用（io.Reader/Writer 流式）
 - manifest 的 `runtime` 字段区分格式，restore 调度按格式匹配节点能力
-- snapshot API 语义一致，档位差异只体现在速度与 fork 式扇出是否可用
+- snapshot API 语义一致，档位差异只体现在速度与 fork 式克隆是否可用
 
 ## 4.5 fork:机制已经在了,缺的是 API 表面 ⚠️
 
@@ -357,7 +357,7 @@ POST /sandboxes { "snapshot": "snap_...", ... }
 
 节点本地这条路是**为这个形态设计的**,不只是恰好能用。`snapCache` 让一条链在每个
 节点只合并一次,该叶子之后的每次 restore 都跳过合并;那个分支的注释直接点名了这个
-场景 —— 「这就是扇出便宜的原因」。
+场景 —— 「这就是一份变多份便宜的原因」。
 
 ### 一个 fork API 真正会带来什么
 
@@ -454,7 +454,7 @@ GET    /v1/snapshots/{id}                    ✅
 DELETE /v1/snapshots/{id}                    ✅  有子代时 409 SNAPSHOT_IN_USE
 POST   /v1/sandboxes { "snapshot": "snap_..." }  ✅  从快照创建:一个**新的** sandbox、新 id。
                                                     不兼容 CPU 时 409 INCOMPATIBLE_CPU。
-                                                    调 N 次就是 N 路扇出
+                                                    调 N 次就是一份克隆成 N 份
 POST   /v1/sandboxes/{id}/fork               ⚠️  无 API;机制就是上面那两个调用(§4.5)
 ```
 

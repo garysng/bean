@@ -44,7 +44,7 @@ for 128 devices on both.
 
 ## Not delivered
 
-| | | |
+| feature | status | notes |
 |---|---|---|
 | Cross-node sandbox networking | 📐 | A non-goal, not a gap. Sandbox-to-sandbox traffic does not cross nodes |
 | Per-port access control | 📐 | Any port on a sandbox is reachable by anything that can reach bean-proxy. A sandbox must not be given a port it would not want its caller to see (api-design.md §3.4) |

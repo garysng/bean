@@ -102,7 +102,7 @@ sbx.pause(); sbx.resume()                                  # 同一个 sandbox,�
 snap = sbx.snapshot(name="after-setup", keep_running=True)
 client.snapshots.list(); snap.delete()
 sbx2 = client.sandboxes.create(snapshot=snap.id)           # 从快照创建:一个新 sandbox
-kids = [client.sandboxes.create(snapshot=snap.id) for _ in range(8)]   # 8 路扇出,彼此独立
+kids = [client.sandboxes.create(snapshot=snap.id) for _ in range(8)]   # 一次克隆 8 个,彼此独立
 children = sbx.fork(count=8)                               # 📐 上一行的语法糖,省掉持久快照
                                                            #    (snapshot-resume.md 4.5)
 ```
