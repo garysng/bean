@@ -179,13 +179,15 @@ e2b / agentenv / tensorlake all do it this way.
 **Unpacking a bundle happens once per snapshot (shipped)**: every restore of the same
 snapshot unpacks byte-identical content, so vmstate + memory are cached by snapshot id.
 Safety comes from Firecracker mapping the memory file `MAP_PRIVATE` (measured: the host
-file's md5 is unchanged after the guest writes 64MB).
+file's md5 is unchanged after the guest writes 64MB). That `MAP_PRIVATE` is Firecracker's own
+copy-on-write semantics for the guest; it is not the same mapping as the UFFD handler's
+read-only `MAP_SHARED` (§below), which is what shares one page-cache copy across VMs.
 **The writable rootfs is not cached** — two sandboxes restored from the same snapshot
 diverge the moment either writes.
 
-Measured restore ~950ms (1617ms the first time, paying the unpack cost). The remaining cost
-is transferring the bundle from the gateway and gunzipping it just to get that one rootfs
-member — unoptimised.
+Measured: the first restore is ~950ms (paying the unpack cost), and every cache hit after that
+is 392ms. The remaining cost is transferring the bundle from the gateway and gunzipping it just
+to get that one rootfs member — unoptimised.
 - fork ⚠️ **the mechanism ships, the API does not** (§4.5). The intended surface is
   `POST /sandboxes/{id}/fork {count}`: an instantaneous CoW snapshot + N LoadSnapshot calls
   → one parent many children, producing no persistent snapshot object (use /snapshot if you
@@ -402,8 +404,9 @@ one memory image; fork just turns "multiple restores" into "one derivation of N"
 `guestCID` and the vsock port can both be constants, because every VM has its own vsock
 namespace (vm-assembly §7) — which spares fork one layer of allocation.
 
-Once networking exists there will additionally be a MAC/IP to reconfigure inside the guest;
-there is no network today, so the problem does not arise.
+A restored guest also has a MAC/IP that must line up inside the guest; because the
+tap keeps the same name across a restore and the address rides on the restore
+override (network.md §4), this resolves without per-fork reconfiguration.
 
 ### Relationship to snapCache
 

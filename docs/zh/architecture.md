@@ -123,9 +123,11 @@ microVM（见 D9）——两种形态共享同一条镜像链路，用户无感�
 
 ### D2. overlaybd 直驱,无 containerd 热路径 ⚠️
 
-> **「无 containerd」已达成,「overlaybd 直驱」未达成。** 当前后端是 dm-snapshot:
-> 拉全量 + 转换 + 共享只读 base + 每 sandbox CoW(实测 44 KiB/sandbox)。
-> overlaybd 能力已在 tcmu 后端实测跑通但未接入 `image.Provider`。
+> **「无 containerd」已达成,「overlaybd 直驱」已接入但非默认(⚠️)。** 默认后端是
+> dm-snapshot:拉全量 + 转换 + 共享只读 base + 每 sandbox CoW(实测 44 KiB/sandbox)。
+> overlaybd 已作为 `OverlaybdProvider`(`internal/node/image/overlaybd_linux.go`)接入
+> `image.Provider`,经 TCMU 驱动,用 `--fc-overlaybd` 开启;在 overlaybd 成为验证过的
+> 主路径之前,dm-snapshot 仍是默认后端。
 
 fc 主路径**不引入 containerd**（AgentENV 同款,其源码已在本地 /Users/mac/project/agentenv
 可参考）：noded 直接驱动 overlaybd（经 TCMU）组装块设备（S3 backing + 本地
@@ -149,9 +151,10 @@ fc 主路径**不引入 containerd**（AgentENV 同款,其源码已在本地 /Us
 原本的理由仍然成立,故保留:runc 生命周期与 overlayfs 组装不值得自研,
 纯 fc 节点可完全不装 containerd。runtime 抽象接口见 noded-design §3。
 
-### D3. 隔离分档 + 节点能力探测 ⚠️
+### D3. 隔离分档 + 节点能力探测 📐
 
-noded 启动时探测节点能力并上报：
+启动时能力探测是计划态,尚未实现。当前档位由 `--runtime` 显式指定,而非探测;
+探测落地后的目标映射:
 
 ```
 ├── /dev/kvm 可用（裸金属 or 嵌套虚拟化 VM）→ [runc, runsc, fc]
@@ -325,7 +328,9 @@ eval 镜像任意、不可假设内含工具链。注入方式按档位：
 
 ### D6. 网络：节点内 NAT，取裸金属/云 VM 最大公约数 📐
 
-> **未实现**。sandbox 当前没有网络栈,见 noded-design §5。
+> **已实现**(network.md、noded-design §5):每个 sandbox 有自己的 netns、tap 和出网,
+> 元数据段与 RFC1918 默认拒绝。注意实现形态与下面这张早期草图不同 —— 没有 `bean0` 桥、
+> 没有节点子网,规则用 iptables 而非 nftables,详见 noded-design §5。
 
 ```
 sandbox netns ←veth→ 节点 bridge → SNAT 出网
@@ -545,7 +550,7 @@ bean/
 │   └── bean-proxy/         ✅ 进入 sandbox 的反向代理(按 Host 路由)
 ├── internal/
 │   ├── control/            ✅ api / scheduler / store / snapshot / s3
-│   ├── node/               ✅ manager / runtime / image / vsock（无网络模块）
+│   ├── node/               ✅ manager / runtime / image / vsock / network（每 sandbox netns + tap + NAT）
 │   ├── beand/              ✅ sandbox 内 daemon 实现
 │   ├── obs/                ✅ OTel tracing + gRPC 拦截器
 │   ├── logging/            ✅ slog 结构化日志

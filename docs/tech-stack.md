@@ -11,8 +11,8 @@ number is quoted; where it is a judgment call with no measurement, it says so
 rather than borrowing authority it does not have.
 
 Two things this document is not. It is not a claim of delivery — the markers
-distinguish what runs from what is designed, and the network stack, the jailer,
-the container tiers and Postgres are all in the second group. And it is not a
+distinguish what runs from what is designed, and the jailer is in the second
+group. And it is not a
 list of libraries: `go.mod` has **four direct requires**, and most of the
 interesting choices below are decisions *not* to take a dependency.
 
@@ -45,7 +45,7 @@ is organised around: memory snapshots and on-demand page serving.
   is a compatibility surface, and eval images are arbitrary — anything that
   builds a kernel module, uses an unusual syscall, or probes `/proc` in an
   uncommon way becomes a support question. A real guest kernel has no such
-  surface. **📐 Unimplemented**: there is no runsc runtime in the repo.
+  surface. **✅ Implemented**: `--runtime runsc` drives the OCI runtime directly through `NewOCITier` (no containerd), sharing the fc tier's rootfs providers; runc is the same implementation differing only in the binary.
 - **Kata Containers.** Superseded by driving Firecracker directly. Kata's value
   is a CRI-compatible VM runtime; the platform does not speak CRI and does not
   want containerd on the hot path, so Kata would be a layer that only
@@ -132,10 +132,10 @@ concerns, so a new backend does not reimplement the pull.
 - **TCMU/SCSI per sandbox.** A whole SCSI fabric (loopback nexus) per sandbox:
   fragile and slow, against `dm_snapshot` needing one kernel module.
 
-### overlaybd: measured working, deliberately not wired in ⚠️
+### overlaybd: wired into `image.Provider`, dm-snapshot still the default ⚠️
 
-This one deserves its own explanation, because "it works and we are not using
-it" looks like an oversight and is not.
+This one deserves its own explanation, because "it works but is not the default"
+looks like an oversight and is not.
 
 overlaybd (DADI, Alibaba) is block-level lazy-pull: layers are block-device
 diffs in a registry, and a mount range-reads only the blocks touched. Measured
@@ -152,7 +152,7 @@ writable upper layer, actual     40 KiB (1.1 GB nominal, genuinely sparse)
 The overlaybd log's `__open_ro_remote` confirms it opens an HTTP URL rather than
 a local file. Ready in 25 ms with no full-layer download.
 
-**Why it is not the live path.** The realisation that settles the ordering is
+**Why it is not the default path.** The realisation that settles the ordering is
 that **overlaybd's value is wait time on first use of a large image, not
 per-sandbox cost — CoW already solved the latter at 44 KiB.** So it is an
 optimisation on the cold-image path, not infrastructure the platform needs to
@@ -161,9 +161,10 @@ number it would attack is real (5–10 s for busybox, up to 2 m 45 s for alpine 
 a poor network), but prewarm plus image-affinity scheduling covers the same case
 for a batch that knows its images in advance, which an eval batch does.
 
-What remains is writing an `OverlaybdProvider` behind the same four-method
-`Provider` interface: configfs orchestration, registry push, lifecycle. Two
-traps from the verification have to go into that code, because they will
+It is now wired in as an `OverlaybdProvider` behind the same four-method
+`Provider` interface — configfs orchestration, registry push, lifecycle —
+opt-in with `--fc-overlaybd` and verified on hardware; dm-snapshot stays the
+default. Two traps from the verification live in that code, because they will
 reproduce in production and documentation will not remember them:
 
 1. **The LUN must be linked after the nexus.** Wrong order and the kernel says
@@ -186,7 +187,7 @@ writable layer and the promise of zero conversion becomes literal.
 
 **Nydus was rejected for the same reason overlayfs was**: it is file-level, its
 filesystem semantics cannot get into a microVM, and the fc tier would need
-virtiofs. It is kept as a fallback for the (unimplemented) container tier.
+virtiofs. It is kept as a fallback for the container tier.
 
 ---
 
@@ -1031,10 +1032,10 @@ choose the technology.
 |---|---|---|
 | VMM | Firecracker (upstream, unforked) | ✅ |
 | Jailer / host cgroups | — | 📐 |
-| Container tiers | runc / gVisor | 📐 |
+| Container tiers | runc / gVisor | ✅ noded drives the OCI runtime directly, no containerd |
 | Dev/CI tier | `local` process tree, no isolation | ✅ |
 | Rootfs | device-mapper snapshot, shared base + CoW | ✅ 44 KiB/sandbox |
-| Rootfs lazy-pull | overlaybd | ⚠️ measured, not wired in |
+| Rootfs lazy-pull | overlaybd | ⚠️ wired into `image.Provider`, dm-snapshot still default |
 | Memory restore | Firecracker UFFD backend | ✅ 7 ms load |
 | Diff snapshots | Firecracker diff + merge at restore | ✅ 298 KB, depth capped at 8 |
 | `--track-dirty-pages` | | ⚠️ implemented, off by default, overhead unmeasured |

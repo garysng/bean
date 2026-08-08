@@ -197,10 +197,13 @@ Environment variables are not strong protection either (`/proc/<pid>/environ` is
 readable, just restricted to the same uid), but at least they are not in `ps`'s default output
 and do not end up in shell history.
 
-**Today only the control plane touches S3** (`grep -rn BEAN_S3 cmd/noded/` is empty).
-Snapshot blobs flow node → gRPC → gateway → S3, so the node neither needs credentials nor can
-obtain them. That is not design restraint; it is a by-product of "there is not yet a
-node-side feature that needs to upload to S3 directly".
+**noded talks to S3 directly under `--fc-overlaybd`** (`grep -rn BEAN_S3 cmd/noded/`
+now returns 5 hits). It constructs an S3 client (`cmd/noded/main.go` `s3.New(...)` →
+`NewS3BlobStore(...)`) from `BEAN_S3_ACCESS_KEY` / `BEAN_S3_SECRET_KEY`, and the
+resulting `OverlaybdBlobs` store publishes and range-reads sealed layers
+(`internal/node/image/obdblobstore.go`). Snapshot blobs for the dm-snapshot path
+still flow node → gRPC → gateway → S3, but the node-side S3 access under overlaybd is
+now real, and so is the need to manage its credentials.
 
 ### Known gaps 📐
 
@@ -210,14 +213,16 @@ it does need to upload directly:
 - **presigned URLs** are unimplemented — a node uploading artifacts, and artifacts uploaded
   directly from inside a sandbox, should both use short-lived URLs issued by the control plane
   and bound to a key prefix and content-length
-- **STS read-only role rotation** is unimplemented — once overlaybd is wired in the node will
-  read blobs directly, and that is when it is genuinely needed (hourly-rotated read-only
-  temporary credentials rotated every 1h, scoped to the blob bucket prefix)
+- **STS read-only role rotation** is unimplemented — the node already range-reads blobs directly
+  under `--fc-overlaybd-lazy-pull`, and it does so with long-lived `BEAN_S3_ACCESS_KEY` /
+  `BEAN_S3_SECRET_KEY` rather than rotated STS credentials. That is the real gap today: what it
+  needs is a read-only temporary credential rotated every 1h, scoped to the blob bucket prefix
 
-Put differently: neither gap **creates a risk today**, because the node does not touch S3.
-But they are prerequisites for wiring in overlaybd (the node range-reading blobs directly) and
-for uploading build outputs (#22) — and if long-lived credentials are handed to the node out of
-laziness at that point, it becomes a substantive security regression.
+Put differently: node-side S3 access is no longer hypothetical — the node holds long-lived
+credentials the moment overlaybd is enabled, so the STS gap is a live concern, not a future one.
+Presigned uploads for build outputs (#22) remain a prerequisite for node/sandbox artifact upload;
+handing the node long-lived credentials out of laziness is already a substantive security
+regression, not a deferred one.
 
 ## 7. Testing strategy ✅
 

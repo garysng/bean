@@ -85,12 +85,13 @@ POST /sandboxes
 GET    /sandboxes/{id}                       → sandbox detail (state, runtime, nodeId, createdAt, lifecycle, lastActivityAt, endpoints)
 GET    /sandboxes?label=eval-run%3Dswebench-0731&state=RUNNING&pageToken=&pageSize=100
 DELETE /sandboxes/{id}                       → 202, destroyed asynchronously; ?force=true skips graceful
-PATCH  /sandboxes/{id}/lifecycle { "idleTimeout": "600s", "onIdle": "delete" }   → adjust at runtime
+PATCH  /sandboxes/{id}/lifecycle { "idleTimeout": "600s", "onIdle": "delete" }   → adjust at runtime  📐 unimplemented (SDK set_lifecycle likewise)
 POST   /sandboxes/{id}/pause                 → 202 → PAUSED
 POST   /sandboxes/{id}/resume                → 202 → RUNNING
 POST   /sandboxes/{id}/snapshot  { "name": "after-setup", "keepRunning": true }
                                              → 202 { "snapshotId": "snap_..." }
-POST   /sandboxes/{id}/start                 → start the original entrypoint (manual start after autoStartCmd=false)
+POST   /sandboxes/{id}/start                 → start the original entrypoint (manual start after autoStartCmd=false)  📐 unimplemented
+POST   /sandboxes/{id}/commit                → 202; commit the running rootfs into an image
 POST   /sandboxes/{id}/fork     { "count": 3, "labels": {...} }    // separate API (fc tier, P4)
        → 202 { "sandboxes": [ ...N new sandboxes... ] }
        // Semantics: take an instantaneous CoW snapshot of a running sandbox and clone N
@@ -104,17 +105,18 @@ POST   /sandboxes/{id}/fork     { "count": 3, "labels": {...} }    // separate A
 
 The sandbox detail response carries `runtime: fc|runsc|runc` (the actual tier, for troubleshooting).
 
-Batch (frequent in eval scenarios):
+Batch (frequent in eval scenarios) 📐 unimplemented — no batch route exists; loop the single-item endpoints:
 
 ```
-POST /sandboxes:batchCreate   { "requests": [ ... ≤100 ... ] }
+POST /sandboxes:batchCreate   { "requests": [ ... ≤100 ... ] }    // 📐
 → 207 per item { index, sandbox | error }     // partial-success semantics
-DELETE /sandboxes?label=eval-run%3Dswebench-0731    → batch destroy, 202 + task count
+DELETE /sandboxes?label=eval-run%3Dswebench-0731    → batch destroy, 202 + task count    // 📐
 ```
 
 ### 3.2 Exec ⚠️
 
-> Synchronous exec and streaming exec are both shipped; **PTY is unimplemented**.
+> Only synchronous exec is shipped; **streaming/PTY exec over WebSocket is unimplemented**
+> (the gateway exposes no WS route and there is no ExecStream RPC — see sdk-cli-design.md).
 
 
 ```
@@ -128,8 +130,10 @@ POST /sandboxes/{id}/exec          // synchronous, suits a single eval command
 → 200 { "exitCode": 1, "stdout": "...", "stderr": "...", "truncated": false, "durationMs": 42150 }
 ```
 
+📐 **unimplemented** — the block below is design intent; no such route is served today.
+
 ```
-WS /sandboxes/{id}/exec/ws?pty=true&cols=120&rows=40
+WS /sandboxes/{id}/exec/ws?pty=true&cols=120&rows=40    // 📐
 ```
 
 WebSocket subprotocol (JSON frames):
@@ -152,14 +156,20 @@ PUT  /sandboxes/{id}/files?path=/workspace/patch.diff     // body ≤4MiB sent d
      ?mode=0644&mkdirs=true
 GET  /sandboxes/{id}/files?path=/workspace/report.json    // ≤4MiB returned directly
 GET  /sandboxes/{id}/files/ls?path=/workspace             → [{name,size,mode,mtime,isDir}]
-POST /sandboxes/{id}/files:uploadUrl   {"path": "...", "sizeBytes": 123456789}
+DELETE /sandboxes/{id}/files?path=...
+```
+
+The presigned two-stage upload/download below is 📐 **unimplemented** — today the direct
+PUT/GET above is the only file path:
+
+```
+POST /sandboxes/{id}/files:uploadUrl   {"path": "...", "sizeBytes": 123456789}    // 📐
      → { "url": "<presigned PUT>", "commit": "/files:commitUpload?token=..." }
      // Two-stage: client PUTs to S3 → calls commit → gateway instructs the agent to
      // FetchToSandbox (the agent pulls it to the target path inside the sandbox over a
      // presigned GET)
-POST /sandboxes/{id}/files:downloadUrl {"path": "..."}
+POST /sandboxes/{id}/files:downloadUrl {"path": "..."}    // 📐
      → { "url": "<presigned GET>" }    // noded stages the file to S3, then signs a URL
-DELETE /sandboxes/{id}/files?path=...
 ```
 
 ### 3.4 Ports — no registration step ✅
@@ -168,12 +178,12 @@ Reaching a port inside a sandbox works, and it takes **no API call at all**. The
 travels in the Host header (`{port}-{sandbox}`, §6) and bean-proxy forwards to it. A
 process listening in the sandbox is reachable; one that is not returns 502.
 
-The design below was drafted first and is **not** built, deliberately:
+The design below was drafted first and is **not** built, deliberately (📐):
 
 ```
-POST /sandboxes/{id}/ports    { "port": 8888, "auth": "token" }
-GET    /sandboxes/{id}/ports
-DELETE /sandboxes/{id}/ports/{port}
+POST /sandboxes/{id}/ports    { "port": 8888, "auth": "token" }    // 📐
+GET    /sandboxes/{id}/ports                                       // 📐
+DELETE /sandboxes/{id}/ports/{port}                                // 📐
 ```
 
 It would be a second source of truth for something the guest already decides. Whether a
@@ -213,6 +223,9 @@ POST /images/prewarm   { "refs": ["img:a"], "region": "ap-east-1",
                          "targetNodes": 10, "priority": "high" }
      → { jobId, refs, ready: {ref: nodeCount}, done }
 GET  /images/prewarm/{jobId}      per-image × per-node readiness matrix
+POST /images/build     { ... }    → kick off a remote image build
+GET  /images/build/logs?ref=<ref> build log stream (ref in the query: it contains / and :)
+POST /images/build/cancel { ... } cancel an in-flight build
 ```
 
 `cachedNodes` / `targetNodes` are **operator semantics, deliberately kept out of the
@@ -252,7 +265,7 @@ GET    /volumes?label=...          → includes usage (space/inode consumption)
 GET    /volumes/{id}
 DELETE /volumes/{id}               // 409 VOLUME_IN_USE while a mount is active
 
-POST /sandboxes { ..., "volumes": [
+POST /sandboxes { ..., "volumes": [    // 📐 the inline volumes field is reserved, not yet honoured
   { "volume": "vol_...", "subPath": "run-0731", "mountPath": "/workspace",
     "readOnly": false }
 ] }
@@ -350,6 +363,7 @@ reserve item.
 ```
 GET /sandboxes/{id}/logs?follow=false&tailLines=1000    // agent ring buffer + S3 archive
 GET /nodes                                              // operator surface: node list, capacity, capabilities
+POST /nodes/{id}/drain                                  // operator surface: cordon + drain a node
 GET /metrics                                            // Prometheus format (unauthenticated: local scrape, contains no sandbox content)
     // bean_sandbox_creates_total{outcome}         creation outcome counter
     // bean_sandbox_create_duration_seconds{outcome}  end-to-end creation latency histogram

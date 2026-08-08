@@ -151,10 +151,12 @@ snapCache,所以 fan-out 每节点只付一次。链深超 8 自动转 full。
 
 **解 bundle 每快照只做一次(已实装)**:同一快照的每次 restore 解出的字节完全
 相同,所以按 snapshot id 缓存 vmstate + memory。安全性来自 Firecracker 对
-memory 文件是 `MAP_PRIVATE`(实测 guest 写 64MB 后宿主文件 md5 不变)。
+memory 文件是 `MAP_PRIVATE`(实测 guest 写 64MB 后宿主文件 md5 不变)。这个 `MAP_PRIVATE`
+是 Firecracker 自己对 guest 的写时复制语义,和 UFFD handler 的只读 `MAP_SHARED`(见下文)
+不是同一个映射 —— 后者才是多个 VM 共用一份 page cache 的那个。
 **可写 rootfs 不缓存** —— 同一快照恢复出的两个 sandbox 一写就分叉。
 
-实测 restore ~950ms(首次 1617ms,付 unpack 代价)。剩余成本是把 bundle
+实测:首次 restore ~950ms(付 unpack 代价),之后每次 cache hit 392ms。剩余成本是把 bundle
 从 gateway 传过来并解 gzip,只为取 rootfs 那个 member —— 未优化。
 - fork ⚠️ **机制已实装,API 未实现**(见 §4.5)。计划的表面是
   `POST /sandboxes/{id}/fork {count}`:瞬时 CoW 快照 + N 次
@@ -353,7 +355,7 @@ fork 只是把「多次 restore」变成「一次派生 N 个」。
 `guestCID` 与 vsock port 可以都用常量,因为每个 VM 有自己的 vsock 命名空间
 (vm-assembly §7)—— 这一点让 fork 少一层分配。
 
-网络实现之后会多出 MAC/IP 需要 guest 内重配,当前没有网络所以没有这个问题。
+恢复出来的 guest 也有 MAC/IP 需要在 guest 内对上;由于 tap 跨 restore 同名、地址随 restore override 下发(network.md §4),这一点无需每次 fork 重配即可成立。
 
 ### 与 snapCache 的关系
 

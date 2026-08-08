@@ -2,7 +2,7 @@
 
 > 中文版:[zh/jailer.md](zh/jailer.md)
 > The status-marker convention is defined in [architecture.md](architecture.md) §0.
-> Implementation: nothing yet. `grep -rn jailer --include='*.go'` returns 1 hit, a comment.
+> Implementation: nothing yet. `grep -rn jailer --include='*.go'` returns ~10 hits, all comments and tests — no implementation code.
 > Related: `internal/node/runtime/fc_linux.go` (startVMM, drive/vsock registration),
 > `internal/node/runtime/uffd_linux.go` (page-fault handler),
 > `internal/node/network/setup_linux.go` (netns creation), GitHub #20.
@@ -149,10 +149,10 @@ one.** bean already creates namespaces itself (`ip netns add bean-<n>`,
 `setup_linux.go:100-126`), and `ip netns add` puts a handle at `/var/run/netns/bean-<n>`, which
 is exactly what `--netns` wants. Neither has to give.
 
-Better: this closes a gap in the current code. The runtime **never enters the netns today** —
-`grep -rn netns` over `internal/node/runtime/` returns nothing outside the network package.
-Adopting jailer is what would actually attach the VMM to its namespace, so #20 and #21 are
-complementary rather than competing.
+The runtime **already enters the netns today** via `setns` (`netns_linux.go`, and the join at
+`fc_linux.go:269`), so the VMM is attached to its namespace without jailer. Adopting jailer would
+let jailer perform that same join (it opens the `--netns` path and calls `setns` itself), so #20
+and #21 are complementary rather than competing.
 
 The `network.md` §4 worry about namespace organisation having to change does not materialise:
 tap naming is unaffected, `beantap0` is still right in the new namespace, and `network_overrides`

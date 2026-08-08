@@ -263,7 +263,7 @@ flowchart TB
 </div>
 
 <h2>5 · Sandbox lifecycle state machine</h2>
-<p class="note">The two settled states a sandbox rests in on a node, and what drives the transitions — the sandbox's <b>lifecycle policy</b> (<code>Lifecycle{IdleTimeout, OnIdle: pause|delete}</code>). An idle sweep acts when a RUNNING sandbox has been idle past <code>idle_timeout</code>: <code>on_idle=pause</code> freezes it into PAUSED, <code>on_idle=delete</code> removes it. A PAUSED sandbox is <b>woken transparently on the next request</b> — no explicit resume, the request itself resumes it. <b>One removal operation, two triggers:</b> a user calls <code>DELETE /v1/sandboxes/{id}</code>, and the idle sweep does the same when the policy is <code>on_idle=delete</code>; both run the node's <code>Destroy</code>. <b>Node vs. control plane:</b> this is the node's view, and the node holds no terminal state — a destroyed sandbox is simply gone from its map. The control plane <i>does</i> keep a <code>STOPPED</code> record (<code>store.SandboxStopped</code>) so a deleted sandbox has a queryable final state; that lives in the control-plane store, not on the node. Likewise <code>PULLING</code> (image fetch) is control-plane; the node owns states from <code>STARTING</code> on. Each transition runs through a transient <code>-ing</code> state in the code (rollback on failure), kept off the diagram.</p>
+<p class="note">The two settled states a sandbox rests in on a node, and what drives the transitions — the sandbox's <b>lifecycle policy</b> (<code>Lifecycle{IdleTimeout, OnIdle: pause|delete}</code>). <b>The idle sweep only acts on RUNNING</b> (it skips any sandbox not in <code>StateRunning</code>): past <code>idle_timeout</code>, <code>on_idle=pause</code> freezes it into PAUSED, <code>on_idle=delete</code> destroys it. A PAUSED sandbox never idles out — only an explicit <code>DELETE</code> removes it. So <b>RUNNING → gone</b> has two triggers (<code>on_idle=delete</code> or explicit <code>DELETE</code>) but <b>PAUSED → gone</b> has just one (explicit <code>DELETE</code>); both run the node's <code>Destroy</code>. <b>One creation entry, <code>create</code> — not a separate <code>restore</code>:</b> the API has a single create endpoint (<code>POST /v1/sandboxes</code>) taking <i>either</i> an <code>image</code> or a <code>snapshot</code> (mutually exclusive) and branching internally. "restore" is just the internal name of the snapshot path (<code>rt.Fork</code>) vs. the cold-boot path (<code>rt.Create</code>); both make a brand-new sandbox and differ only in <i>how it comes up</i> (boot the guest kernel vs. resume a captured memory image — the split §4 draws), so this lifecycle view labels the entry simply <code>create</code>. <b>Neither is <code>resume</code>:</b> resume is the PAUSED→RUNNING wake of an already-live frozen sandbox — its process never left, nothing is created. <b>Node vs. control plane:</b> the node holds no terminal state — a destroyed sandbox is gone from its map; the control plane <i>does</i> keep a <code>STOPPED</code> record (<code>store.SandboxStopped</code>) for a queryable final state. Likewise <code>PULLING</code> is control-plane; the node owns states from <code>STARTING</code> on. Each transition runs through a transient <code>-ing</code> state in the code (rollback on failure), kept off the diagram.</p>
 <div class="diagram">
 <pre class="mermaid">
 ---
@@ -273,11 +273,11 @@ config:
 ---
 stateDiagram-v2
   direction LR
-  [*] --> RUNNING: create / restore
+  [*] --> RUNNING: create
   RUNNING --> PAUSED: on_idle=pause<br>(idle_timeout)
-  PAUSED --> RUNNING: request arrives<br>(wake on demand)
-  RUNNING --> [*]: destroy
-  PAUSED --> [*]: destroy
+  PAUSED --> RUNNING: request arrives<br>(wake / resume)
+  RUNNING --> [*]: on_idle=delete (idle_timeout)<br>or DELETE
+  PAUSED --> [*]: DELETE
 </pre>
 </div>
 

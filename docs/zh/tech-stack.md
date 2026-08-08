@@ -10,7 +10,7 @@
 明说是判断,不借用它没有的权威性。
 
 两点声明。第一,本文不是交付声明 —— 标记区分「跑得起来的」和「设计好的」,
-而网络栈、jailer、容器档、Postgres 全在后者。第二,本文不是依赖清单:
+而 jailer 在后者。第二,本文不是依赖清单:
 `go.mod` 只有**四个直接依赖**,下面多数有意思的决定,恰恰是**决定不引依赖**。
 
 全文实测机器:AMD EPYC 7542(Zen 2),16 物理核,24 GB,
@@ -36,7 +36,7 @@ snapshot 只能走 API,所以一个 client 覆盖整个生命周期(`fc_api.go`)
 - **gVisor(runsc)。** 设计里保留它作为无 `/dev/kvm` 宿主的兜底档(architecture D3),
   不是主档。syscall 模拟层就是一层兼容性表面,而 eval 镜像是任意的 ——
   任何要编内核模块、用了冷门 syscall、以不常见方式读 `/proc` 的镜像都会变成一个支持问题。
-  真内核没有这层表面。**📐 未实现**:仓库里没有 runsc runtime。
+  真内核没有这层表面。**✅ 已实现**:`--runtime runsc` 经 `NewOCITier` 直驱 OCI runtime(无 containerd),共用 fc 档的 rootfs providers;runc 与之同一套实现,只差二进制。
 - **Kata Containers。** 被「直接驱动 Firecracker」取代。Kata 的价值是一个 CRI 兼容的
   VM runtime;平台不说 CRI、也不想让 containerd 上热路径,所以 Kata 只会是一层纯翻译。
 - **QEMU。** 功能完备因而庞大:完整设备模型、大得多的攻击面、boot 时间以秒计而不是
@@ -102,9 +102,9 @@ Provider 是分层而不是揉在一起:`PullingProvider` 包住任意一个内�
 - **每 sandbox 一套 TCMU/SCSI。** 每个 sandbox 一整套 SCSI fabric(loopback nexus):
   脆弱且慢,对比 `dm_snapshot` 只要一个内核模块。
 
-### overlaybd:实测跑通,刻意没接 ⚠️
+### overlaybd:已接进 `image.Provider`,dm-snapshot 仍默认 ⚠️
 
-这一条值得单独解释,因为「跑通了却不用」看起来像疏漏,但不是。
+这一条值得单独解释,因为「跑通了却不设默认」看起来像疏漏,但不是。
 
 overlaybd(DADI,阿里)是块级 lazy-pull:层在 registry 里是块设备 diff,
 挂载只 range 读实际访问到的块。2026-08-02 实测
@@ -121,15 +121,16 @@ registry 响应                     8 × HTTP 206 Partial Content
 overlaybd 日志里的 `__open_ro_remote` 证实它打开的是 HTTP URL 而不是本地文件。
 25 ms 就绪,没有全层下载。
 
-**为什么它不是当前路径。** 决定排序的那个认识是:**overlaybd 的价值在「首次使用大镜像
+**为什么它不是默认路径。** 决定排序的那个认识是:**overlaybd 的价值在「首次使用大镜像
 的等待时间」,不在「每 sandbox 成本」—— 后者 CoW 已经用 44 KiB 解决了。**
 所以它是冷镜像路径上的优化项,不是平台立起来必须的基础设施,因此排在快照能力之后。
 它要打的那个冷镜像数字是真实的(busybox 5–10 s,网络差时 alpine 到 2 m 45 s),
 但对一批**事先知道自己要用哪些镜像**的 eval(它确实知道),
 prewarm + 镜像亲和调度覆盖了同一个场景。
 
-剩下的工作是写一个 `OverlaybdProvider` 实现同一个四方法 `Provider` 接口:
-configfs 编排、registry 推送、生命周期。验证中撞到的两个陷阱必须写进那份代码,
+它现在已作为 `OverlaybdProvider` 接进同一个四方法 `Provider` 接口:
+configfs 编排、registry 推送、生命周期,用 `--fc-overlaybd` 开启、真机验证过;
+dm-snapshot 仍是默认。验证中撞到的两个陷阱都在那份代码里,
 因为它们在生产会复现,而文档不会替我们记住:
 
 1. **LUN 必须在 nexus 之后链接。** 顺序错了内核报
@@ -147,7 +148,7 @@ tcmu 后端功能完整,所以**不需要先升级宿主内核**;ublk(≥ 6.0)�
 `overlaybd-commit` 直接 seal LSMT 可写层,「零转换」这个承诺才变成字面意义上的真。
 
 **Nydus 被否掉的理由和 overlayfs 一样**:它是文件级的,文件系统语义进不了 microVM,
-fc 档就得用 virtiofs。它作为(未实现的)容器档的备选保留。
+fc 档就得用 virtiofs。它作为容器档的备选保留。
 
 ---
 
@@ -855,10 +856,10 @@ restore  1500 ms → 950 ms(首次 1617ms)
 |---|---|---|
 | VMM | Firecracker(上游,未 fork) | ✅ |
 | jailer / 宿主 cgroup | — | 📐 |
-| 容器档 | runc / gVisor | 📐 |
+| 容器档 | runc / gVisor | ✅ noded 直驱 OCI runtime,无 containerd |
 | 开发/CI 档 | `local` 进程树,无隔离 | ✅ |
 | Rootfs | device-mapper snapshot,共享 base + CoW | ✅ 每 sandbox 44 KiB |
-| Rootfs 按需拉取 | overlaybd | ⚠️ 已实测,未接入 |
+| Rootfs 按需拉取 | overlaybd | ⚠️ 已接进 `image.Provider`,dm-snapshot 仍默认 |
 | 内存恢复 | Firecracker UFFD 后端 | ✅ load 7 ms |
 | 增量快照 | Firecracker diff + 恢复时合并 | ✅ 298 KB,链深上限 8 |
 | `--track-dirty-pages` | | ⚠️ 已实现,默认关,开销未测 |

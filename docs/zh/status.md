@@ -42,6 +42,7 @@
 | prewarm | ✅ | 控制面后台调 `PrewarmImage`,节点拉取转换;节点心跳上报 `cachedImages`,**镜像亲和打分与 prewarm 进度因此才真正生效**（之前从未被填充） |
 | commit | ✅ | 把 sandbox 文件系统封成 base image（`CommitSandbox` RPC）。**先 sync guest 再 pause**——只 pause 的话 guest page cache 还是脏的,读块设备会丢掉刚写的东西 |
 | build image（Dockerfile） | ✅ | `bean build --tag REF .`,BuildKit 在节点上执行。**导出 `type=tar` 扁平 rootfs**,不组装层也不过 registry,和拉取路径共用同一个 image writer |
+| `OCITier`（容器档） | ✅ | `--runtime runc` / `--runtime runsc`:noded 直驱 OCI runtime(`NewOCITier`),**无 containerd** —— 两者同一套 bundle 与子命令,共用 fc 档的 rootfs providers。这是继 `fc`、`local` 之后的第三个已实装 runtime 档 |
 | `LocalRuntime` | ✅ | 进程级 sandbox（dev/CI，含 darwin），跑真 beand 二进制,验证与 fc 档相同的 agent gRPC 面 |
 
 ### 客户端

@@ -81,12 +81,13 @@ POST /sandboxes
 GET    /sandboxes/{id}                       → sandbox 详情（state、runtime、nodeId、createdAt、lifecycle、lastActivityAt、endpoints）
 GET    /sandboxes?label=eval-run%3Dswebench-0731&state=RUNNING&pageToken=&pageSize=100
 DELETE /sandboxes/{id}                       → 202，异步销毁；?force=true 跳过 graceful
-PATCH  /sandboxes/{id}/lifecycle { "idleTimeout": "600s", "onIdle": "delete" }   → 运行时调整
+PATCH  /sandboxes/{id}/lifecycle { "idleTimeout": "600s", "onIdle": "delete" }   → 运行时调整  📐 未实现（SDK set_lifecycle 亦未实现）
 POST   /sandboxes/{id}/pause                 → 202 → PAUSED
 POST   /sandboxes/{id}/resume                → 202 → RUNNING
 POST   /sandboxes/{id}/snapshot  { "name": "after-setup", "keepRunning": true }
                                              → 202 { "snapshotId": "snap_..." }
-POST   /sandboxes/{id}/start                 → 拉起原 entrypoint（autoStartCmd=false 后手动启动）
+POST   /sandboxes/{id}/start                 → 拉起原 entrypoint（autoStartCmd=false 后手动启动）  📐 未实现
+POST   /sandboxes/{id}/commit                → 202；把运行中的 rootfs 提交为镜像
 POST   /sandboxes/{id}/fork     { "count": 3, "labels": {...} }    // 独立 API（fc 档,P4）
        → 202 { "sandboxes": [ ...N 个新 sandbox... ] }
        // 语义：对运行中 sandbox 做瞬时 CoW 快照并克隆 N 个独立实例（不产生
@@ -99,17 +100,18 @@ POST   /sandboxes/{id}/fork     { "count": 3, "labels": {...} }    // 独立 API
 
 sandbox 详情返回 `runtime: fc|runsc|runc`（实际档位，排障用）。
 
-批量（eval 场景高频）：
+批量（eval 场景高频）📐 未实现 —— 没有批量路由,请循环调用单条端点：
 
 ```
-POST /sandboxes:batchCreate   { "requests": [ ... ≤100 ... ] }
+POST /sandboxes:batchCreate   { "requests": [ ... ≤100 ... ] }    // 📐
 → 207 逐项 { index, sandbox | error }     // 部分成功语义
-DELETE /sandboxes?label=eval-run%3Dswebench-0731    → 批量销毁，202 + 任务计数
+DELETE /sandboxes?label=eval-run%3Dswebench-0731    → 批量销毁，202 + 任务计数    // 📐
 ```
 
 ### 3.2 Exec ⚠️
 
-> 同步 exec 与流式 exec 已实装;**PTY 未实现**。
+> 仅同步 exec 已实装;**流式/PTY exec（WebSocket）未实现**
+> （网关无 WS 路由,也无 ExecStream RPC —— 见 sdk-cli-design.md）。
 
 
 ```
@@ -123,8 +125,10 @@ POST /sandboxes/{id}/exec          // 同步，适合 eval 单条命令
 → 200 { "exitCode": 1, "stdout": "...", "stderr": "...", "truncated": false, "durationMs": 42150 }
 ```
 
+📐 **未实现** —— 下面这段是设计意图,今天并没有这条路由。
+
 ```
-WS /sandboxes/{id}/exec/ws?pty=true&cols=120&rows=40
+WS /sandboxes/{id}/exec/ws?pty=true&cols=120&rows=40    // 📐
 ```
 
 WebSocket 子协议（JSON 帧）：
@@ -147,13 +151,18 @@ PUT  /sandboxes/{id}/files?path=/workspace/patch.diff     // body ≤4MiB 直传
      ?mode=0644&mkdirs=true
 GET  /sandboxes/{id}/files?path=/workspace/report.json    // ≤4MiB 直回
 GET  /sandboxes/{id}/files/ls?path=/workspace             → [{name,size,mode,mtime,isDir}]
-POST /sandboxes/{id}/files:uploadUrl   {"path": "...", "sizeBytes": 123456789}
+DELETE /sandboxes/{id}/files?path=...
+```
+
+下面的 presigned 两段式上传/下载 📐 **未实现** —— 今天只有上面的直传 PUT/GET：
+
+```
+POST /sandboxes/{id}/files:uploadUrl   {"path": "...", "sizeBytes": 123456789}    // 📐
      → { "url": "<presigned PUT>", "commit": "/files:commitUpload?token=..." }
      // 两段式：client PUT S3 → 调 commit → gateway 指令 agent FetchToSandbox
      //（agent 经 presigned GET 拉入 sandbox 内目标路径）
-POST /sandboxes/{id}/files:downloadUrl {"path": "..."}
+POST /sandboxes/{id}/files:downloadUrl {"path": "..."}    // 📐
      → { "url": "<presigned GET>" }    // noded 把文件推 S3 暂存后签 URL
-DELETE /sandboxes/{id}/files?path=...
 ```
 
 ### 3.4 Ports —— 没有注册步骤 ✅
@@ -162,12 +171,12 @@ DELETE /sandboxes/{id}/files?path=...
 (`{port}-{sandbox}`,见 §6),bean-proxy 转发过去。沙箱内有进程在听就能访问,
 没有就返回 502。
 
-下面这套设计是先画的,**没有实现,而且是刻意不实现**:
+下面这套设计是先画的,**没有实现,而且是刻意不实现**（📐）:
 
 ```
-POST /sandboxes/{id}/ports    { "port": 8888, "auth": "token" }
-GET    /sandboxes/{id}/ports
-DELETE /sandboxes/{id}/ports/{port}
+POST /sandboxes/{id}/ports    { "port": 8888, "auth": "token" }    // 📐
+GET    /sandboxes/{id}/ports                                       // 📐
+DELETE /sandboxes/{id}/ports/{port}                                // 📐
 ```
 
 它会给一件 guest 已经决定的事再造一个真相来源。端口开没开是沙箱内进程的事实,
@@ -203,6 +212,9 @@ POST /images/prewarm   { "refs": ["img:a"], "region": "ap-east-1",
                          "targetNodes": 10, "priority": "high" }
      → { jobId, refs, ready: {ref: nodeCount}, done }
 GET  /images/prewarm/{jobId}      各镜像 × 节点就绪矩阵
+POST /images/build     { ... }    → 发起远程镜像构建
+GET  /images/build/logs?ref=<ref> 构建日志流（ref 走 query:含 / 与 :）
+POST /images/build/cancel { ... } 取消进行中的构建
 ```
 
 `cachedNodes` / `targetNodes` 是**运维语义,故意不进 CLI**：副本落在几台机器上
@@ -239,7 +251,7 @@ GET    /volumes?label=...          → 含 usage（空间/inode 用量）
 GET    /volumes/{id}
 DELETE /volumes/{id}               // 有活跃挂载时 409 VOLUME_IN_USE
 
-POST /sandboxes { ..., "volumes": [
+POST /sandboxes { ..., "volumes": [    // 📐 create 请求体内联的 volumes 字段是预留字段,尚未生效
   { "volume": "vol_...", "subPath": "run-0731", "mountPath": "/workspace",
     "readOnly": false }
 ] }
@@ -323,6 +335,7 @@ webhook 推送为 P5 储备项。
 ```
 GET /sandboxes/{id}/logs?follow=false&tailLines=1000    // agent 环形缓冲 + S3 归档
 GET /nodes                                              // 运维面：节点列表、容量、能力
+POST /nodes/{id}/drain                                  // 运维面：cordon + drain 一个节点
 GET /metrics                                            // Prometheus 格式（免鉴权:本地采集,不含 sandbox 内容）
     // bean_sandbox_creates_total{outcome}         创建结果计数
     // bean_sandbox_create_duration_seconds{outcome}  端到端创建延迟直方图

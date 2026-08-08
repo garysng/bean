@@ -138,11 +138,13 @@ one image path, and the user never notices the difference.
 
 ### D2. overlaybd driven directly, no containerd on the hot path ⚠️
 
-> **"No containerd" is achieved; "overlaybd driven directly" is not.** The
-> current backend is dm-snapshot: pull the whole image, convert it, share a
-> read-only base, one CoW per sandbox (measured at 44 KiB/sandbox). The
-> overlaybd capability has been measured working on a tcmu backend but is not
-> wired into `image.Provider`.
+> **"No containerd" is achieved; "overlaybd driven directly" is wired in but not
+> the default (⚠️).** The default backend is dm-snapshot: pull the whole image,
+> convert it, share a read-only base, one CoW per sandbox (measured at 44
+> KiB/sandbox). overlaybd is now wired into `image.Provider` as `OverlaybdProvider`
+> (`internal/node/image/overlaybd_linux.go`), driven over TCMU and enabled with
+> `--fc-overlaybd`; dm-snapshot remains the default until overlaybd is the proven
+> main path.
 
 The fc main path **does not bring in containerd** (same as AgentENV, whose
 source is available locally at /Users/mac/project/agentenv for reference):
@@ -171,9 +173,11 @@ The original reasoning, kept because the trade is real: runc lifecycle and overl
 assembly are not worth reimplementing, and a pure fc node can skip containerd
 entirely. For the runtime abstraction interface see noded-design §3.
 
-### D3. Isolation tiers + node capability probing ⚠️
+### D3. Isolation tiers + node capability probing 📐
 
-noded probes node capabilities at startup and reports them:
+Startup capability probing is planned, not yet implemented. Today the tier is
+set explicitly with `--runtime` rather than probed; the intended mapping once
+probing lands:
 
 ```
 ├── /dev/kvm available (bare metal or nested-virt VM) → [runc, runsc, fc]

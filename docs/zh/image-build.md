@@ -20,7 +20,7 @@ template build。但完全没有构建能力留下两个真实缺口：
 
 | Source | 来源 | 转换 | 状态流转 |
 |---|---|---|---|
-| `imported` | 用户给的 OCI ref | tar.gz layer → LSMT 块设备，需 convertor | `PENDING → CONVERTING → READY` |
+| `imported` | 用户给的 OCI ref | tar.gz layer → ext4 镜像/块设备，需 convertor | `PENDING → CONVERTING → READY` |
 | `built` | 平台构建 | 见下 | `BUILDING → CONVERTING → READY`（commit 路径跳过 CONVERTING） |
 
 **关于「built 是否零转换」——取决于构建路径**，这点必须说清，否则会误判成本：

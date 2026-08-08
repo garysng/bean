@@ -254,22 +254,35 @@ flowchart TB
 
 The two settled states a sandbox rests in on a node, and what drives the
 transitions — the sandbox's **lifecycle policy** (`Lifecycle{IdleTimeout,
-OnIdle: pause|delete}`, `internal/node/manager.go`). An idle sweep (:1449) acts
-when a RUNNING sandbox has been idle past `idle_timeout`: `on_idle=pause` freezes
-it into PAUSED, `on_idle=delete` removes it. A PAUSED sandbox is **woken
-transparently on the next request** (:457) — no explicit resume call, the request
-itself resumes it.
+OnIdle: pause|delete}`, `internal/node/manager.go`).
+
+**The idle sweep only acts on RUNNING** (:1451 — it skips any sandbox not in
+`StateRunning`). When a RUNNING sandbox has been idle past `idle_timeout`,
+`on_idle=pause` freezes it into PAUSED and `on_idle=delete` destroys it. A PAUSED
+sandbox is never touched by the sweep — it does not idle out, and only an explicit
+`DELETE` removes it.
 
 - **RUNNING → PAUSED** — `on_idle=pause`, idle past `idle_timeout`
-- **PAUSED → RUNNING** — request arrives (wake on demand)
-- **delete** — from RUNNING or PAUSED. On the node there is no resting terminal
-  state: the operation (`Destroy`, :469) removes the sandbox record outright
-  (`delete(m.sandboxes, id)`, :496).
+- **PAUSED → RUNNING** — a request arrives and transparently wakes it (`Resume`,
+  :457/:1370) — the frozen process resumes; nothing is rebuilt
+- **RUNNING → gone** — `on_idle=delete` (idle_timeout) **or** an explicit `DELETE`.
+  Two triggers, one operation (`Destroy`, :469).
+- **PAUSED → gone** — explicit `DELETE` only; `on_idle` never fires here.
 
-**One removal operation, two triggers.** A user calls `DELETE /v1/sandboxes/{id}`;
-the idle sweep does the same thing when the policy is `on_idle=delete`. Both run
-the node's `Destroy`. (The metric is `bean_node_idle_actions_total{action=…}`, and
-the accepted policy values are `pause|delete`.)
+**There is one creation entry, `create` — not a separate `restore`.** The API has
+a single create endpoint (`POST /v1/sandboxes`) that takes *either* an `image` or a
+`snapshot` (mutually exclusive, `handleCreate`); it branches internally on which
+was given. "restore" is not a user-facing operation, just the internal name of the
+snapshot path (`StateRestoring` :1151 / `rt.Fork`) as opposed to the cold-boot path
+(`StateStarting` :171 / `rt.Create`). Both make a brand-new sandbox and differ only
+in *how it comes up* — boot the guest kernel vs. resume a captured memory image —
+which is the split §4 draws. This diagram stays at the user/lifecycle level, so the
+entry edge is simply `create`.
+
+**Don't confuse either creation path with `resume`.** `resume` is the
+PAUSED→RUNNING wake of an already-live, frozen sandbox (`StateResuming` :1382) — its
+process never went away, so nothing is created. Creation makes a new sandbox;
+resume just thaws an existing one.
 
 **Node vs. control plane.** This diagram is the *node's* view, and the node holds
 no terminal state — a destroyed sandbox is simply gone from its map. The *control
@@ -292,9 +305,9 @@ config:
 ---
 stateDiagram-v2
   direction LR
-  [*] --> RUNNING: create / restore
+  [*] --> RUNNING: create
   RUNNING --> PAUSED: on_idle=pause<br>(idle_timeout)
-  PAUSED --> RUNNING: request arrives<br>(wake on demand)
-  RUNNING --> [*]: destroy
-  PAUSED --> [*]: destroy
+  PAUSED --> RUNNING: request arrives<br>(wake / resume)
+  RUNNING --> [*]: on_idle=delete (idle_timeout)<br>or DELETE
+  PAUSED --> [*]: DELETE
 ```

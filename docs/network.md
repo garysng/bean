@@ -6,8 +6,12 @@
 > Implementation: `internal/node/network/` (address pool, netns, NAT),
 > `internal/node/runtime/fc_linux.go` (NIC registration and restore overrides).
 
-Sandboxes have no network today, and SWE-bench-class tasks need `pip install` / `git clone` —
-**this is the gap that makes bean unusable**, not an optimisation that can be sequenced later.
+Sandbox networking is **implemented and shipped**: per-sandbox netns + address pool + two
+layers of MASQUERADE + FORWARD DROP + DNS, with rule counters verified on a live guest
+(status.md marks "Sandbox networking ✅ / Port exposure ✅"). SWE-bench-class tasks need
+`pip install` / `git clone`, so this was never an optimisation that could be sequenced later —
+it was the gap that made bean unusable, and it is now closed. Only a few refinements remain
+(MTU tuning, bandwidth limiting via tc, IPv6, conntrack limits — see §8).
 
 The core of this document is not "how to create a tap", which is three `ip` commands. The core
 is **"a guest restored from a snapshot comes back with its original IP, and it may land on a
@@ -65,7 +69,7 @@ The second one matters more than it sounds: **snapshot portability depends entir
 networking would silently break snapshot restore. Verify first and then act, because that kind
 of breakage raises no error.
 
-## 2. Address layout 📐
+## 2. Address layout ✅
 
 ```
 Inside the guest (identical for every sandbox, so a snapshot can move anywhere)
@@ -116,7 +120,7 @@ A `/30` steps by 4, so every `10.<a>.<b>.0/30` is an independent link. `10/8` ho
 **the ceiling should not be set by the address space**, because that would turn into a strange
 limit that needs explaining.
 
-## 3. The address pool has to be rebuildable after noded restarts 📐
+## 3. The address pool has to be rebuildable after noded restarts ✅
 
 This one was taught to me by the loop device leak ([decisions.md](decisions.md), GitHub #16):
 **the reference count lives in process memory, a restart loses it, and the thing on the host is
@@ -141,17 +145,19 @@ serving a sandbox that was already running before the restart. Deciding what is 
 comparing against the control plane's `SyncState` desired set, which belongs to host resource
 reconciliation (GitHub #17) and is out of scope here.
 
-## 4. restore: use network_overrides rather than changing the guest 📐
+## 4. restore: use network_overrides rather than changing the guest ✅
 
-`fcNetOverride` (fc_api.go:151, defined and unused) exists for exactly this:
+`fcNetOverride` (fc_api.go:192, referenced from fc_linux.go:79 and
+fc_lifecycle_linux.go:519) exists for exactly this:
 
 ```json
 "network_overrides": [{"iface_id": "eth0", "host_dev_name": "beantap0"}]
 ```
 
-**But in our scheme it probably does not need to be used**: the tap name is `beantap0` in every
-netns, so the name recorded in the snapshot happens to be right in the new netns. That is a
-direct benefit of the "same-named taps coexisting across netns" property.
+**In our scheme the restore path keys on the tap name being identical**: the tap is `beantap0`
+in every netns, so the name recorded in the snapshot is already right in the new netns and the
+override normally does not have to fire. That is a direct benefit of the "same-named taps
+coexisting across netns" property.
 
 The reason to keep the field is that **it is the only escape hatch**: if some future scenario
 has to change the tap name (say the way netns are organised changes once jailer is wired in,
@@ -163,7 +169,7 @@ newly created, so the host-side neighbour table is clean; but the table inside t
 back with the snapshot. This one **needs verification on a real machine**, because it decides
 whether an `ip neigh flush` has to be added in the agent.
 
-## 5. Egress: two layers of MASQUERADE 📐
+## 5. Egress: two layers of MASQUERADE ✅
 
 ```
 Inside the netns:  POSTROUTING -s 172.31.0.0/30 -o veth-in -j MASQUERADE
@@ -188,7 +194,7 @@ is identical in every sandbox, and the namespace is what disambiguates.
 The route is `bean-proxy` → noded's forwarding port → the namespace → `172.31.0.2:{port}`, with
 `{port}` read from the Host header. See api-design.md §6.
 
-## 5a. What MASQUERADE reaches that it must not 📐
+## 5a. What MASQUERADE reaches that it must not ✅
 
 The two rules above are what makes egress work. They are also, on their own, what makes a sandbox
 able to reach the node's internal network and the cloud metadata service — because those are not
@@ -246,7 +252,7 @@ IPv6 is not addressed here. If the uplink has IPv6, the equivalent metadata addr
 IPv6 address at all — which is the current state and the safe one — or this section needs the v6
 half before that changes.
 
-## 6. DNS 📐
+## 6. DNS ✅
 
 The guest's `/etc/resolv.conf` comes from the user's image, and what the image writes there could
 be anything. Two approaches:
@@ -263,11 +269,11 @@ that may contain `127.0.0.53` (systemd-resolved), which from the guest's point o
 itself. So take the host's upstream resolver, or have it specified by node configuration
 (`--guest-dns`).
 
-## 7. Phasing 📐
+## 7. Phasing ✅
 
 Networking is the one module where "half done is worse than not done": a sandbox whose network
-works intermittently makes people doubt their own code rather than the platform. So three steps,
-each requiring verification on a real machine:
+works intermittently makes people doubt their own code rather than the platform. So it was built
+in three steps, each verified on a real machine:
 
 1. **Egress for a single sandbox**. netns + tap + veth + two layers of NAT, built by hand,
    verifying that `ping 8.8.8.8` and `apk add curl` work inside the guest
