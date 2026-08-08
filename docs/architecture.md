@@ -246,7 +246,7 @@ total in `runtime_create` (almost all of it in the first) and 0.072s in
 
 **Concurrency, measured.** `hack/oci-tier-concurrent.sh`:
 
-| | |
+| scenario | result |
 |---|---|
 | 5 concurrent creates | 5/5, ~4s |
 | 30 concurrent creates | 25/30, 9.6s wall clock (fastest 2.0s, median 4.7s, slowest 9.6s) |

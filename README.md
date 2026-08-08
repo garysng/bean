@@ -172,7 +172,7 @@ checkpoint fan out to many sandboxes without collisions.
 
 ### Not built yet
 
-| | |
+| feature | status |
 |---|---|
 | jailer chroot | 📐 The VMM drops to an unprivileged uid, runs in a per-sandbox cgroup, and has its own pid, mount and network namespaces by default. What jailer would add on top is a `chroot` and a device allowlist — [#20](https://github.com/garysng/bean/issues/20) phase 2, and probably not the right shape |
 | Volumes | 📐 |
@@ -330,7 +330,7 @@ made networking and jailer look shipped. Convention in
 
 **Authority order: code > `status.md` > `decisions.md` > design docs.**
 
-| | |
+| document | what's in it |
 |---|---|
 | [status.md](docs/status.md) | **what is actually built**, with measurements |
 | [decisions.md](docs/decisions.md) | **why** each choice was made — measured data, competitor comparisons, and the traps that only appeared on hardware |

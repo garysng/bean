@@ -211,7 +211,7 @@ microVM 共享镜像缓存、已转换的 overlaybd 层和对象存储。这种�
 
 **并发,实测。** `hack/oci-tier-concurrent.sh`:
 
-| | |
+| 场景 | 结果 |
 |---|---|
 | 5 个并发 create | 5/5,约 4s |
 | 30 个并发 create | 25/30,墙钟 9.6s(最快 2.0s、中位 4.7s、最慢 9.6s) |

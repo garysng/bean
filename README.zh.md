@@ -156,7 +156,7 @@ bean run --snapshot snap_...
 
 ### 尚未构建
 
-| | |
+| 功能 | 状态 |
 |---|---|
 | jailer chroot | 📐 VMM 已降到非 root uid、跑在每沙箱 cgroup 里,默认也有自己的 pid、mount、network 命名空间。jailer 在此之上还能加的是一个 `chroot` 和设备白名单 —— [#20](https://github.com/garysng/bean/issues/20) 第二阶段,而且未必是对的形态 |
 | 卷 | 📐 |
@@ -318,7 +318,7 @@ flowchart TB
 
 **权威顺序:代码 > `status.md` > `decisions.md` > 设计文档。**
 
-| | |
+| 文档 | 内容 |
 |---|---|
 | [status.md](docs/zh/status.md) | **实际构建了什么**,带实测数据 |
 | [decisions.md](docs/zh/decisions.md) | 每个选择**为什么**这么做 —— 实测数据、竞品对比,以及只在真机上才现形的陷阱 |
