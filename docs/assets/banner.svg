@@ -1,0 +1,28 @@
+<svg width="760" height="200" viewBox="0 0 760 200" fill="none" xmlns="http://www.w3.org/2000/svg" role="img" aria-label="bean - a sandbox platform for AI agents">
+  <defs>
+    <linearGradient id="bg" x1="0" y1="0" x2="760" y2="200" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#0f1720"/>
+      <stop offset="1" stop-color="#12241d"/>
+    </linearGradient>
+    <linearGradient id="bean" x1="72" y1="60" x2="136" y2="140" gradientUnits="userSpaceOnUse">
+      <stop offset="0" stop-color="#4ade80"/>
+      <stop offset="1" stop-color="#16a34a"/>
+    </linearGradient>
+  </defs>
+
+  <rect x="0" y="0" width="760" height="200" rx="20" fill="url(#bg)"/>
+
+  <!-- sandbox box -->
+  <rect x="52" y="52" width="104" height="96" rx="22" fill="none" stroke="#2f4536" stroke-width="3"/>
+
+  <!-- bean: tilted ellipse + center seam -->
+  <g transform="rotate(-22 104 100)">
+    <ellipse cx="104" cy="100" rx="26" ry="36" fill="url(#bean)"/>
+    <path d="M104 68c-11 8-11 24 0 32 11 8 11 24 0 32" fill="none" stroke="#0f1720" stroke-width="3.5" stroke-linecap="round" opacity="0.5"/>
+  </g>
+
+  <!-- wordmark -->
+  <text x="192" y="112" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="64" font-weight="700" fill="#f1f5f0" letter-spacing="-1">bean</text>
+  <!-- tagline -->
+  <text x="194" y="146" font-family="-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif" font-size="20" font-weight="400" fill="#8aa398">a sandbox platform for AI agents</text>
+</svg>

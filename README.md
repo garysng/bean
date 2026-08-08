@@ -1,32 +1,37 @@
+<div align="center">
+
+<img src="docs/assets/banner.svg" alt="bean" width="560">
+
 # bean
 
-> 中文版:[README.zh.md](README.zh.md)
+**A sandbox platform for AI agents** — run untrusted code in hardware isolation:
+create it, exec into it, snapshot it, fan it out. Any OCI image, no template build step.
 
-**A sandbox platform for AI agents** — a place to run untrusted code in
-hardware isolation: create it, exec into it, snapshot it, fan it out. Any OCI
-image, no template build step.
+`952 ms to a reachable agent` · `44 KiB disk per sandbox` · `no Kubernetes, no containerd`
 
-Four shapes of work, all the same underlying capability:
+[中文版](README.zh.md) · [What works](#what-works) · [Architecture](#architecture) · [Docs](#documentation)
 
-| scenario | what it looks like |
-|---|---|
-| **Agent hosting** | an agent lives inside the sandbox — run Claude Code or another coding agent in an isolated environment it can freely modify |
-| **Agent-invoked sandboxes** | an agent or agent platform spins one up on demand to do work — execute code, run a data-analysis job, throw it away after |
-| **RL rollouts** | long-lived training environments fanned out by the hundred, one prepared checkpoint cloned into many |
-| **Benchmarks / eval** | SWE-bench-class suites over thousands of heterogeneous multi-GB images, each run in its own sandbox |
+</div>
 
-Two runtimes cover these, and you pick per workload — neither is a second-class
-citizen:
+---
 
-| runtime | serves | why |
-|---|---|---|
-| **Firecracker microVM** (`fc`) | agent hosting, agent-invoked sandboxes, RL rollouts | a hardware-isolation boundary for untrusted or long-lived code, with snapshot/restore and fork so one prepared environment clones into many |
-| **OCI + gVisor** (`runsc`/`runc`) | benchmarks / eval | run any image directly with no per-image template build, OCI driven with no containerd, plus image build and full lifecycle management |
+## What it's for
 
-Both sit on one self-contained stack — control plane, node daemon, in-sandbox
-agent, CLI, SDK — sharing the same image pipeline, snapshot machinery,
-scheduler and network isolation, with **no Kubernetes and no containerd on the
-hot path**.
+Four shapes of work, one underlying capability:
+
+- **Agent hosting** — an agent lives inside the sandbox; run Claude Code or another coding agent in an isolated environment it can freely modify.
+- **Agent-invoked sandboxes** — an agent or platform spins one up on demand to execute code or run a data-analysis job, then throws it away.
+- **RL rollouts** — long-lived training environments fanned out by the hundred, one prepared checkpoint cloned into many.
+- **Benchmarks / eval** — SWE-bench-class suites over thousands of heterogeneous multi-GB images, each in its own sandbox.
+
+Two runtimes cover these; you pick per workload, neither is second-class:
+
+- **Firecracker microVM** (`fc`) — agent hosting, agent-invoked sandboxes, RL rollouts. A hardware-isolation boundary for untrusted or long-lived code, with snapshot/restore and fork so one prepared environment clones into many.
+- **OCI + gVisor** (`runsc`/`runc`) — benchmarks and eval. Run any image directly with no per-image template build, OCI driven with no containerd, plus image build and full lifecycle management.
+
+One self-contained stack underneath — control plane, node daemon, in-sandbox agent,
+CLI, SDK — sharing the same image pipeline, snapshot machinery, scheduler and network
+isolation, with **no Kubernetes and no containerd on the hot path**.
 
 > **Status: working system, incomplete platform.** The microVM tier boots real
 > Firecracker VMs on real hardware, and every number below is measured rather
