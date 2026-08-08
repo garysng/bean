@@ -1,0 +1,288 @@
+<title>Bean architecture</title>
+<style>
+  :root {
+    --bg: #ffffff;
+    --fg: #1a1a1a;
+    --muted: #5f6368;
+    --card: #f8f9fa;
+    --border: #dadce0;
+  }
+  :root:not([data-theme="light"]) {
+    @media (prefers-color-scheme: dark) {
+      --bg: #16181c;
+      --fg: #e8eaed;
+      --muted: #9aa0a6;
+      --card: #202226;
+      --border: #3c4043;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #16181c;
+    --fg: #e8eaed;
+    --muted: #9aa0a6;
+    --card: #202226;
+    --border: #3c4043;
+  }
+  body {
+    background: var(--bg);
+    color: var(--fg);
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+    line-height: 1.6;
+    max-width: 1100px;
+    margin: 0 auto;
+    padding: 32px 24px 80px;
+  }
+  h1 { font-size: 28px; margin: 0 0 8px; }
+  h2 { font-size: 20px; margin: 40px 0 4px; padding-top: 20px; border-top: 1px solid var(--border); }
+  p.lede { color: var(--muted); margin: 0 0 24px; }
+  p.note { color: var(--muted); font-size: 14px; margin: 6px 0 16px; }
+  .diagram {
+    background: var(--card);
+    border: 1px solid var(--border);
+    border-radius: 12px;
+    padding: 20px;
+    margin: 16px 0;
+    overflow-x: auto;
+  }
+  .mermaid { display: flex; justify-content: center; }
+  code { background: var(--card); padding: 1px 6px; border-radius: 4px; font-size: 0.9em; }
+</style>
+
+<h1>Bean architecture</h1>
+<p class="lede">Hand-drawn views of the bean sandbox platform. Colors mark roles — client, control plane, data plane, storage. Diagrams follow the code: the image block layer is TCMU, not ublk.</p>
+
+<h2>1 · Overall architecture</h2>
+<p class="note">Four bands top to bottom: clients → control plane → nodes → sandbox. S3 backs the node. <code>bean-proxy</code> is the data-plane path for port traffic into a sandbox.</p>
+<div class="diagram">
+<pre class="mermaid">
+---
+config:
+  look: handDrawn
+  theme: neutral
+  flowchart:
+    curve: basis
+---
+flowchart TB
+  subgraph CLIENTS["clients"]
+    direction LR
+    SDK["SDK<br>py · ts"]
+    CLI["CLI"]
+  end
+
+  subgraph CP["control plane · bean-api (one process)"]
+    direction LR
+    API["api-gateway<br>auth · quota"]
+    SCHED["scheduler<br>placement · leases"]
+    IMGS["image-service<br>prewarm · GC"]
+    STORE[("state store<br>SQLite / PG")]
+  end
+
+  PROXY["bean-proxy<br>port routing"]
+
+  subgraph NODED["noded · one per host"]
+    direction LR
+    IMGSUB["image subsystem<br>overlaybd · TCMU · CoW"]
+    RT["runtime tiers<br>fc · oci"]
+  end
+
+  subgraph SBX["sandbox"]
+    BEAND["beand (PID1)<br>+ user process"]
+  end
+
+  S3[("S3<br>blobs · artifacts · snapshots")]
+
+  SDK --> API
+  CLI --> API
+  SDK -. port traffic .-> PROXY
+  SCHED <== commands / heartbeat ==> IMGSUB
+  PROXY -. forward .-> IMGSUB
+  IMGSUB --> RT
+  RT --> BEAND
+  IMGSUB -. range-read .-> S3
+  RT -. snapshots .-> S3
+
+  classDef client fill:#E8F0FE,stroke:#4285F4,color:#111;
+  classDef control fill:#E6F4EA,stroke:#34A853,color:#111;
+  classDef data fill:#FEF7E0,stroke:#F9AB00,color:#111;
+  classDef store fill:#F3E8FD,stroke:#A142F4,color:#111;
+  class SDK,CLI client;
+  class API,SCHED,IMGS control;
+  class PROXY,IMGSUB,RT,BEAND data;
+  class STORE,S3 store;
+</pre>
+</div>
+
+<h2>2 · Inside one noded</h2>
+<p class="note">Each block on the arrows names the responsibility that technology owns. <b>overlaybd</b> range-reads image blocks on demand and shares base layers; <b>TCMU/loopback</b> presents that device to the kernel as <code>/dev/sdX</code> via configfs (docs call it "ublk"; the code is TCMU); <b>DevMapper</b> is the CoW alternative; <b>UFFD</b> supplies guest memory pages on demand during a restore.</p>
+<div class="diagram">
+<pre class="mermaid">
+---
+config:
+  look: handDrawn
+  theme: neutral
+  flowchart:
+    curve: basis
+---
+flowchart LR
+  REG[("registry / S3<br>image blobs")]
+
+  subgraph IMG["image subsystem — produce a rootfs block device"]
+    direction TB
+    OBD["overlaybd<br>range-read blocks · share base layers"]
+    DM["DevMapper<br>shared base + CoW"]
+    TCMU["TCMU / loopback<br>present as /dev/sdX (configfs)"]
+    OBD -- virtual block device --> TCMU
+  end
+
+  subgraph FC["fc tier — boot the microVM"]
+    direction TB
+    DRV["Firecracker /drives<br>/dev/vdb rootfs"]
+    UFFD["UFFD<br>on-demand memory page-in (restore)"]
+    SNAP["snapshot<br>bundle · CPU template"]
+  end
+
+  GUEST["guest<br>beand + user process"]
+
+  REG -. blocks on demand .-> OBD
+  TCMU -- /dev/sdX --> DRV
+  DM -. CoW rootfs .-> DRV
+  DRV --> GUEST
+  UFFD -. supplies pages .-> GUEST
+  SNAP -. restore .-> UFFD
+
+  classDef store fill:#F3E8FD,stroke:#A142F4,color:#111;
+  classDef img fill:#FEF7E0,stroke:#F9AB00,color:#111;
+  classDef rt fill:#E6F4EA,stroke:#34A853,color:#111;
+  classDef run fill:#E8F0FE,stroke:#4285F4,color:#111;
+  class REG store;
+  class OBD,DM,TCMU img;
+  class DRV,UFFD,SNAP rt;
+  class GUEST run;
+</pre>
+</div>
+
+<h2>3 · Port forwarding into a sandbox</h2>
+<p class="note">A client addresses <code>{port}-{sandbox}</code>. <code>bean-proxy</code> asks bean-api which node holds it, then forwards with a node token. The node's forwarder does the protocol conversion — it's the only thing that can reach the agent inside the sandbox's network namespace.</p>
+<div class="diagram">
+<pre class="mermaid">
+---
+config:
+  look: handDrawn
+  theme: neutral
+  flowchart:
+    curve: basis
+---
+flowchart LR
+  CLIENT["client<br>HTTP {port}-{sbx}"]
+  API["bean-api<br>placement"]
+  PROXY["bean-proxy<br>reverse proxy"]
+
+  subgraph NODE["node · netns boundary"]
+    direction LR
+    FWD["forwarder<br>protocol conversion"]
+    AGENT["beand<br>guest port"]
+    FWD --> AGENT
+  end
+
+  CLIENT --> PROXY
+  PROXY -. resolve .-> API
+  PROXY -- forward + nodeToken --> FWD
+
+  classDef client fill:#E8F0FE,stroke:#4285F4,color:#111;
+  classDef control fill:#E6F4EA,stroke:#34A853,color:#111;
+  classDef data fill:#FEF7E0,stroke:#F9AB00,color:#111;
+  class CLIENT client;
+  class API control;
+  class PROXY,FWD,AGENT data;
+</pre>
+</div>
+
+<h2>4 · Assembling an fc microVM</h2>
+<p class="note">How <code>FCRuntime.create</code> turns a spec into a running guest. Host prep is shared, then the path <b>branches on whether the spec carries snapshot layers</b>. <b>Cold boot</b> (<code>configureAndBoot</code>): ordered pre-boot PUTs, then <code>InstanceStart</code> — CPU mask and NIC must be pre-boot, drive order fixes naming (agent = <code>/dev/vda</code> root, user image = <code>/dev/vdb</code>). <b>Restore</b> (<code>loadSnapshot</code>): nothing is configured first, a <code>uffd</code> handler mmaps the memory image, then <code>/snapshot/load</code> with <code>ResumeVM</code> brings the guest back and faults pages in on demand. A memory-less checkpoint falls back to cold boot.</p>
+<div class="diagram">
+<pre class="mermaid">
+---
+config:
+  look: handDrawn
+  theme: neutral
+  flowchart:
+    curve: basis
+---
+flowchart TB
+  SPEC["create(spec, layers)"]
+
+  subgraph PREP["prepare host resources — both paths"]
+    direction TB
+    STAGE["stage snapshot<br>(restore only)<br>unpack bundle · seed writable layer"]
+    ROOTFS["image.Provider<br>rootfs block device<br>overlaybd/TCMU or DevMapper CoW"]
+    LAUNCH["launch firecracker · setns → netns<br>cgroup.Add(pid) · wait API"]
+    STAGE --> ROOTFS --> LAUNCH
+  end
+
+  BRANCH{"snapshot<br>layers?"}
+
+  subgraph COLD["cold boot · configureAndBoot — pre-boot PUTs (order matters)"]
+    direction TB
+    MC["/machine-config<br>vcpu · mem · dirty-pages"]
+    CPU["/cpu-config<br>template mask (pre-boot)"]
+    BOOT["/boot-source<br>kernel + init=/bean/beand"]
+    DA["/drives/agent<br>/dev/vda · root · ro"]
+    DR["/drives/rootfs<br>/dev/vdb · user image"]
+    REST["/vsock · /network-interfaces (tap) · /mmds"]
+    START["/actions InstanceStart"]
+    MC --> CPU --> BOOT --> DA --> DR --> REST --> START
+  end
+
+  subgraph WARM["restore · loadSnapshot — no pre-boot config"]
+    direction TB
+    UFFD["newUffdHandler<br>mmap memory image · serve faults"]
+    LOAD["PUT /snapshot/load<br>MemBackend=Uffd · ResumeVM=true"]
+    UFFD --> LOAD
+  end
+
+  GB["guest boots<br>beand (PID1) pivots to user rootfs"]
+  GR["guest resumes<br>pages faulted in on demand (uffd)"]
+
+  SPEC --> STAGE
+  LAUNCH --> BRANCH
+  BRANCH -- "no · cold" --> MC
+  BRANCH -- "yes · warm" --> UFFD
+  LOAD -. "no memory in bundle" .-> MC
+  START --> GB
+  LOAD --> GR
+
+  classDef entry fill:#E8F0FE,stroke:#4285F4,color:#111;
+  classDef prep fill:#FEF7E0,stroke:#F9AB00,color:#111;
+  classDef cfg fill:#E6F4EA,stroke:#34A853,color:#111;
+  classDef warm fill:#F3E8FD,stroke:#A142F4,color:#111;
+  class SPEC,GB,GR entry;
+  class STAGE,ROOTFS,LAUNCH prep;
+  class MC,CPU,BOOT,DA,DR,REST,START cfg;
+  class UFFD,LOAD warm;
+</pre>
+</div>
+
+<h2>5 · Sandbox lifecycle state machine</h2>
+<p class="note">The two settled states a sandbox rests in on a node, and what drives the transitions — the sandbox's <b>lifecycle policy</b> (<code>Lifecycle{IdleTimeout, OnIdle: pause|delete}</code>). An idle sweep acts when a RUNNING sandbox has been idle past <code>idle_timeout</code>: <code>on_idle=pause</code> freezes it into PAUSED, <code>on_idle=delete</code> removes it. A PAUSED sandbox is <b>woken transparently on the next request</b> — no explicit resume, the request itself resumes it. <b>One removal operation, two triggers:</b> a user calls <code>DELETE /v1/sandboxes/{id}</code>, and the idle sweep does the same when the policy is <code>on_idle=delete</code>; both run the node's <code>Destroy</code>. <b>Node vs. control plane:</b> this is the node's view, and the node holds no terminal state — a destroyed sandbox is simply gone from its map. The control plane <i>does</i> keep a <code>STOPPED</code> record (<code>store.SandboxStopped</code>) so a deleted sandbox has a queryable final state; that lives in the control-plane store, not on the node. Likewise <code>PULLING</code> (image fetch) is control-plane; the node owns states from <code>STARTING</code> on. Each transition runs through a transient <code>-ing</code> state in the code (rollback on failure), kept off the diagram.</p>
+<div class="diagram">
+<pre class="mermaid">
+---
+config:
+  look: handDrawn
+  theme: neutral
+---
+stateDiagram-v2
+  direction LR
+  [*] --> RUNNING: create / restore
+  RUNNING --> PAUSED: on_idle=pause<br>(idle_timeout)
+  PAUSED --> RUNNING: request arrives<br>(wake on demand)
+  RUNNING --> [*]: destroy
+  PAUSED --> [*]: destroy
+</pre>
+</div>
+
+<script type="module">
+  import mermaid from 'https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.esm.min.mjs';
+  const dark = matchMedia('(prefers-color-scheme: dark)').matches;
+  mermaid.initialize({ startOnLoad: true, look: 'handDrawn', theme: dark ? 'dark' : 'neutral', flowchart: { curve: 'basis' } });
+</script>

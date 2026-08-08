@@ -85,7 +85,7 @@ POST /sandboxes
 GET    /sandboxes/{id}                       → sandbox detail (state, runtime, nodeId, createdAt, lifecycle, lastActivityAt, endpoints)
 GET    /sandboxes?label=eval-run%3Dswebench-0731&state=RUNNING&pageToken=&pageSize=100
 DELETE /sandboxes/{id}                       → 202, destroyed asynchronously; ?force=true skips graceful
-PATCH  /sandboxes/{id}/lifecycle { "idleTimeout": "600s", "onIdle": "kill" }   → adjust at runtime
+PATCH  /sandboxes/{id}/lifecycle { "idleTimeout": "600s", "onIdle": "delete" }   → adjust at runtime
 POST   /sandboxes/{id}/pause                 → 202 → PAUSED
 POST   /sandboxes/{id}/resume                → 202 → RUNNING
 POST   /sandboxes/{id}/snapshot  { "name": "after-setup", "keepRunning": true }
@@ -327,7 +327,7 @@ Restore is a `POST /sandboxes` — a creation — while `resume` is a `POST` on 
 Event types: sandbox.lifecycle.{created,running,paused,resumed,stopped,failed,lost,oom}
              + sandbox.snapshot.{ready,failed}
              // stopped corresponds to the STOPPED state (covers explicit DELETE and
-             // onIdle=kill); lost corresponds to losing the node lease
+             // onIdle=delete); lost corresponds to losing the node lease
 Event body:  { "id", "type", "timestamp", "sandboxId", "data": {...}, "version": "v1" }
              // Naming follows e2b (dotted sandbox.lifecycle.* hierarchy) for ecosystem
              // compatibility
@@ -639,7 +639,7 @@ than implementing.
 
 ### 6.4 Lifecycle interlock 📐
 
-- Sandbox destroyed (including onIdle=kill) → gateway revokes the port record → proxy cache
+- Sandbox destroyed (including onIdle=delete) → gateway revokes the port record → proxy cache
   invalidation is pushed → subsequent requests 404
 - PAUSED → triggers a transparent wake and blocks the forwarding; only on wake timeout
   (10s by default) does it return 502 + Retry-After

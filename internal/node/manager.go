@@ -1465,7 +1465,7 @@ func (m *Manager) sweepIdle() {
 		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		var err error
 		switch a.onIdle {
-		case "kill":
+		case "delete":
 			err = m.Destroy(ctx, a.id, false)
 		default: // pause
 			err = m.Pause(ctx, a.id)

@@ -81,7 +81,7 @@ POST /sandboxes
 GET    /sandboxes/{id}                       → sandbox 详情（state、runtime、nodeId、createdAt、lifecycle、lastActivityAt、endpoints）
 GET    /sandboxes?label=eval-run%3Dswebench-0731&state=RUNNING&pageToken=&pageSize=100
 DELETE /sandboxes/{id}                       → 202，异步销毁；?force=true 跳过 graceful
-PATCH  /sandboxes/{id}/lifecycle { "idleTimeout": "600s", "onIdle": "kill" }   → 运行时调整
+PATCH  /sandboxes/{id}/lifecycle { "idleTimeout": "600s", "onIdle": "delete" }   → 运行时调整
 POST   /sandboxes/{id}/pause                 → 202 → PAUSED
 POST   /sandboxes/{id}/resume                → 202 → RUNNING
 POST   /sandboxes/{id}/snapshot  { "name": "after-setup", "keepRunning": true }
@@ -302,7 +302,7 @@ restore 是 `POST /sandboxes` —— 一次创建 —— 而 `resume` 是打在�
 ```
 事件类型：sandbox.lifecycle.{created,running,paused,resumed,stopped,failed,lost,oom}
           + sandbox.snapshot.{ready,failed}
-          // stopped 对应状态机 STOPPED（含显式 DELETE 与 onIdle=kill）,
+          // stopped 对应状态机 STOPPED（含显式 DELETE 与 onIdle=delete）,
           // lost 对应节点租约丢失
 事件体：  { "id", "type", "timestamp", "sandboxId", "data": {...}, "version": "v1" }
           // 命名对齐 e2b（sandbox.lifecycle.* 点分层级）,便于生态兼容
@@ -552,7 +552,7 @@ e2b 从另一个方向到了同一个形状:`packages/client-proxy` 把 sandbox 
 
 ### 6.4 生命周期联动 📐
 
-- sandbox 销毁（含 onIdle=kill）→ gateway 撤销端口记录 → proxy 缓存失效推送 → 后续请求 404
+- sandbox 销毁（含 onIdle=delete）→ gateway 撤销端口记录 → proxy 缓存失效推送 → 后续请求 404
 - PAUSED → 触发透明唤醒并阻塞透传;唤醒超时（默认 10s）才回 502 + Retry-After
 
 ## 7. 配额与限流 ⚠️

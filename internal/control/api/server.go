@@ -390,7 +390,7 @@ type createRequest struct {
 	Labels       map[string]string `json:"labels"`
 	Lifecycle    *struct {
 		IdleTimeout string `json:"idleTimeout"` // e.g. "300s"; null = never
-		OnIdle      string `json:"onIdle"`      // pause|kill
+		OnIdle      string `json:"onIdle"`      // pause|delete
 	} `json:"lifecycle"`
 }
 
@@ -480,8 +480,8 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		if onIdle == "" {
 			onIdle = "pause"
 		}
-		if onIdle != "pause" && onIdle != "kill" {
-			writeErr(w, http.StatusBadRequest, "INVALID_ARGUMENT", "onIdle must be pause|kill")
+		if onIdle != "pause" && onIdle != "delete" {
+			writeErr(w, http.StatusBadRequest, "INVALID_ARGUMENT", "onIdle must be pause|delete")
 			return
 		}
 		secs := int64(d.Seconds())
@@ -681,7 +681,7 @@ func (s *Server) handleGet(w http.ResponseWriter, r *http.Request) {
 			rec.State = store.SandboxState(st.Status.State)
 			_ = s.store.PutSandbox(rec)
 		case status.Code(err) == codes.NotFound:
-			// Node no longer has it (e.g. idle sweep onIdle=kill).
+			// Node no longer has it (e.g. idle sweep onIdle=delete).
 			rec.State = store.SandboxStopped
 			_ = s.store.PutSandbox(rec)
 			s.emit(id, "sandbox.lifecycle.stopped", map[string]string{"reason": "reconciled: gone on node"})
