@@ -1,7 +1,5 @@
 <div align="center">
 
-<img src="docs/assets/banner.svg" alt="bean" width="560">
-
 # bean
 
 **面向 AI agent 的 sandbox 平台** —— 在硬件隔离里跑不可信代码:创建、exec 进去、快照、扇出。
@@ -62,6 +60,24 @@
 
 ```
 create → exec → cp → pause → resume → snapshot → create-from-snapshot → destroy
+```
+
+上面是可以做的操作。而沙箱真正经历的状态更少 —— `create` 只有一个入口,无论它是冷启动
+镜像还是从快照恢复;而 idle 清扫或一次显式 `DELETE` 是仅有的出口:
+
+```mermaid
+---
+config:
+  look: handDrawn
+  theme: neutral
+---
+stateDiagram-v2
+  direction LR
+  [*] --> RUNNING: create
+  RUNNING --> PAUSED: on_idle=pause<br>(idle_timeout)
+  PAUSED --> RUNNING: request arrives<br>(wake / resume)
+  RUNNING --> [*]: on_idle=delete (idle_timeout)<br>or DELETE
+  PAUSED --> [*]: DELETE
 ```
 
 | 操作 | 实测 | 说明 |
@@ -199,6 +215,66 @@ NODED_FLAGS="--guest-subnet 172.31.0.0/30 --uplink eth0 --guest-dns 223.5.5.5" \
 四个二进制:`bean`(CLI)、`bean-api`(gateway,调度器在同进程内,这样放置与承诺发生在
 同一个事务里)、`noded`(每宿主一个)、`beand`(每个沙箱内的 PID 1,装在自己的只读磁盘上,
 所以用户镜像不需要任何改动)。
+
+同一套栈画成四条带 —— 客户端、控制面、节点、沙箱 —— `bean-proxy` 在端口流量的数据面路径上,
+S3 支撑节点:
+
+```mermaid
+---
+config:
+  look: handDrawn
+  theme: neutral
+  flowchart:
+    curve: basis
+---
+flowchart TB
+  subgraph CLIENTS["clients"]
+    direction LR
+    SDK["SDK<br>py · ts"]
+    CLI["CLI"]
+  end
+
+  subgraph CP["control plane · bean-api (one process)"]
+    direction LR
+    API["api-gateway<br>auth · quota"]
+    SCHED["scheduler<br>placement · leases"]
+    IMGS["image-service<br>prewarm · GC"]
+    STORE[("state store<br>SQLite / PG")]
+  end
+
+  PROXY["bean-proxy<br>port routing"]
+
+  subgraph NODED["noded · one per host"]
+    direction LR
+    IMGSUB["image subsystem<br>overlaybd · TCMU · CoW"]
+    RT["runtime tiers<br>fc · oci"]
+  end
+
+  subgraph SBX["sandbox"]
+    BEAND["beand (PID1)<br>+ user process"]
+  end
+
+  S3[("S3<br>blobs · artifacts · snapshots")]
+
+  SDK --> API
+  CLI --> API
+  SDK -. port traffic .-> PROXY
+  SCHED <== commands / heartbeat ==> IMGSUB
+  PROXY -. forward .-> IMGSUB
+  IMGSUB --> RT
+  RT --> BEAND
+  IMGSUB -. range-read .-> S3
+  RT -. snapshots .-> S3
+
+  classDef client fill:#E8F0FE,stroke:#4285F4,color:#111;
+  classDef control fill:#E6F4EA,stroke:#34A853,color:#111;
+  classDef data fill:#FEF7E0,stroke:#F9AB00,color:#111;
+  classDef store fill:#F3E8FD,stroke:#A142F4,color:#111;
+  class SDK,CLI client;
+  class API,SCHED,IMGS control;
+  class PROXY,IMGSUB,RT,BEAND data;
+  class STORE,S3 store;
+```
 
 ### 一个沙箱如何启动
 
