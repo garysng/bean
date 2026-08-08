@@ -66,7 +66,7 @@ POST /sandboxes
   "nodeSelector": { "pool": "nvme" },   // 可选;按节点 labels 过滤
   "lifecycle": {                        // 可选;缺省 = 一直运行
     "idleTimeout": "300s",              //   null/缺省=永不;"0s"=活动一结束即触发
-    "onIdle": "pause"                   //   pause（默认）| kill
+    "onIdle": "pause"                   //   pause（默认）| delete
   },
   "labels": { "eval-run": "swebench-0731", "task": "django-12345" },
   "networkPolicy": "egress-only",       // egress-only|none|allow-list（预留）
@@ -447,7 +447,7 @@ control plane 作为 client 直连调用）。
 | idleTimeout | 行为 |
 |---|---|
 | 缺省 / null | 不启用 idle 检测（默认）,sandbox 持续运行 |
-| `"0s"` | 活动一结束立即触发 onIdle（eval 批量：`onIdle: kill` 用完即走） |
+| `"0s"` | 活动一结束立即触发 onIdle（eval 批量：`onIdle: delete` 用完即走） |
 | `"300s"` | 闲置 5 分钟触发 onIdle |
 
 - **idle 判定**（noded 本地,不依赖控制面）：无 exec 会话 + 无端口活跃连接 +
@@ -459,7 +459,7 @@ control plane 作为 client 直连调用）。
   仍占宿主 RAM 与调度承诺量,容量代价由容量规划承担。管理员可选开启全局回收
   （默认关）;长期正解是 P4 的 snapshot 归档:PAUSED 超阈值 → 状态落 S3 释放
   RAM → 再访问自动 restore
-- 业界对齐:CubeSandbox v0.5(on_timeout: pause/kill + 数据面透明唤醒)、
+- 业界对齐:CubeSandbox v0.5(on_timeout: pause/delete + 数据面透明唤醒)、
   e2b auto-pause/auto-resume 同构;我们以 null 表达「永不」,避开 -1/0 魔数重载
 
 ### 5.3 Exec 路由 ✅

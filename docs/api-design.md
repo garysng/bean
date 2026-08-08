@@ -70,7 +70,7 @@ POST /sandboxes
   "lifecycle": {                        // optional; default = run forever
     "idleTimeout": "300s",              //   null/absent = never; "0s" = fires as soon as
                                         //   activity ends
-    "onIdle": "pause"                   //   pause (default) | kill
+    "onIdle": "pause"                   //   pause (default) | delete
   },
   "labels": { "eval-run": "swebench-0731", "task": "django-12345" },
   "networkPolicy": "egress-only",       // egress-only|none|allow-list (reserved)
@@ -492,7 +492,7 @@ implemented by noded and called directly by the control plane as a client).
 | idleTimeout | Behaviour |
 |---|---|
 | absent / null | idle detection off (default), the sandbox keeps running |
-| `"0s"` | fires onIdle the moment activity ends (batch eval: `onIdle: kill`, gone as soon as it is done) |
+| `"0s"` | fires onIdle the moment activity ends (batch eval: `onIdle: delete`, gone as soon as it is done) |
 | `"300s"` | fires onIdle after 5 minutes idle |
 
 - **Idle determination** (local to noded, does not depend on the control plane): no exec
@@ -508,7 +508,7 @@ implemented by noded and called directly by the control plane as a client).
   administrator can opt into global reclamation (off by default); the real long-term answer
   is the P4 snapshot archive: PAUSED past a threshold → state goes to S3, freeing RAM → the
   next access restores it automatically
-- Industry alignment: CubeSandbox v0.5 (on_timeout: pause/kill + transparent wake on the
+- Industry alignment: CubeSandbox v0.5 (on_timeout: pause/delete + transparent wake on the
   data plane) and e2b auto-pause/auto-resume are the same shape; we express "never" as null,
   avoiding the -1/0 magic-number overload
 

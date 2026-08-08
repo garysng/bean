@@ -53,7 +53,7 @@ module by module).
 ```
 curl POST /sandboxes {image} → fc microVM RUNNING
 curl POST /exec {pytest} → exit code + output
-curl DELETE → resources back to zero (no leftover FC process / tap / ublk device / mount)
+curl DELETE → resources back to zero (no leftover FC process / tap / TCMU device / mount)
 ```
 
 ## P1 — Usable across nodes (first eval integration)
@@ -99,7 +99,7 @@ P50 < 2s; the escape regression suite passes.
 - bean-proxy (regional): wildcard-domain TLS, port exposure (reverse proxy connecting straight to
   the sandbox IP), sandbox token authentication, transparent wake from PAUSED
 - pause/resume (fc PauseVM) + transparent wake from PAUSED
-- Lifecycle automation: idle detection (local to noded), onIdle pause/kill, transparent wake on a request to a PAUSED sandbox
+- Lifecycle automation: idle detection (local to noded), onIdle pause/delete, transparent wake on a request to a PAUSED sandbox
 - The fc tier's same-node snapshot path (memory+disk → S3)
 - **shared-fs volumes** (the host mounts JuiceFS and exports it through the kernel nfsd, the agent mounts NFS, backend quota)
 - The TS SDK, an e2b migration mapping document

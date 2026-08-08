@@ -324,14 +324,14 @@ fc 档两个平台工件,均由 CI 构建、S3 分发、noded 启动时按版本
 
 ### 4.1 overlaybd 直驱主路线 📐
 
-image 模块直接管理 overlaybd ublk daemon（不经 containerd snapshotter）：
+image 模块直接管理 overlaybd（经 TCMU，不经 containerd snapshotter）：
 按镜像元数据（控制面下发的层清单 + S3 blob 引用）生成 overlaybd config →
-ublk 设备就绪 → 交给 runtime。实证细节参考本地 AgentENV 源码
+TCMU 块设备就绪 → 交给 runtime。实证细节参考本地 AgentENV 源码
 （`src/overlaybd/`、crates 下 uvm-ublk,以及 registryfs_v2 远端直读模式）。
 
 | 格式 | 消费方式 | 场景 |
 |---|---|---|
-| overlaybd（块级，DADI） | fc 档：ublk 块设备 virtio-blk 直挂;容器档（P5）：同设备挂载 | 主路径;blob 存 S3，ublk 按需 range-read |
+| overlaybd（块级，DADI） | fc 档：TCMU 块设备 virtio-blk 直挂;容器档（P5）：同设备挂载 | 主路径;blob 存 S3，经 TCMU 暴露、按需 range-read |
 | 标准 OCI（gzip 层） | containerd overlayfs（仅容器档,P5） | 兜底：未转换镜像 |
 
 - image-service（control plane 逻辑模块，见 4.4）负责把镜像**离线转换**为
@@ -544,7 +544,7 @@ netns/veth/nftables 链均带 `bean-<id>` 命名规约，孤儿扫描按前缀�
 
 | 对象 | 策略 |
 |---|---|
-| sandbox idle | noded 本地 idle 检测（lifecycle 随 create 下发）:无 exec/端口/文件活动持续 idleTimeout → 执行 onIdle(pause/kill) 并发 event——不依赖控制面在线 |
+| sandbox idle | noded 本地 idle 检测（lifecycle 随 create 下发）:无 exec/端口/文件活动持续 idleTimeout → 执行 onIdle(pause/delete) 并发 event——不依赖控制面在线 |
 | PAUSED 滞留 | 默认不回收;管理员可选开启全局策略（P4 后由 snapshot 归档替代） |
 | 镜像/chunk 缓存 | §4.2 水位 LRU |
 | exec 会话 | 断连 60s 无重连 |

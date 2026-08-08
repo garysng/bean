@@ -86,7 +86,7 @@ AI evaluation / agent rollout 场景（如 SWE-bench 类任务）的特点：
         └────┬─────┘         └──────────┘         └──────────┘
              │ overlaybd 直驱 + noded 自管 FC 与容器 runtime;不依赖 containerd
         ┌────▼─────────────────────────────┐
-        │  ├── 镜像: overlaybd ublk daemon  │ ← 块级 lazy-pull from S3
+        │  ├── 镜像: overlaybd + TCMU       │ ← 块级 lazy-pull from S3
         │  └── runtime: fc(默认)│runc│runsc │ ← 内部自动分档（D3）
         └────┬─────────────────────────────┘
              │
@@ -128,13 +128,13 @@ microVM（见 D9）——两种形态共享同一条镜像链路，用户无感�
 > overlaybd 能力已在 tcmu 后端实测跑通但未接入 `image.Provider`。
 
 fc 主路径**不引入 containerd**（AgentENV 同款,其源码已在本地 /Users/mac/project/agentenv
-可参考）：noded 直接驱动 overlaybd 的 ublk daemon 组装块设备（S3 backing + 本地
+可参考）：noded 直接驱动 overlaybd（经 TCMU）组装块设备（S3 backing + 本地
 缓存）→ virtio-blk 挂 microVM。containerd 的三项职责在本设计中均有更直接的替代：
 
 | containerd 职责 | 本设计 |
 |---|---|
 | 镜像拉取/content store | blob 在 S3（image-service 离线转换）,元数据控制面下发;registry 不在热路径 |
-| snapshotter | overlaybd ublk daemon 直驱（AgentENV 的 uvm-ublk 实证） |
+| snapshotter | overlaybd 直驱（经 TCMU 暴露块设备；AgentENV 的 uvm-ublk 实证） |
 | task 生命周期 | fc:noded 自管 FC 进程;容器档:noded 直驱 runsc/runc（无 containerd,见下） |
 
 > **已修正。** 容器档**不使用** containerd。这一段写于 overlaybd 尚未接入
@@ -289,7 +289,7 @@ disk-diff 直接取宿主 overlaybd 可写层、guest 内零 union 复杂度。
 
 | 数据 | 方案 |
 |---|---|
-| 镜像 blob | **overlaybd 块级镜像**（层 = 块设备 diff）直存 S3，节点经 ublk 按需 range-read；registry 仅存元数据 |
+| 镜像 blob | **overlaybd 块级镜像**（层 = 块设备 diff）直存 S3，节点经 TCMU 暴露、按需 range-read；registry 仅存元数据 |
 | 节点缓存 | 本地 NVMe 作为 S3 之上的块 chunk LRU 缓存；裸金属（大盘）与云 VM（小盘）仅命中率差异，架构统一 |
 | eval 产物 | agent/noded 经 presigned URL 直推 S3（control plane 签发，节点不持长期凭证） |
 | 大文件下载 | API 返回 presigned URL 重定向，不过 gateway 转发 |
@@ -510,7 +510,7 @@ RUNNING,restore 造出另一个。见 [snapshot-resume.md](snapshot-resume.md) �
 
 目标：P50 < 2s（镜像已缓存）/ P50 < 10s（lazy-pull 冷镜像）。
 
-1. **lazy-pull**：overlaybd + ublk 块级按需加载，启动只需元数据 + 热块，运行中按需 range-read S3
+1. **lazy-pull**：overlaybd + TCMU 块级按需加载，启动只需元数据 + 热块，运行中按需 range-read S3
 2. **节点缓存**：chunk 级 LRU，S3 为 source of truth，节点盘可随意 GC
 3. **prewarm API**:评测批次开始前预热镜像到目标节点
 4. **镜像亲和调度**：天然提升缓存命中

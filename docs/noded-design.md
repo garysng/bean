@@ -339,16 +339,16 @@ fetched to local disk by version when noded starts:
 
 ### 4.1 The overlaybd-direct main route 📐
 
-The image module manages the overlaybd ublk daemon directly (without going
+The image module manages overlaybd directly over TCMU (without going
 through a containerd snapshotter): from the image metadata (the layer list pushed
 down by the control plane + S3 blob references) it generates an overlaybd config
-→ the ublk device becomes ready → it is handed to the runtime. For the
+→ the TCMU block device becomes ready → it is handed to the runtime. For the
 demonstrated details see the local AgentENV source (`src/overlaybd/`, uvm-ublk
 under crates, and the registryfs_v2 remote direct-read mode).
 
 | Format | How it is consumed | Use case |
 |---|---|---|
-| overlaybd (block-level, DADI) | fc tier: the ublk block device attached over virtio-blk; container tier (P5): the same device mounted | The main path; blobs live in S3 and ublk range-reads on demand |
+| overlaybd (block-level, DADI) | fc tier: the TCMU block device attached over virtio-blk; container tier (P5): the same device mounted | The main path; blobs live in S3 and overlaybd range-reads on demand over TCMU |
 | Standard OCI (gzip layers) | containerd overlayfs (container tier only, P5) | Fallback: unconverted images |
 
 - image-service (a logical module of the control plane, see 4.4) is responsible for converting images to the overlaybd format **offline** (the `convertor` tool, with layer-by-layer incremental conversion); conversion is done once on the server side, so the node side has zero conversion cost
@@ -564,7 +564,7 @@ orphan scan compares by prefix against the set of live sandboxes.
 
 | Object | Policy |
 |---|---|
-| Idle sandbox | Local idle detection on noded (the lifecycle is pushed down with create): no exec/port/file activity for idleTimeout → execute onIdle (pause/kill) and emit an event — no dependency on the control plane being online |
+| Idle sandbox | Local idle detection on noded (the lifecycle is pushed down with create): no exec/port/file activity for idleTimeout → execute onIdle (pause/delete) and emit an event — no dependency on the control plane being online |
 | Lingering PAUSED | Not reclaimed by default; an administrator can optionally enable a global policy (superseded by snapshot archival after P4) |
 | Image/chunk cache | §4.2 watermark LRU |
 | exec session | 60s disconnected with no reattach |

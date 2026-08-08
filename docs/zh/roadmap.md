@@ -44,7 +44,7 @@ overlaybd、envd、jailer/FC 管理的完整实证,逐模块对照）。
 ```
 curl POST /sandboxes {image} → fc microVM RUNNING
 curl POST /exec {pytest} → exit code + output
-curl DELETE → 资源清零（FC 进程/tap/ublk 设备/挂载无残留）
+curl DELETE → 资源清零（FC 进程/tap/TCMU 设备/挂载无残留）
 ```
 
 ## P1 — 多节点可用（eval 首次接入）
@@ -84,7 +84,7 @@ curl DELETE → 资源清零（FC 进程/tap/ublk 设备/挂载无残留）
 - WS 流式 exec + PTY（会话重连）、CLI 交互模式（run -it / attach）
 - bean-proxy（regional）：通配域名 TLS、端口暴露（反代直连 sandbox IP）、sandbox token 鉴权、PAUSED 透明唤醒
 - pause/resume（fc PauseVM）+ PAUSED 透明唤醒
-- lifecycle 自动化：idle 检测（noded 本地）、onIdle pause/kill、PAUSED 请求透明唤醒
+- lifecycle 自动化：idle 检测（noded 本地）、onIdle pause/delete、PAUSED 请求透明唤醒
 - fc 档 snapshot 本节点路径（memory+disk → S3）
 - **shared-fs 卷**（宿主挂 JuiceFS + 内核 nfsd 导出、agent NFS 挂载、后端配额）
 - TS SDK、e2b 迁移对照文档

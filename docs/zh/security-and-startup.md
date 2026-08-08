@@ -209,7 +209,7 @@ sandbox token（JWT）：签名密钥控制面持有，绑定 sandbox-id + 过�
 | API + 调度 | 50 ms | 50 ms | 内存化调度器状态，无同步外呼 |
 | 指令送达 noded | 50 ms | 50 ms | push 直连 gRPC（控制面→noded） |
 | 镜像就绪 | ~0（已缓存） | 2–6 s | overlaybd：仅拉元数据+启动热块（见 B2） |
-| rootfs 设备就绪 | 100 ms | 200 ms | ublk 设备组装、overlaybd 元数据缓存 |
+| rootfs 设备就绪 | 100 ms | 200 ms | TCMU 设备组装、overlaybd 元数据缓存 |
 | netns/网络 | 50 ms | 50 ms | veth/nftables 批量原子操作;IPAM 内存位图 |
 | sandbox 启动 | 200–500 ms | 200–500 ms | FC microVM 启动≈125ms+内核引导;容器档 runc≈100ms/runsc≈300ms |
 | agent ready | 100 ms | 100 ms | 静态二进制,无依赖加载 |
@@ -242,7 +242,7 @@ overlaybd 侧实测:挂载 7ms、只传 19.6% 的层字节就能挂载并读文�
 OCI 镜像 → overlaybd convertor（层级增量转换）→ 块设备层 blobs → S3
                                      │
 节点使用链路：                          ▼
-CreateSandbox → overlaybd/ublk 组装块设备（元数据数 MiB）→ 立即可挂
+CreateSandbox → overlaybd（经 TCMU）组装块设备（元数据数 MiB）→ 立即可挂
              → 容器档挂 overlayfs / fc 档 virtio-blk 直挂 guest
              → IO 访问触发块按需 range-read S3 → 本地 obd-cache
 ```

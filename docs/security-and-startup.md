@@ -249,7 +249,7 @@ absence of the VM boot item):
 | API + scheduling | 50 ms | 50 ms | Scheduler state in memory, no synchronous outbound calls |
 | Command reaches noded | 50 ms | 50 ms | Direct push over gRPC (control plane → noded) |
 | Image ready | ~0 (already cached) | 2–6 s | overlaybd: pull only metadata + the hot startup blocks (see B2) |
-| rootfs device ready | 100 ms | 200 ms | ublk device assembly, overlaybd metadata cache |
+| rootfs device ready | 100 ms | 200 ms | TCMU device assembly, overlaybd metadata cache |
 | netns/network | 50 ms | 50 ms | Batched atomic veth/nftables operations; IPAM as an in-memory bitmap |
 | Sandbox start | 200–500 ms | 200–500 ms | FC microVM start ≈125ms + kernel boot; container tier runc ≈100ms / runsc ≈300ms |
 | agent ready | 100 ms | 100 ms | A static binary, no dependency loading |
@@ -290,7 +290,7 @@ Image publishing path (image-service, once, offline):
 OCI image → overlaybd convertor (per-layer incremental conversion) → block-device-layer blobs → S3
                                      │
 Node consumption path:               ▼
-CreateSandbox → overlaybd/ublk assembles the block device (a few MiB of metadata) → mountable immediately
+CreateSandbox → overlaybd (over TCMU) assembles the block device (a few MiB of metadata) → mountable immediately
              → container tier mounts overlayfs / fc tier attaches virtio-blk straight to the guest
              → IO access triggers on-demand block range-reads from S3 → local obd-cache
 ```
