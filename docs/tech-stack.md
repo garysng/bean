@@ -11,8 +11,8 @@ number is quoted; where it is a judgment call with no measurement, it says so
 rather than borrowing authority it does not have.
 
 Two things this document is not. It is not a claim of delivery — the markers
-distinguish what runs from what is designed, and the network stack, the jailer,
-the container tiers and Postgres are all in the second group. And it is not a
+distinguish what runs from what is designed, and the jailer is in the second
+group. And it is not a
 list of libraries: `go.mod` has **four direct requires**, and most of the
 interesting choices below are decisions *not* to take a dependency.
 
@@ -45,7 +45,7 @@ is organised around: memory snapshots and on-demand page serving.
   is a compatibility surface, and eval images are arbitrary — anything that
   builds a kernel module, uses an unusual syscall, or probes `/proc` in an
   uncommon way becomes a support question. A real guest kernel has no such
-  surface. **📐 Unimplemented**: there is no runsc runtime in the repo.
+  surface. **✅ Implemented**: `--runtime runsc` drives the OCI runtime directly through `NewOCITier` (no containerd), sharing the fc tier's rootfs providers; runc is the same implementation differing only in the binary.
 - **Kata Containers.** Superseded by driving Firecracker directly. Kata's value
   is a CRI-compatible VM runtime; the platform does not speak CRI and does not
   want containerd on the hot path, so Kata would be a layer that only
@@ -202,7 +202,7 @@ backend is implemented and still unexercised.
 
 **Nydus was rejected for the same reason overlayfs was**: it is file-level, its
 filesystem semantics cannot get into a microVM, and the fc tier would need
-virtiofs. It is kept as a fallback for the (unimplemented) container tier.
+virtiofs. It is kept as a fallback for the container tier.
 
 ---
 
@@ -1047,7 +1047,7 @@ choose the technology.
 |---|---|---|
 | VMM | Firecracker (upstream, unforked) | ✅ |
 | Jailer / host cgroups | — | 📐 |
-| Container tiers | runc / gVisor | 📐 |
+| Container tiers | runc / gVisor | ✅ noded drives the OCI runtime directly, no containerd |
 | Dev/CI tier | `local` process tree, no isolation | ✅ |
 | Rootfs | device-mapper snapshot, shared base + CoW | ✅ 44 KiB/sandbox |
 | Rootfs lazy-pull | overlaybd | ⚠️ wired in behind `--fc-overlaybd` over TCMU; lazy pull itself untested against a registry |

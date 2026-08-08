@@ -14,6 +14,63 @@ getting either wrong produces **silently wrong behaviour** rather than an error.
 
 ## 1. The full order ✅
 
+```mermaid
+---
+config:
+  look: handDrawn
+  theme: neutral
+  flowchart:
+    curve: basis
+---
+flowchart TB
+  subgraph SHARED["shared prep &middot; both paths"]
+    direction TB
+    PREP["image.Prepare<br>/dev/mapper/bean-&lt;id&gt;<br>(restore: backfill CoW here &middot; constraint A)"]
+    EXEC["exec firecracker in netns<br>cwd = sandbox dir"]
+    WAIT["waitAPIReady<br>poll API socket"]
+    PREP --> EXEC --> WAIT
+  end
+
+  BRANCH{"snapshot<br>layers?"}
+
+  subgraph COLD["cold boot &middot; ordered pre-boot PUTs"]
+    direction TB
+    MC["/machine-config"]
+    CPU["/cpu-config<br>CPU mask &middot; constraint B"]
+    BOOT["/boot-source"]
+    DRV["/drives/agent (vda root)<br>/drives/rootfs (vdb)<br>/vsock"]
+    START["/actions InstanceStart"]
+    MC --> CPU --> BOOT --> DRV --> START
+  end
+
+  subgraph WARM["restore &middot; no pre-boot config"]
+    direction TB
+    LOAD["PUT /snapshot/load<br>Uffd backend &middot; ResumeVM"]
+  end
+
+  GB["guest boots<br>beand PID1 pivots to user rootfs"]
+  GR["guest resumes<br>pages faulted in on demand"]
+
+  WAIT --> BRANCH
+  BRANCH -- "no &middot; cold" --> MC
+  BRANCH -- "yes &middot; warm" --> LOAD
+  LOAD -. "no memory in bundle" .-> MC
+  START --> GB
+  LOAD --> GR
+
+  classDef prep fill:#FEF7E0,stroke:#F9AB00,color:#111;
+  classDef cold fill:#E6F4EA,stroke:#34A853,color:#111;
+  classDef warm fill:#F3E8FD,stroke:#A142F4,color:#111;
+  classDef out fill:#E8F0FE,stroke:#4285F4,color:#111;
+  class PREP,EXEC,WAIT prep;
+  class MC,CPU,BOOT,DRV,START cold;
+  class LOAD warm;
+  class GB,GR out;
+```
+
+The numbered order below is the cold-boot spine; restore reuses the shared prep and swaps
+the PUT sequence for a single `/snapshot/load`.
+
 ```
 ① image.Prepare        assemble /dev/mapper/bean-<id> (shared base + per-sandbox CoW)
                        on restore: the CoW must be backfilled within this step ← ordering constraint A

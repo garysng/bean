@@ -9,29 +9,30 @@ sandbox 内运行的是 **AI 生成的不可信代码**（eval 任务、agent ro
 | 威胁 | 后果 | 防线 |
 |---|---|---|
 | 内核逃逸 | 接管节点 | FC microVM / gVisor 隔离档（A2） |
-| 横向移动 | 访问其他 sandbox / 内网服务 | 📐 网络栈未实现,当前 sandbox 无网络（A4） |
+| 横向移动 | 访问其他 sandbox / 内网服务 | ✅ 每 sandbox 一个 netns + FORWARD DROP 掉 RFC1918/169.254;sandbox 间无路由（A4、[network.md](network.md) §5a） |
 | 凭证窃取 | 拿到 S3/控制面凭证 | 零长期凭证（A5） |
 | 资源滥用 | 挖矿、fork 炸弹、磁盘写满 | ⚠️ guest 内核自限加 CoW 盘大小;包裹 VMM 的宿主 cgroup 已存在,但不设 `--fc-cgroups` 就不生效（A3） |
-| 出网滥用 | 作为跳板攻击外部、DDoS | 📐 同上,未实现（A4） |
+| 出网滥用 | 作为跳板攻击外部、DDoS | ✅ 默认 egress-only,内网段 + 元数据被 DROP;⚠️ 带宽/conntrack 限速（tc）待做（A4） |
 | 恶意镜像 | 供应链投毒 | 镜像来源控制（A6） |
 | agent 攻击面 | 从容器内攻击 agent → noded | 最小 API + socket 权限（A7） |
 
 ### A2. 隔离档位 ⚠️（内部机制，不对外暴露;分档规则见 architecture.md D3）
 
-**当前只有 `fc` 和 `local` 两档存在。** `local` 是进程级 sandbox,仅供开发与
-CI 使用,**没有任何隔离**,不在下表里也不该用于不可信代码。容器档(runc/runsc)
-未实现。
+**三档已接入:`fc`、`oci`(runsc/runc)、`local`。** `local` 是进程级 sandbox,仅供开发与
+CI 使用,**没有任何隔离**,不在下表里也不该用于不可信代码。容器档(runc/runsc)经 OCI 档
+实现(`--runtime runsc|runc`,`oci_tier_linux.go`),不经 containerd;不可信代码用 runsc,
+因为 runc 共享宿主内核。
 
 | 实际档 | 运行时 | 逃逸防线 | 何时使用 |
 |---|---|---|---|
 | `fc`（默认主档） | Firecracker microVM | 硬件虚拟化边界,宿主暴露面最小（FC 设备模型极简 + 内置 seccomp）。**jailer 尚未接入**,见 A3 | KVM 节点——常规 eval/rollout |
-| `runsc` 📐 | gVisor | 用户态内核拦截 syscall，宿主内核面≈70 个 syscall | 无 KVM 节点的降级档。**未实现** |
-| `runc` 📐 | runc | 仅 namespace/seccomp/caps | 内部可信任务 + GPU（内部预留）。**未实现** |
+| `runsc` ✅ | gVisor | 用户态内核拦截 syscall，宿主内核面≈70 个 syscall | 无 KVM 节点的降级档。**已实现**（OCI 档,`--runtime runsc`） |
+| `runc` ✅ | runc | 仅 namespace/seccomp/caps | 内部可信任务 + GPU（内部预留）。**已实现**（OCI 档,`--runtime runc`） |
 
 - fc 档 guest 是真内核，无 gVisor 的 syscall 兼容性问题
 - runc 承载 GPU 意味着 **GPU eval 的隔离弱于默认档**——GPU 节点独立节点池 +
   镜像白名单收紧作为补偿控制;gVisor GPU 支持（nvproxy）作为 P5 演进项
-- runsc 降级档兼容性回归集随容器档 P5 引入，不兼容镜像显式豁免，不静默降级
+- runsc 降级档兼容性回归集随 OCI 容器档一起交付，不兼容镜像显式豁免，不静默降级
 
 ### A3. 加固基线 ⚠️
 
@@ -125,25 +126,20 @@ CPU 配额来自 machine config 拿到的
 - ⚠️ FC 进程独立 uid/gid —— 已实现,不设 `--fc-vmm-uid` 则不生效
 - ⚠️ 宿主侧 cgroup 包裹 FC 进程（cpu/mem+swap/pids）—— 已实现,不设 `--fc-cgroups` 则不生效;要求 cgroup v2,v1 宿主拒绝启动
 
-### A4. 网络安全 📐
+### A4. 网络安全 ✅
 
-**整节未实现。** `grep -rn 'nftables\|netns\|veth\|bean0'` 全仓库为 0 ——
-没有网络模块,sandbox 目前没有任何网络能力(fc 档只有 vsock 到 agent,
-那是控制通道不是数据网络)。
+**网络栈已实现**（`internal/node/network/`、`internal/node/portforward.go`、
+`internal/node/dial.go`）:每 sandbox 一个 netns + 地址池 + 两层 MASQUERADE +
+FORWARD DROP + DNS,并在真机 guest 上用规则计数器验证过。见 [network.md](network.md)
+与 noded-design.md §5。下面的安全语义已生效,除标 ⚠️ 的两个细化项外:
 
-这意味着下面每一条都是**计划**,不是当前的安全承诺。特别是「默认 egress-only」——
-当前既没有 egress 也没有隔离规则,因为根本没有网络栈。**不要**把这一节当成
-「sandbox 已被限制在这些规则内」来读。
-
-见 noded-design.md §5(同样未实现)。计划中的安全语义:
-
-- 默认 `egress-only`：可出公网（拉依赖是 eval 刚需），**禁止**：sandbox 间互访、节点内网段（RFC1918）、云元数据（169.254.169.254 / fd00:ec2::254）
-- 出网带宽 per-sandbox 限速（tc，默认 100 Mbps）+ conntrack 连接数上限（防端口扫描/DDoS 放大）
+- 默认 `egress-only`：可出公网（拉依赖是 eval 刚需），**禁止**：sandbox 间互访、节点内网段（RFC1918）、云元数据（169.254.169.254 / fd00:ec2::254）。✅ 由插在宿主 Docker ACCEPT 之前的 FORWARD DROP 规则,加上每 sandbox 一个 netns、互相无路由来强制（[network.md](network.md) §5a）
+- ⚠️ 出网带宽 per-sandbox 限速（tc，默认 100 Mbps）+ conntrack 连接数上限（防端口扫描/DDoS 放大）—— **待做**;上面的隔离规则不依赖它
 - `none` 策略供纯离线 eval：无默认路由，杜绝数据外传（模型作弊检测场景有用）;
   卷不破坏该承诺——dataset 卷是本地块设备,shared-fs 卷走宿主 NFS（流量仅达宿主网关,
   不出节点）,均与「出公网」正交。若连宿主共享存储也要禁,创建时不挂卷即可
 - DNS 走节点转发器，可记录审计日志
-- 入站零暴露：无 DNAT，唯一入口是 proxy → noded → agent 的应用层链路
+- 入站零暴露：无 DNAT，唯一入口是 proxy → noded → agent 的应用层链路。入站不经宿主监听者 —— noded 进入 sandbox 的 netns 从里面发起连接,所以 guest 地址无需在别处可路由（[network.md](network.md) §5）
 
 ### A5. 凭证与信任链 ⚠️
 
@@ -160,8 +156,9 @@ S3 长期凭证：仅 control plane 持有
 控制面 ↔ noded：TLS 单向（云上托管 gRPC 接入层终结,节点零证书配置）
    + 应用层 node token（短期,内存持有,绑定 nodeId——控制面校验节点只能
    操作自己的 sandbox）;注册凭 bootstrap token,凭证分层见 noded-design §7.0
-noded ↔ agent：容器档 unix socket（0700，host 侧仅 noded 用户可达;容器内挂载点
-   仅 root 可读）;fc 档 vsock（host 侧 FC API socket 仅 noded 可达,guest 内
+noded ↔ agent：local 档 unix socket（0700，host 侧仅 noded 用户可达;容器内挂载点
+   仅 root 可读）;oci 档走 netns 内 TCP（gVisor 下宿主 unix socket 在 Sentry 内不可达,
+   见 oci_linux.go）;fc 档 vsock（host 侧 FC API socket 仅 noded 可达,guest 内
    /dev/vsock 默认仅 root 可开——非 root 用户进程无法调用 agent API）
 sandbox token（JWT）：签名密钥控制面持有，绑定 sandbox-id + 过期时间
 ```
@@ -174,7 +171,7 @@ sandbox token（JWT）：签名密钥控制面持有，绑定 sandbox-id + 过�
 
 ### A7. agent 攻击面控制 ✅
 
-- agent 对 sandbox 内进程暴露的唯一接口是 unix socket（容器档）/ vsock（fc 档），均 root-only（A5）
+- agent 对 sandbox 内进程暴露的接口:local 档 unix socket、oci 档 netns 内 TCP、fc 档 vsock;无网络的 sandbox 内进程无法拨到 agent,联网 fc/oci 沙箱则由每 sandbox token 兜底（A5）
 - agent 以 root 跑（需 setuid 到镜像 USER），但其 API 只允许来自 noded 侧 socket 的指令——容器内即使 root 也只能调用与自己权限等价的操作，无提权增益
 - agent 二进制只读挂载，容器内不可替换
 - noded 侧对 agent 响应做长度/速率限制，防被攻陷的 agent 反打 noded
@@ -183,7 +180,7 @@ sandbox token（JWT）：签名密钥控制面持有，绑定 sandbox-id + 过�
 
 - API 全写操作审计（who/what/when，Postgres + S3 归档）
 - 节点最小化：专用 OS 镜像、无多余服务、noded 非 root 化评估（P3;containerd 如启用,P5）
-- 每周期跑 sandbox 逃逸回归测试集（FC/KVM 攻击面为主;容器档引入后加 gVisor exploit suite 子集）
+- 每周期跑 sandbox 逃逸回归测试集（FC/KVM 攻击面为主;容器档已实现,加 gVisor exploit suite 子集）
 
 ---
 
@@ -210,7 +207,7 @@ sandbox token（JWT）：签名密钥控制面持有，绑定 sandbox-id + 过�
 | API + 调度 | 50 ms | 50 ms | 内存化调度器状态，无同步外呼 |
 | 指令送达 noded | 50 ms | 50 ms | push 直连 gRPC（控制面→noded） |
 | 镜像就绪 | ~0（已缓存） | 2–6 s | overlaybd：仅拉元数据+启动热块（见 B2） |
-| rootfs 设备就绪 | 100 ms | 200 ms | ublk 设备组装、overlaybd 元数据缓存 |
+| rootfs 设备就绪 | 100 ms | 200 ms | TCMU 设备组装、overlaybd 元数据缓存 |
 | netns/网络 | 50 ms | 50 ms | veth/nftables 批量原子操作;IPAM 内存位图 |
 | sandbox 启动 | 200–500 ms | 200–500 ms | FC microVM 启动≈125ms+内核引导;容器档 runc≈100ms/runsc≈300ms |
 | agent ready | 100 ms | 100 ms | 静态二进制,无依赖加载 |
@@ -247,7 +244,7 @@ FC `/snapshot/load` 只占 7ms。
 OCI 镜像 → overlaybd convertor（层级增量转换）→ 块设备层 blobs → S3
                                      │
 节点使用链路：                          ▼
-CreateSandbox → overlaybd/ublk 组装块设备（元数据数 MiB）→ 立即可挂
+CreateSandbox → overlaybd（经 TCMU）组装块设备（元数据数 MiB）→ 立即可挂
              → 容器档挂 overlayfs / fc 档 virtio-blk 直挂 guest
              → IO 访问触发块按需 range-read S3 → 本地 obd-cache
 ```

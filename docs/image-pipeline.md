@@ -10,6 +10,52 @@ What the user hands the platform is an ordinary OCI ref like `python:3.12`. What
 needs is a block device. This document is every step in between, plus where the 2m45s cold
 start goes.
 
+```mermaid
+---
+config:
+  look: handDrawn
+  theme: neutral
+  flowchart:
+    curve: basis
+---
+flowchart LR
+  REF["OCI ref<br>python:3.12"]
+  REG[("registry / S3<br>tar.gz layers")]
+
+  subgraph DEFAULT["default path &middot; DevMapper"]
+    direction TB
+    CONV["convert<br>tar.gz &rarr; ext4"]
+    BASE[("shared base<br>read-only loop<br>one per node")]
+    COW["per-sandbox CoW<br>sparse &middot; ~44 KiB"]
+    DM["dm-snapshot<br>/dev/mapper/bean-&lt;id&gt;"]
+    CONV --> BASE
+    BASE --> DM
+    COW --> DM
+  end
+
+  OBD["overlaybd<br>range-read blocks by digest<br>--fc-overlaybd, section 7"]
+  VDB["fc /drives/rootfs<br>/dev/vdb in guest"]
+
+  REF --> REG
+  REG -- "pull on miss" --> CONV
+  REG -. "blocks on demand" .-> OBD
+  DM --> VDB
+  OBD -. "alternative backend" .-> VDB
+
+  classDef ref fill:#E8F0FE,stroke:#4285F4,color:#111;
+  classDef store fill:#F3E8FD,stroke:#A142F4,color:#111;
+  classDef work fill:#FEF7E0,stroke:#F9AB00,color:#111;
+  classDef out fill:#E6F4EA,stroke:#34A853,color:#111;
+  class REF ref;
+  class REG,BASE store;
+  class CONV,COW,DM,OBD work;
+  class VDB out;
+```
+
+The default path is solid; overlaybd (dashed) is the opt-in alternative that skips
+conversion and range-reads blocks instead. The rest of this document is each of these
+steps, plus where the 2m45s cold start goes.
+
 ## 1. Three layers of Provider ✅
 
 ```

@@ -12,12 +12,13 @@
 
 ```
 internal/node/
-├── manager.go       ✅ Manager:生命周期编排(创建/销毁/pause/resume/snapshot/
-│                       restore、透明唤醒、idle 回收、in-flight 保护)
+├── manager.go       ✅ Manager:生命周期编排(创建 含从快照创建/销毁/pause/resume/
+│                       snapshot、透明唤醒、idle 回收、in-flight 保护)
 ├── grpc.go          ✅ SandboxService 实现 + 数据面透传到 agent
 ├── register.go      ✅ 出向注册、心跳、SyncState 对账
 ├── auth.go / dial.go ✅ node token 鉴权、agent 连接
-├── runtime/         ✅ Runtime 接口 + fc(真 microVM)与 local(进程级,仅开发)
+├── runtime/         ✅ Runtime 接口 + fc(真 microVM)、oci(runsc/runc,无 containerd)
+│                       与 local(进程级,仅开发)
 │                       含 UFFD 供页、快照 bundle、CPU template、diff 合并
 ├── image/           ✅ image.Provider:DevMapperProvider(共享 base + CoW)、
 │                       FileProvider、PullingProvider;OCI 拉取转换、commit、build
@@ -61,7 +62,7 @@ controlPlane: grpcs://<hosted-gateway>:443   # ⚠️ 有 --control-plane,但无
 s3:
   endpoint: https://...  # ⚠️ 走环境变量而非配置(凭证不进命令行)
 containerd: null        # ✅ 容器档已实现,且不需要 containerd(D2/D3)
-cidr: 10.100.0.0/24     # 📐 无网络栈
+cidr: 10.100.0.0/24     # 📐 形态不是这样 —— 网络是每 sandbox 的 /30，不是节点子网（见 §5）；guest /30 用 --guest-subnet 设置
 cache:
   dir: /var/lib/bean/cache
   maxBytes: 800Gi        # 📐 无缓存 LRU;当前基础镜像不自动回收
@@ -69,7 +70,7 @@ runtimes: auto           # 📐 不探测,靠 --runtime 显式指定
 overcommit:              # ✅ 已实装,见 §3.2
   cpu: 3.0
   memory: 1.0
-network:                 # 📐 无网络栈
+network:                 # 📐 出网已可用（§5），但 tc 限速未实现
   egressRateMbps: 100
 ```
 
@@ -136,8 +137,8 @@ local 档跑宿主进程,没有「缓存镜像」这个概念,让它 stub 掉四
 |---|---|---|---|
 | `FCRuntime`（主档） | ✅ | noded 直接 exec firecracker 进程,**无 jailer**(见 security §A3)、无 containerd | dm-snapshot 块设备 virtio-blk 直挂;vsock 通 agent;full/diff/memoryless 快照 |
 | `LocalRuntime`（开发/CI） | ✅ | 宿主进程 | **无隔离**,不可用于不可信代码 |
-| `runcRuntime` | 📐 | containerd + runc shim | 未实现 |
-| `runscRuntime` | 📐 | containerd + runsc shim | 未实现 |
+| `runcRuntime` | ✅ | noded 直驱 OCI runtime(runsc/runc),**无 containerd**,共用 fc 档的 rootfs providers | `--runtime runc`;容器档经 `NewOCITier` |
+| `runscRuntime` | ✅ | noded 直驱 OCI runtime(runsc/runc),**无 containerd**,共用 fc 档的 rootfs providers | `--runtime runsc`;与 runc 同一套实现,只差二进制 |
 
 要点：
 
@@ -163,7 +164,7 @@ local 档跑宿主进程,没有「缓存镜像」这个概念,让它 stub 掉四
 2. noded 直接 exec firecracker(**无 jailer**,见 security §A3):
    virtio-blk: **agent 盘为 root device**(`agent.ext4`,含 beand)
                + 用户镜像为第二盘(guest 内 `/dev/vdb`)
-   vsock;**无网卡、无 balloon**(网络栈未实现,balloon 未接)
+   vsock;一张 tap 网卡(启动前注册,见 §5.3),**无 balloon**(balloon 未接)
    kernel cmdline: `init=/bean/beand -- --listen vsock:1024 --pivot ...`
 3. guest 内 beand 作为 init：
    a. 挂载矩阵：/proc /sys /dev /dev/shm /dev/pts /dev/mqueue /tmp
@@ -301,7 +302,7 @@ guest/容器内 agent 执行: mount -t nfs -o fg,hard <宿主网关IP>:/<volumeN
 
 - 配额：后端执行（JuiceFS 目录配额 / CephFS quota）,nfsd 层不做拦截
 - 挂载失败属 sandbox 创建失败（FAILED,带明确 reason）
-- nftables：sandbox → 宿主网关 NFS 端口的 accept 规则仅对挂了 shared-fs 卷的
+- iptables：sandbox → 宿主网关 NFS 端口的 accept 规则仅对挂了 shared-fs 卷的
   sandbox 插入（per-sandbox 链）
 
 **不做**：sandbox 间实时协作锁语义——共享写一律经后端文件系统落盘保证一致性。
@@ -323,16 +324,17 @@ fc 档两个平台工件,均由 CI 构建、S3 分发、noded 启动时按版本
 
 ## 4. 镜像模块 ⚠️
 
-### 4.1 overlaybd 直驱主路线 📐
+### 4.1 overlaybd 直驱路线 ⚠️
 
-image 模块直接管理 overlaybd ublk daemon（不经 containerd snapshotter）：
+image 模块直接管理 overlaybd（经 TCMU，不经 containerd snapshotter）：
 按镜像元数据（控制面下发的层清单 + S3 blob 引用）生成 overlaybd config →
-ublk 设备就绪 → 交给 runtime。实证细节参考本地 AgentENV 源码
-（`src/overlaybd/`、crates 下 uvm-ublk,以及 registryfs_v2 远端直读模式）。
+TCMU 块设备就绪 → 交给 runtime。它**已接进 `image.Provider`(`OverlaybdProvider`)**,
+用 `--fc-overlaybd` 开启、真机验证过;dm-snapshot 仍是默认后端。实证细节参考本地
+AgentENV 源码（`src/overlaybd/`、crates 下 uvm-ublk,以及 registryfs_v2 远端直读模式）。
 
 | 格式 | 消费方式 | 场景 |
 |---|---|---|
-| overlaybd（块级，DADI） | fc 档：ublk 块设备 virtio-blk 直挂;容器档（P5）：同设备挂载 | 主路径;blob 存 S3，ublk 按需 range-read |
+| overlaybd（块级，DADI） | fc 档：TCMU 块设备 virtio-blk 直挂;容器档（P5）：同设备挂载 | 主路径;blob 存 S3，经 TCMU 暴露、按需 range-read |
 | 标准 OCI（gzip 层） | containerd overlayfs（仅容器档,P5） | 兜底：未转换镜像 |
 
 - image-service（control plane 逻辑模块，见 4.4）负责把镜像**离线转换**为
@@ -376,58 +378,88 @@ image-service 是 **control plane 的逻辑模块**（`internal/control/image`�
 
 转换任务 CPU 重,量大后可拆独立 worker 池水平扩展（接口已按模块边界隔离）。
 
-## 5. 网络模块 📐
+## 5. 网络模块 ✅
 
-> **整节没有任何代码。** `grep -rn 'nftables\|netns\|veth\|bean0'` 全仓库为 0。
-> sandbox 当前**没有网络** —— fc 档只有 vsock 通到 agent,那是控制通道。
-> 下面是设计意图,不是当前行为;安全语义见 security-and-startup.md §A4。
+> **网络已实现并交付**,代码在 `internal/node/network/`(分配、pool、provision、
+> rules、`setup_linux.go`、restore),外加 `runtime/fc_linux.go` 里的 tap 注册,
+> 以及 `internal/node/portforward.go` 的数据面路由。下面描述的是**已建成**的行为;
+> 完整推导与两条在硬件上验证过的性质见 [network.md](network.md),安全语义见
+> security-and-startup.md §A4。
+>
+> 注意形态**不是**本节原先写的「桥 + 节点本地 IPAM」草图。没有 `bean0` 桥,也没有
+> 位图分出的每节点子网。Firecracker 恢复快照会带回原 IP,所以每个 sandbox 拿到
+> **自己的** netns 和一个**恒定**的 guest 地址,只有宿主端随索引变化。规则用的是
+> **iptables**(经 `iptables-restore` 批量下发),不是 nftables。
 
+### 5.1 数据面 ✅
 
-### 5.1 数据面 📐
+每个 sandbox 有自己的 netns,里面一张 VMM 挂载的 tap 和一对通向宿主的 veth。guest
+地址在所有 sandbox 间相同 —— 这正是恢复快照后无需重新编址即可继续工作的前提
+(network.md §1–§2)。
 
 ```
-创建：
-1. ip netns add bean-<id>
-2. veth 对：veth-<id> (host) ↔ eth0 (netns)，母桥 bean0 (10.100.0.1/24)
-3. netns 内配 IP（节点本地 IPAM，位图分配）、默认路由 → 10.100.0.1
-4. resolv.conf 指向节点 DNS 转发器（可审计;上游可配,默认 1.1.1.1）
-5. /etc/hosts 注入 sandbox hostname
+Setup（network/setup_linux.go，每 sandbox 一次）：
+1. ip netns add bean-<idx>
+2. netns 内 tap "beantap0"（每次同名，快照才能找回它记录的设备）
+     地址 172.31.0.1/30  ← guest 的网关
+3. veth 对 bnv<idx> (host) ↔ bnp<idx> (netns)，一端移入 netns
+     host  端 10.<idx/64>.<idx%64*4>.1/30
+     netns 端 10.<idx/64>.<idx%64*4>.2/30   ← 每 sandbox 唯一，一条 /30 一个链路
+4. netns 内默认路由 → 宿主链路 IP；net.ipv4.ip_forward=1
+5. iptables 规则（见 §5.2），按 scope 用 iptables-restore 下发
 ```
 
-### 5.2 nftables 规则（每节点一套 + per-sandbox 链）📐
+guest 在 eth0 上配恒定的 `172.31.0.2/30`(选在 Docker 默认段尾部以尽量避免冲突 ——
+network.md §2)。宿主端由 sandbox 的槽位索引推导;`/30` 步长为 4,所以每个
+`10.<a>.<b>.0/30` 都是独立的点对点链路。pool 自身不持有权威内存态:noded 重启后靠
+列举宿主上实际存在的 netns 重建,因此复用的索引绝不会把同一地址发给两个存活的
+sandbox(network.md §3,`network/alloc.go` + `pool.go`)。
+
+DNS:guest 的解析器由 guest 内的 agent 处理,而不是桥侧的转发器 —— 用宿主的上游
+解析器,可用 `--guest-dns` 配置(network.md §6)。这条路径上没有 `bean0`、没有节点
+DNS 转发进程,也不注入 `/etc/hosts`。
+
+### 5.2 iptables 规则（两层 NAT + FORWARD DROP，每 sandbox 一套）✅
+
+规则在 `network/rules.go` 里表达为数据,由 `setup_linux.go` 用 `iptables-restore`
+下发(每 scope 批量一次)。分两个 scope,因为一个离开 guest 的包会被看到两次且源
+地址不同,而 FORWARD → POSTROUTING 的先后次序正是让过滤器正确的关键
+(network.md §5、§5a)：
 
 ```
-table inet bean {
-  chain forward {
-    # sandbox → 公网：SNAT 出网（masquerade 在 nat 表）
-    iifname "bean0" oifname != "bean0" ct state new accept
-    # 禁止 sandbox ↔ sandbox
-    iifname "bean0" oifname "bean0" drop
-    # 禁止访问节点内网段与元数据服务
-    iifname "bean0" ip daddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.169.254 } drop
-      # 注：10.100.0.1（网关自身）与 DNS 例外在前置 accept 规则处理
-  }
-  chain input {
-    # 仅放行 sandbox → 网关的 DNS/agent 必要端口
-  }
-}
+netns 内（源仍是 guest，172.31.0.0/30）：
+  filter FORWARD  -s 172.31.0.0/30 -d <denied> -j DROP     (insert，排在 Docker 规则之前)
+  filter FORWARD  -s 172.31.0.0/30 -j ACCEPT              (append，在 DROP 之下)
+  nat POSTROUTING -s 172.31.0.0/30 -o bnp<idx> -j MASQUERADE
+
+宿主上（源已是 veth 链路，10.<a>.<b>.0/30）：
+  filter FORWARD  -s 10.<a>.<b>.0/30 -j ACCEPT            (insert)
+  filter FORWARD  -s 10.<a>.<b>.0/30 -d <denied> -j DROP  (insert，压在最上)
+  nat POSTROUTING -s 10.<a>.<b>.0/30 -o <uplink> -j MASQUERADE
 ```
 
-- 前提：启用 `br_netfilter`（桥接流量过 forward 链,否则同桥 sandbox↔sandbox
-  二层直通绕过规则）;节点 bootstrap 脚本固化该 sysctl
-- 带宽/连接数：per-sandbox tc 出口限速（配置项,默认 100 Mbps）+ conntrack
-  连接数上限（防扫描/DDoS 放大）
-- `networkPolicy: none` → netns 无默认路由，纯本地回环（宿主 NFS/网关地址除外,见 §3.3）
-- `allow-list`（预留）→ per-sandbox 链插入目标 CIDR accept
-- 端口暴露不开入站 DNAT——regional proxy → noded sbxproxy → 直连 sandbox IP
-  （见 api-design.md §6.2）;节点防火墙入站仅对 control plane/proxy 开放
+- `<denied>` 是 `169.254.0.0/16`(云元数据 + 链路本地)、`10.0.0.0/8`、
+  `172.16.0.0/12`、`192.168.0.0/16` —— 按**目的地址**拒绝,因此出公网的流量
+  (dst 8.8.8.8)不命中任何 DROP,而节点内网段与元数据服务不可达。已由 live guest
+  上的规则计数器验证。
+- 无需给元数据开例外:应用 `/mmds/config` 后,VMM 自己在 tap 上应答
+  `169.254.169.254`,位于转发路径之下,该请求根本不进这些链(实测 —— 见 `SetupPlan`
+  注释)。
+- DROP 用 **insert**(插到链首),压在 Docker 在共享宿主上已装的 ACCEPT 之前;删除时
+  精确指名该规则(`-D` 配同样参数,绝不用 `-F`),因为每条规则都精确匹配本 sandbox 的
+  `/30`。Teardown 逆序回放 setup。
+- **仍是设计意图、尚未实现(📐):** per-sandbox tc 出口限速、conntrack 连接数上限、
+  两层封装后的 MTU 调优,以及 IPv6(本包不给 guest 任何 IPv6 地址,这正是 v4-only 拒绝
+  列表足够的前提)。见 network.md §8。
 
-### 5.3 fcRuntime 兼容 📐
+### 5.3 fcRuntime 兼容 ✅
 
-当前 FC 不配 tap 网卡,`fcMachineConfig` 里没有网络设备。
-
-
-FC microVM 用 tap 设备替代 veth 的 netns 端，同样挂 bean0 桥，nftables 规则不变。
+FC **配了** tap 网卡(`runtime/fc_linux.go`):在 InstanceStart 之前,noded 通过
+`/network-interfaces/<id>` 注册 tap,`HostDevName` 设为 layout 的 tap 名,并应用
+`/mmds/config` 让 VMM 在该接口上提供元数据服务。VMM 在 sandbox 的 netns 内 exec
+(tap 就在那儿),所以 fc 档用 tap 替代 veth 的 netns 端 —— 没有 `bean0` 桥,上面的
+iptables 规则才是隔离 sandbox 彼此的手段。layout 为 nil(未配网络的节点)则保持此前
+「完全没有网卡」的行为,而不是让启动失败。
 
 ## 6. beand ✅
 
@@ -539,13 +571,13 @@ BYOC：客户节点出向连托管接入层即可（443,零证书配置）,身�
 4. 全量上报，恢复心跳
 ```
 
-netns/veth/nftables 链均带 `bean-<id>` 命名规约，孤儿扫描按前缀比对存活 sandbox 集合。
+netns/veth/iptables 链均带 `bean-<id>` 命名规约，孤儿扫描按前缀比对存活 sandbox 集合。
 
 ### 7.3 GC 触发器 ⚠️
 
 | 对象 | 策略 |
 |---|---|
-| sandbox idle | noded 本地 idle 检测（lifecycle 随 create 下发）:无 exec/端口/文件活动持续 idleTimeout → 执行 onIdle(pause/kill) 并发 event——不依赖控制面在线 |
+| sandbox idle | noded 本地 idle 检测（lifecycle 随 create 下发）:无 exec/端口/文件活动持续 idleTimeout → 执行 onIdle(pause/delete) 并发 event——不依赖控制面在线 |
 | PAUSED 滞留 | 默认不回收;管理员可选开启全局策略（P4 后由 snapshot 归档替代） |
 | 镜像/chunk 缓存 | §4.2 水位 LRU |
 | exec 会话 | 断连 60s 无重连 |
@@ -560,7 +592,7 @@ netns/veth/nftables 链均带 `bean-<id>` 命名规约，孤儿扫描按前缀�
   - `bean_node_creates_total{outcome,runtime}`、`bean_node_destroys_total{outcome,runtime}`
   - `bean_node_idle_actions_total{action,outcome}` idle 回收动作
   - `bean_node_sandboxes{state}`、`bean_node_requests_in_flight`（scrape 时重算）
-  - 待补：缓存命中率、nftables 规则数、IPAM 使用率
+  - 待补：缓存命中率、iptables 规则数、IPAM 使用率
 - per-sandbox 资源时序（cgroup/FC stats → OTLP,attributes 带 sandbox_id/labels）;
   agent 可选透传 sandbox 内应用 OTLP（localhost:4317 → vsock 转发）
 - 结构化日志（zap），request_id 透传

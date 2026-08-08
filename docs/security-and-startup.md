@@ -13,32 +13,33 @@ What has to be defended:
 | Threat | Consequence | Line of defence |
 |---|---|---|
 | Kernel escape | Take over the node | FC microVM / gVisor isolation tier (A2) |
-| Lateral movement | Reach other sandboxes / internal services | 📐 the network stack is unimplemented, sandboxes currently have no network (A4) |
+| Lateral movement | Reach other sandboxes / internal services | ✅ per-sandbox netns + FORWARD DROP of RFC1918/169.254; sandbox-to-sandbox has no route (A4, [network.md](network.md) §5a) |
 | Credential theft | Obtain S3/control-plane credentials | Zero long-lived credentials (A5) |
 | Resource abuse | Mining, fork bombs, filling the disk | ⚠️ the guest kernel limiting itself plus the CoW disk size; a host cgroup around the VMM exists but is off unless `--fc-cgroups` is set (A3) |
-| Egress abuse | Use it as a jump box to attack outward, DDoS | 📐 same as above, unimplemented (A4) |
+| Egress abuse | Use it as a jump box to attack outward, DDoS | ✅ egress-only by default with internal segments + metadata denied; ⚠️ bandwidth/conntrack caps (tc) still to do (A4) |
 | Malicious images | Supply-chain poisoning | Image provenance control (A6) |
 | The agent's attack surface | Attack the agent from inside the container → noded | Minimal API + socket permissions (A7) |
 
 ### A2. Isolation tiers ⚠️ (an internal mechanism, not exposed outward; the tier-selection rules are in architecture.md D3)
 
-**Only the `fc` and `local` tiers exist today.** `local` is a process-level sandbox for
-development and CI only, with **no isolation whatsoever**; it is not in the table below and
-should not be used for untrusted code. The container tiers (runc/runsc) are implemented
-(`--runtime runsc|runc`); runsc is the one to reach for with untrusted code, since runc
-shares the host kernel.
+**Three tiers are wired up: `fc`, `oci` (runsc/runc), and `local`.** `local` is a
+process-level sandbox for development and CI only, with **no isolation whatsoever**; it is not
+in the table below and should not be used for untrusted code. The container tiers (runc/runsc)
+are implemented via the OCI tier (`--runtime runsc|runc`, `oci_tier_linux.go`) and do not go
+through containerd; runsc is the one to reach for with untrusted code, since runc shares the
+host kernel.
 
 | Actual tier | Runtime | Escape defence | When it is used |
 |---|---|---|---|
 | `fc` (the default main tier) | Firecracker microVM | A hardware virtualisation boundary, with the smallest host-facing surface (FC's device model is minimal, plus built-in seccomp). **jailer is not wired up yet**, see A3 | KVM nodes — regular eval/rollout |
-| `runsc` 📐 | gVisor | A userspace kernel intercepts syscalls, and the host kernel surface is ≈70 syscalls | The degraded tier for nodes without KVM. **Unimplemented** |
-| `runc` 📐 | runc | namespace/seccomp/caps only | Internal trusted tasks + GPU (reserved internally). **Unimplemented** |
+| `runsc` ✅ | gVisor | A userspace kernel intercepts syscalls, and the host kernel surface is ≈70 syscalls | The degraded tier for nodes without KVM. **Implemented** (OCI tier, `--runtime runsc`) |
+| `runc` ✅ | runc | namespace/seccomp/caps only | Internal trusted tasks + GPU (reserved internally). **Implemented** (OCI tier, `--runtime runc`) |
 
 - In the fc tier the guest is a real kernel, so gVisor's syscall-compatibility problems do not apply
 - Having runc carry the GPU means **GPU eval is more weakly isolated than the default tier** —
   a separate node pool for GPU nodes plus a tightened image allowlist serve as compensating
   controls; gVisor GPU support (nvproxy) is a P5 evolution item
-- The compatibility regression set for the runsc degraded tier arrives with the P5 container tier; incompatible images are exempted explicitly, never downgraded silently
+- The compatibility regression set for the runsc degraded tier ships with the OCI container tier; incompatible images are exempted explicitly, never downgraded silently
 
 ### A3. Hardening baseline ⚠️
 
@@ -143,25 +144,19 @@ not name its cause.
 - ⚠️ Separate uid/gid for the FC process — implemented, off unless `--fc-vmm-uid` is set
 - ⚠️ Host-side cgroup wrapping the FC process (cpu/mem+swap/pids) — implemented, off unless `--fc-cgroups` is set; requires cgroup v2 and refuses to start on v1
 
-### A4. Network security 📐
+### A4. Network security ✅
 
-**The entire section is unimplemented.** `grep -rn 'nftables\|netns\|veth\|bean0'` across the
-repo returns 0 — there is no network module, and a sandbox currently has no network capability
-at all (in the fc tier there is only vsock to the agent, and that is a control channel, not a
-data network).
+**The network stack is implemented** (`internal/node/network/`, `internal/node/portforward.go`,
+`internal/node/dial.go`): per-sandbox netns + address pool + two layers of MASQUERADE +
+FORWARD DROP + DNS, with rule counters verified on a live guest. See
+[network.md](network.md) and noded-design.md §5. The security semantics below are in force,
+except for the two ⚠️ refinements noted:
 
-That means every line below is a **plan**, not a current security promise. In particular
-"egress-only by default" — right now there is neither egress nor any isolation rule, because
-there is no network stack at all. Do **not** read this section as "the sandbox is already
-confined by these rules".
-
-See noded-design.md §5 (equally unimplemented). The planned security semantics:
-
-- `egress-only` by default: the public internet is reachable (pulling dependencies is a hard requirement for eval), and what is **forbidden** is: sandbox-to-sandbox access, the node's internal segments (RFC1918), and cloud metadata (169.254.169.254 / fd00:ec2::254)
-- Per-sandbox egress bandwidth limiting (tc, 100 Mbps by default) + a conntrack connection cap (against port scanning / DDoS amplification)
+- `egress-only` by default: the public internet is reachable (pulling dependencies is a hard requirement for eval), and what is **forbidden** is: sandbox-to-sandbox access, the node's internal segments (RFC1918), and cloud metadata (169.254.169.254 / fd00:ec2::254). ✅ enforced by FORWARD DROP rules inserted ahead of the host's Docker ACCEPT, plus one netns per sandbox with no route between them ([network.md](network.md) §5a)
+- ⚠️ Per-sandbox egress bandwidth limiting (tc, 100 Mbps by default) + a conntrack connection cap (against port scanning / DDoS amplification) — **still to do**; the isolation rules above do not depend on it
 - The `none` policy serves purely offline eval: no default route, ruling out data exfiltration (useful for model-cheating detection); volumes do not break that promise — a dataset volume is a local block device and a shared-fs volume goes over host NFS (the traffic only reaches the host gateway and never leaves the node), and both are orthogonal to "reaching the public internet". If even host shared storage has to be forbidden, simply mount no volume at creation
 - DNS goes through a node forwarder, which can record an audit log
-- Zero inbound exposure: no DNAT, and the only ingress is the application-layer path proxy → noded → agent
+- Zero inbound exposure: no DNAT, and the only ingress is the application-layer path proxy → noded → agent. Ingress works without a host-side listener — noded enters the sandbox's netns and connects from inside, so the guest address never has to be routable from elsewhere ([network.md](network.md) §5)
 
 ### A5. Credentials and the trust chain ⚠️
 
@@ -181,8 +176,11 @@ Control plane ↔ noded: one-way TLS (terminated at the cloud managed gRPC ingre
    + an application-layer node token (short-lived, held in memory, bound to nodeId — the
    control plane validates that a node can only operate on its own sandboxes); registration
    uses a bootstrap token, and credential tiering is in noded-design §7.0
-noded ↔ agent: container tier over a unix socket (0700, on the host reachable only by the
-   noded user; inside the container the mount point is readable only by root); fc tier over
+noded ↔ agent: local tier over a unix socket (0700, on the host reachable only by the
+   noded user; inside the container the mount point is readable only by root); oci tier over
+   TCP inside the sandbox's netns (under gVisor a host unix socket lives inside the Sentry and
+   is unreachable, so the node dials a per-sandbox veth address in the netns — see
+   `oci_linux.go`); fc tier over
    vsock (on the host the FC API socket is reachable only by noded, and inside the guest
    /dev/vsock is by default openable only by root — a non-root user process cannot call the
    agent API)
@@ -197,7 +195,7 @@ sandbox token (JWT): the signing key is held by the control plane, bound to sand
 
 ### A7. Controlling the agent's attack surface ✅
 
-- **On a sandbox with no networking, the agent is unreachable from inside by construction.** The container tier's agent is on a unix socket outside the guest's mount namespace, and an fc sandbox without `--guest-subnet` is on vsock, which is a host-to-guest address family no guest process can dial. Neither depends on a credential.
+- **On a sandbox with no networking, the agent is unreachable from inside by construction.** The local tier's agent is on a unix socket outside the guest's mount namespace, and an fc sandbox without `--guest-subnet` is on vsock, which is a host-to-guest address family no guest process can dial. Neither depends on a credential. (The oci tier reaches its agent over TCP inside the sandbox's own netns — under gVisor a host unix socket lives inside the Sentry and is unreachable — so it falls under the networked case below, `oci_linux.go`.)
 - **On a networked fc sandbox, that is no longer true, and a per-sandbox token is what replaces it.** The agent listens on TCP (`10001`) so that one addressing scheme covers both it and any port a user exposes — which is what makes port exposure and the data plane one mechanism. Any process in the sandbox can now connect: **measured**, a probe inside the guest reaches `127.0.0.1:10001` successfully.
 
   What holds instead is a token minted per sandbox, whose **hash** is published to the guest through MMDS. Three properties matter, and all three were verified on hardware:
@@ -219,7 +217,7 @@ sandbox token (JWT): the signing key is held by the control plane, bound to sand
 
 - Audit every write operation on the API (who/what/when, Postgres + S3 archive)
 - Minimise the node: a dedicated OS image, no superfluous services, an assessment of running noded non-root (P3; containerd, if enabled, P5)
-- Run a sandbox-escape regression suite every cycle (mainly the FC/KVM attack surface; once the container tier arrives, add a subset of the gVisor exploit suite)
+- Run a sandbox-escape regression suite every cycle (mainly the FC/KVM attack surface; the container tier is implemented, so add a subset of the gVisor exploit suite)
 
 ---
 
@@ -249,7 +247,7 @@ absence of the VM boot item):
 | API + scheduling | 50 ms | 50 ms | Scheduler state in memory, no synchronous outbound calls |
 | Command reaches noded | 50 ms | 50 ms | Direct push over gRPC (control plane → noded) |
 | Image ready | ~0 (already cached) | 2–6 s | overlaybd: pull only metadata + the hot startup blocks (see B2) |
-| rootfs device ready | 100 ms | 200 ms | ublk device assembly, overlaybd metadata cache |
+| rootfs device ready | 100 ms | 200 ms | TCMU device assembly, overlaybd metadata cache |
 | netns/network | 50 ms | 50 ms | Batched atomic veth/nftables operations; IPAM as an in-memory bitmap |
 | Sandbox start | 200–500 ms | 200–500 ms | FC microVM start ≈125ms + kernel boot; container tier runc ≈100ms / runsc ≈300ms |
 | agent ready | 100 ms | 100 ms | A static binary, no dependency loading |
@@ -290,7 +288,7 @@ Image publishing path (image-service, once, offline):
 OCI image → overlaybd convertor (per-layer incremental conversion) → block-device-layer blobs → S3
                                      │
 Node consumption path:               ▼
-CreateSandbox → overlaybd/ublk assembles the block device (a few MiB of metadata) → mountable immediately
+CreateSandbox → overlaybd (over TCMU) assembles the block device (a few MiB of metadata) → mountable immediately
              → container tier mounts overlayfs / fc tier attaches virtio-blk straight to the guest
              → IO access triggers on-demand block range-reads from S3 → local obd-cache
 ```

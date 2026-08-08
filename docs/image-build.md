@@ -23,7 +23,7 @@ e2b-style per-image template build. But having no build capability at all leaves
 
 | Source | Origin | Conversion | State progression |
 |---|---|---|---|
-| `imported` | an OCI ref given by the user | tar.gz layer → LSMT block device, needs the convertor | `PENDING → CONVERTING → READY` |
+| `imported` | an OCI ref given by the user | tar.gz layer → ext4 image/block device, needs the convertor | `PENDING → CONVERTING → READY` |
 | `built` | built by the platform | see below | `BUILDING → CONVERTING → READY` (the commit path skips CONVERTING) |
 
 **On whether "built" means zero conversion — it depends on the build path**, and this has to be

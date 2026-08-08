@@ -70,7 +70,7 @@ POST /sandboxes
   "lifecycle": {                        // optional; default = run forever
     "idleTimeout": "300s",              //   null/absent = never; "0s" = fires as soon as
                                         //   activity ends
-    "onIdle": "pause"                   //   pause (default) | kill
+    "onIdle": "pause"                   //   pause (default) | delete
   },
   "labels": { "eval-run": "swebench-0731", "task": "django-12345" },
   "networkPolicy": "egress-only",       // egress-only|none|allow-list (reserved)
@@ -85,36 +85,55 @@ POST /sandboxes
 GET    /sandboxes/{id}                       → sandbox detail (state, runtime, nodeId, createdAt, lifecycle, lastActivityAt, endpoints)
 GET    /sandboxes?label=eval-run%3Dswebench-0731&state=RUNNING&pageToken=&pageSize=100
 DELETE /sandboxes/{id}                       → 202, destroyed asynchronously; ?force=true skips graceful
-PATCH  /sandboxes/{id}/lifecycle { "idleTimeout": "600s", "onIdle": "kill" }   → adjust at runtime
+PATCH  /sandboxes/{id}/lifecycle { "idleTimeout": "600s", "onIdle": "delete" }   → adjust at runtime  📐 unimplemented (SDK set_lifecycle likewise)
 POST   /sandboxes/{id}/pause                 → 202 → PAUSED
 POST   /sandboxes/{id}/resume                → 202 → RUNNING
 POST   /sandboxes/{id}/snapshot  { "name": "after-setup", "keepRunning": true }
                                              → 202 { "snapshotId": "snap_..." }
-POST   /sandboxes/{id}/start                 → start the original entrypoint (manual start after autoStartCmd=false)
+POST   /sandboxes/{id}/start                 → start the original entrypoint (manual start after autoStartCmd=false)  📐 unimplemented
+POST   /sandboxes/{id}/commit                → 202; commit the running rootfs into an image
 POST   /sandboxes/{id}/fork     { "count": 3, "labels": {...} }    // separate API (fc tier, P4)
        → 202 { "sandboxes": [ ...N new sandboxes... ] }
        // Semantics: take an instantaneous CoW snapshot of a running sandbox and clone N
        // independent instances (no persistent snapshot object is produced; use /snapshot
        // if you want one kept). The container tier returns 501.
-       // NOTE: this is a convenience over the snapshot+restore pair, not a new capability.
+       // NOTE: this is a convenience over snapshot + create-from-snapshot, not a new capability.
        // POST /snapshot then N x POST /sandboxes{snapshot} already yields N independent
        // sandboxes today; fork saves the persistent object and the round trip.
        // See snapshot-resume.md 4.5
 ```
 
+**There is one creation endpoint, and it branches internally.** `POST /sandboxes` takes
+*either* an `image` *or* a `snapshot` (mutually exclusive). Which one is present decides how
+the guest comes up, and nothing else about the call changes:
+
+- **from an image** — a cold boot. The runtime's `Create` path assembles a rootfs and boots
+  the guest kernel (vm-assembly.md).
+- **from a snapshot** — the runtime's `Fork` path: it seeds the CoW layer and brings the guest
+  back through UFFD page-in instead of booting. This path is what earlier docs call *restore*;
+  it is an internal branch of create, not a separate call or endpoint. It always produces a
+  **new** sandbox with a new id — never a revival of the one that was snapshotted — and calling
+  it N times is how one snapshot fans out to N independent sandboxes.
+
+So "restore" names an internal path (`rt.Fork`, as opposed to the cold-boot `rt.Create`), not
+a user-facing verb: there is no `/restore`. `resume` is a different thing entirely — it wakes a
+PAUSED sandbox whose process never left (§3.1 `resume`), creating nothing. The distinction is
+drawn in full in [snapshot-resume.md](snapshot-resume.md) §0.
+
 The sandbox detail response carries `runtime: fc|runsc|runc` (the actual tier, for troubleshooting).
 
-Batch (frequent in eval scenarios):
+Batch (frequent in eval scenarios) 📐 unimplemented — no batch route exists; loop the single-item endpoints:
 
 ```
-POST /sandboxes:batchCreate   { "requests": [ ... ≤100 ... ] }
+POST /sandboxes:batchCreate   { "requests": [ ... ≤100 ... ] }    // 📐
 → 207 per item { index, sandbox | error }     // partial-success semantics
-DELETE /sandboxes?label=eval-run%3Dswebench-0731    → batch destroy, 202 + task count
+DELETE /sandboxes?label=eval-run%3Dswebench-0731    → batch destroy, 202 + task count    // 📐
 ```
 
 ### 3.2 Exec ⚠️
 
-> Synchronous exec and streaming exec are both shipped; **PTY is unimplemented**.
+> Only synchronous exec is shipped; **streaming/PTY exec over WebSocket is unimplemented**
+> (the gateway exposes no WS route and there is no ExecStream RPC — see sdk-cli-design.md).
 
 
 ```
@@ -128,8 +147,10 @@ POST /sandboxes/{id}/exec          // synchronous, suits a single eval command
 → 200 { "exitCode": 1, "stdout": "...", "stderr": "...", "truncated": false, "durationMs": 42150 }
 ```
 
+📐 **unimplemented** — the block below is design intent; no such route is served today.
+
 ```
-WS /sandboxes/{id}/exec/ws?pty=true&cols=120&rows=40
+WS /sandboxes/{id}/exec/ws?pty=true&cols=120&rows=40    // 📐
 ```
 
 WebSocket subprotocol (JSON frames):
@@ -152,14 +173,20 @@ PUT  /sandboxes/{id}/files?path=/workspace/patch.diff     // body ≤4MiB sent d
      ?mode=0644&mkdirs=true
 GET  /sandboxes/{id}/files?path=/workspace/report.json    // ≤4MiB returned directly
 GET  /sandboxes/{id}/files/ls?path=/workspace             → [{name,size,mode,mtime,isDir}]
-POST /sandboxes/{id}/files:uploadUrl   {"path": "...", "sizeBytes": 123456789}
+DELETE /sandboxes/{id}/files?path=...
+```
+
+The presigned two-stage upload/download below is 📐 **unimplemented** — today the direct
+PUT/GET above is the only file path:
+
+```
+POST /sandboxes/{id}/files:uploadUrl   {"path": "...", "sizeBytes": 123456789}    // 📐
      → { "url": "<presigned PUT>", "commit": "/files:commitUpload?token=..." }
      // Two-stage: client PUTs to S3 → calls commit → gateway instructs the agent to
      // FetchToSandbox (the agent pulls it to the target path inside the sandbox over a
      // presigned GET)
-POST /sandboxes/{id}/files:downloadUrl {"path": "..."}
+POST /sandboxes/{id}/files:downloadUrl {"path": "..."}    // 📐
      → { "url": "<presigned GET>" }    // noded stages the file to S3, then signs a URL
-DELETE /sandboxes/{id}/files?path=...
 ```
 
 ### 3.4 Ports — no registration step ✅
@@ -168,12 +195,12 @@ Reaching a port inside a sandbox works, and it takes **no API call at all**. The
 travels in the Host header (`{port}-{sandbox}`, §6) and bean-proxy forwards to it. A
 process listening in the sandbox is reachable; one that is not returns 502.
 
-The design below was drafted first and is **not** built, deliberately:
+The design below was drafted first and is **not** built, deliberately (📐):
 
 ```
-POST /sandboxes/{id}/ports    { "port": 8888, "auth": "token" }
-GET    /sandboxes/{id}/ports
-DELETE /sandboxes/{id}/ports/{port}
+POST /sandboxes/{id}/ports    { "port": 8888, "auth": "token" }    // 📐
+GET    /sandboxes/{id}/ports                                       // 📐
+DELETE /sandboxes/{id}/ports/{port}                                // 📐
 ```
 
 It would be a second source of truth for something the guest already decides. Whether a
@@ -213,6 +240,9 @@ POST /images/prewarm   { "refs": ["img:a"], "region": "ap-east-1",
                          "targetNodes": 10, "priority": "high" }
      → { jobId, refs, ready: {ref: nodeCount}, done }
 GET  /images/prewarm/{jobId}      per-image × per-node readiness matrix
+POST /images/build     { ... }    → kick off a remote image build
+GET  /images/build/logs?ref=<ref> build log stream (ref in the query: it contains / and :)
+POST /images/build/cancel { ... } cancel an in-flight build
 ```
 
 `cachedNodes` / `targetNodes` are **operator semantics, deliberately kept out of the
@@ -252,7 +282,7 @@ GET    /volumes?label=...          → includes usage (space/inode consumption)
 GET    /volumes/{id}
 DELETE /volumes/{id}               // 409 VOLUME_IN_USE while a mount is active
 
-POST /sandboxes { ..., "volumes": [
+POST /sandboxes { ..., "volumes": [    // 📐 the inline volumes field is reserved, not yet honoured
   { "volume": "vol_...", "subPath": "run-0731", "mountPath": "/workspace",
     "readOnly": false }
 ] }
@@ -275,10 +305,10 @@ POST   /sandboxes/{id}/snapshot  { "name": "after-setup", "labels": {},
 GET    /snapshots?label=k%3Dv&state=READY   → list
 GET    /snapshots/{id}
 DELETE /snapshots/{id}      // RefCount>0 or has descendants → 409 SNAPSHOT_IN_USE
-POST   /sandboxes    { "snapshot": "snap_..." }   // restore: a NEW sandbox with a new id,
-                                                  // not a revival of the one snapshotted.
-                                                  // Call it N times for N independent
-                                                  // sandboxes from one snapshot
+POST   /sandboxes    { "snapshot": "snap_..." }   // create from a snapshot: a NEW sandbox with
+                                                  // a new id, not a revival of the one snapshotted
+                                                  // (internally the Fork path). Call it N times
+                                                  // for N independent sandboxes from one snapshot
                                                   // image and snapshot are mutually exclusive
                      // incompatible CPU → 409 INCOMPATIBLE_CPU
 ```
@@ -327,7 +357,7 @@ Restore is a `POST /sandboxes` — a creation — while `resume` is a `POST` on 
 Event types: sandbox.lifecycle.{created,running,paused,resumed,stopped,failed,lost,oom}
              + sandbox.snapshot.{ready,failed}
              // stopped corresponds to the STOPPED state (covers explicit DELETE and
-             // onIdle=kill); lost corresponds to losing the node lease
+             // onIdle=delete); lost corresponds to losing the node lease
 Event body:  { "id", "type", "timestamp", "sandboxId", "data": {...}, "version": "v1" }
              // Naming follows e2b (dotted sandbox.lifecycle.* hierarchy) for ecosystem
              // compatibility
@@ -350,6 +380,7 @@ reserve item.
 ```
 GET /sandboxes/{id}/logs?follow=false&tailLines=1000    // agent ring buffer + S3 archive
 GET /nodes                                              // operator surface: node list, capacity, capabilities
+POST /nodes/{id}/drain                                  // operator surface: cordon + drain a node
 GET /metrics                                            // Prometheus format (unauthenticated: local scrape, contains no sandbox content)
     // bean_sandbox_creates_total{outcome}         creation outcome counter
     // bean_sandbox_create_duration_seconds{outcome}  end-to-end creation latency histogram
@@ -492,7 +523,7 @@ implemented by noded and called directly by the control plane as a client).
 | idleTimeout | Behaviour |
 |---|---|
 | absent / null | idle detection off (default), the sandbox keeps running |
-| `"0s"` | fires onIdle the moment activity ends (batch eval: `onIdle: kill`, gone as soon as it is done) |
+| `"0s"` | fires onIdle the moment activity ends (batch eval: `onIdle: delete`, gone as soon as it is done) |
 | `"300s"` | fires onIdle after 5 minutes idle |
 
 - **Idle determination** (local to noded, does not depend on the control plane): no exec
@@ -508,7 +539,7 @@ implemented by noded and called directly by the control plane as a client).
   administrator can opt into global reclamation (off by default); the real long-term answer
   is the P4 snapshot archive: PAUSED past a threshold → state goes to S3, freeing RAM → the
   next access restores it automatically
-- Industry alignment: CubeSandbox v0.5 (on_timeout: pause/kill + transparent wake on the
+- Industry alignment: CubeSandbox v0.5 (on_timeout: pause/delete + transparent wake on the
   data plane) and e2b auto-pause/auto-resume are the same shape; we express "never" as null,
   avoiding the -1/0 magic-number overload
 
@@ -639,7 +670,7 @@ than implementing.
 
 ### 6.4 Lifecycle interlock 📐
 
-- Sandbox destroyed (including onIdle=kill) → gateway revokes the port record → proxy cache
+- Sandbox destroyed (including onIdle=delete) → gateway revokes the port record → proxy cache
   invalidation is pushed → subsequent requests 404
 - PAUSED → triggers a transparent wake and blocks the forwarding; only on wake timeout
   (10s by default) does it return 502 + Retry-After

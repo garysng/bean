@@ -86,7 +86,7 @@ AI evaluation / agent rollout 场景（如 SWE-bench 类任务）的特点：
         └────┬─────┘         └──────────┘         └──────────┘
              │ overlaybd 直驱 + noded 自管 FC 与容器 runtime;不依赖 containerd
         ┌────▼─────────────────────────────┐
-        │  ├── 镜像: overlaybd ublk daemon  │ ← 块级 lazy-pull from S3
+        │  ├── 镜像: overlaybd + TCMU       │ ← 块级 lazy-pull from S3
         │  └── runtime: fc(默认)│runc│runsc │ ← 内部自动分档（D3）
         └────┬─────────────────────────────┘
              │
@@ -129,13 +129,13 @@ microVM（见 D9）——两种形态共享同一条镜像链路，用户无感�
 > (PR #49)—— 但走 TCMU,不是本节描述的 ublk 直驱。见 [status.md](status.md)。
 
 fc 主路径**不引入 containerd**（AgentENV 同款,其源码已在本地 /Users/mac/project/agentenv
-可参考）：noded 直接驱动 overlaybd 的 ublk daemon 组装块设备（S3 backing + 本地
+可参考）：noded 直接驱动 overlaybd（经 TCMU）组装块设备（S3 backing + 本地
 缓存）→ virtio-blk 挂 microVM。containerd 的三项职责在本设计中均有更直接的替代：
 
 | containerd 职责 | 本设计 |
 |---|---|
 | 镜像拉取/content store | blob 在 S3（image-service 离线转换）,元数据控制面下发;registry 不在热路径 |
-| snapshotter | overlaybd ublk daemon 直驱（AgentENV 的 uvm-ublk 实证） |
+| snapshotter | overlaybd 直驱（经 TCMU 暴露块设备；AgentENV 的 uvm-ublk 实证） |
 | task 生命周期 | fc:noded 自管 FC 进程;容器档:noded 直驱 runsc/runc（无 containerd,见下） |
 
 > **已修正。** 容器档**不使用** containerd。这一段写于 overlaybd 尚未接入
@@ -150,9 +150,10 @@ fc 主路径**不引入 containerd**（AgentENV 同款,其源码已在本地 /Us
 原本的理由仍然成立,故保留:runc 生命周期与 overlayfs 组装不值得自研,
 纯 fc 节点可完全不装 containerd。runtime 抽象接口见 noded-design §3。
 
-### D3. 隔离分档 + 节点能力探测 ⚠️
+### D3. 隔离分档 + 节点能力探测 📐
 
-noded 启动时探测节点能力并上报：
+启动时能力探测是计划态,尚未实现。当前档位由 `--runtime` 显式指定,而非探测;
+探测落地后的目标映射:
 
 ```
 ├── /dev/kvm 可用（裸金属 or 嵌套虚拟化 VM）→ [runc, runsc, fc]
@@ -290,11 +291,11 @@ disk-diff 直接取宿主 overlaybd 可写层、guest 内零 union 复杂度。
 
 | 数据 | 方案 |
 |---|---|
-| 镜像 blob | **overlaybd 块级镜像**（层 = 块设备 diff）直存 S3，节点经 ublk 按需 range-read；registry 仅存元数据 |
+| 镜像 blob | **overlaybd 块级镜像**（层 = 块设备 diff）直存 S3，节点经 TCMU 暴露、按需 range-read；registry 仅存元数据 |
 | 节点缓存 | 本地 NVMe 作为 S3 之上的块 chunk LRU 缓存；裸金属（大盘）与云 VM（小盘）仅命中率差异，架构统一 |
 | eval 产物 | agent/noded 经 presigned URL 直推 S3（control plane 签发，节点不持长期凭证） |
 | 大文件下载 | API 返回 presigned URL 重定向，不过 gateway 转发 |
-| 快照（P3–P4） | FC memory snapshot / rootfs diff 落 S3，支持跨节点 **restore**（在任意节点造出一个新 sandbox;resume 是同进程同节点的,见 snapshot-resume.md §0） |
+| 快照（P3–P4） | FC memory snapshot / rootfs diff 落 S3，支持跨节点 **从快照创建**（在任意节点造出一个新 sandbox,内部走 restore/Fork 路径;resume 是同进程同节点的,见 snapshot-resume.md §0） |
 | 卷 | shared-fs 卷后端（JuiceFS on S3）宿主挂载 + nfsd 导出（见 D10）;dataset 卷预留 |
 
 选 overlaybd（块级，DADI/阿里，AgentENV 已在 FC 场景验证）而非 Nydus（文件级）的关键原因：**块设备链路同时服务容器档（overlaybd-snapshotter → overlayfs）与 microVM 档（virtio-blk 直挂 guest），一条镜像链路通吃全部 runtime 档位**；Nydus 的文件系统语义进不了 microVM，FC 档需另走 virtiofs（FC 支持弱）。Nydus 保留为容器档备选。
@@ -326,7 +327,9 @@ eval 镜像任意、不可假设内含工具链。注入方式按档位：
 
 ### D6. 网络：节点内 NAT，取裸金属/云 VM 最大公约数 📐
 
-> **未实现**。sandbox 当前没有网络栈,见 noded-design §5。
+> **已实现**(network.md、noded-design §5):每个 sandbox 有自己的 netns、tap 和出网,
+> 元数据段与 RFC1918 默认拒绝。注意实现形态与下面这张早期草图不同 —— 没有 `bean0` 桥、
+> 没有节点子网,规则用 iptables 而非 nftables,详见 noded-design §5。
 
 ```
 sandbox netns ←veth→ 节点 bridge → SNAT 出网
@@ -511,7 +514,7 @@ RUNNING,restore 造出另一个。见 [snapshot-resume.md](snapshot-resume.md) �
 
 目标：P50 < 2s（镜像已缓存）/ P50 < 10s（lazy-pull 冷镜像）。
 
-1. **lazy-pull**：overlaybd + ublk 块级按需加载，启动只需元数据 + 热块，运行中按需 range-read S3
+1. **lazy-pull**：overlaybd + TCMU 块级按需加载，启动只需元数据 + 热块，运行中按需 range-read S3
 2. **节点缓存**：chunk 级 LRU，S3 为 source of truth，节点盘可随意 GC
 3. **prewarm API**:评测批次开始前预热镜像到目标节点
 4. **镜像亲和调度**：天然提升缓存命中
@@ -546,7 +549,7 @@ bean/
 │   └── bean-proxy/         ✅ 进入 sandbox 的反向代理(按 Host 路由)
 ├── internal/
 │   ├── control/            ✅ api / scheduler / store / snapshot / s3
-│   ├── node/               ✅ manager / runtime / image / vsock（无网络模块）
+│   ├── node/               ✅ manager / runtime / image / vsock / network（每 sandbox netns + tap + NAT）
 │   ├── beand/              ✅ sandbox 内 daemon 实现
 │   ├── obs/                ✅ OTel tracing + gRPC 拦截器
 │   ├── logging/            ✅ slog 结构化日志

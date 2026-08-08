@@ -262,7 +262,7 @@ message Lifecycle {
   // 0 = unset (never idle out); -0 semantics avoided: use has_idle_timeout.
   bool has_idle_timeout = 1;
   int64 idle_timeout_seconds = 2;
-  string on_idle = 3; // pause|kill
+  string on_idle = 3; // pause|delete
 }
 
 message SandboxStatus {

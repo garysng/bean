@@ -16,9 +16,10 @@ agent, CLI, SDK — with no Kubernetes and no containerd on the hot path.
 
 > **Status: working system, incomplete platform.** The microVM tier boots real
 > Firecracker VMs on real hardware, and every number below is measured rather
-> than projected. The container tiers (runc/gVisor) are unimplemented and the VMM
-> is not yet confined by a jailer. Read [What works](#what-works) before planning
-> around it.
+> than projected. The container tiers (runc/gVisor) run too, driving the OCI
+> runtime directly with no containerd, though the microVM tier is the tested
+> path; the VMM is not yet confined by a jailer. Read [What works](#what-works)
+> before planning around it.
 
 ---
 
@@ -45,7 +46,7 @@ Measured on an AMD EPYC 7542 (Zen 2) host, guest kernel 6.1.102, Alpine 3.20.
 ### Lifecycle
 
 ```
-create → exec → cp → pause → resume → snapshot → restore → destroy
+create → exec → cp → pause → resume → snapshot → create-from-snapshot → destroy
 ```
 
 | operation | measured | notes |
@@ -109,6 +110,10 @@ checkpoint fan out to many sandboxes without collisions.
   AES-256-GCM at rest), prewarm with image-affinity scheduling
 - **Builds** — Dockerfile through BuildKit with streaming logs and cancellation,
   and `commit` to freeze a running sandbox's filesystem into a reusable base image
+- **Container tiers** — `--runtime runc` or `--runtime runsc` (gVisor) drive the
+  OCI runtime directly, no containerd, sharing the microVM tier's rootfs
+  providers; a third real tier alongside `fc` and the dev-only `local`. The
+  microVM tier stays the default and the tested path
 - **`fork`** — N independent sandboxes from one source, one checkpoint per batch,
   the source left running
 - **Scheduling** — two-level placement; commitments persisted so replicas cannot
@@ -134,7 +139,6 @@ checkpoint fan out to many sandboxes without collisions.
 | | |
 |---|---|
 | jailer chroot | 📐 The VMM drops to an unprivileged uid, runs in a per-sandbox cgroup, and has its own pid, mount and network namespaces by default. What jailer would add on top is a `chroot` and a device allowlist — [#20](https://github.com/garysng/bean/issues/20) phase 2, and probably not the right shape |
-| Container tiers (runc/gVisor) | 📐 microVM, plus a no-isolation `local` tier for development, are the only options |
 | Volumes | 📐 |
 | Per-port access control | 📐 Any port on a sandbox is reachable by anything that can reach bean-proxy — [#50](https://github.com/garysng/bean/issues/50) |
 | overlaybd | ⚠️ Wired in and measured on one host. **3.32x less disk** for three images sharing a base, and a shared layer converted once per node rather than once per image (0.49 s of CPU for the second image against 2.24 s). With layers published to an object store a create is **1.3 s against dm-snapshot's 14.3 s**; a *cold* create is unchanged, and cannot be improved — a gzipped tar has no block index to seek into, so the first encounter anywhere always converts. Opt-in via `--fc-overlaybd`; dm-snapshot remains the default. **Under 256 concurrent creates on a 128-core host it is 4.2x faster on rootfs setup** (3.809 s -> 0.908 s) and 1.9x on throughput (47.5 -> 88.0 creates/s), because dm-snapshot forks `losetup`/`dmsetup` per sandbox while overlaybd writes configfs. `commit` on this backend is unexercised, and the cross-node path has only been exercised on one machine. [docs/image-pipeline.md](docs/image-pipeline.md) §7 |
@@ -240,7 +244,7 @@ made networking and jailer look shipped. Convention in
 | [s3-storage.md](docs/s3-storage.md) | hand-rolled SigV4, multipart, the `Blobs` contract |
 | [noded-design.md](docs/noded-design.md) | node daemon and in-sandbox agent |
 | [api-design.md](docs/api-design.md) | REST and gRPC surface, auth, error codes |
-| [snapshot-resume.md](docs/snapshot-resume.md) | pause/resume/snapshot/restore |
+| [snapshot-resume.md](docs/snapshot-resume.md) | pause/resume, snapshot, and create-from-snapshot — and why they are different operations |
 | [image-build.md](docs/image-build.md) | build and commit |
 | [security-and-startup.md](docs/security-and-startup.md) | threat model, hardening, cold-start budget |
 | [sdk-cli-design.md](docs/sdk-cli-design.md) | SDK and CLI |

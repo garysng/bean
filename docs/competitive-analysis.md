@@ -158,7 +158,7 @@ Built for Kimi K3's agentic RL training, and its target scenario (batches of het
 | CodeSandbox | Firecracker | ⚠️ devcontainer wrapper | resume 1–2s | ✅ mature | ❌ | ❌ |
 | Cloudflare | containers | ⚠️ must embed their runtime | fast | ✅ | ❌ (SDK open) | ❌ ecosystem lock-in |
 | Vercel | Firecracker | ✅ but must push to their registry | seconds | ✅ FS snapshot | ❌ | ❌ single region |
-| **bean (target)** | **FC as the default tier (runc for GPU / gVisor as the degraded tier, reserved internally for P5)** | **✅ overlaybd zero conversion, S3 lazy-pull** | **<2s on a hit / <10s cold** | **FC-native snapshot/fork (P3–P4)** | **in-house, self-hosted** | **✅ a first-class scenario (multi-node scheduling / prewarm / quota at the core)** |
+| **bean** | **FC as the default tier (gVisor/runc via the implemented OCI tier — runc for GPU, gVisor as the degraded tier)** | **✅ overlaybd zero conversion, S3 lazy-pull** | **<2s on a hit / <10s cold** | **✅ FC-native snapshot/restore shipped (fork is a future item)** | **in-house, self-hosted** | **✅ a first-class scenario (multi-node scheduling / prewarm / quota at the core)** |
 
 > **What "cold start" means in this column.** Nearly every figure quoted above,
 > whatever each vendor calls it, is the cost of **restoring** a new sandbox from a
@@ -189,7 +189,7 @@ to describe the API surface and not the filter.
 | Daytona (docs) | per-sandbox stack | allowed | not stated (`networkBlockAll`, ≤5 CIDR allowlist) | not stated | n/a |
 | Fly.io (docs) | per-Machine **/112 IPv6** from `fdaa::/16`, org/host/instance in the bits | allowed | "a trivial BPF program", per their 6PN post | DNS at `fdaa::3` is the one documented exception | not documented |
 | Cloudflare (docs) | no host adjacency: Worker → Durable Object → container | not documented | n/a | n/a — platform RPC is the data plane | platform RPC |
-| **bean** | one netns, tap + veth /30 per sandbox | allowed | FORWARD, **both scopes** (netns and host) | ⛔ not yet — no host-side listener exists | vsock |
+| **bean** | one netns, tap + veth /30 per sandbox | allowed | FORWARD, **both scopes** (netns and host) | ⛔ by design — no host-local REDIRECT listener (ingress is implemented, but noded enters the netns and dials the guest directly, so no host-side listener is needed) | vsock |
 
 ### The two findings that change bean's plans
 

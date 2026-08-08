@@ -7,6 +7,51 @@
 用户交给平台的是 `python:3.12` 这样的普通 OCI ref。fc 档需要的是一个块设备。
 本文是这两者之间的全部步骤,以及冷启动 2m45s 花在哪。
 
+```mermaid
+---
+config:
+  look: handDrawn
+  theme: neutral
+  flowchart:
+    curve: basis
+---
+flowchart LR
+  REF["OCI ref<br>python:3.12"]
+  REG[("registry / S3<br>tar.gz 层")]
+
+  subgraph DEFAULT["默认路径 &middot; DevMapper"]
+    direction TB
+    CONV["转换<br>tar.gz &rarr; ext4"]
+    BASE[("共享 base<br>只读 loop<br>每节点一份")]
+    COW["每 sandbox CoW<br>稀疏 &middot; 约 44 KiB"]
+    DM["dm-snapshot<br>/dev/mapper/bean-&lt;id&gt;"]
+    CONV --> BASE
+    BASE --> DM
+    COW --> DM
+  end
+
+  OBD["overlaybd<br>按 digest range-read 块<br>--fc-overlaybd, 见 §7"]
+  VDB["fc /drives/rootfs<br>guest 里的 /dev/vdb"]
+
+  REF --> REG
+  REG -- "缺失时拉取" --> CONV
+  REG -. "按需取块" .-> OBD
+  DM --> VDB
+  OBD -. "备选后端" .-> VDB
+
+  classDef ref fill:#E8F0FE,stroke:#4285F4,color:#111;
+  classDef store fill:#F3E8FD,stroke:#A142F4,color:#111;
+  classDef work fill:#FEF7E0,stroke:#F9AB00,color:#111;
+  classDef out fill:#E6F4EA,stroke:#34A853,color:#111;
+  class REF ref;
+  class REG,BASE store;
+  class CONV,COW,DM,OBD work;
+  class VDB out;
+```
+
+默认路径是实线;overlaybd(虚线)是可选的备选后端,跳过转换、改成 range-read 取块。
+本文余下部分逐一讲这些步骤,以及冷启动 2m45s 花在哪。
+
 ## 1. 三层 Provider ✅
 
 ```

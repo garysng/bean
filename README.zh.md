@@ -12,7 +12,8 @@
 也没有 containerd。
 
 > **状态:系统能跑,平台未完。** microVM 档在真机上启动真的 Firecracker VM,下面每个数字
-> 都是实测而非推算。容器档(runc/gVisor)尚未实现,VMM 也还没被 jailer 收进 chroot。
+> 都是实测而非推算。容器档(runc/gVisor)也能跑,直接驱动 OCI 运行时、不经 containerd,不过
+> microVM 档才是被测过的路径;VMM 还没被 jailer 收进 chroot。
 > 在此之上做规划前请先读 [已经可用的部分](#已经可用的部分)。
 
 ---
@@ -39,7 +40,7 @@
 ### 生命周期
 
 ```
-create → exec → cp → pause → resume → snapshot → restore → destroy
+create → exec → cp → pause → resume → snapshot → create-from-snapshot → destroy
 ```
 
 | 操作 | 实测 | 说明 |
@@ -98,30 +99,32 @@ bean run --snapshot snap_...
   带镜像亲和调度的 prewarm
 - **构建** —— 通过 BuildKit 构建 Dockerfile,日志流式输出且可取消;`commit` 可把运行中
   沙箱的文件系统冻结成可复用的基础镜像
+- **容器档** —— `--runtime runc` 或 `--runtime runsc`(gVisor)直接驱动 OCI 运行时,
+  不经 containerd,与 microVM 档共用同一套 rootfs provider;是 `fc` 和开发用 `local`
+  之外的第三个真实档位。microVM 档仍是默认、也是被测过的路径
 - **`fork`** —— 从一个源产出 N 个独立沙箱,每批只做一次 checkpoint,源沙箱保持运行
 - **调度** —— 两级放置;承诺量持久化,所以副本之间不会重复放置、重启也不丢账本;
   overcommit 可配置
 - **快照 blob 落 S3** —— 基于标准库自实现 SigV4,不用 AWS SDK;支持分片上传与 range 读
 - **追踪** —— OpenTelemetry,W3C `traceparent` 贯穿 gateway → noded → 沙箱内 agent,
   每个请求汇成一棵 span 树
-- **节点直连的数据面** —— Host 里的 `{port}-{sandbox}` 直达该 guest 的该端口,
-  用户的服务器和 agent 走同一条路。一个机制而不是两个:无需注册调用、无需宿主端口池,
-  `exec` 与文件传输也不再经控制面中转
-- **Warm snapshot** —— prewarm 产出一个可 resume 的基础快照,于是 create 变成 restore
-  而不是 boot,调度器也会偏向能这么做的节点。磁盘占用有上界,按 LRU 驱逐
-- **Postgres** —— `bean-api --postgres`,这才是多副本的前提:SQLite 是一个文件,
-  两个副本没法共享。requirement 由 `hack/postgres-conformance.sh` 对真 Postgres 16 跑;
-  store 里没有 mutex —— 原子性在语句里,由数据库裁决
+- **节点直连数据平面** —— Host 里的 `{port}-{sandbox}` 直达该 guest 的那个端口,
+  无论它是用户的 server 还是 agent。一套机制而非两套:没有注册调用、没有宿主端口池,
+  `exec` 和文件传输也不再经控制面中转
+- **Warm snapshot** —— prewarm 产出一份可 resume 的基础快照,于是 create 变成 restore
+  而不是 boot,调度器也会优先选能做到这点的节点。磁盘上有上限,按 LRU 淘汰
+- **Postgres** —— `bean-api --postgres`,这正是支持多副本的前提;SQLite 是单文件,
+  两个副本无法共享。需求由 `hack/postgres-conformance.sh` 对真实 Postgres 16 跑通,
+  store 不持有 mutex —— 原子性在语句里,由数据库仲裁
 
 ### 尚未构建
 
 | | |
 |---|---|
-| jailer chroot | 📐 VMM 已降到非特权 uid、跑在每沙箱 cgroup 里,并且默认拥有自己的 pid、mount 和 network namespace。jailer 在此之上要加的是 `chroot` 和设备白名单 —— [#20](https://github.com/garysng/bean/issues/20) 第二阶段,而且大概不是对的形状 |
-| 容器档(runc/gVisor) | 📐 目前只有 microVM 档,以及开发用的无隔离 `local` 档 |
+| jailer chroot | 📐 VMM 已降到非 root uid、跑在每沙箱 cgroup 里,默认也有自己的 pid、mount、network 命名空间。jailer 在此之上还能加的是一个 `chroot` 和设备白名单 —— [#20](https://github.com/garysng/bean/issues/20) 第二阶段,而且未必是对的形态 |
 | 卷 | 📐 |
-| 按端口的访问控制 | 📐 任何能访问 bean-proxy 的东西都能访问沙箱的任意端口 —— [#50](https://github.com/garysng/bean/issues/50) |
-| overlaybd | ⚠️ 已接入并在一台机器上实测。三个共享 base 的镜像**省 3.32 倍磁盘**,共享层每节点只转换一次而不是每镜像一次(第二个镜像 0.49 s CPU,对比 2.24 s)。层发布到对象存储后,create 是 **1.3 s,对比 dm-snapshot 的 14.3 s**;而真正*冷*的 create 没有变快,也无法变快 —— gzip tar 没有可 seek 的块索引,所以任何地方的首次相遇都要转换。`--fc-overlaybd` 开启,dm-snapshot 仍是默认。**128 核机器 256 并发 create 下 rootfs 组装快 4.2 倍**(3.809 s → 0.908 s)、吞吐快 1.9 倍(47.5 → 88.0 creates/s),因为 dm-snapshot 每沙箱 fork `losetup`/`dmsetup` 而 overlaybd 只写 configfs。这个后端上的 `commit` 未验证,跨节点路径也只在一台机器上跑过。[docs/image-pipeline.md](docs/image-pipeline.md) §7 |
+| 按端口访问控制 | 📐 沙箱上任何端口,只要能到达 bean-proxy 就能访问 —— [#50](https://github.com/garysng/bean/issues/50) |
+| overlaybd | ⚠️ 已接入,在一台宿主上实测过。三个镜像共享一个 base 时**磁盘少 3.32 倍**,共享层每节点只转换一次而非每镜像一次(第二个镜像 0.49 s CPU,对比 2.24 s)。层发布到对象存储后,create 是 **1.3 s,对比 dm-snapshot 的 14.3 s**;*冷* create 不变,也无法改进 —— gzip tar 没有块索引可 seek,所以任何地方首次遇到都要转换。用 `--fc-overlaybd` 开启,dm-snapshot 仍是默认。**128 核机器 256 并发 create 下 rootfs 组装快 4.2 倍**(3.809 s → 0.908 s)、吞吐快 1.9 倍(47.5 → 88.0 creates/s),因为 dm-snapshot 每沙箱 fork `losetup`/`dmsetup` 而 overlaybd 只写 configfs。这个后端上的 `commit` 未经检验,跨节点路径也只在一台机器上跑过。[docs/image-pipeline.md](docs/image-pipeline.md) §7 |
 
 ---
 
@@ -228,11 +231,12 @@ NODED_FLAGS="--guest-subnet 172.31.0.0/30 --uplink eth0 --guest-dns 223.5.5.5" \
 | [s3-storage.md](docs/zh/s3-storage.md) | 手写 SigV4、分片上传、`Blobs` 契约 |
 | [noded-design.md](docs/zh/noded-design.md) | 节点守护进程与沙箱内 agent |
 | [api-design.md](docs/zh/api-design.md) | REST 与 gRPC 表面、认证、错误码 |
-| [snapshot-resume.md](docs/zh/snapshot-resume.md) | pause/resume/snapshot/restore |
+| [snapshot-resume.md](docs/zh/snapshot-resume.md) | pause/resume、snapshot、从快照创建 —— 以及它们为何是不同的操作 |
 | [image-build.md](docs/zh/image-build.md) | 构建与 commit |
 | [security-and-startup.md](docs/zh/security-and-startup.md) | 威胁模型、加固、冷启动预算 |
 | [sdk-cli-design.md](docs/zh/sdk-cli-design.md) | SDK 与 CLI |
 | [network.md](docs/zh/network.md) | ✅ 每沙箱一个 netns、两个过滤作用域,以及恢复的快照为何保留原地址 |
+| [warm-snapshots.md](docs/zh/warm-snapshots.md) | 📐 每镜像 boot 一次,而非每沙箱 boot 一次 |
 | [competitive-analysis.md](docs/zh/competitive-analysis.md) | e2b / Modal / Daytona / Morph / AgentENV,含各家的网络做法 |
 | [roadmap.md](docs/zh/roadmap.md) | 阶段划分,标注实际进度 |
 
@@ -244,10 +248,11 @@ NODED_FLAGS="--guest-subnet 172.31.0.0/30 --uplink eth0 --guest-dns 223.5.5.5" \
 ## 开发
 
 ```bash
-make build      # 编译全部
-make test       # 单元测试
-make lint       # vet + ASCII 检查
-make proto      # 重新生成 protobuf
+make build          # 编译全部
+make test           # 单元测试,带 race 检测
+make test-e2e       # 端到端,local 档
+make lint vet       # gofmt、go vet,以及下面那个 ASCII 检查
+make proto          # 从 proto/ 重新生成
 ```
 
 ### 只有文档可以有中文

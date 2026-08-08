@@ -56,7 +56,7 @@ sbx = client.sandboxes.create(
     env={"PYTHONUNBUFFERED": "1"},
     cmd=None, auto_start_cmd=False,   # the original entrypoint is managed; sbx.start() starts it manually
     network_policy="egress-only",
-    idle_timeout="300s", on_idle="pause",   # default = run forever; eval uses ("0s","kill")
+    idle_timeout="300s", on_idle="pause",   # default = run forever; eval uses ("0s","delete")
     labels={"eval-run": "r0731"},
     volumes=[{"volume": vol.id, "mount_path": "/workspace"}],   # optional
 )                                     # blocks until RUNNING (polling/long-polling internally), wait=False available
@@ -64,7 +64,7 @@ sbx = client.sandboxes.create(
 
 sbx = client.sandboxes.get("sbx_...")
 for s in client.sandboxes.list(labels={"eval-run": "r0731"}): ...
-sbx.set_lifecycle(idle_timeout="600s", on_idle="kill")
+sbx.set_lifecycle(idle_timeout="600s", on_idle="delete")
 sbx.kill()
 
 # —— execution ——
@@ -107,7 +107,7 @@ client.volumes.list(labels={...}); vol.delete()
 sbx.pause(); sbx.resume()                                  # the SAME sandbox, frozen and woken
 snap = sbx.snapshot(name="after-setup", keep_running=True)
 client.snapshots.list(); snap.delete()
-sbx2 = client.sandboxes.create(snapshot=snap.id)           # restore: a NEW sandbox from the snapshot
+sbx2 = client.sandboxes.create(snapshot=snap.id)           # create from a snapshot: a NEW sandbox
 kids = [client.sandboxes.create(snapshot=snap.id) for _ in range(8)]   # fan-out of 8, all independent
 children = sbx.fork(count=8)                               # 📐 sugar for the line above, without the
                                                            #    persistent snapshot (snapshot-resume.md 4.5)
@@ -136,7 +136,7 @@ results = run_batch(
 )
 ```
 
-What it wraps: batching for batchCreate (injecting lifecycle=("0s","kill") by default so
+What it wraps: batching for batchCreate (injecting lifecycle=("0s","delete") by default so
 things go away as soon as they are done), a concurrency semaphore, event-driven collection
 (a WS subscription replacing polling), LOST rebuild, and collecting artifacts straight from
 S3 URLs. The first-class entry point for SWE-bench scenarios.
@@ -202,7 +202,7 @@ output: --json / --quiet    exit codes: 0 / 64 / 69 / 70 / 125
 
 ```
 bean run --image IMG | --snapshot SNAP
-         [--label k=v] [--idle-timeout 300s] [--on-idle pause|kill]
+         [--label k=v] [--idle-timeout 300s] [--on-idle pause|delete]
 bean ls   [--label k=v]
 bean exec SBX -- CMD...
 bean cp   ./local sbx:SBX:/path  |  sbx:SBX:/path ./local
@@ -210,7 +210,7 @@ bean logs SBX [--tail N]
 bean events SBX             # history; `-f [SBX] [--label k=v]` follows the live stream (SSE)
 bean kill SBX [--force]
 bean pause SBX / bean resume SBX   # freeze and wake the same sandbox
-bean run --snapshot SNAP           # restore: a new sandbox each time it is called
+bean run --snapshot SNAP           # create from a snapshot: a new sandbox each time it is called
 bean build  --tag REF [--file Dockerfile] [CONTEXT]   # build an image on the platform
 bean commit SBX --tag REF                             # freeze the filesystem into an image
 bean snapshot create SBX [--name N] [--no-keep-running]
