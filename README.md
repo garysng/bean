@@ -341,6 +341,7 @@ made networking and jailer look shipped. Convention in
 
 | document | what's in it |
 |---|---|
+| [glossary.md](docs/glossary.md) | **the terms** — sandbox, image, snapshot, the lifecycle verbs, the runtime tiers — defined once |
 | [status.md](docs/status.md) | **what is actually built**, with measurements |
 | [decisions.md](docs/decisions.md) | **why** each choice was made — measured data, competitor comparisons, and the traps that only appeared on hardware |
 | [architecture.md](docs/architecture.md) | components, design decisions, state machine |

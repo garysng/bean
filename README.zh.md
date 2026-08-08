@@ -329,6 +329,7 @@ flowchart TB
 
 | 文档 | 内容 |
 |---|---|
+| [glossary.md](docs/zh/glossary.md) | **术语表** —— sandbox、image、snapshot、生命周期动词、runtime 各档,一次定义清楚 |
 | [status.md](docs/zh/status.md) | **实际构建了什么**,带实测数据 |
 | [decisions.md](docs/zh/decisions.md) | 每个选择**为什么**这么做 —— 实测数据、竞品对比,以及只在真机上才现形的陷阱 |
 | [architecture.md](docs/zh/architecture.md) | 组件、设计决策、状态机 |
