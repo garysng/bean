@@ -2,40 +2,54 @@
 
 > 中文版:[README.zh.md](README.zh.md)
 
-Firecracker microVM sandboxes for AI evaluation workloads — any OCI image, no
-template build step.
+**A sandbox platform for AI agents** — a place to run untrusted code in
+hardware isolation: create it, exec into it, snapshot it, fan it out. Any OCI
+image, no template build step.
 
-`bean` runs untrusted code in hardware-isolated microVMs. It exists for one
-shape of problem: evaluation and agent-rollout batches over **thousands of
-heterogeneous Docker images** (SWE-bench and similar), where each task has its
-own multi-GB image, sandboxes live for minutes, and a run creates hundreds at
-once.
+Four shapes of work, all the same underlying capability:
 
-The whole stack is self-contained — control plane, node daemon, in-sandbox
-agent, CLI, SDK — with no Kubernetes and no containerd on the hot path.
+| scenario | what it looks like |
+|---|---|
+| **Agent hosting** | an agent lives inside the sandbox — run Claude Code or another coding agent in an isolated environment it can freely modify |
+| **Agent-invoked sandboxes** | an agent or agent platform spins one up on demand to do work — execute code, run a data-analysis job, throw it away after |
+| **RL rollouts** | long-lived training environments fanned out by the hundred, one prepared checkpoint cloned into many |
+| **Benchmarks / eval** | SWE-bench-class suites over thousands of heterogeneous multi-GB images, each run in its own sandbox |
+
+Two runtimes cover these, and you pick per workload — neither is a second-class
+citizen:
+
+| runtime | serves | why |
+|---|---|---|
+| **Firecracker microVM** (`fc`) | agent hosting, agent-invoked sandboxes, RL rollouts | a hardware-isolation boundary for untrusted or long-lived code, with snapshot/restore and fork so one prepared environment clones into many |
+| **OCI + gVisor** (`runsc`/`runc`) | benchmarks / eval | run any image directly with no per-image template build, OCI driven with no containerd, plus image build and full lifecycle management |
+
+Both sit on one self-contained stack — control plane, node daemon, in-sandbox
+agent, CLI, SDK — sharing the same image pipeline, snapshot machinery,
+scheduler and network isolation, with **no Kubernetes and no containerd on the
+hot path**.
 
 > **Status: working system, incomplete platform.** The microVM tier boots real
 > Firecracker VMs on real hardware, and every number below is measured rather
-> than projected. The container tiers (runc/gVisor) run too, driving the OCI
-> runtime directly with no containerd, though the microVM tier is the tested
-> path; the VMM is not yet confined by a jailer. Read [What works](#what-works)
-> before planning around it.
+> than projected. The container tier (gVisor/runc) runs too, driving the OCI
+> runtime directly with no containerd, though the microVM tier is the more
+> heavily tested path; the VMM is not yet confined by a jailer. Read
+> [What works](#what-works) before planning around it.
 
 ---
 
 ## Why not e2b / Modal / plain containers
 
-| | approach | cost for this workload |
+| | approach | cost at scale |
 |---|---|---|
-| e2b | Firecracker + per-image template build | one template build per image, minutes each — unusable at 2000 images |
+| e2b | Firecracker + per-image template build | one template build per image, minutes each — unusable across thousands of images |
 | Modal | own container runtime + lazy-loading FS | not self-hostable |
 | K8s + Pod | container per task | no VM boundary for untrusted code; scheduling and network stack are heavy |
 | **bean** | Firecracker + shared base image with per-sandbox CoW | **44 KiB of disk per sandbox**, 952 ms to a reachable agent |
 
 The pivot is that a sandbox does not get its own copy of the image. One
 read-only base is loop-mounted per node and shared; each sandbox gets a sparse
-copy-on-write layer over it through device-mapper. Fanning out a hundred clones
-of one image costs a hundred sparse files.
+copy-on-write layer over it through device-mapper. Fanning out a hundred agent
+sandboxes — or a hundred clones of one eval image — costs a hundred sparse files.
 
 ---
 
@@ -110,10 +124,10 @@ checkpoint fan out to many sandboxes without collisions.
   AES-256-GCM at rest), prewarm with image-affinity scheduling
 - **Builds** — Dockerfile through BuildKit with streaming logs and cancellation,
   and `commit` to freeze a running sandbox's filesystem into a reusable base image
-- **Container tiers** — `--runtime runc` or `--runtime runsc` (gVisor) drive the
-  OCI runtime directly, no containerd, sharing the microVM tier's rootfs
-  providers; a third real tier alongside `fc` and the dev-only `local`. The
-  microVM tier stays the default and the tested path
+- **Container tier (gVisor/runc)** — `--runtime runsc` or `--runtime runc` drive
+  the OCI runtime directly, no containerd, sharing the microVM tier's rootfs
+  providers; the tier that serves the benchmark workload, alongside `fc` and the
+  dev-only `local`. The microVM tier is the more heavily tested path today
 - **`fork`** — N independent sandboxes from one source, one checkpoint per batch,
   the source left running
 - **Scheduling** — two-level placement; commitments persisted so replicas cannot

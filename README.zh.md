@@ -2,34 +2,47 @@
 
 > English: [README.md](README.md)
 
-面向 AI 评测负载的 Firecracker microVM 沙箱 —— 任意 OCI 镜像,不需要模板构建步骤。
+**面向 AI agent 的 sandbox 平台** —— 一个在硬件隔离里跑不可信代码的地方:创建、exec 进去、
+快照、扇出。任意 OCI 镜像,不需要模板构建步骤。
 
-`bean` 在硬件隔离的 microVM 里跑不可信代码。它只为一类问题而生:**成千上万个异构 Docker
-镜像**(SWE-bench 及类似)之上的评测与 agent rollout 批量任务 —— 每个任务有自己数 GB 的
-镜像,沙箱只活几分钟,一次运行要同时创建几百个。
+四类工作,底层是同一套能力:
 
-整个栈自包含 —— 控制面、节点守护进程、沙箱内 agent、CLI、SDK —— 热路径上没有 Kubernetes,
-也没有 containerd。
+| 场景 | 长什么样 |
+|---|---|
+| **Agent 托管** | agent 就住在 sandbox 里 —— 在一个它可以随意改动的隔离环境里运行 Claude Code 或别的 coding agent |
+| **Agent 按需拉起** | agent 或 agent 平台按需拉起一个 sandbox 干活 —— 执行代码、跑一个数据分析任务,用完即弃 |
+| **RL rollout** | 按百扇出的长活训练环境,一份备好的 checkpoint 克隆成许多 |
+| **Benchmark / 评测** | SWE-bench 类套件,成千上万个异构、数 GB 的镜像,每个跑在自己的 sandbox 里 |
+
+两条 runtime 覆盖这些,按负载各取所需 —— 谁都不是二等公民:
+
+| runtime | 服务 | 为什么 |
+|---|---|---|
+| **Firecracker microVM**(`fc`) | agent 托管、agent 按需拉起、RL rollout | 给不可信或长活代码一道硬件隔离边界,快照/restore 与 fork 让一份备好的环境克隆成许多 |
+| **OCI + gVisor**(`runsc`/`runc`) | benchmark / 评测 | 任意镜像直接跑,不需每镜像一次模板构建;OCI 直驱不经 containerd,外加镜像构建与完整生命周期管理 |
+
+两者共用一套自包含的栈 —— 控制面、节点守护进程、沙箱内 agent、CLI、SDK —— 共享同一条镜像
+流水线、快照机制、调度器与网络隔离,**热路径上没有 Kubernetes,也没有 containerd**。
 
 > **状态:系统能跑,平台未完。** microVM 档在真机上启动真的 Firecracker VM,下面每个数字
-> 都是实测而非推算。容器档(runc/gVisor)也能跑,直接驱动 OCI 运行时、不经 containerd,不过
-> microVM 档才是被测过的路径;VMM 还没被 jailer 收进 chroot。
+> 都是实测而非推算。容器档(gVisor/runc)也能跑,直接驱动 OCI 运行时、不经 containerd,不过
+> microVM 档是目前测得更充分的路径;VMM 还没被 jailer 收进 chroot。
 > 在此之上做规划前请先读 [已经可用的部分](#已经可用的部分)。
 
 ---
 
 ## 为什么不用 e2b / Modal / 裸容器
 
-| | 做法 | 在这个负载下的代价 |
+| | 做法 | 规模化时的代价 |
 |---|---|---|
-| e2b | Firecracker + 每镜像一次模板构建 | 每个镜像一次模板构建,每次数分钟 —— 2000 个镜像下不可用 |
+| e2b | Firecracker + 每镜像一次模板构建 | 每个镜像一次模板构建,每次数分钟 —— 成千上万镜像下不可用 |
 | Modal | 自研容器运行时 + 懒加载文件系统 | 不可自托管 |
 | K8s + Pod | 每任务一个容器 | 不可信代码没有 VM 边界;调度与网络栈都重 |
 | **bean** | Firecracker + 共享基础镜像 + 每沙箱 CoW | **每沙箱 44 KiB 磁盘**,952 ms 到 agent 可达 |
 
 关键转折是:沙箱**不会**拿到镜像的自有副本。每节点一份只读基础镜像 loop 挂载后共享,
-每个沙箱通过 device-mapper 在其上获得一个稀疏的写时复制层。把一个镜像扇出成一百个克隆,
-代价就是一百个稀疏文件。
+每个沙箱通过 device-mapper 在其上获得一个稀疏的写时复制层。扇出一百个 agent 沙箱 ——
+或把一个 eval 镜像扇出成一百个克隆 —— 代价就是一百个稀疏文件。
 
 ---
 
@@ -99,9 +112,9 @@ bean run --snapshot snap_...
   带镜像亲和调度的 prewarm
 - **构建** —— 通过 BuildKit 构建 Dockerfile,日志流式输出且可取消;`commit` 可把运行中
   沙箱的文件系统冻结成可复用的基础镜像
-- **容器档** —— `--runtime runc` 或 `--runtime runsc`(gVisor)直接驱动 OCI 运行时,
-  不经 containerd,与 microVM 档共用同一套 rootfs provider;是 `fc` 和开发用 `local`
-  之外的第三个真实档位。microVM 档仍是默认、也是被测过的路径
+- **容器档(gVisor/runc)** —— `--runtime runsc` 或 `--runtime runc` 直接驱动 OCI
+  运行时,不经 containerd,与 microVM 档共用同一套 rootfs provider;服务 benchmark 负载的
+  那一档,和 `fc`、开发用 `local` 并列。microVM 档是目前测得更充分的路径
 - **`fork`** —— 从一个源产出 N 个独立沙箱,每批只做一次 checkpoint,源沙箱保持运行
 - **调度** —— 两级放置;承诺量持久化,所以副本之间不会重复放置、重启也不丢账本;
   overcommit 可配置
