@@ -1037,7 +1037,7 @@ type Lifecycle struct {
 	// 0 = unset (never idle out); -0 semantics avoided: use has_idle_timeout.
 	HasIdleTimeout     bool   `protobuf:"varint,1,opt,name=has_idle_timeout,json=hasIdleTimeout,proto3" json:"has_idle_timeout,omitempty"`
 	IdleTimeoutSeconds int64  `protobuf:"varint,2,opt,name=idle_timeout_seconds,json=idleTimeoutSeconds,proto3" json:"idle_timeout_seconds,omitempty"`
-	OnIdle             string `protobuf:"bytes,3,opt,name=on_idle,json=onIdle,proto3" json:"on_idle,omitempty"` // pause|kill
+	OnIdle             string `protobuf:"bytes,3,opt,name=on_idle,json=onIdle,proto3" json:"on_idle,omitempty"` // pause|delete
 	unknownFields      protoimpl.UnknownFields
 	sizeCache          protoimpl.SizeCache
 }

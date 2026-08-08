@@ -2,7 +2,7 @@
 
 > English: [../jailer.md](../jailer.md)
 > 状态标注约定见 [architecture.md](architecture.md) §0。
-> 实现:暂无。`grep -rn jailer --include='*.go'` 只有 1 处命中,且是注释。
+> 实现:暂无。`grep -rn jailer --include='*.go'` 约 10 处命中,全是注释与测试 —— 没有实现代码。
 > 相关:`internal/node/runtime/fc_linux.go`(startVMM、drive/vsock 注册)、
 > `internal/node/runtime/uffd_linux.go`(缺页处理器)、
 > `internal/node/network/setup_linux.go`(netns 创建)、GitHub #20。

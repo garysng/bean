@@ -132,7 +132,7 @@ func TestIdleSweepKill(t *testing.T) {
 	m := newTestManager(t)
 	ctx := context.Background()
 	sp := spec("idle-kill", func(s *nodev1.SandboxSpec) {
-		s.Lifecycle = &nodev1.Lifecycle{HasIdleTimeout: true, IdleTimeoutSeconds: 1, OnIdle: "kill"}
+		s.Lifecycle = &nodev1.Lifecycle{HasIdleTimeout: true, IdleTimeoutSeconds: 1, OnIdle: "delete"}
 	})
 	if _, err := m.Create(ctx, sp); err != nil {
 		t.Fatal(err)
@@ -219,7 +219,7 @@ func TestIdleSweepSkipsInFlight(t *testing.T) {
 	m := newTestManager(t)
 	ctx := context.Background()
 	sp := spec("busy", func(s *nodev1.SandboxSpec) {
-		s.Lifecycle = &nodev1.Lifecycle{HasIdleTimeout: true, IdleTimeoutSeconds: 1, OnIdle: "kill"}
+		s.Lifecycle = &nodev1.Lifecycle{HasIdleTimeout: true, IdleTimeoutSeconds: 1, OnIdle: "delete"}
 	})
 	if _, err := m.Create(ctx, sp); err != nil {
 		t.Fatal(err)
@@ -356,7 +356,7 @@ func TestManagerMetricsCountDestroyAndIdleActions(t *testing.T) {
 	m := newTestManager(t)
 	ctx := context.Background()
 	sp := spec("idle-metric", func(s *nodev1.SandboxSpec) {
-		s.Lifecycle = &nodev1.Lifecycle{HasIdleTimeout: true, IdleTimeoutSeconds: 1, OnIdle: "kill"}
+		s.Lifecycle = &nodev1.Lifecycle{HasIdleTimeout: true, IdleTimeoutSeconds: 1, OnIdle: "delete"}
 	})
 	if _, err := m.Create(ctx, sp); err != nil {
 		t.Fatal(err)
@@ -371,7 +371,7 @@ func TestManagerMetricsCountDestroyAndIdleActions(t *testing.T) {
 	var b strings.Builder
 	m.Metrics().WritePrometheus(&b)
 	out := b.String()
-	if !strings.Contains(out, `bean_node_idle_actions_total{action="kill",outcome="success"} 1`) {
+	if !strings.Contains(out, `bean_node_idle_actions_total{action="delete",outcome="success"} 1`) {
 		t.Errorf("idle action not counted:\n%s", out)
 	}
 	if !strings.Contains(out, `bean_node_destroys_total{outcome="success",runtime="local"} 1`) {

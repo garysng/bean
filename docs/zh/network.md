@@ -4,8 +4,11 @@
 > 实现:`internal/node/network/`(地址池、netns、NAT)、
 > `internal/node/runtime/fc_linux.go`(网卡注册与 restore 覆盖)。
 
-sandbox 现在没有网络,而 SWE-bench 类任务要 `pip install` / `git clone` ——
-**这是让 bean 用不了的那个缺口**,不是一个可以排后面的优化项。
+sandbox 网络**已实现并交付**:每 sandbox 一个 netns + 地址池 + 两层 MASQUERADE +
+FORWARD DROP + DNS,并在真机 guest 上用规则计数器验证过(status.md 明确标
+「Sandbox networking ✅ / Port exposure ✅」)。SWE-bench 类任务要 `pip install` /
+`git clone`,所以这从来就不是一个可以排后面的优化项 —— 它曾是让 bean 用不了的那个缺口,
+现在已经补上。剩下的只是一些细化项(MTU 调优、tc 带宽限速、IPv6、conntrack 上限,见 §8)。
 
 本文的核心不是「怎么建 tap」,那是三行 `ip` 命令。核心是
 **「快照恢复出的 guest 带着原来的 IP,而它可能落在已经有人用那个 IP 的机器上」**。
@@ -58,7 +61,7 @@ inside netns:  /tmp/bean-cwd-check
 (vm-assembly §5)。如果进 netns 会改 cwd,加网络就会静默破坏快照恢复。
 先验证再动手,因为这种破坏不会报错。
 
-## 2. 地址布局 📐
+## 2. 地址布局 ✅
 
 ```
 guest 内(每个 sandbox 都一样,快照可以随便搬)
@@ -104,7 +107,7 @@ netns 里的地址可以全都一样(那是 netns 的意义),但 **veth 的宿�
 64 × 64 × 64 = 262144 条,远超一台机器的 sandbox 数 ——
 **上限不该由地址空间决定**,那会变成一个需要解释的奇怪限制。
 
-## 3. 地址池必须能在 noded 重启后重建 📐
+## 3. 地址池必须能在 noded 重启后重建 ✅
 
 这一条是 loop device 那次泄漏教给我的([decisions.md](decisions.md),GitHub #16):
 **引用计数活在进程内存里,重启就丢,而宿主上的东西还在。**
@@ -126,17 +129,18 @@ netns 里的地址可以全都一样(那是 netns 的意义),但 **veth 的宿�
 重启前就在跑的 sandbox。判断孤儿要和控制面的 `SyncState` 期望集合比对,
 这属于宿主资源对账(GitHub #17),不在本文范围。
 
-## 4. restore:用 network_overrides 而不是改 guest 📐
+## 4. restore:用 network_overrides 而不是改 guest ✅
 
-`fcNetOverride`(fc_api.go:151,已定义未使用)就是为这个存在的:
+`fcNetOverride`(fc_api.go:192,被 fc_linux.go:79 与 fc_lifecycle_linux.go:519 引用)
+就是为这个存在的:
 
 ```json
 "network_overrides": [{"iface_id": "eth0", "host_dev_name": "beantap0"}]
 ```
 
-**但在我们的方案里它大概不需要用**:tap 名字在每个 netns 里都是 `beantap0`,
-所以快照记录的名字在新 netns 里恰好是对的。这是「同名 tap 分 netns 共存」
-那个性质的直接好处。
+**在我们的方案里 restore 路径靠 tap 同名成立**:tap 名字在每个 netns 里都是 `beantap0`,
+所以快照记录的名字在新 netns 里已经是对的,override 通常不额外触发。这是「同名 tap
+分 netns 共存」那个性质的直接好处。
 
 保留这个字段的理由是**它是唯一的逃生舱**:如果将来某个场景必须换 tap 名
 (例如 jailer 接入后 netns 的组织方式变了,GitHub #20),
@@ -147,7 +151,54 @@ netns 里的地址可以全都一样(那是 netns 的意义),但 **veth 的宿�
 但 guest 内的表是快照带回来的。这一条**需要真机验证**,
 因为它决定要不要在 agent 里加一次 `ip neigh flush`。
 
-## 5. 出网:两层 MASQUERADE 📐
+## 5. 出网:两层 MASQUERADE ✅
+
+```mermaid
+---
+config:
+  look: handDrawn
+  theme: neutral
+  flowchart:
+    curve: basis
+---
+flowchart LR
+  subgraph NETNS["每 sandbox 的 netns"]
+    direction TB
+    GUEST["guest eth0<br>172.31.0.2/30"]
+    TAP["tap"]
+    NAT1["MASQUERADE #1<br>172.31.0.0/30 &rarr; veth"]
+    DROP1{{"netns FORWARD DROP<br>拦的是节点自身地址"}}
+    GUEST --- TAP --> NAT1 --> DROP1
+  end
+
+  subgraph HOST["宿主"]
+    direction TB
+    NAT2["MASQUERADE #2<br>10.a.b.0/30 &rarr; uplink"]
+    DROP2{{"宿主 FORWARD DROP<br>169.254/16 &middot; 10/8 &middot; 172.16/12 &middot; 192.168/16"}}
+    NAT2 --> DROP2
+  end
+
+  UP(["上行 &rarr; 公网"])
+  META["169.254.169.254<br>元数据"]
+  NODE["节点自身地址"]
+
+  DROP1 -- "veth pair" --> NAT2
+  DROP2 --> UP
+  DROP2 -. "拒绝" .-> META
+  DROP1 -. "拒绝" .-> NODE
+
+  classDef guest fill:#E8F0FE,stroke:#4285F4,color:#111;
+  classDef nat fill:#FEF7E0,stroke:#F9AB00,color:#111;
+  classDef deny fill:#FCE8E6,stroke:#D93025,color:#111;
+  classDef ok fill:#E6F4EA,stroke:#34A853,color:#111;
+  class GUEST,TAP guest;
+  class NAT1,NAT2 nat;
+  class DROP1,DROP2,META,NODE deny;
+  class UP ok;
+```
+
+两层 MASQUERADE,以及**两个作用域拦不同的东西**:宿主作用域拦元数据服务和 RFC1918 段,
+而节点自身地址是被 netns 作用域的规则拦下的 —— 本地投递的包根本不经过宿主 FORWARD 链(§5a)。
 
 ```
 netns 内:  POSTROUTING -s 172.31.0.0/30 -o veth-in -j MASQUERADE
@@ -171,7 +222,7 @@ guest 地址在每个沙箱里都一样,靠 namespace 区分。
 路径是 `bean-proxy` → noded 的转发端口 → namespace → `172.31.0.2:{port}`,
 `{port}` 从 Host 头读出。见 api-design.md §6。
 
-## 6. DNS 📐
+## 6. DNS ✅
 
 guest 的 `/etc/resolv.conf` 来自用户镜像,而镜像里写的可能是任何东西。
 两种做法:
@@ -186,10 +237,10 @@ guest 的 `/etc/resolv.conf` 来自用户镜像,而镜像里写的可能是任�
 那里面可能是 `127.0.0.53`(systemd-resolved),从 guest 看是它自己。
 所以取宿主的上游解析器,或者由节点配置指定(`--guest-dns`)。
 
-## 7. 分阶段 📐
+## 7. 分阶段 ✅
 
 网络是唯一一个「做一半比不做更糟」的模块:一个网络时好时坏的 sandbox
-会让人怀疑自己的代码,而不是怀疑平台。所以分三步,每步都要真机验证:
+会让人怀疑自己的代码,而不是怀疑平台。所以按三步来建,每步都做了真机验证:
 
 1. **单个 sandbox 出网**。netns + tap + veth + 两层 NAT,手工建,
    验证 guest 里 `ping 8.8.8.8` 和 `apk add curl` 能通

@@ -16,19 +16,19 @@ points:
 - ✅ **The snapshot part of P3/P4 is already done, ahead of schedule**: pause/resume, three
   snapshot variants (full / `--no-memory` / `--base` incremental), UFFD on-demand page serving,
   CPU templates and scheduler CPU filtering
-- ⚠️ **The overlaybd ublk direct drive P0 talks about is not done**: it runs on dm-snapshot
-  (44 KiB per sandbox). The overlaybd capability is measured but not wired in — it has become an
-  optimisation rather than a foundation
+- ⚠️ **The overlaybd ublk direct drive P0 talks about runs on TCMU, not ublk**: the default is
+  still dm-snapshot (44 KiB per sandbox). overlaybd is now wired into `image.Provider` as
+  `OverlaybdProvider`, opt-in with `--fc-overlaybd` and verified on hardware — it has become an
+  optimisation rather than a foundation, ublk (≥ 6.0) only being the faster alternative
 - ⚠️ **The jailer P0 talks about is not done**: noded execs firecracker directly
 - ✅ **The networking P0/P1 talk about is done**, and it was the largest gap: per-sandbox
   namespace, tap and NAT egress, metadata and RFC1918 denied by default, and a port inside a
   sandbox reachable from outside the node through bean-proxy. Verified on a real kernel,
   denials included. Cross-node sandbox connectivity is still a non-goal
-- 📐 **Not done**: the container tiers (runc/runsc), volumes, per-port access control,
-  Postgres, the TypeScript SDK
+- 📐 **Not done**: volumes, per-port access control, the TypeScript SDK
 
 In one sentence: **vertically (snapshots / startup optimisation) it has gone deeper than the
-roadmap; horizontally, networking has closed and what remains is the container tiers and
+roadmap; horizontally, networking and the container tiers have closed and what remains is
 volumes.**
 
 ## P0 — Single-node end-to-end skeleton (fc direct boot, no containerd)
@@ -53,7 +53,7 @@ module by module).
 ```
 curl POST /sandboxes {image} → fc microVM RUNNING
 curl POST /exec {pytest} → exit code + output
-curl DELETE → resources back to zero (no leftover FC process / tap / ublk device / mount)
+curl DELETE → resources back to zero (no leftover FC process / tap / TCMU device / mount)
 ```
 
 ## P1 — Usable across nodes (first eval integration)
@@ -99,7 +99,7 @@ P50 < 2s; the escape regression suite passes.
 - bean-proxy (regional): wildcard-domain TLS, port exposure (reverse proxy connecting straight to
   the sandbox IP), sandbox token authentication, transparent wake from PAUSED
 - pause/resume (fc PauseVM) + transparent wake from PAUSED
-- Lifecycle automation: idle detection (local to noded), onIdle pause/kill, transparent wake on a request to a PAUSED sandbox
+- Lifecycle automation: idle detection (local to noded), onIdle pause/delete, transparent wake on a request to a PAUSED sandbox
 - The fc tier's same-node snapshot path (memory+disk → S3)
 - **shared-fs volumes** (the host mounts JuiceFS and exports it through the kernel nfsd, the agent mounts NFS, backend quota)
 - The TS SDK, an e2b migration mapping document
@@ -111,7 +111,7 @@ resource billing basis after a pause is correct.
 
 **Scope**
 
-- fc-tier cross-node restore, diff snapshot increments, fork as a separate API (CoW one parent many children, same node)
+- fc-tier cross-node restore, diff snapshot increments, ✅ fork as a separate API (CoW one parent many children, same node — done, `POST /v1/sandboxes/{id}/fork`)
 - PAUSED archiving: past a threshold, snapshot to S3 automatically to free RAM, and restore transparently on the next access
 - Snapshot lifecycle: quota, reference counting, TTL / S3 lifecycle
 - **Image as snapshot**: `POST /images:register {snapshot}` registers any sandbox snapshot as a

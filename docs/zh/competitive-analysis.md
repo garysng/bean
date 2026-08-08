@@ -133,7 +133,7 @@ Orchestrate（`@application`/`@function` serverless 编排,每 function 独占 s
 | CodeSandbox | Firecracker | ⚠️ devcontainer 套壳 | resume 1–2s | ✅ 成熟 | ❌ | ❌ |
 | Cloudflare | 容器 | ⚠️ 须嵌其运行时 | 快 | ✅ | ❌(SDK 开源) | ❌ 生态绑定 |
 | Vercel | Firecracker | ✅ 但须推其 registry | 秒级 | ✅ FS 快照 | ❌ | ❌ 单区域 |
-| **bean（目标）** | **FC 默认档（runc GPU/gVisor 降级为 P5 内部预留）** | **✅ overlaybd 零转换，S3 lazy-pull** | **命中<2s/冷<10s** | **FC 原生 snapshot/fork（P3–P4）** | **自研自托管** | **✅ 一等场景（多节点调度/prewarm/配额为核心）** |
+| **bean** | **FC 默认档（gVisor/runc 经已实现的 OCI 档 —— runc 带 GPU、gVisor 作降级档）** | **✅ overlaybd 零转换，S3 lazy-pull** | **命中<2s/冷<10s** | **✅ FC 原生 snapshot/restore 已交付（fork 是未来项）** | **自研自托管** | **✅ 一等场景（多节点调度/prewarm/配额为核心）** |
 
 > **这一列的「冷启动」指的是什么。** 上表引用的绝大多数数字,不管各家自己怎么叫,
 > 量的都是从一份准备好的快照/模板 **restore** 出一个新 sandbox 的开销 —— 既不是开机,
@@ -160,7 +160,7 @@ FORWARD 还是移到 prerouting（[network.md](../network.md) §5a）。现在�
 | Daytona（文档） | 每沙箱独立网络栈 | 放行 | 未说明（有 `networkBlockAll`、≤5 条 CIDR 白名单） | 未说明 | 不适用 |
 | Fly.io（文档） | 每 Machine 一个 **/112 IPv6**，取自 `fdaa::/16`，org/host/instance 编码在位里 | 放行 | 按其 6PN 博文的说法是"一个很简单的 BPF 程序" | `fdaa::3` 上的 DNS 是唯一有文档的例外 | 未公开 |
 | Cloudflare（文档） | 不存在宿主邻接问题：Worker → Durable Object → container | 未公开 | 不适用 | 不适用 —— 平台 RPC 就是数据平面 | 平台 RPC |
-| **bean** | 一个 netns，每沙箱一对 tap + veth /30 | 放行 | FORWARD，**两个 scope**（netns 与宿主） | ⛔ 暂无 —— 宿主侧没有监听者 | vsock |
+| **bean** | 一个 netns，每沙箱一对 tap + veth /30 | 放行 | FORWARD，**两个 scope**（netns 与宿主） | ⛔ 设计如此 —— 没有宿主本地 REDIRECT 监听者（入站已实现,只是 noded 进 netns 直连 guest,不需要宿主侧监听者） | vsock |
 
 ### 两个改变 bean 计划的结论
 

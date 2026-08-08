@@ -14,6 +14,55 @@
 below follows from that sentence, and getting it wrong has cost real explanations more
 than once.
 
+```mermaid
+---
+config:
+  look: handDrawn
+  theme: neutral
+  flowchart:
+    curve: basis
+---
+flowchart TB
+  subgraph RESUME["resume · pairs with pause"]
+    direction TB
+    RP["frozen firecracker<br>vCPUs paused, process alive"]
+    RS["the SAME sandbox<br>same id"]
+    RP -- "PATCH /vm Resumed &middot; ~ms" --> RS
+  end
+
+  subgraph RESTORE["restore · pairs with snapshot · the only fan-out"]
+    direction TB
+    BLOB[("snapshot blob<br>disk / S3 &middot; survives restart, crosses machines")]
+    N1["new sandbox &middot; new id"]
+    N2["new sandbox &middot; new id"]
+    NN["new sandbox &middot; new id"]
+    BLOB -- "create(snapshot) &middot; 392 ms" --> N1
+    BLOB -- "create(snapshot)" --> N2
+    BLOB -- "create(snapshot)" --> NN
+  end
+
+  subgraph FORK["fork · from a live source, same node"]
+    direction TB
+    SRC["running sandbox"]
+    FK1["new sandbox &middot; new id"]
+    FKN["new sandbox &middot; new id"]
+    SRC -- "fork {N}" --> FK1
+    SRC -- "fork {N}" --> FKN
+  end
+
+  classDef same fill:#E8F0FE,stroke:#4285F4,color:#111;
+  classDef fresh fill:#E6F4EA,stroke:#34A853,color:#111;
+  classDef store fill:#F3E8FD,stroke:#A142F4,color:#111;
+  class RP,RS same;
+  class N1,N2,NN,FK1,FKN,SRC fresh;
+  class BLOB store;
+```
+
+`create(snapshot)` is the API verb; "restore" is the name of the path it takes. One
+create endpoint, branching on whether the spec carries a snapshot — so restore is not a
+separate call, but it *is* the only one of the three that fans out to N independent
+sandboxes from a durable object.
+
 | | **resume** | **restore** | **fork** |
 |---|---|---|---|
 | Starts from | a live firecracker process whose vCPUs are frozen | a snapshot blob on disk / in S3 | a *running* sandbox |
@@ -22,15 +71,15 @@ than once.
 | Persistent object | none | a `snap_...` that outlives every sandbox made from it | none produced (use snapshot if you want one kept) |
 | Cost | milliseconds — one `PATCH /vm {Resumed}` | **392 ms** on a node-local cache hit | restore's cost, minus the packing and transfer |
 | Survives noded restart | ❌ the process dies with it | ✅ the blob is the state | ❌ derives from a live process |
-| Crosses machines | ❌ bound to the process's host | ✅ that is the point | ❌ same node; cross-node goes through snapshot+restore |
+| Crosses machines | ❌ bound to the process's host | ✅ that is the point | ❌ same node; cross-node goes through snapshot + create-from-snapshot |
 | Fan-out (1 → N) | ❌ there is only ever one | ✅ **N independent sandboxes from one snapshot** | ✅ by construction |
 | Constraint | none beyond "the process is still there" | pinned to the CPU vendor+family the memory was captured on | as restore |
 | Pairs with | `pause` | `snapshot` | — |
 
 ### Why the distinction matters
 
-**Fan-out is only possible with restore.** One snapshot restored N times gives N
-independent sandboxes, and that is the core evaluation workload: set up an environment
+**Fan-out is only possible with restore.** Creating N sandboxes from one snapshot gives N
+independent ones, and that is the core evaluation workload: set up an environment
 once, then run N experiments against it that must not see each other's writes. Resume
 cannot do this at all — a paused sandbox is one sandbox, and resuming it gives you that
 one sandbox back. Reference counting reflects exactly this: `ref_count` on a snapshot is
@@ -179,13 +228,15 @@ e2b / agentenv / tensorlake all do it this way.
 **Unpacking a bundle happens once per snapshot (shipped)**: every restore of the same
 snapshot unpacks byte-identical content, so vmstate + memory are cached by snapshot id.
 Safety comes from Firecracker mapping the memory file `MAP_PRIVATE` (measured: the host
-file's md5 is unchanged after the guest writes 64MB).
+file's md5 is unchanged after the guest writes 64MB). That `MAP_PRIVATE` is Firecracker's own
+copy-on-write semantics for the guest; it is not the same mapping as the UFFD handler's
+read-only `MAP_SHARED` (§below), which is what shares one page-cache copy across VMs.
 **The writable rootfs is not cached** — two sandboxes restored from the same snapshot
 diverge the moment either writes.
 
-Measured restore ~950ms (1617ms the first time, paying the unpack cost). The remaining cost
-is transferring the bundle from the gateway and gunzipping it just to get that one rootfs
-member — unoptimised.
+Measured: the first restore is ~950ms (paying the unpack cost), and every cache hit after that
+is 392ms. The remaining cost is transferring the bundle from the gateway and gunzipping it just
+to get that one rootfs member — unoptimised.
 - fork ⚠️ **the mechanism ships, the API does not** (§4.5). The intended surface is
   `POST /sandboxes/{id}/fork {count}`: an instantaneous CoW snapshot + N LoadSnapshot calls
   → one parent many children, producing no persistent snapshot object (use /snapshot if you
@@ -308,7 +359,7 @@ interface — space that counts against no allocation should at least be visible
 
 - A snapshot is an independent object with an independent quota (total bytes per key); TTL is optional, with S3 lifecycle as the backstop
 - Reference counting: a snapshot with a RESTORING in flight cannot be deleted. The count is a **counter, not a flag**, precisely because concurrent restores of one snapshot are the expected case
-- The same snapshot can be restored many times, each producing an independent sandbox → this is the fan-out that "set up the environment, snapshot once, run N experiments" needs, and the core value point in eval scenarios. Resume cannot substitute: it returns one sandbox, the one that was paused
+- The same snapshot can be used to create many sandboxes, each one independent → this is the fan-out that "set up the environment, snapshot once, run N experiments" needs, and the core value point in eval scenarios. Resume cannot substitute: it returns one sandbox, the one that was paused
 
 ## 4. Comparing the two tiers, and the unified interface ⚠️
 
@@ -402,8 +453,9 @@ one memory image; fork just turns "multiple restores" into "one derivation of N"
 `guestCID` and the vsock port can both be constants, because every VM has its own vsock
 namespace (vm-assembly §7) — which spares fork one layer of allocation.
 
-Once networking exists there will additionally be a MAC/IP to reconfigure inside the guest;
-there is no network today, so the problem does not arise.
+A restored guest also has a MAC/IP that must line up inside the guest; because the
+tap keeps the same name across a restore and the address rides on the restore
+override (network.md §4), this resolves without per-fork reconfiguration.
 
 ### Relationship to snapCache
 
@@ -456,18 +508,19 @@ POST   /v1/sandboxes/{id}/snapshot           ✅
 GET    /v1/snapshots?label=...&state=...     ✅
 GET    /v1/snapshots/{id}                    ✅
 DELETE /v1/snapshots/{id}                    ✅  409 SNAPSHOT_IN_USE when it has descendants
-POST   /v1/sandboxes { "snapshot": "snap_..." }  ✅  restore: a NEW sandbox, new id.
+POST   /v1/sandboxes { "snapshot": "snap_..." }  ✅  create from a snapshot: a NEW sandbox, new id.
                                                     409 INCOMPATIBLE_CPU on an incompatible CPU.
                                                     Call it N times for a fan-out of N
 POST   /v1/sandboxes/{id}/fork               ⚠️  no API; the mechanism is the two calls
                                                  above (§4.5)
 ```
 
-Note that `pause`/`resume` act on `{id}` and return the same sandbox, while restore is a
-`POST /v1/sandboxes` — a creation — and returns a different one. The URL shapes say so.
+Note that `pause`/`resume` act on `{id}` and return the same sandbox, while creating from a
+snapshot is a `POST /v1/sandboxes` — a creation — and returns a different one. The URL shapes
+say so.
 
 CLI: `bean snapshot create SBX [--name N] [--no-memory] [--base SNAP] [--no-keep-running]`,
-`bean snapshot ls|rm`, `bean run --snapshot SNAP` (restore: a new sandbox each time),
-`bean pause SBX` / `bean resume SBX` (the same sandbox). There is no `bean fork`.
+`bean snapshot ls|rm`, `bean run --snapshot SNAP` (creates a new sandbox from the snapshot each
+time), `bean pause SBX` / `bean resume SBX` (the same sandbox). There is no `bean fork`.
 
 The SDK shape is in [sdk-cli-design.md](sdk-cli-design.md).

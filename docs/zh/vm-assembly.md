@@ -11,6 +11,62 @@
 
 ## 1. 全序 ✅
 
+```mermaid
+---
+config:
+  look: handDrawn
+  theme: neutral
+  flowchart:
+    curve: basis
+---
+flowchart TB
+  subgraph SHARED["共享准备 &middot; 两条路都走"]
+    direction TB
+    PREP["image.Prepare<br>/dev/mapper/bean-&lt;id&gt;<br>(restore: CoW 在此回填 &middot; 约束 A)"]
+    EXEC["在 netns 内 exec firecracker<br>cwd = sandbox 目录"]
+    WAIT["waitAPIReady<br>轮询 API socket"]
+    PREP --> EXEC --> WAIT
+  end
+
+  BRANCH{"带快照层?"}
+
+  subgraph COLD["冷启动 &middot; 有序 pre-boot PUT"]
+    direction TB
+    MC["/machine-config"]
+    CPU["/cpu-config<br>CPU 掩码 &middot; 约束 B"]
+    BOOT["/boot-source"]
+    DRV["/drives/agent (vda root)<br>/drives/rootfs (vdb)<br>/vsock"]
+    START["/actions InstanceStart"]
+    MC --> CPU --> BOOT --> DRV --> START
+  end
+
+  subgraph WARM["restore &middot; 不做任何 pre-boot 配置"]
+    direction TB
+    LOAD["PUT /snapshot/load<br>Uffd backend &middot; ResumeVM"]
+  end
+
+  GB["guest 启动<br>beand PID1 pivot 进用户 rootfs"]
+  GR["guest 恢复运行<br>缺页时按需供页"]
+
+  WAIT --> BRANCH
+  BRANCH -- "否 &middot; 冷启动" --> MC
+  BRANCH -- "是 &middot; restore" --> LOAD
+  LOAD -. "bundle 里无内存" .-> MC
+  START --> GB
+  LOAD --> GR
+
+  classDef prep fill:#FEF7E0,stroke:#F9AB00,color:#111;
+  classDef cold fill:#E6F4EA,stroke:#34A853,color:#111;
+  classDef warm fill:#F3E8FD,stroke:#A142F4,color:#111;
+  classDef out fill:#E8F0FE,stroke:#4285F4,color:#111;
+  class PREP,EXEC,WAIT prep;
+  class MC,CPU,BOOT,DRV,START cold;
+  class LOAD warm;
+  class GB,GR out;
+```
+
+下面带编号的全序是冷启动主干;restore 复用共享准备,把 PUT 序列换成单个 `/snapshot/load`。
+
 ```
 ① image.Prepare        组出 /dev/mapper/bean-<id>(共享 base + 每 sandbox CoW)
                        restore 时:CoW 必须在此步之内回填 ← 顺序约束 A
@@ -113,32 +169,53 @@ cmd.Dir = vm.dir
 ## 6. cmdline 的每一项 ✅
 
 ```
-quiet reboot=k panic=-1 pci=off init=/bean/beand -- --listen vsock:1024 --pivot /dev/vdb
+console=ttyS0 loglevel=3 reboot=k panic=-1 pci=off ip=... init=/bean/beand -- --listen tcp:0.0.0.0:10001 --pivot /dev/vdb
 ```
 
 | 参数 | 作用 | 依据 |
 |---|---|---|
-| `quiet` | 不挂串口 | **实测省 493ms**(1193ms → 700ms)。8250 UART 写入是同步的,内核每打一行都等硬件 |
+| `console=ttyS0 loglevel=3` | 挂上串口,只透传错误 | 曾用 `quiet`,实测省 493ms(1193ms → 700ms)。但 `quiet` **根本不挂任何 console 设备**,所以 boot 途中死掉的 guest 无处写下原因:`quiet` 下实测零解释性输出,而 `console=ttyS0` 下能看到真实成因,可 noded 两种情况都只报「agent not healthy after 20s」。`loglevel=3` 是 KERN_ERR 及以上,排掉了让 console 变贵的初始化噪声 —— **实测 1062-1122ms vs 1108-1119ms 基线**,这个级别下 UART 代价看不出来。`--debug-console` 仍会进一步降 loglevel,给那些还没来得及记录错误就失败的 guest 用 |
 | `reboot=k` | 用 keyboard reset | FC 无 ACPI,这是最小可用的 reset 方式 |
 | `panic=-1` | panic 不重启 | 崩掉的 guest 保持可检查,不进重启循环 |
 | `pci=off` | 跳过 PCI 枚举 | FC 没有 PCI 总线,枚举纯属浪费 |
 | `init=/bean/beand` | agent 作 PID 1 | 见 §4 |
 | `--` 之后 | 传给 beand 的参数 | 内核把 `--` 后的部分原样交给 init |
 
-**`quiet` 与可调试性的取舍**:内核仍然编进了 8250 驱动 ——
-`--debug-console` 只是把 `console=ttyS0` 加回去。失败的 boot 没有别的证据来源,
-所以这个能力不能丢,但不该每次 boot 都付 493ms。这一点学的是 e2b
-(它的 `fc-kernels` config 里 `CONFIG_SERIAL_8250=y` 是开着的)。
+**console 取舍是怎么解决的**:原本的推理 —— 失败的 boot 没有别的证据来源,
+所以这个能力不能丢,但不该每次 boot 都付 493ms —— 是对的,但从中得出的结论错了。
+`quiet` 被当成「压掉输出」,可它根本不挂 console 设备,于是证据不是变安静了,而是压根不存在。
+这是用昂贵的方式发现的:noded 传给 agent 一个它不认识的 flag,agent 退出,guest 以
+「Attempted to kill init!」panic,而 noded 报的是「agent not healthy after 20s」。
+成因是 guest 本会写下的那一行 —— 只要有地方可写。更糟的是,console log 里确实有
+Firecracker 自己的输出,它描述的是 VMM 的反应、读起来像硬件故障(`MissingAddressRange`),
+在被认定为噪声之前浪费了实打实的时间。误导性的证据比没有证据更糟。
+解决办法是降 loglevel 而非用开关:console 挂着,错误透传,初始化噪声不透传,实测代价落在噪声里。
+`--debug-console` 保留给那些还没来得及记录错误就失败的 guest。8250 驱动两种方式都编进内核,
+和 e2b 的 `fc-kernels` config 一样(`CONFIG_SERIAL_8250=y`)。
 
-## 7. vsock 为什么可以用常量 ✅
+## 7. agent 地址为什么可以用常量 ✅
 
 ```go
-const agentVsockPort = 1024
+const agentVsockPort = 1024   // 无网络的 sandbox
 const guestCID = 3
+const AgentGuestPort = 10001  // 有网络的 sandbox
 ```
 
-两个都不需要分配:**每个 VM 有自己的 vsock 命名空间**,所以没有可冲突的对象。
-CID 3 是 guest 可用的最小值(0–2 被协议保留)。
+三个都不需要分配:**每个 VM 有自己的 vsock 命名空间,也有自己的网络命名空间**,
+所以没有可冲突的对象。CID 3 是 guest 可用的最小值(0–2 被协议保留)。
+
+**用哪一个取决于 sandbox 有没有网络**,这是一条安全边界而非偏好:
+
+| | 无网络 | 有网络 |
+|---|---|---|
+| agent 监听在 | `vsock:1024` | `tcp:0.0.0.0:10001` |
+| sandbox 内部能否触达 | **不能** —— 该地址族是 host-to-guest | **能** |
+| 靠什么把 sandbox 挡在外面 | 内核 | 每 sandbox 的 token(A7) |
+
+有 vsock 的地方就保留 vsock,因为结构性保证胜过凭据。有网络的地方用 TCP,
+因为它让 agent *成为 guest 上的一个端口*,这正是让同一套寻址方案既覆盖它、
+也覆盖用户暴露的任何端口的前提 —— 见 api-design.md §6。
+因此 `10001` 是保留的:用户暴露它就等于暴露了 agent。
 
 常量的好处是 guest 的 cmdline 不依赖宿主状态 —— 这让 cmdline 在快照前后完全一致,
 少一个恢复时要对齐的东西。

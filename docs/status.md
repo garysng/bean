@@ -16,7 +16,7 @@ guest kernel 6.1.102, Alpine 3.20.
 
 | Area | | Notes |
 |---|---|---|
-| Lifecycle | ✅ | create → exec → cp → pause → resume → snapshot → restore → destroy. Resume wakes **this** sandbox; restore builds a **new** one from the snapshot, and N restores of one snapshot are N independent sandboxes ([snapshot-resume.md](snapshot-resume.md) §0) |
+| Lifecycle | ✅ | create → exec → cp → pause → resume → snapshot → create-from-snapshot → destroy. Resume wakes **this** sandbox; creating from a snapshot builds a **new** one (the internal restore/Fork path), and N such creates from one snapshot are N independent sandboxes ([snapshot-resume.md](snapshot-resume.md) §0) |
 | Images | ✅ | OCI pull and conversion to ext4, private registries (AES-256-GCM at rest), prewarm with image-affinity scheduling |
 | Rootfs | ✅ | Shared read-only base + per-sandbox copy-on-write through device-mapper. **44 KiB of actual disk per sandbox** (see the note below on why other figures were quoted) |
 | Snapshots | ✅ | Three kinds with different semantics — see below |
@@ -35,6 +35,7 @@ guest kernel 6.1.102, Alpine 3.20.
 | VMM pid namespace | ✅ | `--fc-pid-namespace`, **on by default**: the VMM cannot see or signal any host process. Verified by inode on a live VMM, simultaneously with the sandbox's network namespace -- the two compose because the netns is joined before the fork and the clone flags apply during it |
 | VMM mount namespace | ✅ | `--fc-mount-namespace`, **on by default**. Held back at first on the expectation that bean's device-mapper rootfs would stop being openable inside one. That was wrong: a booted guest has a working `eth0` and its own mnt, pid and net namespaces at once |
 | VMM killed if noded dies | ✅ | `--fc-kill-on-exit`, **on by default**. Reconciliation already reclaimed such a VMM, but only at the next startup, and until then it holds memory promised elsewhere. Measured with a negative control: with the flag the VMM is gone after `kill -9` on noded, without it it survives |
+| Container tier (runc/gVisor) | ✅ | `--runtime runc` or `--runtime runsc`: noded drives the OCI runtime directly (`NewOCITier`), **no containerd** — same bundle and subcommands for both, sharing the fc tier's rootfs providers. This is the third real runtime tier alongside `fc` and `local` |
 | Postgres | ✅ | `bean-api --postgres`, which is what allows more than one replica: SQLite is one file, so two replicas cannot share it. A dialect rather than a second implementation, sized by measurement — 103 placeholders plus a few DDL constructs, with all eight `ON CONFLICT` clauses porting unchanged. `hack/postgres-conformance.sh` runs the requirements against a real Postgres 16; the suite skips loudly rather than reporting a pass earned by SQLite. **Reading the SQL was not enough** — see below |
 
 ## Not delivered
@@ -44,7 +45,6 @@ guest kernel 6.1.102, Alpine 3.20.
 | Cross-node sandbox networking | 📐 | A non-goal, not a gap. Sandbox-to-sandbox traffic does not cross nodes |
 | Per-port access control | 📐 | Any port on a sandbox is reachable by anything that can reach bean-proxy. A sandbox must not be given a port it would not want its caller to see (api-design.md §3.4) |
 | jailer chroot | 📐 | Not done, and probably not the right shape. What jailer adds over what is now in place is a chroot and a device allowlist, and it needs the device-mapper node `mknod`'d into a per-sandbox jail (docs/jailer.md). The namespace isolation it is usually wanted for is delivered without it |
-| Container tiers (runc/gVisor) | 📐 | microVM, plus a no-isolation `local` tier for development, are the only options |
 | Volumes | 📐 | |
 | Host resource reconciliation | 📐 | A crashed noded leaves dm mappings and sandbox directories behind |
 | Build logs and cancellation | ⚠️ | A build reports no progress and cannot be stopped |

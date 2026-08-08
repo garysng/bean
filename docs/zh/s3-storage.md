@@ -175,9 +175,12 @@ BEAN_S3_SECRET_KEY                    # 仅环境变量
 环境变量也不是强防护(`/proc/<pid>/environ` 同样可读,只是限制在同 uid),
 但至少不在 `ps` 的默认输出里,也不会被记进 shell history。
 
-**当前只有控制面碰 S3**(`grep -rn BEAN_S3 cmd/noded/` 为空)。
-快照 blob 的流向是 节点 → gRPC → gateway → S3,节点不需要凭证也拿不到。
-这不是设计上的克制,是「节点侧还没有需要直传 S3 的功能」的副产品。
+**noded 在 `--fc-overlaybd` 下直连 S3**(`grep -rn BEAN_S3 cmd/noded/` 现在有 5 处命中)。
+它从 `BEAN_S3_ACCESS_KEY` / `BEAN_S3_SECRET_KEY` 构造 S3 client
+(`cmd/noded/main.go` 的 `s3.New(...)` → `NewS3BlobStore(...)`),由此得到的
+`OverlaybdBlobs` store 发布并 range 读 sealed layers(`internal/node/image/obdblobstore.go`)。
+dm-snapshot 路径的快照 blob 仍走 节点 → gRPC → gateway → S3,但 overlaybd 下的节点侧
+S3 访问已经是真实存在的,随之而来的凭证管理需求也是真实的。
 
 ### 已知缺口 📐
 
@@ -185,12 +188,13 @@ BEAN_S3_SECRET_KEY                    # 仅环境变量
 
 - **presigned URL** 未实装 —— 节点上传产物、sandbox 内直传产物都应该用控制面
   签发的、绑定 key 前缀与 content-length 的短时 URL
-- **STS 只读角色轮换**未实装 —— overlaybd 接入后节点要直接读 blob,
-  那时才真正需要它(1h 轮换的只读临时凭证,限 blob bucket 前缀)
+- **STS 只读角色轮换**未实装 —— 节点已经在 `--fc-overlaybd-lazy-pull` 下直接 range 读 blob,
+  且用的是长期 `BEAN_S3_ACCESS_KEY` / `BEAN_S3_SECRET_KEY` 而非轮转的 STS 凭证。这才是当前
+  真正的 gap:它需要的是 1h 轮换、限 blob bucket 前缀的只读临时凭证
 
-换句话说:这两条缺口目前**还没有造成风险**,因为节点不碰 S3。
-但它们是 overlaybd 接入(节点直接 range 读 blob)与构建产物上传(#22)的前置条件 ——
-届时如果偷懒直接给节点长期凭证,就会变成实质的安全退步。
+换句话说:节点侧 S3 访问已不再是假设 —— 一旦开启 overlaybd,节点就持有长期凭证,
+所以 STS 缺口是当下的隐患,不是将来的。构建产物上传(#22)的 presigned 仍是节点/sandbox
+直传产物的前置条件;此刻偷懒给节点长期凭证,已经是实质的安全退步,而非推迟的问题。
 
 ## 7. 测试策略 ✅
 

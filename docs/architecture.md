@@ -99,7 +99,7 @@ reach the proxy (api-design.md §3.4).
         └────┬─────┘         └──────────┘         └──────────┘
              │ overlaybd direct + noded owns both FC and the container runtime; no containerd
         ┌────▼────────────────────────────────┐
-        │  ├── image: overlaybd ublk daemon   │ ← block-level lazy-pull from S3
+        │  ├── image: overlaybd (over TCMU)   │ ← block-level lazy-pull from S3
         │  └── runtime: fc(default)│runc│runsc│ ← internal tier selection (D3)
         └────┬────────────────────────────────┘
              │
@@ -138,22 +138,24 @@ one image path, and the user never notices the difference.
 
 ### D2. overlaybd driven directly, no containerd on the hot path ⚠️
 
-> **"No containerd" is achieved; "overlaybd driven directly" is not.** The
-> current backend is dm-snapshot: pull the whole image, convert it, share a
-> read-only base, one CoW per sandbox (measured at 44 KiB/sandbox). The
-> overlaybd capability has been measured working on a tcmu backend but is not
-> wired into `image.Provider`.
+> **"No containerd" is achieved; "overlaybd driven directly" is wired in but not
+> the default (⚠️).** The default backend is dm-snapshot: pull the whole image,
+> convert it, share a read-only base, one CoW per sandbox (measured at 44
+> KiB/sandbox). overlaybd is now wired into `image.Provider` as `OverlaybdProvider`
+> (`internal/node/image/overlaybd_linux.go`), driven over TCMU and enabled with
+> `--fc-overlaybd`; dm-snapshot remains the default until overlaybd is the proven
+> main path.
 
 The fc main path **does not bring in containerd** (same as AgentENV, whose
 source is available locally at /Users/mac/project/agentenv for reference):
-noded drives overlaybd's ublk daemon directly to assemble the block device
+noded drives overlaybd directly (over TCMU) to assemble the block device
 (S3 backing + local cache) → virtio-blk attached to the microVM. All three of
 containerd's responsibilities have a more direct replacement in this design:
 
 | containerd responsibility | This design |
 |---|---|
 | Image pull / content store | Blobs live in S3 (image-service converts offline), metadata pushed down by the control plane; the registry is not on the hot path |
-| snapshotter | overlaybd ublk daemon driven directly (demonstrated by AgentENV's uvm-ublk) |
+| snapshotter | overlaybd driven directly over TCMU (demonstrated by AgentENV's uvm-ublk) |
 | Task lifecycle | fc: noded owns the FC process; container tier: noded drives runsc/runc directly (no containerd -- see below) |
 
 > **Revised.** The container tier does **not** use containerd. This paragraph was
@@ -171,9 +173,11 @@ The original reasoning, kept because the trade is real: runc lifecycle and overl
 assembly are not worth reimplementing, and a pure fc node can skip containerd
 entirely. For the runtime abstraction interface see noded-design §3.
 
-### D3. Isolation tiers + node capability probing ⚠️
+### D3. Isolation tiers + node capability probing 📐
 
-noded probes node capabilities at startup and reports them:
+Startup capability probing is planned, not yet implemented. Today the tier is
+set explicitly with `--runtime` rather than probed; the intended mapping once
+probing lands:
 
 ```
 ├── /dev/kvm available (bare metal or nested-virt VM) → [runc, runsc, fc]
@@ -340,11 +344,11 @@ complexity inside the guest.
 
 | Data | Approach |
 |---|---|
-| Image blobs | **overlaybd block-level images** (a layer = a block-device diff) stored directly in S3, range-read on demand by the node through ublk; the registry holds metadata only |
+| Image blobs | **overlaybd block-level images** (a layer = a block-device diff) stored directly in S3, range-read on demand by the node through the overlaybd TCMU backend; the registry holds metadata only |
 | Node cache | Local NVMe as a block-chunk LRU on top of S3; bare metal (big disks) and cloud VMs (small disks) differ only in hit rate, the architecture is the same |
 | Eval artifacts | agent/noded push straight to S3 via presigned URL (issued by the control plane; nodes hold no long-lived credentials) |
 | Large downloads | The API returns a presigned URL redirect rather than proxying through the gateway |
-| Snapshots (P3–P4) | FC memory snapshot / rootfs diff land in S3, enabling cross-node **restore** (a new sandbox on any node; resume is same-process and same-node, see snapshot-resume.md §0) |
+| Snapshots (P3–P4) | FC memory snapshot / rootfs diff land in S3, enabling cross-node **create-from-snapshot** (a new sandbox on any node, via the internal restore/Fork path; resume is same-process and same-node, see snapshot-resume.md §0) |
 | Volumes | shared-fs volume backend (JuiceFS on S3) mounted on the host and exported over nfsd (see D10); dataset volumes reserved |
 
 overlaybd (block-level, DADI/Alibaba, already validated by AgentENV in the FC
@@ -586,7 +590,7 @@ See [snapshot-resume.md](snapshot-resume.md).
 
 Target: P50 < 2s (image already cached) / P50 < 10s (lazy-pull of a cold image).
 
-1. **lazy-pull**: overlaybd + ublk block-level on-demand loading; startup needs only the metadata plus the hot blocks, and the rest is range-read from S3 while running
+1. **lazy-pull**: overlaybd + TCMU block-level on-demand loading; startup needs only the metadata plus the hot blocks, and the rest is range-read from S3 while running
 2. **Node cache**: chunk-level LRU, S3 is the source of truth, so the node disk can be GC'd freely
 3. **prewarm API**: warm images onto the target nodes before an evaluation batch begins
 4. **Image-affinity scheduling**: raises the cache hit rate for free

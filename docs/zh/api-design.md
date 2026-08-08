@@ -66,7 +66,7 @@ POST /sandboxes
   "nodeSelector": { "pool": "nvme" },   // 可选;按节点 labels 过滤
   "lifecycle": {                        // 可选;缺省 = 一直运行
     "idleTimeout": "300s",              //   null/缺省=永不;"0s"=活动一结束即触发
-    "onIdle": "pause"                   //   pause（默认）| kill
+    "onIdle": "pause"                   //   pause（默认）| delete
   },
   "labels": { "eval-run": "swebench-0731", "task": "django-12345" },
   "networkPolicy": "egress-only",       // egress-only|none|allow-list（预留）
@@ -81,35 +81,52 @@ POST /sandboxes
 GET    /sandboxes/{id}                       → sandbox 详情（state、runtime、nodeId、createdAt、lifecycle、lastActivityAt、endpoints）
 GET    /sandboxes?label=eval-run%3Dswebench-0731&state=RUNNING&pageToken=&pageSize=100
 DELETE /sandboxes/{id}                       → 202，异步销毁；?force=true 跳过 graceful
-PATCH  /sandboxes/{id}/lifecycle { "idleTimeout": "600s", "onIdle": "kill" }   → 运行时调整
+PATCH  /sandboxes/{id}/lifecycle { "idleTimeout": "600s", "onIdle": "delete" }   → 运行时调整  📐 未实现（SDK set_lifecycle 亦未实现）
 POST   /sandboxes/{id}/pause                 → 202 → PAUSED
 POST   /sandboxes/{id}/resume                → 202 → RUNNING
 POST   /sandboxes/{id}/snapshot  { "name": "after-setup", "keepRunning": true }
                                              → 202 { "snapshotId": "snap_..." }
-POST   /sandboxes/{id}/start                 → 拉起原 entrypoint（autoStartCmd=false 后手动启动）
+POST   /sandboxes/{id}/start                 → 拉起原 entrypoint（autoStartCmd=false 后手动启动）  📐 未实现
+POST   /sandboxes/{id}/commit                → 202；把运行中的 rootfs 提交为镜像
 POST   /sandboxes/{id}/fork     { "count": 3, "labels": {...} }    // 独立 API（fc 档,P4）
        → 202 { "sandboxes": [ ...N 个新 sandbox... ] }
        // 语义：对运行中 sandbox 做瞬时 CoW 快照并克隆 N 个独立实例（不产生
        // 持久 snapshot 对象;要留存用 /snapshot）。容器档返回 501。
-       // 注意:这是 snapshot+restore 这对操作的便利封装,不是一项新能力。
+       // 注意:这是 snapshot + 从快照创建 这对操作的便利封装,不是一项新能力。
        // 今天 POST /snapshot 再 N 次 POST /sandboxes{snapshot} 已经能得到 N 个
        // 互相独立的 sandbox;fork 省掉的是那个持久对象和那一圈往返。
        // 见 snapshot-resume.md 4.5
 ```
 
+**只有一个创建端点，它在内部分叉。** `POST /sandboxes` 接受 `image` 或 `snapshot`
+二者之一（互斥）。带哪个决定 guest 怎么起来，调用的其它部分都不变:
+
+- **从 image** —— 冷启动。运行时的 `Create` 路径组出 rootfs 并 boot guest 内核
+  （vm-assembly.md）。
+- **从 snapshot** —— 运行时的 `Fork` 路径:回填 CoW 层，用 UFFD 缺页供页把 guest 带回来，
+  而不是 boot。这条路径就是早期文档里说的 *restore*;它是 create 的一条内部分支，
+  不是单独的调用或端点。它永远产出一个**新的** sandbox、新 id —— 绝不是把被快照的那个唤回来 ——
+  调 N 次就是一份快照扇出成 N 个互相独立的 sandbox。
+
+所以 "restore" 是一条内部路径的名字（`rt.Fork`，相对于冷启动的 `rt.Create`），
+不是面向用户的动词:没有 `/restore`。`resume` 完全是另一回事 —— 它唤醒一个进程从未离开的
+PAUSED sandbox（见 `resume`），什么都不创建。完整区分见
+[snapshot-resume.md](snapshot-resume.md) §0。
+
 sandbox 详情返回 `runtime: fc|runsc|runc`（实际档位，排障用）。
 
-批量（eval 场景高频）：
+批量（eval 场景高频）📐 未实现 —— 没有批量路由,请循环调用单条端点：
 
 ```
-POST /sandboxes:batchCreate   { "requests": [ ... ≤100 ... ] }
+POST /sandboxes:batchCreate   { "requests": [ ... ≤100 ... ] }    // 📐
 → 207 逐项 { index, sandbox | error }     // 部分成功语义
-DELETE /sandboxes?label=eval-run%3Dswebench-0731    → 批量销毁，202 + 任务计数
+DELETE /sandboxes?label=eval-run%3Dswebench-0731    → 批量销毁，202 + 任务计数    // 📐
 ```
 
 ### 3.2 Exec ⚠️
 
-> 同步 exec 与流式 exec 已实装;**PTY 未实现**。
+> 仅同步 exec 已实装;**流式/PTY exec（WebSocket）未实现**
+> （网关无 WS 路由,也无 ExecStream RPC —— 见 sdk-cli-design.md）。
 
 
 ```
@@ -123,8 +140,10 @@ POST /sandboxes/{id}/exec          // 同步，适合 eval 单条命令
 → 200 { "exitCode": 1, "stdout": "...", "stderr": "...", "truncated": false, "durationMs": 42150 }
 ```
 
+📐 **未实现** —— 下面这段是设计意图,今天并没有这条路由。
+
 ```
-WS /sandboxes/{id}/exec/ws?pty=true&cols=120&rows=40
+WS /sandboxes/{id}/exec/ws?pty=true&cols=120&rows=40    // 📐
 ```
 
 WebSocket 子协议（JSON 帧）：
@@ -147,13 +166,18 @@ PUT  /sandboxes/{id}/files?path=/workspace/patch.diff     // body ≤4MiB 直传
      ?mode=0644&mkdirs=true
 GET  /sandboxes/{id}/files?path=/workspace/report.json    // ≤4MiB 直回
 GET  /sandboxes/{id}/files/ls?path=/workspace             → [{name,size,mode,mtime,isDir}]
-POST /sandboxes/{id}/files:uploadUrl   {"path": "...", "sizeBytes": 123456789}
+DELETE /sandboxes/{id}/files?path=...
+```
+
+下面的 presigned 两段式上传/下载 📐 **未实现** —— 今天只有上面的直传 PUT/GET：
+
+```
+POST /sandboxes/{id}/files:uploadUrl   {"path": "...", "sizeBytes": 123456789}    // 📐
      → { "url": "<presigned PUT>", "commit": "/files:commitUpload?token=..." }
      // 两段式：client PUT S3 → 调 commit → gateway 指令 agent FetchToSandbox
      //（agent 经 presigned GET 拉入 sandbox 内目标路径）
-POST /sandboxes/{id}/files:downloadUrl {"path": "..."}
+POST /sandboxes/{id}/files:downloadUrl {"path": "..."}    // 📐
      → { "url": "<presigned GET>" }    // noded 把文件推 S3 暂存后签 URL
-DELETE /sandboxes/{id}/files?path=...
 ```
 
 ### 3.4 Ports —— 没有注册步骤 ✅
@@ -162,12 +186,12 @@ DELETE /sandboxes/{id}/files?path=...
 (`{port}-{sandbox}`,见 §6),bean-proxy 转发过去。沙箱内有进程在听就能访问,
 没有就返回 502。
 
-下面这套设计是先画的,**没有实现,而且是刻意不实现**:
+下面这套设计是先画的,**没有实现,而且是刻意不实现**（📐）:
 
 ```
-POST /sandboxes/{id}/ports    { "port": 8888, "auth": "token" }
-GET    /sandboxes/{id}/ports
-DELETE /sandboxes/{id}/ports/{port}
+POST /sandboxes/{id}/ports    { "port": 8888, "auth": "token" }    // 📐
+GET    /sandboxes/{id}/ports                                       // 📐
+DELETE /sandboxes/{id}/ports/{port}                                // 📐
 ```
 
 它会给一件 guest 已经决定的事再造一个真相来源。端口开没开是沙箱内进程的事实,
@@ -203,6 +227,9 @@ POST /images/prewarm   { "refs": ["img:a"], "region": "ap-east-1",
                          "targetNodes": 10, "priority": "high" }
      → { jobId, refs, ready: {ref: nodeCount}, done }
 GET  /images/prewarm/{jobId}      各镜像 × 节点就绪矩阵
+POST /images/build     { ... }    → 发起远程镜像构建
+GET  /images/build/logs?ref=<ref> 构建日志流（ref 走 query:含 / 与 :）
+POST /images/build/cancel { ... } 取消进行中的构建
 ```
 
 `cachedNodes` / `targetNodes` 是**运维语义,故意不进 CLI**：副本落在几台机器上
@@ -239,7 +266,7 @@ GET    /volumes?label=...          → 含 usage（空间/inode 用量）
 GET    /volumes/{id}
 DELETE /volumes/{id}               // 有活跃挂载时 409 VOLUME_IN_USE
 
-POST /sandboxes { ..., "volumes": [
+POST /sandboxes { ..., "volumes": [    // 📐 create 请求体内联的 volumes 字段是预留字段,尚未生效
   { "volume": "vol_...", "subPath": "run-0731", "mountPath": "/workspace",
     "readOnly": false }
 ] }
@@ -261,14 +288,14 @@ POST   /sandboxes/{id}/snapshot  { "name": "after-setup", "labels": {},
 GET    /snapshots?label=k%3Dv&state=READY   → 列表
 GET    /snapshots/{id}
 DELETE /snapshots/{id}      // RefCount>0 或有子代 → 409 SNAPSHOT_IN_USE
-POST   /sandboxes    { "snapshot": "snap_..." }   // restore:一个**新的** sandbox、新 id,
-                                                  // 不是把被快照的那个救回来。
+POST   /sandboxes    { "snapshot": "snap_..." }   // 从快照创建:一个**新的** sandbox、新 id,
+                                                  // 不是把被快照的那个救回来(内部走 Fork 路径)。
                                                   // 调 N 次就是一份快照出 N 个独立 sandbox
                                                   // image 与 snapshot 互斥
                      // CPU 不兼容 → 409 INCOMPATIBLE_CPU
 ```
 
-restore 是 `POST /sandboxes` —— 一次创建 —— 而 `resume` 是打在已存在的
+从快照创建走 `POST /sandboxes` —— 一次创建 —— 而 `resume` 是打在已存在的
 `/sandboxes/{id}` 上的 POST。两者是作用在不同对象上的不同操作,见
 [snapshot-resume.md](snapshot-resume.md) §0。
 
@@ -302,7 +329,7 @@ restore 是 `POST /sandboxes` —— 一次创建 —— 而 `resume` 是打在�
 ```
 事件类型：sandbox.lifecycle.{created,running,paused,resumed,stopped,failed,lost,oom}
           + sandbox.snapshot.{ready,failed}
-          // stopped 对应状态机 STOPPED（含显式 DELETE 与 onIdle=kill）,
+          // stopped 对应状态机 STOPPED（含显式 DELETE 与 onIdle=delete）,
           // lost 对应节点租约丢失
 事件体：  { "id", "type", "timestamp", "sandboxId", "data": {...}, "version": "v1" }
           // 命名对齐 e2b（sandbox.lifecycle.* 点分层级）,便于生态兼容
@@ -323,6 +350,7 @@ webhook 推送为 P5 储备项。
 ```
 GET /sandboxes/{id}/logs?follow=false&tailLines=1000    // agent 环形缓冲 + S3 归档
 GET /nodes                                              // 运维面：节点列表、容量、能力
+POST /nodes/{id}/drain                                  // 运维面：cordon + drain 一个节点
 GET /metrics                                            // Prometheus 格式（免鉴权:本地采集,不含 sandbox 内容）
     // bean_sandbox_creates_total{outcome}         创建结果计数
     // bean_sandbox_create_duration_seconds{outcome}  端到端创建延迟直方图
@@ -447,7 +475,7 @@ control plane 作为 client 直连调用）。
 | idleTimeout | 行为 |
 |---|---|
 | 缺省 / null | 不启用 idle 检测（默认）,sandbox 持续运行 |
-| `"0s"` | 活动一结束立即触发 onIdle（eval 批量：`onIdle: kill` 用完即走） |
+| `"0s"` | 活动一结束立即触发 onIdle（eval 批量：`onIdle: delete` 用完即走） |
 | `"300s"` | 闲置 5 分钟触发 onIdle |
 
 - **idle 判定**（noded 本地,不依赖控制面）：无 exec 会话 + 无端口活跃连接 +
@@ -459,7 +487,7 @@ control plane 作为 client 直连调用）。
   仍占宿主 RAM 与调度承诺量,容量代价由容量规划承担。管理员可选开启全局回收
   （默认关）;长期正解是 P4 的 snapshot 归档:PAUSED 超阈值 → 状态落 S3 释放
   RAM → 再访问自动 restore
-- 业界对齐:CubeSandbox v0.5(on_timeout: pause/kill + 数据面透明唤醒)、
+- 业界对齐:CubeSandbox v0.5(on_timeout: pause/delete + 数据面透明唤醒)、
   e2b auto-pause/auto-resume 同构;我们以 null 表达「永不」,避开 -1/0 魔数重载
 
 ### 5.3 Exec 路由 ✅
@@ -552,7 +580,7 @@ e2b 从另一个方向到了同一个形状:`packages/client-proxy` 把 sandbox 
 
 ### 6.4 生命周期联动 📐
 
-- sandbox 销毁（含 onIdle=kill）→ gateway 撤销端口记录 → proxy 缓存失效推送 → 后续请求 404
+- sandbox 销毁（含 onIdle=delete）→ gateway 撤销端口记录 → proxy 缓存失效推送 → 后续请求 404
 - PAUSED → 触发透明唤醒并阻塞透传;唤醒超时（默认 10s）才回 502 + Retry-After
 
 ## 7. 配额与限流 ⚠️

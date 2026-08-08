@@ -11,17 +11,16 @@
   OCI 拉取转换、commit、BuildKit 构建、OTel trace 全链路
 - ✅ **已提前做完 P3/P4 的快照部分**:pause/resume、full / `--no-memory` /
   `--base` 增量三种快照、UFFD 按需供页、CPU template 与调度器 CPU 过滤
-- ⚠️ **P0 里说的 overlaybd ublk 直驱没做**:走的是 dm-snapshot(每 sandbox 44 KiB)。
-  overlaybd 能力已实测但未接入 —— 它变成了优化项而非基础
+- ⚠️ **P0 里说的 overlaybd ublk 直驱走的是 TCMU 而非 ublk**:默认仍是 dm-snapshot
+  (每 sandbox 44 KiB)。overlaybd 已接进 `image.Provider`(`OverlaybdProvider`),
+  用 `--fc-overlaybd` 开启、真机验证过 —— 它变成了优化项而非基础,ublk(≥ 6.0)只是更快的备选
 - ⚠️ **P0 里说的 jailer 没做**:noded 直接 exec firecracker
 - ✅ **P0/P1 里说的网络已做完**,而它曾是最大的空白:每沙箱 namespace、tap、
   NAT 出网,元数据网段与 RFC1918 默认拒绝,沙箱内端口可从节点外经 bean-proxy 到达。
   在真实内核上验证过,包括拒绝规则。跨节点 sandbox 互通仍是非目标
-- 📐 **未做**:容器档(runc/runsc)、volume、按端口的访问控制、
-  Postgres、TypeScript SDK
+- 📐 **未做**:volume、按端口的访问控制、TypeScript SDK
 
-一句话:**纵向(快照/启动优化)走得比路线图深;横向上网络已经补齐,剩下的是容器档
-和卷。**
+一句话:**纵向(快照/启动优化)走得比路线图深;横向上网络与容器档都已补齐,剩下的是卷。**
 
 ## P0 — 单节点端到端骨架（fc 直启,无 containerd）
 
@@ -44,7 +43,7 @@ overlaybd、envd、jailer/FC 管理的完整实证,逐模块对照）。
 ```
 curl POST /sandboxes {image} → fc microVM RUNNING
 curl POST /exec {pytest} → exit code + output
-curl DELETE → 资源清零（FC 进程/tap/ublk 设备/挂载无残留）
+curl DELETE → 资源清零（FC 进程/tap/TCMU 设备/挂载无残留）
 ```
 
 ## P1 — 多节点可用（eval 首次接入）
@@ -84,7 +83,7 @@ curl DELETE → 资源清零（FC 进程/tap/ublk 设备/挂载无残留）
 - WS 流式 exec + PTY（会话重连）、CLI 交互模式（run -it / attach）
 - bean-proxy（regional）：通配域名 TLS、端口暴露（反代直连 sandbox IP）、sandbox token 鉴权、PAUSED 透明唤醒
 - pause/resume（fc PauseVM）+ PAUSED 透明唤醒
-- lifecycle 自动化：idle 检测（noded 本地）、onIdle pause/kill、PAUSED 请求透明唤醒
+- lifecycle 自动化：idle 检测（noded 本地）、onIdle pause/delete、PAUSED 请求透明唤醒
 - fc 档 snapshot 本节点路径（memory+disk → S3）
 - **shared-fs 卷**（宿主挂 JuiceFS + 内核 nfsd 导出、agent NFS 挂载、后端配额）
 - TS SDK、e2b 迁移对照文档
@@ -95,7 +94,7 @@ curl DELETE → 资源清零（FC 进程/tap/ublk 设备/挂载无残留）
 
 **范围**
 
-- fc 档跨节点 restore、diff snapshot 增量、fork 独立 API（CoW 一母多子,本节点）
+- fc 档跨节点 restore、diff snapshot 增量、✅ fork 独立 API（CoW 一母多子,本节点 —— 已实装,`POST /v1/sandboxes/{id}/fork`）
 - PAUSED 归档：超阈值自动 snapshot 落 S3 释放 RAM,再访问透明 restore
 - snapshot 生命周期：配额、引用计数、TTL/S3 lifecycle
 - **镜像即快照**：`POST /images:register {snapshot}` 把任意 sandbox 快照注册为

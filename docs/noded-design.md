@@ -14,12 +14,14 @@
 
 ```
 internal/node/
-├── manager.go       ✅ Manager: lifecycle orchestration (create/destroy/pause/resume/
-│                       snapshot/restore, transparent wake, idle reclaim, in-flight guard)
+├── manager.go       ✅ Manager: lifecycle orchestration (create incl. create-from-snapshot/
+│                       destroy/pause/resume/snapshot, transparent wake, idle reclaim,
+│                       in-flight guard)
 ├── grpc.go          ✅ SandboxService implementation + data-plane pass-through to the agent
 ├── register.go      ✅ Outbound registration, heartbeat, SyncState reconciliation
 ├── auth.go / dial.go ✅ node token auth, agent connection
-├── runtime/         ✅ Runtime interface + fc (real microVM) and local (process-level, dev only)
+├── runtime/         ✅ Runtime interface + fc (real microVM), oci (runsc/runc, no containerd)
+│                       and local (process-level, dev only)
 │                       including UFFD page supply, snapshot bundles, CPU templates, diff merge
 ├── image/           ✅ image.Provider: DevMapperProvider (shared base + CoW),
 │                       FileProvider, PullingProvider; OCI pull-and-convert, commit, build
@@ -68,7 +70,7 @@ controlPlane: grpcs://<hosted-gateway>:443   # ⚠️ --control-plane exists, bu
 s3:
   endpoint: https://...  # ⚠️ comes from environment variables rather than config (credentials stay off the command line)
 containerd: null        # ✅ the container tier is implemented and needs no containerd (D2/D3)
-cidr: 10.100.0.0/24     # 📐 there is no network stack
+cidr: 10.100.0.0/24     # 📐 not this shape — networking is per-sandbox /30s, not a node subnet (see §5); the guest /30 is set with --guest-subnet
 cache:
   dir: /var/lib/bean/cache
   maxBytes: 800Gi        # 📐 no cache LRU; base images are not reclaimed automatically today
@@ -76,7 +78,7 @@ runtimes: auto           # 📐 not probed, specified explicitly with --runtime
 overcommit:              # ✅ implemented, see §3.2
   cpu: 3.0
   memory: 1.0
-network:                 # 📐 there is no network stack
+network:                 # 📐 egress works (§5), but tc rate limiting is not built
   egressRateMbps: 100
 ```
 
@@ -146,8 +148,8 @@ than making callers check for the capability.
 |---|---|---|---|
 | `FCRuntime` (main tier) | ✅ | noded execs the firecracker process directly, **no jailer** (see security §A3), no containerd | dm-snapshot block device attached directly over virtio-blk; vsock to the agent; full/diff/memoryless snapshots |
 | `LocalRuntime` (dev/CI) | ✅ | Host process | **No isolation**, must not be used for untrusted code |
-| `runcRuntime` | 📐 | containerd + runc shim | Unimplemented |
-| `runscRuntime` | 📐 | containerd + runsc shim | Unimplemented |
+| `runcRuntime` | ✅ | noded drives the OCI runtime (runsc/runc) directly, **no containerd**, sharing the fc tier's rootfs providers | `--runtime runc`; container tier via `NewOCITier` |
+| `runscRuntime` | ✅ | noded drives the OCI runtime (runsc/runc) directly, **no containerd**, sharing the fc tier's rootfs providers | `--runtime runsc`; the same implementation as runc, differing only in the binary |
 
 Key points:
 
@@ -163,11 +165,12 @@ Key points:
    read-only base (loop-mounted) + a sparse CoW file per sandbox, composed into
    a single `/dev/mapper/bean-<id>`.
    Quota = the CoW file size; the CoW layer is exactly what a snapshot captures.
-   (overlaybd lazy-pull is the target form; the capability is measured but not wired in)
+   (overlaybd is now wired into `image.Provider` as `OverlaybdProvider`, opt-in with
+   `--fc-overlaybd` over TCMU and verified on hardware; dm-snapshot is still the default)
 2. noded execs firecracker directly (**no jailer**, see security §A3):
    virtio-blk: **the agent disk is the root device** (`agent.ext4`, containing beand)
                + the user image as the second disk (`/dev/vdb` inside the guest)
-   vsock; **no NIC, no balloon** (the network stack is unimplemented, balloon is not wired up)
+   vsock; a tap NIC (registered pre-boot, see §5.3), **no balloon** (balloon is not wired up)
    kernel cmdline: `init=/bean/beand -- --listen vsock:1024 --pivot ...`
 3. beand runs as init inside the guest:
    a. Mount matrix: /proc /sys /dev /dev/shm /dev/pts /dev/mqueue /tmp
@@ -313,7 +316,7 @@ Reasons for choosing host NFS over running a JuiceFS client inside the guest:
 
 - Quota: enforced by the backend (JuiceFS directory quota / CephFS quota); the nfsd layer intercepts nothing
 - A mount failure counts as a sandbox creation failure (FAILED, with an explicit reason)
-- nftables: the accept rule for sandbox → host gateway NFS port is inserted only for sandboxes that actually mount a shared-fs volume (a per-sandbox chain)
+- iptables: the accept rule for sandbox → host gateway NFS port is inserted only for sandboxes that actually mount a shared-fs volume (a per-sandbox chain)
 
 **Not doing**: real-time collaborative lock semantics between sandboxes — shared
 writes are made consistent by going through the backend filesystem.
@@ -337,18 +340,20 @@ fetched to local disk by version when noded starts:
 
 ## 4. Image Module ⚠️
 
-### 4.1 The overlaybd-direct main route 📐
+### 4.1 The overlaybd-direct route ⚠️
 
-The image module manages the overlaybd ublk daemon directly (without going
+The image module manages overlaybd directly over TCMU (without going
 through a containerd snapshotter): from the image metadata (the layer list pushed
 down by the control plane + S3 blob references) it generates an overlaybd config
-→ the ublk device becomes ready → it is handed to the runtime. For the
+→ the TCMU block device becomes ready → it is handed to the runtime. This is
+**wired into `image.Provider` as `OverlaybdProvider`**, opt-in with `--fc-overlaybd`
+and verified on hardware; dm-snapshot remains the default backend. For the
 demonstrated details see the local AgentENV source (`src/overlaybd/`, uvm-ublk
 under crates, and the registryfs_v2 remote direct-read mode).
 
 | Format | How it is consumed | Use case |
 |---|---|---|
-| overlaybd (block-level, DADI) | fc tier: the ublk block device attached over virtio-blk; container tier (P5): the same device mounted | The main path; blobs live in S3 and ublk range-reads on demand |
+| overlaybd (block-level, DADI) | fc tier: the TCMU block device attached over virtio-blk; container tier (P5): the same device mounted | The main path; blobs live in S3 and overlaybd range-reads on demand over TCMU |
 | Standard OCI (gzip layers) | containerd overlayfs (container tier only, P5) | Fallback: unconverted images |
 
 - image-service (a logical module of the control plane, see 4.4) is responsible for converting images to the overlaybd format **offline** (the `convertor` tool, with layer-by-layer incremental conversion); conversion is done once on the server side, so the node side has zero conversion cost
@@ -391,59 +396,100 @@ Conversion tasks are CPU-heavy and can be split into a horizontally scalable
 dedicated worker pool once the volume grows (the interfaces are already isolated
 along the module boundary).
 
-## 5. Network Module 📐
+## 5. Network Module ✅
 
-> **This entire section has no code.** A repo-wide
-> `grep -rn 'nftables\|netns\|veth\|bean0'` returns 0. The sandbox currently
-> **has no networking** — on the fc tier there is only vsock to the agent, and
-> that is a control channel. What follows is design intent, not current
-> behaviour; for the security semantics see security-and-startup.md §A4.
+> **Networking is implemented and shipped**, living in `internal/node/network/`
+> (allocation, pool, provision, rules, `setup_linux.go`, restore) plus the tap
+> registration in `runtime/fc_linux.go` and the data-plane router in
+> `internal/node/portforward.go`. The design below is the *as-built* behaviour;
+> the full derivation with the two properties confirmed on hardware is in
+> [network.md](network.md), and the security semantics are in
+> security-and-startup.md §A4.
+>
+> Note the shape is **not** the bridge + node-local IPAM sketch this section
+> originally carried. There is no `bean0` bridge and no per-node subnet handed
+> out by a bitmap. Firecracker restores a snapshot with its original IP, so every
+> sandbox is given its **own** network namespace and a **constant** guest
+> address; only the host end varies. Rules are **iptables** (batched through
+> `iptables-restore`), not nftables.
 
+### 5.1 Data Plane ✅
 
-### 5.1 Data Plane 📐
+Each sandbox gets its own netns with a tap the VMM attaches to and a veth pair to
+the host. The guest address is identical across sandboxes — that is what lets a
+restored snapshot keep working without renumbering (network.md §1–§2).
 
 ```
-Create:
-1. ip netns add bean-<id>
-2. veth pair: veth-<id> (host) ↔ eth0 (netns), parent bridge bean0 (10.100.0.1/24)
-3. Configure the IP inside the netns (node-local IPAM, bitmap allocation), default route → 10.100.0.1
-4. resolv.conf points at the node's DNS forwarder (auditable; upstream configurable, default 1.1.1.1)
-5. Inject the sandbox hostname into /etc/hosts
+Setup (network/setup_linux.go, per sandbox):
+1. ip netns add bean-<idx>
+2. tap "beantap0" inside the netns (same name every time; a snapshot finds the device it recorded)
+     addr 172.31.0.1/30  ← the guest's gateway
+3. veth pair bnv<idx> (host) ↔ bnp<idx> (netns), moved into the netns
+     host  end 10.<idx/64>.<idx%64*4>.1/30
+     netns end 10.<idx/64>.<idx%64*4>.2/30   ← unique per sandbox, a /30 per link
+4. default route inside the netns → the host link IP; net.ipv4.ip_forward=1
+5. iptables rules (see §5.2), applied per scope with iptables-restore
 ```
 
-### 5.2 nftables Rules (one set per node + a per-sandbox chain) 📐
+The guest configures a constant `172.31.0.2/30` on eth0 (chosen to sit at the tail
+of Docker's default range so it rarely collides — network.md §2). The host end is
+derived from the sandbox's slot index; a `/30` steps by 4, so every
+`10.<a>.<b>.0/30` is an independent point-to-point link. The pool keeps no
+authoritative in-memory state: it is rebuilt after a noded restart by listing the
+namespaces the host actually holds, so a reused index can never hand two live
+sandboxes the same addresses (network.md §3, `network/alloc.go` + `pool.go`).
+
+DNS: the guest's resolver is handled by the agent inside the guest rather than a
+bridge-side forwarder — the host's upstream resolver is used, configurable with
+`--guest-dns` (network.md §6). There is no `bean0`, no node DNS forwarder process,
+and no `/etc/hosts` injection on this path.
+
+### 5.2 iptables Rules (two layers of NAT + FORWARD DROP, per sandbox) ✅
+
+Rules are expressed as data in `network/rules.go` and applied with
+`iptables-restore` (batched one call per scope) in `setup_linux.go`. There are two
+scopes because a packet leaving the guest is seen twice with different source
+addresses, and the ordering across FORWARD → POSTROUTING is what makes the filter
+correct (network.md §5, §5a):
 
 ```
-table inet bean {
-  chain forward {
-    # sandbox → public internet: SNAT egress (masquerade in the nat table)
-    iifname "bean0" oifname != "bean0" ct state new accept
-    # forbid sandbox ↔ sandbox
-    iifname "bean0" oifname "bean0" drop
-    # forbid access to the node's internal ranges and metadata services
-    iifname "bean0" ip daddr { 10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 169.254.169.254 } drop
-      # note: 10.100.0.1 (the gateway itself) and the DNS exception are handled by preceding accept rules
-  }
-  chain input {
-    # only allow the DNS/agent ports the sandbox needs towards the gateway
-  }
-}
+Inside the netns (source is still the guest, 172.31.0.0/30):
+  filter FORWARD  -s 172.31.0.0/30 -d <denied> -j DROP     (insert, ahead of Docker's rules)
+  filter FORWARD  -s 172.31.0.0/30 -j ACCEPT              (append, below the DROPs)
+  nat POSTROUTING -s 172.31.0.0/30 -o bnp<idx> -j MASQUERADE
+
+On the host (source is now the veth link, 10.<a>.<b>.0/30):
+  filter FORWARD  -s 10.<a>.<b>.0/30 -j ACCEPT            (insert)
+  filter FORWARD  -s 10.<a>.<b>.0/30 -d <denied> -j DROP  (insert, on top)
+  nat POSTROUTING -s 10.<a>.<b>.0/30 -o <uplink> -j MASQUERADE
 ```
 
-- Prerequisite: `br_netfilter` enabled (so bridged traffic traverses the forward chain; otherwise sandbox↔sandbox on the same bridge passes at layer 2 and bypasses the rules); the node bootstrap script pins that sysctl
-- Bandwidth/connection count: per-sandbox tc egress rate limiting (a config item, default 100 Mbps) + a conntrack connection cap (to prevent scanning / DDoS amplification)
-- `networkPolicy: none` → the netns has no default route, purely local loopback (except for the host NFS/gateway address, see §3.3)
-- `allow-list` (reserved) → insert accept rules for target CIDRs into the per-sandbox chain
-- Port exposure opens no inbound DNAT — regional proxy → noded sbxproxy → direct connection to the sandbox IP (see api-design.md §6.2); the node firewall's inbound side is open only to the control plane/proxy
+- `<denied>` is `169.254.0.0/16` (cloud metadata + link-local), `10.0.0.0/8`,
+  `172.16.0.0/12`, `192.168.0.0/16` — denied by **destination**, so internet-bound
+  traffic (dst 8.8.8.8) matches no DROP while the node's internal ranges and the
+  metadata service are unreachable. Verified by rule counters on a live guest.
+- No metadata carve-out is needed: with `/mmds/config` applied the VMM answers
+  `169.254.169.254` on the tap itself, below the forwarding path, so that request
+  never enters these chains (measured — see the `SetupPlan` comment).
+- DROPs are **inserted** (head of chain) so they sit ahead of the ACCEPT rules
+  Docker already installs on a shared host; deletes name the exact rule (`-D` with
+  the same args, never `-F`), because every rule matches precisely on this
+  sandbox's `/30`. Teardown replays setup in reverse.
+- **Still design intent, not built (📐):** per-sandbox tc egress rate limiting,
+  a conntrack connection cap, MTU tuning after two layers of encapsulation, and
+  IPv6 (the guest is given no IPv6 address anywhere, which is what keeps the v4-only
+  deny list sufficient). See network.md §8.
 
-### 5.3 fcRuntime Compatibility 📐
+### 5.3 fcRuntime Compatibility ✅
 
-FC is not configured with a tap NIC today; there is no network device in
-`fcMachineConfig`.
-
-
-The FC microVM would use a tap device in place of the netns end of the veth,
-joined to the same bean0 bridge, with the nftables rules unchanged.
+FC **is** configured with a tap NIC (`runtime/fc_linux.go`): before InstanceStart,
+noded registers the tap via `/network-interfaces/<id>` with `HostDevName` set to
+the layout's tap name, and applies `/mmds/config` so the VMM serves the metadata
+service on that interface. The VMM is exec'd inside the sandbox's netns (the tap
+lives there), so the fc tier uses the tap in place of the netns end of the veth —
+there is no `bean0` bridge, and the iptables rules above are what isolate one
+sandbox from another. A nil layout (a node with no networking configured) keeps
+the earlier behaviour of no interface at all rather than failing the boot.
 
 ## 6. beand ✅
 
@@ -557,14 +603,14 @@ shared base image gains another loop device (see the TODO in `docs/status.md`).
 4. Report everything and resume the heartbeat
 ```
 
-netns/veth/nftables chains all follow the `bean-<id>` naming convention, so the
+netns/veth/iptables chains all follow the `bean-<id>` naming convention, so the
 orphan scan compares by prefix against the set of live sandboxes.
 
 ### 7.3 GC Triggers ⚠️
 
 | Object | Policy |
 |---|---|
-| Idle sandbox | Local idle detection on noded (the lifecycle is pushed down with create): no exec/port/file activity for idleTimeout → execute onIdle (pause/kill) and emit an event — no dependency on the control plane being online |
+| Idle sandbox | Local idle detection on noded (the lifecycle is pushed down with create): no exec/port/file activity for idleTimeout → execute onIdle (pause/delete) and emit an event — no dependency on the control plane being online |
 | Lingering PAUSED | Not reclaimed by default; an administrator can optionally enable a global policy (superseded by snapshot archival after P4) |
 | Image/chunk cache | §4.2 watermark LRU |
 | exec session | 60s disconnected with no reattach |
@@ -579,7 +625,7 @@ orphan scan compares by prefix against the set of live sandboxes.
   - `bean_node_creates_total{outcome,runtime}`, `bean_node_destroys_total{outcome,runtime}`
   - `bean_node_idle_actions_total{action,outcome}` idle reclamation actions
   - `bean_node_sandboxes{state}`, `bean_node_requests_in_flight` (recomputed at scrape time)
-  - Still to add: cache hit rate, nftables rule count, IPAM utilisation
+  - Still to add: cache hit rate, iptables rule count, IPAM utilisation
 - Per-sandbox resource time series (cgroup/FC stats → OTLP, with sandbox_id/labels as attributes); the agent can optionally pass through OTLP from applications inside the sandbox (localhost:4317 → forwarded over vsock)
 - Structured logging (zap), with request_id propagated
 - pprof port (internal network)
