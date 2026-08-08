@@ -356,6 +356,7 @@ made networking and jailer look shipped. Convention in
 | [sdk-cli-design.md](docs/sdk-cli-design.md) | SDK and CLI |
 | [network.md](docs/network.md) | ✅ netns per sandbox, the two filter scopes, and why a restored snapshot keeps its address |
 | [warm-snapshots.md](docs/warm-snapshots.md) | 📐 booting once per image instead of once per sandbox |
+| [live-migration.md](docs/live-migration.md) | 📐 research — is live migration feasible on the existing primitives, and what would it take |
 | [competitive-analysis.md](docs/competitive-analysis.md) | e2b / Modal / Daytona / Morph / AgentENV, including how each one does networking |
 | [roadmap.md](docs/roadmap.md) | phases, with actual progress noted |
 

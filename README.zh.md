@@ -344,6 +344,7 @@ flowchart TB
 | [sdk-cli-design.md](docs/zh/sdk-cli-design.md) | SDK 与 CLI |
 | [network.md](docs/zh/network.md) | ✅ 每沙箱一个 netns、两个过滤作用域,以及恢复的快照为何保留原地址 |
 | [warm-snapshots.md](docs/zh/warm-snapshots.md) | 📐 每镜像 boot 一次,而非每沙箱 boot 一次 |
+| [live-migration.md](docs/zh/live-migration.md) | 📐 调研 —— 在现有构件上热迁移是否可行,以及需要什么 |
 | [competitive-analysis.md](docs/zh/competitive-analysis.md) | e2b / Modal / Daytona / Morph / AgentENV,含各家的网络做法 |
 | [roadmap.md](docs/zh/roadmap.md) | 阶段划分,标注实际进度 |
 
