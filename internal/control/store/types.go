@@ -265,6 +265,14 @@ type Sandbox struct {
 	MemoryMiB int64   `json:"memoryMiB"`
 	DiskMiB   int64   `json:"diskMiB"`
 
+	// Domain is the data-plane base the client builds port URLs against: a
+	// request to port P is addressed as "{P}-{id}.{Domain}" through bean-proxy.
+	// It is a per-deployment constant (the proxy's public base), surfaced on the
+	// record so the client never assembles it from convention. Empty on a
+	// single-node/dev deployment with no proxy, where the client falls back to
+	// the bean-api relay path.
+	Domain string `json:"domain,omitempty"`
+
 	Labels map[string]string `json:"labels,omitempty"`
 
 	// Lifecycle: nil IdleTimeout means the sandbox runs until stopped.

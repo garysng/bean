@@ -253,7 +253,7 @@ func (s *Server) childOf(src *store.Sandbox, req *forkRequest) (*store.Sandbox, 
 
 	rec := &store.Sandbox{
 		ID: id, State: store.SandboxPending,
-		Image: src.Image, Region: s.region, Runtime: src.Runtime,
+		Image: src.Image, Region: s.region, Runtime: src.Runtime, Domain: s.domain,
 		CPU: src.CPU, MemoryMiB: src.MemoryMiB, DiskMiB: src.DiskMiB,
 		Labels: labels, CreatedAt: time.Now(), LastActivity: time.Now(),
 		IdleTimeout: src.IdleTimeout, OnIdle: src.OnIdle,

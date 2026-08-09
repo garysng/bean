@@ -96,7 +96,11 @@ type Server struct {
 	// runtimeTier is the node capability sandboxes require. Runtime tiers
 	// are internal (docs/architecture.md D3): callers never choose one.
 	runtimeTier string
-	apiKey      string
+	// domain is the data-plane base stamped onto every sandbox record so the
+	// client can build "{port}-{id}.{domain}" URLs through bean-proxy. Empty
+	// leaves the record's Domain empty and the client on the relay fallback.
+	domain string
+	apiKey string
 	images      *image.Service
 	snapshots   snapshot.Blobs
 	secrets     *secret.Box
@@ -124,6 +128,10 @@ type Options struct {
 	// RuntimeTier is the node capability required for placement; defaults
 	// to "fc" (the main tier) when empty.
 	RuntimeTier string
+	// Domain is the bean-proxy public base stamped onto every sandbox record,
+	// so a client can address a port as "{port}-{id}.{Domain}". Empty means no
+	// data-plane proxy is configured and clients use the bean-api relay path.
+	Domain string
 	// Images enables the image endpoints and image registration on create.
 	Images *image.Service
 	// Secrets encrypts persisted credentials; nil disables the registry
@@ -159,7 +167,7 @@ func New(st Store, router Router, placer Placer, opts Options) *Server {
 		region = "local"
 	}
 	s := &Server{store: st, router: router, placer: placer, region: region,
-		runtimeTier: tier, apiKey: opts.APIKey, images: opts.Images,
+		runtimeTier: tier, domain: opts.Domain, apiKey: opts.APIKey, images: opts.Images,
 		secrets: opts.Secrets, snapshots: opts.Snapshots,
 		bus: newEventBus(), builds: newBuildTracker(),
 		metrics: obs.NewRegistry(), mux: http.NewServeMux(),
@@ -466,7 +474,7 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	}
 	rec := &store.Sandbox{
 		ID: id, Image: req.Image, State: store.SandboxPending,
-		Region: s.region, Runtime: s.runtimeTier,
+		Region: s.region, Runtime: s.runtimeTier, Domain: s.domain,
 		CPU: spec.Cpu, MemoryMiB: spec.MemoryMib, DiskMiB: spec.DiskMib,
 		Labels: req.Labels, CreatedAt: time.Now(), LastActivity: time.Now(),
 	}

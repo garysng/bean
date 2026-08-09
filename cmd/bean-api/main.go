@@ -51,6 +51,9 @@ func main() {
 		"token presented when calling a node's data plane")
 	bootstrapToken := flag.String("bootstrap-token", os.Getenv("BEAN_BOOTSTRAP_TOKEN"),
 		"token nodes must present to register")
+	sandboxDomain := flag.String("sandbox-domain", os.Getenv("BEAN_SANDBOX_DOMAIN"),
+		"bean-proxy public base stamped on each sandbox as its data-plane domain "+
+			"(clients address a port as {port}-{id}.{domain}); empty uses the relay path")
 	runtimeTier := flag.String("runtime-tier", "fc",
 		"node capability required for placement (fc|local|runc|runsc)")
 	createWait := flag.Duration("create-wait", 0,
@@ -235,7 +238,8 @@ func main() {
 
 	srv := api.New(st, router, sched, api.Options{
 		Region: *region, APIKey: *apiKey, RuntimeTier: *runtimeTier,
-		Images: images, Secrets: secrets, Snapshots: blobs,
+		Domain:  *sandboxDomain,
+		Images:  images, Secrets: secrets, Snapshots: blobs,
 		CreateWait: *createWait, Identity: identity,
 	})
 
