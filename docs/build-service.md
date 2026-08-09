@@ -67,7 +67,6 @@ Three real couplings, in descending order of how much they block a split:
    ImageDir and is never uploaded, so no other node can start from it"
    (`build.go:236-240`). **This is the hard blocker.** A centralized build
    service that produced images no sandbox node could consume would be useless.
-   `commit` has the identical property (`commit_linux.go:68`).
 2. **Build shares the node with sandboxes and has zero resource isolation.**
    Build and `create`/`exec` run in the same noded process and `Manager`
    (`manager.go`), and `buildkitd` competes for the same host CPU, disk and IO.

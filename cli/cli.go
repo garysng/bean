@@ -131,8 +131,6 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		err = cmdFork(c, rest, stdout)
 	case "snapshot":
 		err = cmdSnapshot(c, rest, stdout)
-	case "commit":
-		err = cmdCommit(c, rest, stdout)
 	case "build":
 		err = cmdBuild(c, rest, stdout)
 	case "image":
@@ -165,7 +163,6 @@ commands:
                                                 # -f follows the build output
   build logs REF                                # watch a build in progress
   build cancel REF                              # stop a build; -f alone does not
-  commit SBX --tag REF                          # freeze the filesystem as an image
   fork SBX [--count N] [--label k=v]            # N independent copies of SBX,
                                                 # leaving SBX running
   snapshot create SBX [--name N] [--no-keep-running] [--no-memory] [--base SNAP]
@@ -686,27 +683,6 @@ func loadDockerignore(dir string) (func(string) bool, error) {
 		}
 		return false
 	}, nil
-}
-
-// cmdCommit turns a sandbox's filesystem into a reusable base image.
-//
-// Distinct from snapshot: a snapshot restores this one sandbox including its
-// memory, on the tier that made it. A committed image is a filesystem anyone can
-// start from — the "set it up interactively, then share it" path.
-func cmdCommit(c *Client, args []string, stdout io.Writer) error {
-	flags, pos := parseFlags(args)
-	if len(pos) == 0 || flags["tag"] == "" {
-		return usagef("usage: bean commit SBX --tag REF")
-	}
-	var out struct {
-		ImageRef string `json:"imageRef"`
-	}
-	if err := c.doJSON("POST", "/v1/sandboxes/"+pos[0]+"/commit",
-		map[string]any{"tag": flags["tag"]}, &out); err != nil {
-		return err
-	}
-	return newPrinter(stdout, flags).result(out.ImageRef,
-		field{"sandboxId", pos[0]})
 }
 
 // cmdFork derives new sandboxes from a running one.

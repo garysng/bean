@@ -87,7 +87,6 @@ POST   /sandboxes/{id}/resume                → 202 → RUNNING
 POST   /sandboxes/{id}/snapshot  { "name": "after-setup", "keepRunning": true }
                                              → 202 { "snapshotId": "snap_..." }
 POST   /sandboxes/{id}/start                 → 拉起原 entrypoint（autoStartCmd=false 后手动启动）  📐 未实现
-POST   /sandboxes/{id}/commit                → 202；把运行中的 rootfs 提交为镜像
 POST   /sandboxes/{id}/fork     { "count": 3, "labels": {...} }    // 独立 API（fc 档,P4）
        → 202 { "sandboxes": [ ...N 个新 sandbox... ] }
        // 语义：对运行中 sandbox 做瞬时 CoW 快照并克隆 N 个独立实例（不产生
@@ -529,7 +528,7 @@ noded → agent：vsock（fc 主路径;容器档 unix socket,P5）
 下面保留的是当初推理中站得住的部分 —— 动机是收窄接口,而不是负载。
 
 **第二件事更强的理由不是负载。** `SandboxService` 把 `DestroySandbox`、
-`SnapshotSandbox`、`CommitSandbox` 和 `Exec`、`ReadFile`、`WriteFile` 放在同一个服务里,
+`SnapshotSandbox` 和 `Exec`、`ReadFile`、`WriteFile` 放在同一个服务里,
 共用一个 `--node-token`。所以"让客户端直连 noded"不是一个带性能收益的路由改动 ——
 它会把"销毁节点上任何沙箱"的能力交给每一个调用方。一个持有该 token、且**只**转发数据面方法的
 proxy,才是收窄这个接口的办法;字节路径是次要收益。

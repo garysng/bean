@@ -21,7 +21,7 @@ internal/node/
 │                       与 local(进程级,仅开发)
 │                       含 UFFD 供页、快照 bundle、CPU template、diff 合并
 ├── image/           ✅ image.Provider:DevMapperProvider(共享 base + CoW)、
-│                       FileProvider、PullingProvider;OCI 拉取转换、commit、build
+│                       FileProvider、PullingProvider;OCI 拉取转换、build
 ├── vsock/           ✅ AF_VSOCK 拨号
 ├── agentmgr/        📐 空目录
 └── lifecycle/       📐 空目录
@@ -128,9 +128,9 @@ type Runtime interface {
 - **没有 `Stats`**。没有实现,也没有调用方 —— 资源水位目前从心跳的承诺量记账走。
 
 另有三个**可选**接口,runtime 按能力实现,调用方类型断言:
-`ImageWarmer`(prewarm)、`ImageLister`(缓存清单)、`ImageBuilder`(构建)、
-`SandboxCommitter`(封装成镜像)。分开而非塞进 `Runtime` 的理由:
-local 档跑宿主进程,没有「缓存镜像」这个概念,让它 stub 掉四个方法
+`ImageWarmer`(prewarm)、`ImageLister`(缓存清单)、`ImageBuilder`(构建)。
+分开而非塞进 `Runtime` 的理由:
+local 档跑宿主进程,没有「缓存镜像」这个概念,让它 stub 掉这些方法
 比让调用方判断能力说明的信息更少。
 
 | 实现 | 状态 | 底层 | 职责边界 |

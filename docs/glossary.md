@@ -22,8 +22,8 @@ read-only input to a sandbox, not a running thing.
 
 **base image** — the shared, read-only image a node loop-mounts once and reuses
 across every sandbox on it. A sandbox does **not** get its own copy; it gets a
-copy-on-write layer over the shared base (see *CoW layer*). `commit` can freeze a
-running sandbox's filesystem into a new reusable base image.
+copy-on-write layer over the shared base (see *CoW layer*). Promoting a filesystem
+snapshot can freeze a running sandbox's filesystem into a new reusable base image.
 
 **rootfs** — the root filesystem a sandbox boots with, assembled from the shared
 base image plus the sandbox's own writable CoW layer.

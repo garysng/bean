@@ -321,7 +321,7 @@ environment in order to add to it.
 | Source | Config | Why |
 |---|---|---|
 | registry pull | from the config blob | fetched during conversion |
-| `commit` | carried forward from the source image | committing changes a filesystem, not the way the environment starts |
+| `snapshot` promote | carried forward from the source image | a filesystem snapshot changes a filesystem, not the way the environment starts |
 | `build` | **none** 📐 | buildctl is asked for `type=tar`, a flat rootfs with no image metadata; capturing the Dockerfile's `ENV`/`ENTRYPOINT` means exporting an OCI image from the builder instead |
 
 An absent config reads back as `nil`, never as an empty `Config`, and a `nil` means "start from
@@ -336,15 +336,16 @@ the ability to exec anything afterwards — it has to happen in the child. Resol
 `nobody` also needs the guest's `/etc/passwd`, which only exists after the pivot to the image's
 rootfs. So this is a separate change rather than a missing line.
 
-## 6. commit: the reverse path ✅
+## 6. Sealing a filesystem: the reverse path ✅
 
-`commit` seals the filesystem of a running sandbox into a new base image.
+Promoting a **filesystem snapshot** into the image namespace seals the filesystem of a running
+sandbox into a new base image.
 
 The current implementation **reads a complete ext4 out of the composite device under
 `/dev/mapper`** rather than "sealing an incremental layer". The reason is that dm-snapshot's
 CoW layer is not in OCI layer format and cannot be used as a layer directly.
 
-The cost: a commit produces a full image rather than an increment. Once overlaybd is wired in
+The cost: it produces a full image rather than an increment. Once overlaybd is wired in
 this can become `overlaybd-commit` sealing the LSMT writable layer — that is the genuinely
 zero-conversion form (image-build §2).
 
@@ -359,7 +360,7 @@ dm-snapshot path above is still what a node uses unless asked otherwise.
 | Per-sandbox cost | 44 KiB (measured) | comparable, both store only changes |
 | Layer sharing | **none** — each image is its own ext4 | shared by digest, one copy per layer |
 | Conversion CPU | paid per image, including for shared layers | paid once per distinct layer |
-| commit | read out a full ext4 | seal the writable layer in place |
+| seal filesystem | read out a full ext4 | seal the writable layer in place |
 
 The gain that made this worth building is not the one originally written down here. The
 earlier note said the value was first-use latency and that prewarm shadows it — true, but
@@ -812,8 +813,8 @@ claim as a guest that boots from it, and only this closes the gap.
 
 **Not yet exercised**: lazy pull against a registry (`--fc-overlaybd-lazy-pull` is
 implemented and untested — the measured 7 ms mount and 19.6% transfer come from the
-manual verification in decisions §3.1, not from this code), `commit` through
-`CommitSandbox`, and behaviour under concurrent fan-out.
+manual verification in decisions §3.1, not from this code), and behaviour under
+concurrent fan-out.
 
 **On ublk**: it needs kernel ≥ 6.0, and the verification host is now on 6.8. TCMU is
 functionally complete but its teardown is not merely slower — 4.0 s for 128 devices, and the

@@ -1236,26 +1236,6 @@ func (p *OverlaybdProvider) Config(imageRef string) (*Config, error) {
 	return cachedConfig(p.ImageDir, imageRef)
 }
 
-// CommitSandbox seals a sandbox's writable layer into a shareable read-only one.
-//
-// This is where the backend pays off a second time: the dm-snapshot path reads out
-// a whole ext4 because a copy-on-write store is not an OCI layer, whereas here the
-// writable layer already is one and sealing it is a metadata operation over bytes
-// that are already in the right format.
-func (p *OverlaybdProvider) CommitSandbox(ctx context.Context, sandboxID, dest string) error {
-	p.mu.Lock()
-	_, ok := p.attached[sandboxID]
-	p.mu.Unlock()
-	if !ok {
-		return fmt.Errorf("image: sandbox %s is not attached", sandboxID)
-	}
-	dir := filepath.Join(p.BaseDir, sandboxID)
-	return p.Builder.sealWritable(ctx,
-		filepath.Join(dir, "writable.data"),
-		filepath.Join(dir, "writable.index"),
-		dest)
-}
-
 func exists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil

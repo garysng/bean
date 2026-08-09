@@ -91,7 +91,6 @@ POST   /sandboxes/{id}/resume                → 202 → RUNNING
 POST   /sandboxes/{id}/snapshot  { "name": "after-setup", "keepRunning": true }
                                              → 202 { "snapshotId": "snap_..." }
 POST   /sandboxes/{id}/start                 → start the original entrypoint (manual start after autoStartCmd=false)  📐 unimplemented
-POST   /sandboxes/{id}/commit                → 202; commit the running rootfs into an image
 POST   /sandboxes/{id}/fork     { "count": 3, "labels": {...} }    // separate API (fc tier, P4)
        → 202 { "sandboxes": [ ...N new sandboxes... ] }
        // Semantics: take an instantaneous CoW snapshot of a running sandbox and clone N
@@ -586,7 +585,7 @@ What the original reasoning got right is recorded below and still holds -- that 
 motivation is interface narrowing rather than load.
 
 **The stronger reason for the second one is not load.** `SandboxService` puts
-`DestroySandbox`, `SnapshotSandbox` and `CommitSandbox` in the same service as
+`DestroySandbox` and `SnapshotSandbox` in the same service as
 `Exec`, `ReadFile` and `WriteFile`, behind one shared `--node-token`. So "let clients
 reach noded directly" is not a routing change with a performance benefit -- it would
 hand every caller the ability to destroy any sandbox on the node. A proxy holding that

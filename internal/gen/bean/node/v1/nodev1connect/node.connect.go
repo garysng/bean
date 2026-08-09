@@ -72,9 +72,6 @@ const (
 	// SandboxServicePrewarmImageProcedure is the fully-qualified name of the SandboxService's
 	// PrewarmImage RPC.
 	SandboxServicePrewarmImageProcedure = "/bean.node.v1.SandboxService/PrewarmImage"
-	// SandboxServiceCommitSandboxProcedure is the fully-qualified name of the SandboxService's
-	// CommitSandbox RPC.
-	SandboxServiceCommitSandboxProcedure = "/bean.node.v1.SandboxService/CommitSandbox"
 	// SandboxServiceBuildImageProcedure is the fully-qualified name of the SandboxService's BuildImage
 	// RPC.
 	SandboxServiceBuildImageProcedure = "/bean.node.v1.SandboxService/BuildImage"
@@ -297,10 +294,6 @@ type SandboxServiceClient interface {
 	// A first pull can take minutes — longer than a create should block — so the
 	// control plane warms images before placing work that needs them.
 	PrewarmImage(context.Context, *connect.Request[v1.PrewarmImageRequest]) (*connect.Response[v1.PrewarmImageResponse], error)
-	// CommitSandbox seals a sandbox's filesystem into a base image. Unlike a
-	// snapshot the result carries no memory state and is not bound to the tier
-	// that made it, so any sandbox can start from it.
-	CommitSandbox(context.Context, *connect.Request[v1.CommitSandboxRequest]) (*connect.Response[v1.CommitSandboxResponse], error)
 	// BuildImage builds a base image from a Dockerfile. The build runs on the
 	// node, where BuildKit and the image cache already are.
 	//
@@ -385,12 +378,6 @@ func NewSandboxServiceClient(httpClient connect.HTTPClient, baseURL string, opts
 			connect.WithSchema(sandboxServiceMethods.ByName("PrewarmImage")),
 			connect.WithClientOptions(opts...),
 		),
-		commitSandbox: connect.NewClient[v1.CommitSandboxRequest, v1.CommitSandboxResponse](
-			httpClient,
-			baseURL+SandboxServiceCommitSandboxProcedure,
-			connect.WithSchema(sandboxServiceMethods.ByName("CommitSandbox")),
-			connect.WithClientOptions(opts...),
-		),
 		buildImage: connect.NewClient[v1.BuildImageRequest, v1.BuildImageEvent](
 			httpClient,
 			baseURL+SandboxServiceBuildImageProcedure,
@@ -453,7 +440,6 @@ type sandboxServiceClient struct {
 	restoreSandbox   *connect.Client[v1.RestoreSandboxFrame, v1.RestoreSandboxResponse]
 	startUserProcess *connect.Client[v1.StartUserProcessNodeRequest, v1.StartUserProcessNodeResponse]
 	prewarmImage     *connect.Client[v1.PrewarmImageRequest, v1.PrewarmImageResponse]
-	commitSandbox    *connect.Client[v1.CommitSandboxRequest, v1.CommitSandboxResponse]
 	buildImage       *connect.Client[v1.BuildImageRequest, v1.BuildImageEvent]
 	exec             *connect.Client[v11.ExecRequest, v11.ExecResponse]
 	streamExec       *connect.Client[v11.StreamExecFrame, v11.StreamExecFrame]
@@ -507,11 +493,6 @@ func (c *sandboxServiceClient) StartUserProcess(ctx context.Context, req *connec
 // PrewarmImage calls bean.node.v1.SandboxService.PrewarmImage.
 func (c *sandboxServiceClient) PrewarmImage(ctx context.Context, req *connect.Request[v1.PrewarmImageRequest]) (*connect.Response[v1.PrewarmImageResponse], error) {
 	return c.prewarmImage.CallUnary(ctx, req)
-}
-
-// CommitSandbox calls bean.node.v1.SandboxService.CommitSandbox.
-func (c *sandboxServiceClient) CommitSandbox(ctx context.Context, req *connect.Request[v1.CommitSandboxRequest]) (*connect.Response[v1.CommitSandboxResponse], error) {
-	return c.commitSandbox.CallUnary(ctx, req)
 }
 
 // BuildImage calls bean.node.v1.SandboxService.BuildImage.
@@ -574,10 +555,6 @@ type SandboxServiceHandler interface {
 	// A first pull can take minutes — longer than a create should block — so the
 	// control plane warms images before placing work that needs them.
 	PrewarmImage(context.Context, *connect.Request[v1.PrewarmImageRequest]) (*connect.Response[v1.PrewarmImageResponse], error)
-	// CommitSandbox seals a sandbox's filesystem into a base image. Unlike a
-	// snapshot the result carries no memory state and is not bound to the tier
-	// that made it, so any sandbox can start from it.
-	CommitSandbox(context.Context, *connect.Request[v1.CommitSandboxRequest]) (*connect.Response[v1.CommitSandboxResponse], error)
 	// BuildImage builds a base image from a Dockerfile. The build runs on the
 	// node, where BuildKit and the image cache already are.
 	//
@@ -658,12 +635,6 @@ func NewSandboxServiceHandler(svc SandboxServiceHandler, opts ...connect.Handler
 		connect.WithSchema(sandboxServiceMethods.ByName("PrewarmImage")),
 		connect.WithHandlerOptions(opts...),
 	)
-	sandboxServiceCommitSandboxHandler := connect.NewUnaryHandler(
-		SandboxServiceCommitSandboxProcedure,
-		svc.CommitSandbox,
-		connect.WithSchema(sandboxServiceMethods.ByName("CommitSandbox")),
-		connect.WithHandlerOptions(opts...),
-	)
 	sandboxServiceBuildImageHandler := connect.NewServerStreamHandler(
 		SandboxServiceBuildImageProcedure,
 		svc.BuildImage,
@@ -732,8 +703,6 @@ func NewSandboxServiceHandler(svc SandboxServiceHandler, opts ...connect.Handler
 			sandboxServiceStartUserProcessHandler.ServeHTTP(w, r)
 		case SandboxServicePrewarmImageProcedure:
 			sandboxServicePrewarmImageHandler.ServeHTTP(w, r)
-		case SandboxServiceCommitSandboxProcedure:
-			sandboxServiceCommitSandboxHandler.ServeHTTP(w, r)
 		case SandboxServiceBuildImageProcedure:
 			sandboxServiceBuildImageHandler.ServeHTTP(w, r)
 		case SandboxServiceExecProcedure:
@@ -793,10 +762,6 @@ func (UnimplementedSandboxServiceHandler) StartUserProcess(context.Context, *con
 
 func (UnimplementedSandboxServiceHandler) PrewarmImage(context.Context, *connect.Request[v1.PrewarmImageRequest]) (*connect.Response[v1.PrewarmImageResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("bean.node.v1.SandboxService.PrewarmImage is not implemented"))
-}
-
-func (UnimplementedSandboxServiceHandler) CommitSandbox(context.Context, *connect.Request[v1.CommitSandboxRequest]) (*connect.Response[v1.CommitSandboxResponse], error) {
-	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("bean.node.v1.SandboxService.CommitSandbox is not implemented"))
 }
 
 func (UnimplementedSandboxServiceHandler) BuildImage(context.Context, *connect.Request[v1.BuildImageRequest], *connect.ServerStream[v1.BuildImageEvent]) error {

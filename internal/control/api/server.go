@@ -250,7 +250,6 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("DELETE /v1/registries/{host}", s.handleDeleteRegistry)
 	s.mux.HandleFunc("POST /v1/sandboxes/{id}/snapshot", s.handleCreateSnapshot)
 	s.mux.HandleFunc("POST /v1/sandboxes/{id}/fork", s.handleFork)
-	s.mux.HandleFunc("POST /v1/sandboxes/{id}/commit", s.handleCommit)
 	s.mux.HandleFunc("GET /v1/snapshots", s.handleListSnapshots)
 	s.mux.HandleFunc("GET /v1/snapshots/{id}", s.handleGetSnapshot)
 	s.mux.HandleFunc("DELETE /v1/snapshots/{id}", s.handleDeleteSnapshot)

@@ -24,15 +24,14 @@ e2b-style per-image template build. But having no build capability at all leaves
 | Source | Origin | Conversion | State progression |
 |---|---|---|---|
 | `imported` | an OCI ref given by the user | tar.gz layer → ext4 image/block device, needs the convertor | `PENDING → CONVERTING → READY` |
-| `built` | built by the platform | see below | `BUILDING → CONVERTING → READY` (the commit path skips CONVERTING) |
+| `built` | built by the platform | see below | `BUILDING → CONVERTING → READY` |
 
-**On whether "built" means zero conversion — it depends on the build path**, and this has to be
-stated clearly or the cost gets misjudged:
+**On whether "built" means zero conversion — it does not; the BuildKit path always needs one
+conversion**, and this has to be stated clearly or the cost gets misjudged:
 
 | Build path | Output format | Conversion |
 |---|---|---|
 | **BuildKit** (Dockerfile / steps) | standard OCI layer | **still needs one conversion** |
-| **commit** (extract the writable layer of a running sandbox) | ⚠️ currently a **dm-snapshot CoW layer**, not an overlaybd LSMT | reads the composite device under `/dev/mapper` into a new base ext4 image. Once overlaybd is wired in this can become an `overlaybd-commit` seal, and only then is it genuinely zero-conversion |
 
 Even though the BuildKit path needs a conversion, it is still an improvement over e2b: the
 conversion happens at **build time** (once, cacheable, off the user's waiting path), whereas
@@ -75,19 +74,14 @@ img = (client.images.build("myteam/eval-base:v1")
 The SDK compiles the chained calls into the build plan of §5; the server does not distinguish
 whether it came from a Dockerfile or from steps.
 
-### 3.3 commit (snapshot the current sandbox as an image) ✅
-
-"Install the environment interactively first, then freeze it into an image" — the shortest path
-for an exploratory workflow, and zero conversion:
-
-```
-bean commit sbx_abc -t myteam/explored:v1
-```
+> "Install the environment interactively first, then freeze it" — that exploratory workflow is
+> served by a **filesystem snapshot** (§4), which can be promoted into the image namespace, not
+> by a build.
 
 ## 4. The difference between a built image and a snapshot ✅
 
-The two share the "extract the sandbox's writable layer" mechanism, but they are **not the same
-thing**, and conflating them makes a mess of both the data model and the user's mental model:
+A snapshot also captures a sandbox's filesystem, but it is **not the same thing** as a built
+image, and conflating them makes a mess of both the data model and the user's mental model:
 
 | | snapshot | built image |
 |---|---|---|
@@ -99,8 +93,8 @@ thing**, and conflating them makes a mess of both the data model and the user's 
 
 ## 5. Build Plan: the unified intermediate representation ⚠️
 
-> The `store.BuildPlan` / `BuildStep` types are defined ✅, but only the `dockerfile` and
-> `commit` kinds work end to end; the compiler for the `steps` kind is unimplemented. The
+> The `store.BuildPlan` / `BuildStep` types are defined ✅, but only the `dockerfile`
+> kind works end to end; the compiler for the `steps` kind is unimplemented. The
 > per-step cacheKey field exists but is unused.
 
 
@@ -150,11 +144,10 @@ POST /v1/images/build/{id}/context   upload the build context (tar)
 GET  /v1/images/build/{id}           status, log location, output digest
 GET  /v1/images/build?label=          list
 POST /v1/images/build/{id}/cancel
-POST /v1/sandboxes/{id}/commit  { "tag": "..." } → 202 { imageRef }
 ```
 
-Build state machine: `PENDING → RUNNING → CONVERTING → READY | FAILED | CANCELLED`
-(the commit path skips CONVERTING). Logs land in storage per build and can be viewed as a stream.
+Build state machine: `PENDING → RUNNING → CONVERTING → READY | FAILED | CANCELLED`.
+Logs land in storage per build and can be viewed as a stream.
 
 ## 7. Where it executes ⚠️
 
@@ -230,8 +223,7 @@ scenario that requires us to compute a cacheKey ourselves.
 | e2b | Dockerfile | BuildKit → convert to a VM rootfs | template (5–15 minutes each) |
 | Daytona | Dockerfile / Declarative Builder | BuildKit | snapshot |
 | Modal | chained Python calls | in-house builder (requires Python inside the image) | content-addressed layers |
-| **bean** | Dockerfile ✅ / declarative steps 📐 / commit ✅ | BuildKit (platform side) ✅ / read out of the dm-snapshot CoW ⚠️ | ⚠️ currently a node-local ext4; an overlaybd layer on S3 is the target |
+| **bean** | Dockerfile ✅ / declarative steps 📐 | BuildKit (platform side) ✅ | ⚠️ currently a node-local ext4; an overlaybd layer on S3 is the target |
 
-bean's difference: three forms unified into one plan; the commit path is zero-conversion; and
-the output is already in the block-device format the fc tier can use, with no further
-conversion needed.
+bean's difference: the build forms unify into one plan, and the output is already in the
+block-device format the fc tier can use, with no further conversion needed.

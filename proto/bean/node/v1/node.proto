@@ -52,10 +52,6 @@ service SandboxService {
   // A first pull can take minutes — longer than a create should block — so the
   // control plane warms images before placing work that needs them.
   rpc PrewarmImage(PrewarmImageRequest) returns (PrewarmImageResponse);
-  // CommitSandbox seals a sandbox's filesystem into a base image. Unlike a
-  // snapshot the result carries no memory state and is not bound to the tier
-  // that made it, so any sandbox can start from it.
-  rpc CommitSandbox(CommitSandboxRequest) returns (CommitSandboxResponse);
   // BuildImage builds a base image from a Dockerfile. The build runs on the
   // node, where BuildKit and the image cache already are.
   //
@@ -408,18 +404,6 @@ message PrewarmImageRequest {
 message PrewarmImageResponse {
   // ready is true once the image can be used without a further pull.
   bool ready = 1;
-}
-
-message CommitSandboxRequest {
-  string sandbox_id = 1;
-  // tag names the resulting image, and must not already exist: images are
-  // immutable, so committing over a tag would change what sandboxes already
-  // started from it believe about their base.
-  string tag = 2;
-}
-
-message CommitSandboxResponse {
-  string image_ref = 1;
 }
 
 message BuildImageRequest {

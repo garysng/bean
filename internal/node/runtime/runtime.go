@@ -58,11 +58,11 @@ type Spec struct {
 	FSManifestDigest string
 	Image            string
 	CPU              float64
-	MemoryMiB    int64
-	DiskMiB      int64
-	Env          map[string]string
-	Cmd          []string
-	AutoStartCmd bool
+	MemoryMiB        int64
+	DiskMiB          int64
+	Env              map[string]string
+	Cmd              []string
+	AutoStartCmd     bool
 
 	// Network is the addressing this sandbox was assigned, or nil on a node with
 	// no networking configured.
@@ -362,15 +362,4 @@ type BuildRequest struct {
 	// builder's goroutine, so an implementation that blocks here slows the
 	// build down.
 	Logs io.Writer
-}
-
-// SandboxCommitter is implemented by runtimes that can turn a sandbox's
-// filesystem into a base image.
-//
-// This is not a snapshot: the result has no memory state and is not bound to the
-// runtime that produced it, so other sandboxes — on any tier — can start from
-// it. The sandbox must be paused for the read to be consistent, which the caller
-// arranges since only it knows whether the sandbox should keep running.
-type SandboxCommitter interface {
-	CommitSandbox(ctx context.Context, id, tag string) error
 }

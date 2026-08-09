@@ -384,3 +384,14 @@ func (s *Server) handleBuildCancel(w http.ResponseWriter, r *http.Request) {
 		"state":    "CANCELLING",
 	})
 }
+
+// failImage marks a building image failed so a client is not left waiting on
+// something that will never become ready.
+func (s *Server) failImage(ref, reason string) {
+	if s.images == nil {
+		return
+	}
+	if err := s.images.MarkFailed(ref, reason); err != nil {
+		slog.Error("cannot mark image failed", logging.KeyImage, ref, logging.KeyError, err)
+	}
+}
