@@ -17,6 +17,7 @@ import (
 
 	"github.com/garysng/bean/internal/logging"
 	"github.com/garysng/bean/internal/node/runtime"
+	"github.com/garysng/bean/internal/sbxtoken"
 )
 
 // This file reaches a port inside a sandbox from outside the node.
@@ -39,6 +40,13 @@ type PortTarget struct {
 	// agent's port speaks h2c and a user's port speaks HTTP/1.1, and re-parsing it
 	// out of Addr at that decision would be a second place to get it wrong.
 	Port int
+	// AgentToken is the sandbox's per-sandbox credential, populated only when the
+	// request is addressed to the agent's port. noded holds the plaintext (the
+	// guest has only its hash), and the forwarder injects it so a client dialling
+	// through the proxy never has to -- the auth lives in the node's trust domain,
+	// not in the caller's. Empty for a user port, and for a tier that mints no
+	// token (vsock/local), where the agent does not check one.
+	AgentToken string
 }
 
 // roundTripperFunc adapts a function to http.RoundTripper, so the transport can be
@@ -92,7 +100,7 @@ func (m *Manager) TargetFor(sandboxID string, port int) (*PortTarget, error) {
 		m.mu.Unlock()
 		return nil, fmt.Errorf("%w: %s", ErrSandboxNotFound, sandboxID)
 	}
-	net_, state := sb.net, sb.State
+	net_, state, token := sb.net, sb.State, sb.agentToken
 	m.mu.Unlock()
 
 	if net_ == nil {
@@ -120,11 +128,19 @@ func (m *Manager) TargetFor(sandboxID string, port int) (*PortTarget, error) {
 		}
 	}
 
-	return &PortTarget{
+	t := &PortTarget{
 		NetnsPath: netnsHandlePath(net_.Netns),
 		Addr:      fmt.Sprintf("%s:%d", ip, port),
 		Port:      port,
-	}, nil
+	}
+	// Only the agent's port carries the credential. A user's process on any other
+	// port must never receive noded's per-sandbox token: it runs code the sandbox
+	// controls, and handing it the token would leak the very secret that keeps that
+	// code from dialling the agent as noded.
+	if port == runtime.AgentGuestPort {
+		t.AgentToken = token
+	}
+	return t, nil
 }
 
 // PortForwarder serves the Host-routed port.
@@ -232,6 +248,23 @@ func NewPortForwarder(mgr *Manager, token string) *PortForwarder {
 			// request to be well-formed.
 			r.URL.Scheme = "http"
 			r.URL.Host = "sandbox"
+
+			// Inject the per-sandbox agent token, which the agent reads as gRPC
+			// metadata -- and gRPC metadata is carried in HTTP/2 headers, so setting
+			// the header here is setting the metadata the agent checks. The token is
+			// present only for the agent's port (TargetFor populates it nowhere else),
+			// so a user's port is never given it.
+			//
+			// The header is overwritten, not appended: whatever a caller sent under
+			// this name is discarded, so a client cannot smuggle its own value past
+			// the node. When there is no token (a user port, or a tier that mints
+			// none) the header is deleted outright, leaving the agent to see "no
+			// credential" rather than an empty one.
+			if t, ok := r.Context().Value(targetKey{}).(*PortTarget); ok && t.AgentToken != "" {
+				r.Header.Set(sbxtoken.MDKey, t.AgentToken)
+			} else {
+				r.Header.Del(sbxtoken.MDKey)
+			}
 		},
 		// Chosen per request by transportFor, so the agent's port gets h2c and a
 		// user's port gets HTTP/1.1.
