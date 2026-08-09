@@ -23,6 +23,11 @@ NODED_PORT=${NODED_PORT:-17443}
 NODE_METRICS_PORT=${NODE_METRICS_PORT:-17444}
 SANDBOX_PORT_PORT=${SANDBOX_PORT_PORT:-17450}
 PROXY_PORT=${PROXY_PORT:-17460}
+# The data-plane domain stamped on each sandbox record, so a client dialling the
+# proxy builds "{port}-{id}.{domain}" as its gRPC authority. The proxy routes on
+# the label before the first dot, so any suffix works; this matches the Host hint
+# printed once the stack is up.
+SANDBOX_DOMAIN=${SANDBOX_DOMAIN:-sandbox.local}
 
 # Extra noded flags, e.g. NODED_FLAGS="--track-dirty-pages" to allow incremental
 # snapshots. Dirty tracking has to be on from boot, so it cannot be turned on for
@@ -126,6 +131,7 @@ nohup "$BIN/bean-api" \
   --bootstrap-token "$BOOTSTRAP_TOKEN" \
   --runtime-tier "$RUNTIME" \
   --region local \
+  --sandbox-domain "$SANDBOX_DOMAIN" \
   ${API_FLAGS:-} \
   >"$RUN/api.log" 2>&1 &
 
