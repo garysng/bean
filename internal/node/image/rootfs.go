@@ -53,18 +53,19 @@ type PrepareOptions struct {
 	// SizeMiB bounds the writable layer; zero means the provider's default.
 	SizeMiB int64
 
-	// SeedWritable, when set, populates the writable layer from a checkpoint. It
-	// is called with the layer's path once it exists at its final size and
-	// before the device is assembled from it.
+	// FSManifestDigest, when set, resolves the read-only lowers from a snapshot's
+	// sealed filesystem chain instead of from imageRef. The chain already includes
+	// the base image's layers -- a snapshot's manifest is the base layers plus the
+	// one sealed on capture -- so this is resolved as a digest reference through
+	// the same store path an image tag uses, and a fresh empty writable goes on
+	// top. Empty means resolve from imageRef, the cold-start path.
 	//
-	// The ordering is the whole reason this is a provider concern rather than
-	// something the runtime does after Prepare returns. A device-mapper
-	// snapshot reads its exception table into kernel memory when the device is
-	// activated and never re-reads it, so bytes written to the copy-on-write
-	// store afterwards are invisible: the device keeps serving the base image.
-	// That failure is silent — the guest's own metadata still describes the
-	// files, so they appear with the right size and read back as zeroes.
-	SeedWritable func(dest string) error
+	// It is the restore counterpart of sealing on capture: the filesystem travels
+	// as this identity rather than as bytes, so no extents are replayed and the
+	// snapshot layer is shared with the base image's in the store rather than
+	// copied. Overlaybd-tier only -- the local tier restores through its own tar
+	// checkpoint, never through a provider.
+	FSManifestDigest string
 }
 
 // Provider turns an image reference into a rootfs. Implementations differ in
@@ -153,16 +154,6 @@ func (p *FileProvider) Prepare(ctx context.Context, sandboxID, imageRef string, 
 	if err := cloneSparse(base, path, sizeMiB); err != nil {
 		os.RemoveAll(dir)
 		return nil, err
-	}
-
-	// This provider has no device to assemble, so seeding is just a write. It is
-	// still done here rather than left to the caller so that every provider
-	// establishes the writable layer at the same point in the sequence.
-	if opts.SeedWritable != nil {
-		if err := opts.SeedWritable(path); err != nil {
-			os.RemoveAll(dir)
-			return nil, fmt.Errorf("image: seed writable layer: %w", err)
-		}
 	}
 
 	return &Rootfs{

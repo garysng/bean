@@ -492,9 +492,14 @@ func (r *FCRuntime) create(ctx context.Context, spec *Spec, layers []SnapshotLay
 		defer stage.Close()
 	}
 
+	// A restore takes its filesystem from the snapshot's sealed layer chain, named
+	// by the manifest digest and resolved from the shared store as read-only lowers
+	// with a fresh writable on top. A cold start leaves the digest empty and takes
+	// its filesystem from the image. The writable layer is never seeded now: the
+	// snapshot's filesystem is in the lowers, not replayed as extents.
 	rootfs, err := r.Images.Prepare(ctx, spec.SandboxID, spec.Image, image.PrepareOptions{
-		SizeMiB:      spec.DiskMiB,
-		SeedWritable: stage.SeedWritable,
+		SizeMiB:          spec.DiskMiB,
+		FSManifestDigest: spec.FSManifestDigest,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("fc: prepare rootfs: %w", err)

@@ -422,8 +422,8 @@ var ErrCheckpointUnsupported = errors.New("runtime: this tier cannot checkpoint"
 // snapshots are bean's main throughput lever -- a boot costs about 5 CPU-seconds
 // against a restore's near-zero -- and that lever belongs to the microVM tier. This
 // tier exists for what fc cannot do (GPU, no-KVM nodes), not as a substitute for it.
-func (r *OCIRuntime) Checkpoint(ctx context.Context, id string, w io.Writer, opts CheckpointOptions) error {
-	return fmt.Errorf("%w: %s", ErrCheckpointUnsupported, r.Name())
+func (r *OCIRuntime) Checkpoint(ctx context.Context, id string, w io.Writer, opts CheckpointOptions) (CheckpointResult, error) {
+	return CheckpointResult{}, fmt.Errorf("%w: %s", ErrCheckpointUnsupported, r.Name())
 }
 
 // Fork is not implemented, for the same reason as Checkpoint: there are no

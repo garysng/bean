@@ -148,7 +148,7 @@ func (r *FCRuntime) WarmStore(ctx context.Context, imageRef, sandboxID string) e
 		}
 	}()
 
-	if err := r.Checkpoint(ctx, sandboxID, f, CheckpointOptions{IncludeMemory: true}); err != nil {
+	if _, err := r.Checkpoint(ctx, sandboxID, f, CheckpointOptions{IncludeMemory: true}); err != nil {
 		return fmt.Errorf("fc: checkpoint for warm snapshot: %w", err)
 	}
 	done := commit

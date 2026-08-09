@@ -572,18 +572,18 @@ func (m *Manager) Pause(ctx context.Context, id string) error {
 // opts decides whether guest memory travels with it, which is the difference
 // between resuming the guest and rebooting onto its filesystem.
 func (m *Manager) Snapshot(ctx context.Context, id string, w io.Writer,
-	opts runtime.CheckpointOptions) error {
+	opts runtime.CheckpointOptions) (runtime.CheckpointResult, error) {
 	// Claim the transition under lock, remembering where to go back to.
 	m.mu.Lock()
 	sb, ok := m.sandboxes[id]
 	if !ok {
 		m.mu.Unlock()
-		return fmt.Errorf("%w: %s", ErrSandboxNotFound, id)
+		return runtime.CheckpointResult{}, fmt.Errorf("%w: %s", ErrSandboxNotFound, id)
 	}
 	prev := sb.State
 	if prev != runtime.StateRunning && prev != runtime.StatePaused {
 		m.mu.Unlock()
-		return fmt.Errorf("sandbox %s is %s; snapshot needs RUNNING or PAUSED", id, prev)
+		return runtime.CheckpointResult{}, fmt.Errorf("sandbox %s is %s; snapshot needs RUNNING or PAUSED", id, prev)
 	}
 	sb.State = runtime.StateSnapshotting
 	m.mu.Unlock()
@@ -628,12 +628,12 @@ func (m *Manager) Snapshot(ctx context.Context, id string, w io.Writer,
 	if prev == runtime.StateRunning {
 		if err := m.rt.Pause(ctx, id); err != nil {
 			restore()
-			return fmt.Errorf("freeze for snapshot: %w", err)
+			return runtime.CheckpointResult{}, fmt.Errorf("freeze for snapshot: %w", err)
 		}
 	}
 
 	start := time.Now()
-	err := m.rt.Checkpoint(ctx, id, w, opts)
+	res, err := m.rt.Checkpoint(ctx, id, w, opts)
 	m.observePhase(ctx, "checkpoint", time.Since(start))
 	m.metrics.IncCounter("bean_node_snapshots_total",
 		"Snapshots taken on this node.",
@@ -666,9 +666,9 @@ func (m *Manager) Snapshot(ctx context.Context, id string, w io.Writer,
 
 	restore()
 	if err != nil {
-		return fmt.Errorf("checkpoint: %w", err)
+		return runtime.CheckpointResult{}, fmt.Errorf("checkpoint: %w", err)
 	}
-	return nil
+	return res, nil
 }
 
 // CommitSandbox turns a sandbox's filesystem into a base image.
@@ -1355,15 +1355,16 @@ const guestSyncTimeout = 2 * time.Second
 // specToRuntime projects the proto spec onto the runtime's view.
 func specToRuntime(spec *nodev1.SandboxSpec) *runtime.Spec {
 	return &runtime.Spec{
-		SandboxID:    spec.SandboxId,
-		SnapshotID:   spec.SnapshotId,
-		Image:        spec.Image,
-		CPU:          spec.Cpu,
-		MemoryMiB:    spec.MemoryMib,
-		DiskMiB:      spec.DiskMib,
-		Env:          spec.Env,
-		Cmd:          spec.Cmd,
-		AutoStartCmd: spec.AutoStartCmd,
+		SandboxID:        spec.SandboxId,
+		SnapshotID:       spec.SnapshotId,
+		FSManifestDigest: spec.FsManifestDigest,
+		Image:            spec.Image,
+		CPU:              spec.Cpu,
+		MemoryMiB:        spec.MemoryMib,
+		DiskMiB:          spec.DiskMib,
+		Env:              spec.Env,
+		Cmd:              spec.Cmd,
+		AutoStartCmd:     spec.AutoStartCmd,
 	}
 }
 

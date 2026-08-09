@@ -25,16 +25,16 @@ import (
 // for, so it is the case the caching is arranged around.
 
 // mergeChain reconstructs a full memory image and machine state from an ordered
-// chain, writing them into dir. The last layer's writable filesystem is staged
-// to rootfsDest; earlier layers' filesystems are skipped, since the leaf's
-// already contains everything they held.
+// chain, writing them into dir. The filesystem is not part of a chain here: it is
+// resolved from the snapshot's sealed overlaybd layers, so these bundles carry
+// only guest memory and machine state.
 //
 // Order is load-bearing and not verifiable from the layers themselves: a later
 // page legitimately overwrites an earlier one, so a reversed chain produces a
 // coherent-looking image built from stale pages. The caller owns the ordering,
 // which is why the chain is passed as a slice rather than assembled here from
 // parent links discovered along the way.
-func mergeChain(layers []SnapshotLayer, dir, rootfsDest string) (snapEntry, error) {
+func mergeChain(layers []SnapshotLayer, dir string) (snapEntry, error) {
 	if len(layers) == 0 {
 		return snapEntry{}, errors.New("fc: snapshot chain is empty")
 	}
@@ -43,17 +43,7 @@ func mergeChain(layers []SnapshotLayer, dir, rootfsDest string) (snapEntry, erro
 	var entry snapEntry
 
 	for i, layer := range layers {
-		isLeaf := i == len(layers)-1
-
-		// Only the leaf's filesystem is kept. An intermediate layer's writable
-		// store is a strictly earlier state of the same device, so extracting it
-		// would be work whose result the next layer overwrites.
-		dest := ""
-		if isLeaf {
-			dest = rootfsDest
-		}
-
-		paths, err := readSnapshotBundle(layer.Data, dir, dest)
+		paths, err := readSnapshotBundle(layer.Data, dir)
 		if err != nil {
 			return snapEntry{}, fmt.Errorf("fc: read layer %d (%s) of %d: %w",
 				i+1, layer.ID, len(layers), err)

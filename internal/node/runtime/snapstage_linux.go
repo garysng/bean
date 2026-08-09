@@ -5,7 +5,6 @@ package runtime
 import (
 	"fmt"
 	"os"
-	"path/filepath"
 )
 
 // A restore has to establish the sandbox's writable layer before the block
@@ -21,15 +20,17 @@ import (
 // reclaimed. Staging first is what makes the restored filesystem real.
 
 // snapshotStage holds a bundle that has been unpacked but not yet applied.
+//
+// The filesystem is no longer staged here: a restore resolves it from the
+// snapshot's sealed overlaybd layer chain, named by the manifest digest on the
+// spec, so nothing about the writable layer travels in the bundle. What remains
+// is the guest memory and machine state, the one part no image can supply.
 type snapshotStage struct {
 	// entry locates the machine state and memory image, shared across restores
 	// of the same snapshot. Both paths are empty for a filesystem-only
 	// checkpoint, which tells the caller to boot instead of load.
 	entry snapEntry
-	// rootfs is the writable layer's extent stream, held verbatim as it arrived
-	// so applying it is a straight replay onto whatever the provider creates.
-	rootfs string
-	dir    string
+	dir   string
 	// unpin releases the cache entry once the memory image has been opened. Until
 	// then the entry is only a path, and a sweep that removed it would turn the
 	// open into ENOENT with the restore's stream already consumed.
@@ -41,7 +42,7 @@ func (r *FCRuntime) stageSnapshot(dir string, spec *Spec, layers []SnapshotLayer
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("fc: create snapshot staging dir: %w", err)
 	}
-	stage := &snapshotStage{dir: dir, rootfs: filepath.Join(dir, snapshotRootfsFile)}
+	stage := &snapshotStage{dir: dir}
 
 	// Pinned across the whole staging-to-load span, not just the lookup: the entry
 	// is a set of paths until loadSnapshot opens the memory image, and a sweep in
@@ -50,54 +51,18 @@ func (r *FCRuntime) stageSnapshot(dir string, spec *Spec, layers []SnapshotLayer
 		stage.unpin = r.snapshots.Pin(spec.SnapshotID)
 	}
 
-	entry, err := r.snapshotState(stage.rootfs, spec, layers)
+	entry, err := r.snapshotState(dir, spec, layers)
 	if err != nil {
 		stage.Close()
 		return nil, err
 	}
 	stage.entry = entry
-
-	// A bundle with no writable layer is not an error: a checkpoint of a sandbox
-	// that wrote nothing has no extents to carry. Clearing the path keeps the
-	// provider from being handed a seed that would find no file.
-	if _, err := os.Stat(stage.rootfs); err != nil {
-		stage.rootfs = ""
-	}
 	return stage, nil
 }
 
-// SeedWritable replays the staged extents onto the layer the provider created.
-// It is passed to Prepare so it runs at the one point where the writes are
-// guaranteed to be visible to the assembled device.
-func (s *snapshotStage) SeedWritable(dest string) error {
-	if s == nil || s.rootfs == "" {
-		return nil
-	}
-	src, err := os.Open(s.rootfs)
-	if err != nil {
-		return err
-	}
-	defer src.Close()
-
-	// The layer already exists at its provisioned size, so it is written in
-	// place: truncating it would discard that size, and for a block device the
-	// truncation would fail outright.
-	f, err := os.OpenFile(dest, os.O_WRONLY, 0o600)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-
-	if err := readSparse(src, f); err != nil {
-		return fmt.Errorf("replay writable layer: %w", err)
-	}
-	return nil
-}
-
-// Close drops the staged extent stream once it has been replayed, and releases
-// the cache pin. The extent stream is the only file removed: an uncached bundle
+// Close releases the cache pin. No files are removed here: an uncached bundle
 // leaves its machine state and memory image in this directory, and the VM is
-// still using them — Firecracker faults guest pages from the memory image for as
+// still using them -- Firecracker faults guest pages from the memory image for as
 // long as it runs. They go when the sandbox directory does.
 //
 // Releasing the pin here is safe even though the VM is still running, because by
@@ -112,9 +77,4 @@ func (s *snapshotStage) Close() {
 		s.unpin()
 		s.unpin = nil
 	}
-	if s.rootfs == "" {
-		return
-	}
-	os.Remove(s.rootfs)
-	s.rootfs = ""
 }

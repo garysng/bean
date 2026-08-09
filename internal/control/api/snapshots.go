@@ -195,7 +195,12 @@ func (s *Server) captureSnapshot(ctx context.Context, rec *store.Sandbox,
 		return nil, grpcFault(err)
 	}
 
+	// The stream carries the memory bundle as data frames and ends with one result
+	// frame naming the filesystem's sealed layer chain. The filesystem no longer
+	// travels here -- only its manifest identity does -- so a memoryless snapshot
+	// writes no data at all and the result frame is the whole answer.
 	var written int64
+	var fsResult *nodev1.SnapshotResult
 	for {
 		chunk, rerr := stream.Recv()
 		if rerr == io.EOF {
@@ -206,7 +211,11 @@ func (s *Server) captureSnapshot(ctx context.Context, rec *store.Sandbox,
 			s.failSnapshot(snap, rerr)
 			return nil, grpcFault(rerr)
 		}
-		n, werr := blobW.Write(chunk.Data)
+		if res := chunk.GetResult(); res != nil {
+			fsResult = res
+			continue
+		}
+		n, werr := blobW.Write(chunk.GetData())
 		written += int64(n)
 		if werr != nil {
 			snapshot.AbortWrite(s.snapshots, snapID, blobW)
@@ -217,6 +226,18 @@ func (s *Server) captureSnapshot(ctx context.Context, rec *store.Sandbox,
 	if err := blobW.Close(); err != nil {
 		s.failSnapshot(snap, err)
 		return nil, faultf(http.StatusInternalServerError, "INTERNAL", "%s", err.Error())
+	}
+
+	// A checkpoint from the overlaybd tier must name where its filesystem was
+	// sealed: without the manifest digest a restore has no filesystem to resolve,
+	// so an absent result on a memoryless snapshot is a failure to record what was
+	// captured rather than a snapshot with an empty disk. The local tier bundles
+	// its filesystem instead and legitimately returns no digest; there written > 0
+	// even for a memoryless checkpoint.
+	if fsResult != nil {
+		snap.FSManifestDigest = fsResult.GetFsManifestDigest()
+		snap.FSLayerDigests = fsResult.GetFsLayerDigests()
+		snap.FSSizeBytes = fsResult.GetFsSizeBytes()
 	}
 
 	snap.State = store.SnapshotReady
@@ -395,11 +416,20 @@ func (s *Server) launchFromSnapshot(ctx context.Context, snap *store.Snapshot,
 	}
 	// Declared on the spec rather than discovered from the stream: the node has to
 	// create one reader per layer before reading any of them, since each layer is
-	// its own gzip stream.
+	// its own gzip stream. This is now the guest-memory diff chain only; the
+	// filesystem resolves from the leaf's manifest digest below.
 	spec.SnapshotChain = make([]string, len(chain))
 	for i, link := range chain {
 		spec.SnapshotChain[i] = link.ID
 	}
+
+	// The filesystem travels as a manifest identity, not bytes: the node resolves
+	// this digest to the sealed overlaybd layer chain through the shared store,
+	// exactly as it resolves an image tag, and assembles it as read-only lowers
+	// with a fresh writable on top. Empty for a local-tier snapshot, whose
+	// filesystem is still carried in the streamed bundle. The leaf's digest names
+	// the whole filesystem; a memory diff chain does not change the disk.
+	spec.FsManifestDigest = snap.FSManifestDigest
 
 	// The proto RPC keeps its name: it is a published interface, and renaming it
 	// would break every deployed node for a change that adds a verb.

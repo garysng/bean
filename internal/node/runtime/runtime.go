@@ -49,9 +49,15 @@ type Spec struct {
 	SandboxID string
 	// SnapshotID identifies the checkpoint a restore comes from, so a node can
 	// reuse state it has already unpacked. Empty for a cold start.
-	SnapshotID   string
-	Image        string
-	CPU          float64
+	SnapshotID string
+	// FSManifestDigest names a restore's filesystem as an overlaybd layer chain in
+	// the shared store, resolved the same way an image tag is. Empty for a cold
+	// start, and empty for a local-tier restore whose filesystem rides in the
+	// bundle -- both of which take their filesystem from elsewhere (the image, or
+	// the streamed extents) rather than from a sealed snapshot chain.
+	FSManifestDigest string
+	Image            string
+	CPU              float64
 	MemoryMiB    int64
 	DiskMiB      int64
 	Env          map[string]string
@@ -103,10 +109,13 @@ type Runtime interface {
 	Pause(ctx context.Context, id string) error
 	Resume(ctx context.Context, id string) error
 
-	// Checkpoint writes a restorable representation of the sandbox to w.
-	// The format is runtime-specific and not interchangeable between
-	// tiers, which is why a snapshot records the runtime that produced it.
-	Checkpoint(ctx context.Context, id string, w io.Writer, opts CheckpointOptions) error
+	// Checkpoint writes a restorable representation of the sandbox to w and
+	// reports where its filesystem was stored. The memory and device state (if
+	// any) stream to w; the filesystem, on the overlaybd tier, is sealed into the
+	// shared layer store and only its manifest identity comes back in the result.
+	// The format is runtime-specific and not interchangeable between tiers, which
+	// is why a snapshot records the runtime that produced it.
+	Checkpoint(ctx context.Context, id string, w io.Writer, opts CheckpointOptions) (CheckpointResult, error)
 
 	// Fork creates a sandbox from checkpoints previously written by the same
 	// runtime. The spec supplies identity and resources; the checkpoints supply
@@ -160,6 +169,25 @@ type SnapshotLayer struct {
 	ID string
 	// Data is the layer's bundle. Layers are consumed in order, exactly once.
 	Data io.Reader
+}
+
+// CheckpointResult reports where a checkpoint's filesystem was stored.
+//
+// On the overlaybd tier the filesystem is sealed into the shared layer store rather than
+// bundled into the stream, so these coordinates -- not the bytes -- are what a restore needs
+// to reassemble it. They are empty for a checkpoint whose filesystem is not a shared layer
+// chain (the local tier, or an overlaybd node with no store), where the bundle still carries
+// the filesystem.
+type CheckpointResult struct {
+	// FSManifestDigest keys the snapshot filesystem's overlaybd manifest in the shared
+	// store. A restore resolves the layer chain from it the way a create resolves an image.
+	FSManifestDigest string
+	// FSLayerDigests is the filesystem's layer chain, base first, for provenance and layer
+	// accounting. It shares the base image's layer digests.
+	FSLayerDigests []string
+	// FSSizeBytes is the sealed size of the snapshot's own top layer, not the whole chain:
+	// the shared base layers are already accounted to the image.
+	FSSizeBytes int64
 }
 
 // CheckpointOptions selects what a checkpoint captures.

@@ -321,11 +321,27 @@ func (s *GRPCServer) SnapshotSandbox(req *nodev1.SnapshotSandboxRequest,
 		IncludeMemory: req.GetIncludeMemory(),
 		Diff:          req.GetDiff(),
 	}
-	if err := s.mgr.Snapshot(stream.Context(), req.SandboxId, w, opts); err != nil {
+	res, err := s.mgr.Snapshot(stream.Context(), req.SandboxId, w, opts)
+	if err != nil {
 		if errors.Is(err, ErrSandboxNotFound) {
 			return status.Errorf(codes.NotFound, "%v", err)
 		}
 		return status.Errorf(codes.FailedPrecondition, "%v", err)
+	}
+	// The terminal frame names the snapshot's filesystem as a shared overlaybd layer
+	// chain. It is sent after the last data frame so the receiver reads the memory
+	// bundle to EOF and then learns where the filesystem lives, exactly as an image
+	// tag resolves to a manifest. A checkpoint whose filesystem was not sealed into
+	// the store (the local tier) leaves the digest empty and carries its filesystem
+	// in the data stream instead.
+	if err := stream.Send(&nodev1.SnapshotChunk{
+		Chunk: &nodev1.SnapshotChunk_Result{Result: &nodev1.SnapshotResult{
+			FsManifestDigest: res.FSManifestDigest,
+			FsLayerDigests:   res.FSLayerDigests,
+			FsSizeBytes:      res.FSSizeBytes,
+		}},
+	}); err != nil {
+		return err
 	}
 	return nil
 }
@@ -339,7 +355,9 @@ func (c *chunkWriter) Write(p []byte) (int, error) {
 	total := 0
 	for len(p) > 0 {
 		n := min(len(p), snapshotChunkSize)
-		if err := c.stream.Send(&nodev1.SnapshotChunk{Data: p[:n]}); err != nil {
+		if err := c.stream.Send(&nodev1.SnapshotChunk{
+			Chunk: &nodev1.SnapshotChunk_Data{Data: p[:n]},
+		}); err != nil {
 			return total, err
 		}
 		p = p[n:]

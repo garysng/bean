@@ -232,8 +232,12 @@ message SandboxSpec {
   // "unpack from the stream", which keeps a restore self-contained.
   string snapshot_id = 14;
 
-  // snapshot_chain lists the checkpoints a restore must replay, ordered
+  // snapshot_chain lists the memory checkpoints a restore must replay, ordered
   // base-first with snapshot_id last. Empty means snapshot_id is self-contained.
+  //
+  // This now carries only the guest-memory diff chain. The filesystem is resolved
+  // from fs_manifest_digest as a shared overlaybd layer chain, not streamed, so a
+  // memoryless restore sends no bundle data at all.
   //
   // The chain is declared here rather than discovered from the stream because the
   // node has to create one reader per layer before reading any of them: each
@@ -242,6 +246,14 @@ message SandboxSpec {
   // restore fails on a chain the node cannot serve instead of part way through
   // assembling one.
   repeated string snapshot_chain = 15;
+
+  // fs_manifest_digest names the snapshot's filesystem as an overlaybd layer
+  // chain in the shared store. The node resolves it through the image index the
+  // same way it resolves an image tag, assembling the chain as read-only lowers
+  // with a fresh writable on top -- no filesystem bytes travel in the restore
+  // stream. Empty means a non-overlaybd restore (local tier) that still carries
+  // its filesystem in the bundle.
+  string fs_manifest_digest = 16;
 
   string sandbox_id = 1;
   string image = 2;
@@ -333,20 +345,45 @@ message SnapshotSandboxRequest {
 }
 
 message SnapshotChunk {
-  bytes data = 1;
+  oneof chunk {
+    // data carries the memory + vmstate bundle bytes. The filesystem no longer
+    // travels here: it is sealed into a shared overlaybd layer and published to
+    // the blob store, and only its manifest identity comes back, in result.
+    bytes data = 1;
+    // result is the terminal frame, sent once after the last data chunk. It names
+    // the snapshot's filesystem as an overlaybd layer chain the store now holds,
+    // so control records the manifest rather than a copy of the bytes.
+    SnapshotResult result = 2;
+  }
+}
+
+// SnapshotResult identifies a snapshot's filesystem as a published overlaybd
+// layer chain. The chain shares the base image's layer digests, so the store
+// holds one copy of those layers and only the snapshot's own top layer is new.
+message SnapshotResult {
+  // fs_manifest_digest keys the StoredManifest a restore resolves the chain from,
+  // exactly as an image tag resolves to its manifest.
+  string fs_manifest_digest = 1;
+  // fs_layer_digests is the chain base-first, for provenance and layer accounting.
+  repeated string fs_layer_digests = 2;
+  // fs_size_bytes is the sealed size of the snapshot's own top layer, not the
+  // whole chain: the shared base layers are already accounted to the image.
+  int64 fs_size_bytes = 3;
 }
 
 message RestoreSandboxFrame {
   oneof frame {
     SandboxSpec spec = 1;
-    // data carries the bundles back to back, in the order SandboxSpec's
+    // data carries the memory bundles back to back, in the order SandboxSpec's
     // snapshot_chain declares. The node splits them at the boundaries the chain
     // implies rather than at markers in the stream, so the sender does not have to
     // know each bundle's size in advance — it is copying from object storage.
+    // Filesystem layers are not streamed here; they resolve from
+    // fs_manifest_digest.
     bytes data = 2;
-    // layer_end closes the current bundle and moves to the next in the chain. It
-    // is a boundary marker rather than a length because the sender learns a
-    // bundle's size only by finishing it.
+    // layer_end closes the current memory bundle and moves to the next in the
+    // chain. It is a boundary marker rather than a length because the sender
+    // learns a bundle's size only by finishing it.
     bool layer_end = 3;
   }
 }

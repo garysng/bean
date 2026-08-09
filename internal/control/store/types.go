@@ -342,6 +342,26 @@ type Snapshot struct {
 	// "assume memory", the behaviour those snapshots were created under.
 	IncludeMemory *bool `json:"includeMemory,omitempty"`
 
+	// FSManifestDigest names the snapshot's filesystem as an overlaybd layer
+	// chain in the shared store, the same content-addressed space image layers
+	// live in. A restore resolves it exactly as it resolves an image tag: the
+	// chain becomes read-only lowers with a fresh writable on top, and no
+	// filesystem bytes travel in the restore stream.
+	//
+	// Empty means the checkpoint carries its filesystem in the bundle instead --
+	// the local tier, which has no shared store. SizeBytes then covers the whole
+	// checkpoint; when this is set, SizeBytes is only the memory bundle and the
+	// filesystem is accounted by FSSizeBytes.
+	FSManifestDigest string `json:"fsManifestDigest,omitempty"`
+	// FSLayerDigests is the filesystem's layer chain, base first. It shares the
+	// base image's layer digests, so the store holds one copy of those layers and
+	// only the snapshot's own top layer is new -- which is the whole point of
+	// keying the filesystem by digest rather than bundling it.
+	FSLayerDigests []string `json:"fsLayerDigests,omitempty"`
+	// FSSizeBytes is the sealed size of the snapshot's own top layer, not the
+	// whole chain: the shared base layers are already accounted to the image.
+	FSSizeBytes int64 `json:"fsSizeBytes,omitempty"`
+
 	Labels map[string]string `json:"labels,omitempty"`
 	// RefCount counts in-progress restores; a snapshot with refs cannot be
 	// deleted out from under them.
