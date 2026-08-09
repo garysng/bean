@@ -181,7 +181,9 @@ commands:
 output: --json for machine-readable output, --quiet for identifiers only
 exit:   0 ok, 64 not found, 69 unavailable (retry may help), 70 failed,
         125 usage error
-env:    BEAN_BASE_URL (default http://127.0.0.1:8080), BEAN_API_KEY`
+env:    BEAN_BASE_URL (default http://127.0.0.1:8080), BEAN_API_KEY
+        BEAN_PROXY_URL routes exec and cp through bean-proxy (data plane);
+        unset uses the bean-api relay`
 
 func envOr(k, def string) string {
 	if v := os.Getenv(k); v != "" {
@@ -312,6 +314,26 @@ func cmdExec(c *Client, args []string, stdout, stderr io.Writer) int {
 		return ExitUsage
 	}
 	id, cmd := pos[0], pos[1:]
+
+	// Data-plane path: when BEAN_PROXY_URL is set, exec goes straight to the
+	// agent through bean-proxy, and the relay through bean-api is skipped. The
+	// sandbox record carries the domain the authority is built against, so a GET
+	// resolves it before dialling. A relay-path fallback covers an unset proxy or
+	// a sandbox with no domain (a dev/single-node deployment).
+	if dp, ok := dataPlaneFor(os.Getenv("BEAN_PROXY_URL"), ""); ok {
+		res, err := c.execViaDataPlane(dp, id, cmd)
+		if err != nil {
+			fmt.Fprintln(stderr, "error:", err)
+			return exitCodeFor(err)
+		}
+		stdout.Write(res.Stdout)
+		stderr.Write(res.Stderr)
+		if res.Truncated {
+			fmt.Fprintln(stderr, "[output truncated]")
+		}
+		return res.ExitCode
+	}
+
 	var out struct {
 		ExitCode  int    `json:"exitCode"`
 		Stdout    string `json:"stdout"`
@@ -1042,6 +1064,9 @@ func cmdCp(c *Client, args []string, stdout io.Writer) error {
 		return usagef("usage: bean cp SRC DST")
 	}
 	src, dst := pos[0], pos[1]
+	// Data-plane path when configured: file transfer goes straight to the agent
+	// through the proxy, mirroring exec. Unset BEAN_PROXY_URL keeps the REST relay.
+	dp, dataPlane := dataPlaneFor(os.Getenv("BEAN_PROXY_URL"), "")
 	switch {
 	case strings.HasPrefix(dst, "sbx:"):
 		id, remote, err := splitSbxPath(dst)
@@ -1051,6 +1076,13 @@ func cmdCp(c *Client, args []string, stdout io.Writer) error {
 		data, err := os.ReadFile(src)
 		if err != nil {
 			return err
+		}
+		if dataPlane {
+			if err := c.writeFileViaDataPlane(dp, id, remote, data); err != nil {
+				return err
+			}
+			newPrinter(stdout, flags).note("copied %s -> %s:%s", src, id, remote)
+			return nil
 		}
 		req, err := http.NewRequest("PUT",
 			c.BaseURL+"/v1/sandboxes/"+id+"/files?mkdirs=true&path="+url.QueryEscape(remote),
@@ -1075,6 +1107,18 @@ func cmdCp(c *Client, args []string, stdout io.Writer) error {
 		if err != nil {
 			return err
 		}
+		f, err := os.Create(dst)
+		if err != nil {
+			return err
+		}
+		defer f.Close()
+		if dataPlane {
+			if err := c.readFileViaDataPlane(dp, id, remote, f); err != nil {
+				return err
+			}
+			newPrinter(stdout, flags).note("copied %s:%s -> %s", id, remote, dst)
+			return nil
+		}
 		resp, err := c.do("GET", "/v1/sandboxes/"+id+"/files?path="+url.QueryEscape(remote), nil)
 		if err != nil {
 			return err
@@ -1084,11 +1128,6 @@ func cmdCp(c *Client, args []string, stdout io.Writer) error {
 			body, _ := io.ReadAll(resp.Body)
 			return fmt.Errorf("HTTP %d: %s", resp.StatusCode, strings.TrimSpace(string(body)))
 		}
-		f, err := os.Create(dst)
-		if err != nil {
-			return err
-		}
-		defer f.Close()
 		if _, err := io.Copy(f, resp.Body); err != nil {
 			return err
 		}
