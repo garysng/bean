@@ -132,11 +132,14 @@ type BuildStep struct {
 }
 ```
 
-## 6. API ⚠️
+## 6. API
 
-> **Log streaming and cancellation** for builds are unimplemented — this is the most obvious
-> gap right now: a build that has been running for minutes offers neither progress nor a way
-> to stop it.
+> **Log streaming and cancellation** for builds are implemented: the log endpoint
+> (`build.go:289`) and cancel (`build.go:358`) are served over noded's long-lived
+> `BuildImage` stream (`grpc.go:143`). One caveat remains — the log buffer is
+> per-replica in-memory (`buildlog.go`), so under multiple bean-api replicas a
+> logs/cancel request must reach the replica that started the build; see
+> [build-service.md §3.5](build-service.md).
 
 
 ```

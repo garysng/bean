@@ -169,8 +169,10 @@ checkpoint fan out to many sandboxes without collisions.
   in-sandbox agent, arriving as one span tree per request
 - **Node-direct data plane** — `{port}-{sandbox}` in the Host reaches that port in
   that guest, whether it is a user's server or the agent. One mechanism rather than
-  two: no registration call, no host-port pool, and `exec` and file transfer no
-  longer relay through the control plane
+  two: no registration call, no host-port pool. With `BEAN_PROXY_URL` set, `exec`
+  and file transfer take this path straight to the agent instead of relaying
+  through the control plane, with the node's forwarder injecting the per-sandbox
+  token so the client never holds it; unset, they fall back to the gateway relay
 - **Warm snapshots** — prewarm produces a resumable base snapshot, so a create
   restores instead of booting, and the scheduler prefers nodes that can. Bounded on
   disk with LRU eviction

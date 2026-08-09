@@ -155,8 +155,9 @@ bean run --snapshot snap_...
 - **追踪** —— OpenTelemetry,W3C `traceparent` 贯穿 gateway → noded → 沙箱内 agent,
   每个请求汇成一棵 span 树
 - **节点直连数据平面** —— Host 里的 `{port}-{sandbox}` 直达该 guest 的那个端口,
-  无论它是用户的 server 还是 agent。一套机制而非两套:没有注册调用、没有宿主端口池,
-  `exec` 和文件传输也不再经控制面中转
+  无论它是用户的 server 还是 agent。一套机制而非两套:没有注册调用、没有宿主端口池。
+  设了 `BEAN_PROXY_URL` 时,`exec` 和文件传输走这条路直达 agent、不再经控制面中转,
+  由节点的 forwarder 注入 per-sandbox token,所以 client 从不持有它;未设时回退网关中转
 - **Warm snapshot** —— prewarm 产出一份可 resume 的基础快照,于是 create 变成 restore
   而不是 boot,调度器也会优先选能做到这点的节点。磁盘上有上限,按 LRU 淘汰
 - **Postgres** —— `bean-api --postgres`,这正是支持多副本的前提;SQLite 是单文件,

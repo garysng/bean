@@ -121,10 +121,12 @@ type BuildStep struct {
 }
 ```
 
-## 6. API ⚠️
+## 6. API
 
-> 构建的**日志流与取消**未实现 —— 这是当前最明显的缺口:一个跑了几分钟的构建
-> 既看不到进度也停不下来。
+> 构建的**日志流与取消**已实现:日志端点(`build.go:289`)与取消(`build.go:358`)
+> 走 noded 的长活 `BuildImage` 流(`grpc.go:143`)。仅剩一个注意点 —— 日志缓冲是
+> 每副本进程内内存(`buildlog.go`),所以多副本 bean-api 下,logs/cancel 请求必须打到
+> 发起该 build 的那个副本;见 [build-service.md §3.5](build-service.md)。
 
 
 ```
