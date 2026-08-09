@@ -304,6 +304,16 @@ func tcmuAvailable() error {
 	if _, err := os.Stat(configfsCore); err != nil {
 		return errors.New("image: configfs target unavailable (modprobe target_core_user)")
 	}
+	// The loopback fabric is what turns a backstore into a scanned SCSI device.
+	// tcm_loop creates its configfs group on demand -- attach() does the MkdirAll
+	// (see step 3) -- so the group is absent on a capable host that has not attached
+	// a device yet. Gating on the group existing therefore rejected a host that could
+	// serve overlaybd fine; the loaded module is the signal that the group can be
+	// created, and the configfs path is accepted too for a host where a prior attach
+	// already materialised it.
+	if _, err := os.Stat("/sys/module/tcm_loop"); err == nil {
+		return nil
+	}
 	if _, err := os.Stat(configfsLoopback); err != nil {
 		return errors.New("image: loopback fabric unavailable (modprobe tcm_loop)")
 	}

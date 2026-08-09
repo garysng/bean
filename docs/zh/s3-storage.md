@@ -292,12 +292,12 @@ builder 跑在 **noded** 上(`internal/node/image/build_linux.go`,在 `cmd/noded
 留在控制面;它共享的是接口和低层 client,不是进程。统一抽象每进程实例化一次(`bean-api` 一次、
 `noded` 一次),各带自己的 key 方案适配器。
 
-配置收敛成一个命名空间:单一的 `--s3-endpoint` / `--s3-bucket`(overlaybd 读 URL 作为唯一真正
-overlaybd 特有的额外项保留),两个进程读同一批 `BEAN_S3_*` 凭证。这次 flag 改名放到**阶段 2**,
-不在阶段 1 做:今天 noded 的 `-fc-overlaybd-s3-*` 命名的存储*只*放 overlaybd 层,前缀是诚实的;
-是阶段 2 让同一个存储也放 build 产物,那时通用的 `-s3-*` 名才准确,改名跟着那次配得上它的改动一起落地。
-阶段 1 保持 flag 不动 —— 它交付的统一是共享的 `ObjectStore` 契约,以及支撑两个节点侧 facade 的
-单一 `BucketStore`,都在接口之下,没有任何部署看到 flag 变化。
+配置收敛成一个命名空间:单一的 `--s3-endpoint` / `--s3-bucket` / `--s3-region` /
+`--s3-path-style`(overlaybd 读 URL 作为唯一真正 overlaybd 特有的额外项保留),两个进程读同一批
+`BEAN_S3_*` 凭证。阶段 1 交付了共享的 `ObjectStore` 契约,以及在接口之下支撑两个节点侧 facade 的
+单一 `BucketStore`;**改名放在阶段 2 做**,把 noded 的 `-fc-overlaybd-s3-*` 退成 `-s3-*`。改名落在
+阶段 2 而非阶段 1,是因为那一阶段 build 产物也封成 overlaybd 层进同一个存储,存储就明确是节点唯一的
+产物存储,通用的 `-s3-*` 名才准确。
 
 ### 8.5 阶段 2-4:build 产物与 snapshot 文件系统落到共享层
 

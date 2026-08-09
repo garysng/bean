@@ -830,18 +830,18 @@ func (m *Manager) syncViaAgent(ctx context.Context, id string) error {
 // distinguishes a cancelled build from a failed one — a rate of builds someone
 // stopped on purpose says nothing about whether this node's BuildKit is healthy,
 // and counting the two together is how a broken builder hides.
-func (m *Manager) BuildImage(ctx context.Context, req runtime.BuildRequest) (string, error) {
+func (m *Manager) BuildImage(ctx context.Context, req runtime.BuildRequest) (runtime.BuildResult, error) {
 	builder, ok := m.rt.(runtime.ImageBuilder)
 	if !ok {
-		return "", fmt.Errorf("runtime %s cannot build images", m.rt.Name())
+		return runtime.BuildResult{}, fmt.Errorf("runtime %s cannot build images", m.rt.Name())
 	}
 	start := time.Now()
-	ref, err := builder.BuildImage(ctx, req)
+	res, err := builder.BuildImage(ctx, req)
 	m.observePhase(ctx, "image_build", time.Since(start))
 	m.metrics.IncCounter("bean_node_image_builds_total",
 		"Image builds on this node.",
 		map[string]string{"outcome": buildOutcome(ctx, err), "runtime": m.rt.Name()}, 1)
-	return ref, err
+	return res, err
 }
 
 // buildOutcome labels how a build ended. The context is consulted rather than

@@ -334,15 +334,14 @@ snapshot store stays control-side; it shares the interface and the low-level cli
 process. The unified abstraction is instantiated once per process (once in `bean-api`, once in
 `noded`), each with its own key-scheme adapters.
 
-Config converges to one namespace: a single `--s3-endpoint` / `--s3-bucket` set (with the
-overlaybd read-URL kept as the one genuinely overlaybd-specific extra), both processes reading
-the same `BEAN_S3_*` credentials. The flag rename is deferred to **Phase 2**, not done in
-Phase 1: today noded's `-fc-overlaybd-s3-*` flags name a store that holds *only* overlaybd
-layers, so the prefix is honest; it is Phase 2 that makes that same store hold build outputs
-too, at which point the general `-s3-*` name is the accurate one and the rename lands with the
-change that earns it. Phase 1 keeps the flags as they are — the unification it delivers is the
-shared `ObjectStore` contract and the one `BucketStore` backing both node-side facades, under
-the interface, where no deployment sees a flag change.
+Config converges to one namespace: a single `--s3-endpoint` / `--s3-bucket` / `--s3-region` /
+`--s3-path-style` set (with the overlaybd read-URL kept as the one genuinely overlaybd-specific
+extra), both processes reading the same `BEAN_S3_*` credentials. Phase 1 delivered the shared
+`ObjectStore` contract and the one `BucketStore` backing both node-side facades under the
+interface; **Phase 2 does the flag rename**, retiring noded's `-fc-overlaybd-s3-*` for `-s3-*`.
+The rename lands in Phase 2 rather than Phase 1 because that is the phase where a built image
+becomes a sealed overlaybd layer in the same store, so the store is unambiguously the node's one
+artifact store and the general `-s3-*` name is the accurate one.
 
 ### 8.5 Phases 2-4: build outputs and snapshot filesystems onto shared layers
 

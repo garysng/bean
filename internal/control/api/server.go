@@ -99,12 +99,12 @@ type Server struct {
 	// domain is the data-plane base stamped onto every sandbox record so the
 	// client can build "{port}-{id}.{domain}" URLs through bean-proxy. Empty
 	// leaves the record's Domain empty and the client on the relay fallback.
-	domain string
-	apiKey string
-	images      *image.Service
-	snapshots   snapshot.Blobs
-	secrets     *secret.Box
-	bus         *eventBus
+	domain    string
+	apiKey    string
+	images    *image.Service
+	snapshots snapshot.Blobs
+	secrets   *secret.Box
+	bus       *eventBus
 	// builds holds in-flight and recently finished builds, which is what the
 	// build log and cancel endpoints address. It is per-replica, unlike
 	// everything else here: a build's log is only reachable from the gateway that
@@ -236,6 +236,8 @@ func (s *Server) routes() {
 	// ref goes in a query param: it contains slashes and colons, which
 	// would otherwise collide with sibling routes like prewarm.
 	s.mux.HandleFunc("GET /v1/images/status", s.handleImageStatus)
+	// Delete keys on the same query-param ref as status, for the same reason.
+	s.mux.HandleFunc("DELETE /v1/images", s.handleDeleteImage)
 	s.mux.HandleFunc("POST /v1/images/prewarm", s.handlePrewarm)
 	s.mux.HandleFunc("POST /v1/images/build", s.handleBuild)
 	// ref goes in a query param for the same reason as image status: it contains

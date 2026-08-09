@@ -238,6 +238,62 @@ func TestBuildAttributesImageToCaller(t *testing.T) {
 	}
 }
 
+func TestDeleteImageRemovesTheRecord(t *testing.T) {
+	env := startEnv(t, envOpts{})
+	if err := env.Store.PutImage(&store.Image{
+		Ref: "gone:v1", Source: store.ImageBuilt, State: store.ImageReady,
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	resp, out := env.do("DELETE", "/v1/images?ref="+url.QueryEscape("gone:v1"), nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Fatalf("delete status = %d: %v", resp.StatusCode, out)
+	}
+	if out["deleted"] != true {
+		t.Errorf("delete body = %v", out)
+	}
+	resp, _ = env.do("GET", "/v1/images/status?ref="+url.QueryEscape("gone:v1"), nil)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("status after delete = %d, want 404", resp.StatusCode)
+	}
+
+	// A missing ref is a 404, and a missing ref query is a 400.
+	resp, _ = env.do("DELETE", "/v1/images?ref="+url.QueryEscape("never:v1"), nil)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("delete missing = %d, want 404", resp.StatusCode)
+	}
+	resp, _ = env.do("DELETE", "/v1/images", nil)
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("delete without ref = %d, want 400", resp.StatusCode)
+	}
+}
+
+func TestDeleteImageIsScopedToOwner(t *testing.T) {
+	env := startEnv(t, envOpts{WithIdentity: true})
+	if err := env.Store.PutImage(&store.Image{
+		Ref: "theirs:v1", Source: store.ImageBuilt, State: store.ImageReady, Owner: "user-b",
+	}); err != nil {
+		t.Fatal(err)
+	}
+
+	// Another caller may not delete it, and is told it does not exist rather than
+	// that it may not touch it.
+	resp, _ := env.doAs("user-a", "DELETE", "/v1/images?ref="+url.QueryEscape("theirs:v1"), nil)
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("cross-owner delete = %d, want 404", resp.StatusCode)
+	}
+	if img, _ := env.Store.GetImage("theirs:v1"); img == nil {
+		t.Error("cross-owner delete removed the image")
+	}
+
+	// The owner deletes it.
+	resp, _ = env.doAs("user-b", "DELETE", "/v1/images?ref="+url.QueryEscape("theirs:v1"), nil)
+	if resp.StatusCode != http.StatusOK {
+		t.Errorf("owner delete = %d, want 200", resp.StatusCode)
+	}
+}
+
 func TestOwnerFromHeaderTrimsAndDefaults(t *testing.T) {
 	f := OwnerFromHeader("")
 	r, _ := http.NewRequest("GET", "/", nil)

@@ -27,6 +27,13 @@ import (
 // ErrInvalidRef reports a malformed image reference.
 var ErrInvalidRef = errors.New("invalid image reference")
 
+// ErrNotFound reports that an image reference is not registered.
+var ErrNotFound = errors.New("image not found")
+
+// ErrForbidden reports that an image belongs to another identity, so the caller
+// may not act on it.
+var ErrForbidden = errors.New("image belongs to another owner")
+
 // NodeCacheSource reports how many nodes have an image cached, which drives
 // prewarm progress and image-affinity scoring.
 type NodeCacheSource interface {
@@ -150,17 +157,58 @@ func (s *Service) ListFor(owner string) ([]*store.Image, error) {
 	return imgs, nil
 }
 
+// Delete removes an image record. It is the operator's unscoped delete; a
+// per-caller delete goes through DeleteFor.
+func (s *Service) Delete(ref string) error {
+	return s.DeleteFor(ref, "")
+}
+
+// DeleteFor removes an image an identity is allowed to remove: its own, or an
+// unowned one. It returns ErrNotFound when the reference is unknown, and
+// ErrForbidden when it belongs to another identity, so a caller cannot use delete
+// to probe for the existence of images it may not see.
+//
+// The scope mirrors ListFor: an empty owner is the operator's view and may delete
+// anything, an identity may delete what it owns and the unowned images every
+// identity shares. Deletion removes only the control-plane record; published layers
+// are content-addressed and shared, so they are reclaimed by garbage collection, not
+// by deleting one image that referenced them.
+func (s *Service) DeleteFor(ref, owner string) error {
+	if err := ValidateRef(ref); err != nil {
+		return err
+	}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
+	img, err := s.store.GetImage(ref)
+	if err != nil {
+		return err
+	}
+	if img == nil {
+		return ErrNotFound
+	}
+	if owner != "" && img.Owner != "" && img.Owner != owner {
+		return ErrForbidden
+	}
+	return s.store.DeleteImage(ref)
+}
+
 // MarkConverting records that a conversion has started.
 func (s *Service) MarkConverting(ref string) error {
 	return s.transition(ref, store.ImageConverting, "", func(img *store.Image) {})
 }
 
-// MarkReady records a successful conversion along with the artifact ref and
-// size, making the image usable by the fc tier.
-func (s *Service) MarkReady(ref, overlaybdRef string, sizeBytes int64) error {
+// MarkReady records a successful conversion along with the artifact ref, size and
+// layer chain, making the image usable by the fc tier.
+//
+// layerDigests is the published layer chain, base first. It is recorded so per-layer
+// dedup and cache accounting have it without a second round trip; a build that stayed
+// node-local publishes nothing and passes an empty ref, zero size and no digests.
+func (s *Service) MarkReady(ref, overlaybdRef string, sizeBytes int64, layerDigests []string) error {
 	return s.transition(ref, store.ImageReady, "", func(img *store.Image) {
 		img.OverlaybdRef = overlaybdRef
 		img.SizeBytes = sizeBytes
+		img.LayerDigests = layerDigests
 	})
 }
 

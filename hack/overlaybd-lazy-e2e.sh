@@ -74,7 +74,7 @@ docker exec bean-minio mc alias set local "$S3" "$BEAN_S3_ACCESS_KEY" "$BEAN_S3_
 docker exec bean-minio mc rb --force "local/$BUCKET" >/dev/null 2>&1
 
 LAZY="--fc-overlaybd --fc-overlaybd-lazy-pull \
---fc-overlaybd-s3-endpoint $S3 --fc-overlaybd-s3-bucket $BUCKET"
+--s3-endpoint $S3 --s3-bucket $BUCKET"
 
 wipe_node; measure "1. dm-snapshot" ""
 wipe_node; measure "2. overlaybd, local conversion" "--fc-overlaybd"

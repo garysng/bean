@@ -87,7 +87,7 @@ func TestConversionStateTransitions(t *testing.T) {
 		t.Fatalf("state = %s", img.State)
 	}
 
-	if err := svc.MarkReady("app:1", "app:1-obd", 12345); err != nil {
+	if err := svc.MarkReady("app:1", "app:1-obd", 12345, []string{"sha256:aaa"}); err != nil {
 		t.Fatal(err)
 	}
 	img, _ = svc.Get("app:1")
@@ -96,6 +96,9 @@ func TestConversionStateTransitions(t *testing.T) {
 	}
 	if img.OverlaybdRef != "app:1-obd" || img.SizeBytes != 12345 {
 		t.Errorf("artifact not recorded: %+v", img)
+	}
+	if len(img.LayerDigests) != 1 || img.LayerDigests[0] != "sha256:aaa" {
+		t.Errorf("layer digests not recorded: %+v", img.LayerDigests)
 	}
 
 	if err := svc.MarkFailed("app:1", "converter crashed"); err != nil {
@@ -109,7 +112,7 @@ func TestConversionStateTransitions(t *testing.T) {
 
 func TestTransitionUnknownImage(t *testing.T) {
 	svc, _ := newSvc(t, nil)
-	if err := svc.MarkReady("nope:1", "x", 1); err == nil {
+	if err := svc.MarkReady("nope:1", "x", 1, nil); err == nil {
 		t.Error("expected error for unregistered image")
 	}
 }
@@ -242,6 +245,46 @@ func TestListForScopesToCaller(t *testing.T) {
 	}
 	if len(all) != 3 {
 		t.Errorf("all images = %d, want 3", len(all))
+	}
+}
+
+func TestDeleteForScopesToOwner(t *testing.T) {
+	svc, _ := newSvc(t, nil)
+	svc.ResolveFor("a:1", "user-a")
+	svc.ResolveFor("b:1", "user-b")
+	svc.Resolve("shared:1")
+
+	// Another identity's image is refused, and refused as not-found so its
+	// existence does not leak.
+	if err := svc.DeleteFor("b:1", "user-a"); !errors.Is(err, ErrForbidden) {
+		t.Errorf("deleting another owner's image = %v, want ErrForbidden", err)
+	}
+	if img, _ := svc.Get("b:1"); img == nil {
+		t.Error("a forbidden delete removed the image anyway")
+	}
+
+	// An owner deletes its own, and anyone deletes an unowned one.
+	if err := svc.DeleteFor("a:1", "user-a"); err != nil {
+		t.Errorf("deleting own image: %v", err)
+	}
+	if img, _ := svc.Get("a:1"); img != nil {
+		t.Error("own image survived delete")
+	}
+	if err := svc.DeleteFor("shared:1", "user-a"); err != nil {
+		t.Errorf("deleting unowned image: %v", err)
+	}
+
+	// An unknown ref is reported as not-found.
+	if err := svc.DeleteFor("missing:1", "user-a"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("deleting a missing image = %v, want ErrNotFound", err)
+	}
+
+	// The operator (empty owner) may delete anything.
+	if err := svc.Delete("b:1"); err != nil {
+		t.Errorf("operator delete: %v", err)
+	}
+	if img, _ := svc.Get("b:1"); img != nil {
+		t.Error("operator delete did not remove the image")
 	}
 }
 

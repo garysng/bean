@@ -29,8 +29,12 @@ type buildingRuntime struct {
 	build func(ctx context.Context, req runtime.BuildRequest) (string, error)
 }
 
-func (b *buildingRuntime) BuildImage(ctx context.Context, req runtime.BuildRequest) (string, error) {
-	return b.build(ctx, req)
+func (b *buildingRuntime) BuildImage(ctx context.Context, req runtime.BuildRequest) (runtime.BuildResult, error) {
+	ref, err := b.build(ctx, req)
+	if err != nil {
+		return runtime.BuildResult{}, err
+	}
+	return runtime.BuildResult{ImageRef: ref}, nil
 }
 
 // startBuildNode brings up SandboxService over a runtime that can build.

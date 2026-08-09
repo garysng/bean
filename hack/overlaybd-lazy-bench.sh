@@ -46,9 +46,9 @@ export BEAN_API_KEY=devkey
 : "${BEAN_S3_SECRET_KEY:?set BEAN_S3_SECRET_KEY}"
 
 OBD_FLAGS="--fc-overlaybd --fc-overlaybd-lazy-pull \
-  --fc-overlaybd-s3-endpoint $BEAN_S3_ENDPOINT \
-  --fc-overlaybd-s3-bucket $OBD_BUCKET \
-  --fc-overlaybd-s3-path-style \
+  --s3-endpoint $BEAN_S3_ENDPOINT \
+  --s3-bucket $OBD_BUCKET \
+  --s3-path-style \
   --fc-overlaybd-read-url $BEAN_S3_ENDPOINT"
 
 cleanup() { BIN=$BIN bash "$STACK" stop >/dev/null 2>&1; }

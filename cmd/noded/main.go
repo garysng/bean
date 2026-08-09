@@ -199,29 +199,29 @@ func main() {
 	fcOverlaybdBinDir := flag.String("fc-overlaybd-bin-dir", "/opt/overlaybd/bin",
 		"directory holding the overlaybd binaries (overlaybd-create, -apply, "+
 			"-commit). Empty resolves them on PATH")
-	fcOverlaybdS3Endpoint := flag.String("fc-overlaybd-s3-endpoint",
+	s3Endpoint := flag.String("s3-endpoint",
 		os.Getenv("BEAN_S3_ENDPOINT"),
-		"S3-compatible endpoint this node publishes sealed overlaybd layers to (or "+
-			"BEAN_S3_ENDPOINT). This is what makes --fc-overlaybd-lazy-pull work for "+
-			"ordinary images: a layer is converted once, published under its digest, "+
-			"and every later create reading the same store skips the conversion "+
-			"entirely -- including on other nodes. Credentials come from "+
+		"S3-compatible endpoint this node's artifact store uses (or BEAN_S3_ENDPOINT). "+
+			"It holds published overlaybd layers -- both converted OCI layers and "+
+			"built images, which are sealed as overlaybd layers too. This is what "+
+			"makes --fc-overlaybd-lazy-pull work: a layer is published under its "+
+			"digest once and every later create reading the same store skips the "+
+			"conversion, including on other nodes. Credentials come from "+
 			"BEAN_S3_ACCESS_KEY and BEAN_S3_SECRET_KEY, never a flag, so the secret "+
 			"does not appear in the process command line")
-	fcOverlaybdS3Bucket := flag.String("fc-overlaybd-s3-bucket", "bean-obd-layers",
-		"bucket holding published overlaybd layers")
-	fcOverlaybdS3Region := flag.String("fc-overlaybd-s3-region", "us-east-1",
-		"S3 region for the published-layer bucket")
-	fcOverlaybdS3PathStyle := flag.Bool("fc-overlaybd-s3-path-style", true,
+	s3Bucket := flag.String("s3-bucket", "bean-obd-layers",
+		"bucket holding the node's published layers")
+	s3Region := flag.String("s3-region", "us-east-1",
+		"S3 region for the layer bucket")
+	s3PathStyle := flag.Bool("s3-path-style", true,
 		"address the bucket as a path rather than a subdomain, which MinIO and most "+
 			"self-hosted stores need")
 	fcOverlaybdReadURL := flag.String("fc-overlaybd-read-url", "",
 		"URL prefix the overlaybd daemon reads published layers from. Defaults to "+
-			"--fc-overlaybd-s3-endpoint, and is separate because the daemon resolves "+
-			"it rather than this process: a node may write through an internal "+
-			"endpoint while the daemon needs one reachable from where it runs. A "+
-			"wrong value produces a device whose reads fail with the cause only in "+
-			"overlaybd's log")
+			"--s3-endpoint, and is separate because the daemon resolves it rather "+
+			"than this process: a node may write through an internal endpoint while "+
+			"the daemon needs one reachable from where it runs. A wrong value "+
+			"produces a device whose reads fail with the cause only in overlaybd's log")
 	fcVMMUid := flag.Int("fc-vmm-uid", 0,
 		"run the VMM as this uid instead of root (fc runtime). 0 leaves it as "+
 			"noded's own identity, which is what it has always been. The uid needs "+
@@ -457,10 +457,10 @@ func main() {
 	case "fc":
 		// Built before the tier so a misconfigured store fails at startup rather than
 		// on the first create that needed it.
-		obdBlobs, obdIndex, err := overlaybdBlobStore(*fcOverlaybdS3Endpoint, *fcOverlaybdS3Bucket,
-			*fcOverlaybdReadURL, *fcOverlaybdS3Region, *fcOverlaybdS3PathStyle)
+		obdBlobs, obdIndex, err := overlaybdBlobStore(*s3Endpoint, *s3Bucket,
+			*fcOverlaybdReadURL, *s3Region, *s3PathStyle)
 		if err != nil {
-			log.Fatalf("--fc-overlaybd-s3-endpoint: %v", err)
+			log.Fatalf("--s3-endpoint: %v", err)
 		}
 		fcRT, err := runtime.NewFCTier(runtime.FCTierConfig{
 			FirecrackerBin:    *fcBin,
@@ -503,10 +503,10 @@ func main() {
 		//
 		// The blob store is built first for the same reason as on the fc tier: a
 		// misconfigured store should fail at startup, not on the create that needed it.
-		obdBlobs, obdIndex, err := overlaybdBlobStore(*fcOverlaybdS3Endpoint, *fcOverlaybdS3Bucket,
-			*fcOverlaybdReadURL, *fcOverlaybdS3Region, *fcOverlaybdS3PathStyle)
+		obdBlobs, obdIndex, err := overlaybdBlobStore(*s3Endpoint, *s3Bucket,
+			*fcOverlaybdReadURL, *s3Region, *s3PathStyle)
 		if err != nil {
-			log.Fatalf("--fc-overlaybd-s3-endpoint: %v", err)
+			log.Fatalf("--s3-endpoint: %v", err)
 		}
 		ociRT, err := runtime.NewOCITier(runtime.OCITierConfig{
 			Bin:            *rtName,

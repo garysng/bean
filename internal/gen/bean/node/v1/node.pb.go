@@ -2227,8 +2227,20 @@ func (x *BuildImageRequest) GetSizeMib() int64 {
 }
 
 type BuildImageResponse struct {
-	state         protoimpl.MessageState `protogen:"open.v1"`
-	ImageRef      string                 `protobuf:"bytes,1,opt,name=image_ref,json=imageRef,proto3" json:"image_ref,omitempty"`
+	state    protoimpl.MessageState `protogen:"open.v1"`
+	ImageRef string                 `protobuf:"bytes,1,opt,name=image_ref,json=imageRef,proto3" json:"image_ref,omitempty"`
+	// overlaybd_ref names the published artifact in the shared layer store, so a
+	// node that did not build the image can start from it. Empty when the node has
+	// no object store configured: the build still succeeds as a node-local .ext4,
+	// which is the historical single-node behaviour.
+	OverlaybdRef string `protobuf:"bytes,2,opt,name=overlaybd_ref,json=overlaybdRef,proto3" json:"overlaybd_ref,omitempty"`
+	// size_bytes is the sealed layer's length, which a remote create range-reads
+	// against; a wrong value reads past the end.
+	SizeBytes int64 `protobuf:"varint,3,opt,name=size_bytes,json=sizeBytes,proto3" json:"size_bytes,omitempty"`
+	// layer_digests is the sealed layer chain, base first. A build produces a
+	// single base layer today, but the field is a list so a future layered build
+	// reports its chain without a proto change.
+	LayerDigests  []string `protobuf:"bytes,4,rep,name=layer_digests,json=layerDigests,proto3" json:"layer_digests,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
@@ -2268,6 +2280,27 @@ func (x *BuildImageResponse) GetImageRef() string {
 		return x.ImageRef
 	}
 	return ""
+}
+
+func (x *BuildImageResponse) GetOverlaybdRef() string {
+	if x != nil {
+		return x.OverlaybdRef
+	}
+	return ""
+}
+
+func (x *BuildImageResponse) GetSizeBytes() int64 {
+	if x != nil {
+		return x.SizeBytes
+	}
+	return 0
+}
+
+func (x *BuildImageResponse) GetLayerDigests() []string {
+	if x != nil {
+		return x.LayerDigests
+	}
+	return nil
 }
 
 // BuildImageEvent is one frame of a build's progress. Log frames arrive as
@@ -2536,9 +2569,13 @@ const file_bean_node_v1_node_proto_rawDesc = "" +
 	"\bsize_mib\x18\x05 \x01(\x03R\asizeMib\x1a<\n" +
 	"\x0eBuildArgsEntry\x12\x10\n" +
 	"\x03key\x18\x01 \x01(\tR\x03key\x12\x14\n" +
-	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"1\n" +
+	"\x05value\x18\x02 \x01(\tR\x05value:\x028\x01\"\x9a\x01\n" +
 	"\x12BuildImageResponse\x12\x1b\n" +
-	"\timage_ref\x18\x01 \x01(\tR\bimageRef\"j\n" +
+	"\timage_ref\x18\x01 \x01(\tR\bimageRef\x12#\n" +
+	"\roverlaybd_ref\x18\x02 \x01(\tR\foverlaybdRef\x12\x1d\n" +
+	"\n" +
+	"size_bytes\x18\x03 \x01(\x03R\tsizeBytes\x12#\n" +
+	"\rlayer_digests\x18\x04 \x03(\tR\flayerDigests\"j\n" +
 	"\x0fBuildImageEvent\x12\x12\n" +
 	"\x03log\x18\x01 \x01(\fH\x00R\x03log\x12:\n" +
 	"\x06result\x18\x02 \x01(\v2 .bean.node.v1.BuildImageResponseH\x00R\x06resultB\a\n" +

@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"log/slog"
 	"net/http"
@@ -103,6 +104,37 @@ func (s *Server) handleImageStatus(w http.ResponseWriter, r *http.Request) {
 		"baseRef": img.BaseRef,
 		"buildId": img.BuildID,
 	})
+}
+
+// handleDeleteImage removes an image record. The ref comes in the query string, as
+// it does for status, because a native reference carries slashes and colons that a
+// path segment would have to escape.
+//
+// Scoped to the caller: an identity may delete its own images and the unowned ones it
+// shares, but not another identity's -- which is reported as 404 rather than 403 for a
+// ref the caller could otherwise not see, so delete cannot be used to probe.
+func (s *Server) handleDeleteImage(w http.ResponseWriter, r *http.Request) {
+	if s.images == nil {
+		writeErr(w, http.StatusNotImplemented, "NOT_IMPLEMENTED", "image service not configured")
+		return
+	}
+	ref := r.URL.Query().Get("ref")
+	if ref == "" {
+		writeErr(w, http.StatusBadRequest, "INVALID_ARGUMENT", "ref query param required")
+		return
+	}
+	switch err := s.images.DeleteFor(ref, s.owner(r)); {
+	case err == nil:
+		writeJSON(w, http.StatusOK, map[string]any{"ref": ref, "deleted": true})
+	case errors.Is(err, image.ErrNotFound), errors.Is(err, image.ErrForbidden):
+		// A forbidden delete is reported as not-found: an identity must not learn that
+		// a ref it may not touch exists.
+		writeErr(w, http.StatusNotFound, "IMAGE_NOT_FOUND", "image "+ref+" is not registered")
+	case errors.Is(err, image.ErrInvalidRef):
+		writeErr(w, http.StatusBadRequest, "INVALID_ARGUMENT", err.Error())
+	default:
+		writeErr(w, http.StatusInternalServerError, "INTERNAL", err.Error())
+	}
 }
 
 // imageFormat reports the artifact form available for an image, which tells

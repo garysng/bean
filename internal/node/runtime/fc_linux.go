@@ -392,21 +392,35 @@ func (r *FCRuntime) CommitSandbox(ctx context.Context, id, tag string) error {
 }
 
 // BuildImage builds a base image from a Dockerfile on this node.
-func (r *FCRuntime) BuildImage(ctx context.Context, req BuildRequest) (string, error) {
+func (r *FCRuntime) BuildImage(ctx context.Context, req BuildRequest) (BuildResult, error) {
 	if r.Builder == nil {
-		return "", errors.New("fc: builds not configured on this node")
+		return BuildResult{}, errors.New("fc: builds not configured on this node")
 	}
-	if _, err := r.Builder.Build(ctx, image.BuildRequest{
+	// The build publishes to the shared store through whatever the rootfs provider is,
+	// when that provider can seal and publish overlaybd layers. The provider already
+	// owns the store and the seal pipeline, so the builder borrows it rather than
+	// carrying its own. A provider that cannot (device-mapper, or overlaybd with no
+	// store) leaves the build node-local, which BuildImage still reports as success.
+	if publisher, ok := r.Images.(image.LayerPublisher); ok {
+		r.Builder.Publisher = publisher
+	}
+	res, err := r.Builder.Build(ctx, image.BuildRequest{
 		Tag:        req.Tag,
 		Dockerfile: req.Dockerfile,
 		ContextTar: req.ContextTar,
 		BuildArgs:  req.BuildArgs,
 		SizeMiB:    req.SizeMiB,
 		Logs:       req.Logs,
-	}); err != nil {
-		return "", err
+	})
+	if err != nil {
+		return BuildResult{}, err
 	}
-	return req.Tag, nil
+	return BuildResult{
+		ImageRef:     req.Tag,
+		OverlaybdRef: res.OverlaybdRef,
+		SizeBytes:    res.SizeBytes,
+		LayerDigests: res.LayerDigests,
+	}, nil
 }
 
 func (r *FCRuntime) Create(ctx context.Context, spec *Spec) (*Handle, error) {

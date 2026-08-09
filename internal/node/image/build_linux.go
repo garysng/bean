@@ -37,6 +37,38 @@ type Builder struct {
 	WorkDir string
 	// DefaultSizeMiB floors the filesystem size.
 	DefaultSizeMiB int64
+	// Publisher, when set, seals the built rootfs into a shared overlaybd layer so
+	// another node can start from it. Nil leaves the build a node-local .ext4, which
+	// is the historical single-node behaviour -- a node with no object store, or one
+	// not on the overlaybd backend, simply does not publish.
+	Publisher LayerPublisher
+}
+
+// LayerPublisher seals a built rootfs into the shared layer store and records it, so a
+// build enters the same lazy-pull path a pulled image uses. It is satisfied by the
+// overlaybd provider, which already owns the seal/publish/record machinery; the builder
+// holds it as a narrow capability rather than reaching into the provider.
+type LayerPublisher interface {
+	// PublishBuiltRootfs seals tarPath as a base overlaybd layer for imageRef, sized
+	// with at least sizeMiB, publishes it and records a manifest+tag. It returns the
+	// published artifact's ref, its layer digests and the sealed size, or an empty ref
+	// (no error) when there is no store to publish to.
+	PublishBuiltRootfs(ctx context.Context, tarPath, imageRef string, sizeMiB int64) (overlaybdRef string, layerDigests []string, sealed int64, err error)
+}
+
+// BuildResult is what a build produced: the local image path always, and the shared
+// artifact's coordinates when a Publisher sealed and published it.
+type BuildResult struct {
+	// Path is the node-local base image (.ext4).
+	Path string
+	// OverlaybdRef names the published layer artifact, empty when nothing was
+	// published (no store, or the store declined the upload).
+	OverlaybdRef string
+	// SizeBytes is the sealed layer's length, zero when nothing was published.
+	SizeBytes int64
+	// LayerDigests is the published layer chain, base first. A build is one base
+	// layer today; the slice leaves room for a layered build to report a chain.
+	LayerDigests []string
 }
 
 // Available reports whether this node can build, so a node advertises the
@@ -74,51 +106,51 @@ type BuildRequest struct {
 }
 
 // Build runs a Dockerfile and writes the result as a base image.
-func (b *Builder) Build(ctx context.Context, req BuildRequest) (path string, err error) {
+func (b *Builder) Build(ctx context.Context, req BuildRequest) (result BuildResult, err error) {
 	if err := b.Available(); err != nil {
-		return "", err
+		return BuildResult{}, err
 	}
 	name, err := refToFilename(req.Tag)
 	if err != nil {
-		return "", err
+		return BuildResult{}, err
 	}
 	if strings.TrimSpace(req.Dockerfile) == "" {
-		return "", errors.New("image: dockerfile required")
+		return BuildResult{}, errors.New("image: dockerfile required")
 	}
 
 	final := filepath.Join(b.ImageDir, name+imageSuffix)
 	if _, err := os.Stat(final); err == nil {
-		return "", fmt.Errorf("image: %s already exists", req.Tag)
+		return BuildResult{}, fmt.Errorf("image: %s already exists", req.Tag)
 	}
 
 	if err := os.MkdirAll(b.WorkDir, 0o700); err != nil {
-		return "", fmt.Errorf("image: create work dir: %w", err)
+		return BuildResult{}, fmt.Errorf("image: create work dir: %w", err)
 	}
 	// BuildKit reads the context and the Dockerfile from directories, so both
 	// are laid out on disk for the duration of the build.
 	buildDir, err := os.MkdirTemp(b.WorkDir, "build.*")
 	if err != nil {
-		return "", fmt.Errorf("image: create build dir: %w", err)
+		return BuildResult{}, fmt.Errorf("image: create build dir: %w", err)
 	}
 	defer os.RemoveAll(buildDir)
 
 	contextDir := filepath.Join(buildDir, "context")
 	if err := os.MkdirAll(contextDir, 0o700); err != nil {
-		return "", fmt.Errorf("image: create context dir: %w", err)
+		return BuildResult{}, fmt.Errorf("image: create context dir: %w", err)
 	}
 	if len(req.ContextTar) > 0 {
 		if err := extractContext(req.ContextTar, contextDir); err != nil {
-			return "", err
+			return BuildResult{}, err
 		}
 	}
 	if err := os.WriteFile(filepath.Join(contextDir, "Dockerfile"),
 		[]byte(req.Dockerfile), 0o600); err != nil {
-		return "", fmt.Errorf("image: write dockerfile: %w", err)
+		return BuildResult{}, fmt.Errorf("image: write dockerfile: %w", err)
 	}
 
 	rootfsTar := filepath.Join(buildDir, "rootfs.tar")
 	if err := b.runBuildctl(ctx, contextDir, rootfsTar, req.BuildArgs, req.Logs); err != nil {
-		return "", err
+		return BuildResult{}, err
 	}
 
 	size := req.SizeMiB
@@ -132,7 +164,7 @@ func (b *Builder) Build(ctx context.Context, req BuildRequest) (path string, err
 	// therefore runs what the caller asks for and nothing implicit. Recovering them
 	// means exporting an OCI image from the builder rather than a tar, which changes
 	// how base images are assembled and is deliberately not bundled in here.
-	return writeBaseImage(b.ImageDir, b.WorkDir, req.Tag, "", nil, size, func(root string) error {
+	localPath, err := writeBaseImage(b.ImageDir, b.WorkDir, req.Tag, "", nil, size, func(root string) error {
 		f, err := os.Open(rootfsTar)
 		if err != nil {
 			return fmt.Errorf("image: open build output: %w", err)
@@ -142,6 +174,26 @@ func (b *Builder) Build(ctx context.Context, req BuildRequest) (path string, err
 		// containment check apply to built content too.
 		return extractTar(tar.NewReader(f), root)
 	})
+	if err != nil {
+		return BuildResult{}, err
+	}
+	result = BuildResult{Path: localPath}
+
+	// Publish the same rootfs as a shared overlaybd layer, so a node that did not
+	// build the image can start from it. The local image is already written and is
+	// what this node boots; publishing is the cross-node reach on top, and its
+	// failure (or the absence of a store) leaves a working node-local build rather
+	// than failing the build -- the same trade the prewarm path makes.
+	if b.Publisher != nil {
+		ref, digests, sealed, perr := b.Publisher.PublishBuiltRootfs(ctx, rootfsTar, req.Tag, size)
+		if perr != nil {
+			return BuildResult{}, perr
+		}
+		result.OverlaybdRef = ref
+		result.SizeBytes = sealed
+		result.LayerDigests = digests
+	}
+	return result, nil
 }
 
 // runBuildctl invokes BuildKit, exporting a flat rootfs rather than an image.

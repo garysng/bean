@@ -5,6 +5,8 @@ package image
 import (
 	"compress/gzip"
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"io"
@@ -423,6 +425,98 @@ func (p *OverlaybdProvider) recordInStore(ctx context.Context, ref Reference, ma
 			"resolve this tag against the registry",
 			logging.KeyImage, ref.Repository+":"+ref.Tag, logging.KeyError, err)
 	}
+}
+
+// PublishBuiltRootfs seals a freshly built rootfs tar into a base overlaybd layer,
+// publishes it to the shared store and records a one-layer manifest and tag, so a
+// node that did not build the image can start from it exactly as it starts from a
+// prewarmed OCI image. It is how a Dockerfile build enters the same lazy-pull path
+// pulled images use (docs/s3-storage.md section 8.5, Phase 2).
+//
+// tarPath is the decompressed rootfs BuildKit exported. A built image is a single
+// base layer -- there is no chain to diff against -- so the tar is applied with no
+// parents, which is what makes buildLayer format a filesystem (--mkfs) into it.
+//
+// The layer is keyed by the sha256 of the rootfs tar rather than a registry digest,
+// which a built image has none of: it is stable (same tar, same key, so a rebuild
+// dedupes) and it is only an identity, never read as content. The sealed size that a
+// remote create range-reads against is the sealed file's own length, recorded
+// separately by recordInStore from the resolved chain.
+//
+// Returns an empty overlaybdRef with no error when this provider has no store
+// configured: the build still succeeds as a node-local image, which is the historical
+// single-node behaviour, and the caller reports the empty ref upward. Publication and
+// recording failures warn rather than propagate, exactly as the prewarm path's do -- a
+// build is not failed over a cache-warming miss.
+func (p *OverlaybdProvider) PublishBuiltRootfs(ctx context.Context, tarPath, imageRef string, sizeMiB int64) (overlaybdRef string, layerDigests []string, sealed int64, err error) {
+	if p.Blobs == nil || p.Index == nil {
+		return "", nil, 0, nil
+	}
+	ref, err := ParseReference(imageRef)
+	if err != nil {
+		return "", nil, 0, err
+	}
+
+	digest, err := sha256OfFile(tarPath)
+	if err != nil {
+		return "", nil, 0, fmt.Errorf("image: digest built rootfs: %w", err)
+	}
+
+	// vsize mirrors the create path's sizing: the tar is uncompressed, so its bytes
+	// are the content, and the layer's virtual size is grown from there. A built
+	// image's requested SizeMiB, when set, is the floor the sandbox will want.
+	vsizeGB := (sizeMiB >> 10) + 1
+	if vsizeGB < 2 {
+		vsizeGB = 2
+	}
+
+	path, err := p.Builder.buildLayer(ctx, tarPath, digest, vsizeGB, nil)
+	if err != nil {
+		return "", nil, 0, fmt.Errorf("image: seal built rootfs: %w", err)
+	}
+	sealed = sealedSize(path)
+
+	if ok, err := p.publish(ctx, path, digest); err != nil {
+		return "", nil, 0, fmt.Errorf("image: publish built layer: %w", err)
+	} else if !ok {
+		// The store declined the upload (and warned). The layer is sealed locally, so
+		// this node can start the image, but no other can -- report no ref rather than
+		// one that promises a reach the artifact does not have.
+		return "", nil, sealed, nil
+	}
+
+	// A synthetic manifest keyed by the sealed layer, recorded exactly as a prewarm
+	// records a converted chain. The lower's Size is the sealed length, which is what a
+	// remote reader range-reads against. No config: a flat rootfs carries none, matching
+	// what build.go already documents about built images.
+	manifest := &Manifest{Digest: digest, Layers: []Descriptor{{Digest: digest, Size: sealed}}}
+	lowers := []obdLayer{{File: path, Digest: digest, Size: sealed}}
+	// An empty but non-nil config, recorded so a node that did not build the image can
+	// resolve it fully offline. A built image carries no OCI config -- buildctl exports a
+	// flat rootfs tar, so there is no ENV/ENTRYPOINT/CMD, which is what build.go documents
+	// about built images running only what the caller asks. The distinction that matters
+	// here is non-nil vs nil: imageConfig treats a nil stored config as "go ask the
+	// registry", and a built tag is in no registry, so a cache-cleared create would fail
+	// with "no reachable config and none recorded". A recorded empty config is the honest
+	// value and the one that lets the offline resolve complete.
+	p.recordInStore(ctx, ref, manifest, lowers, &Config{})
+
+	return digest, []string{digest}, sealed, nil
+}
+
+// sha256OfFile streams a file through sha256 and returns an OCI-style digest. Used to
+// key a built layer, which has no registry digest of its own.
+func sha256OfFile(path string) (string, error) {
+	f, err := os.Open(path)
+	if err != nil {
+		return "", err
+	}
+	defer f.Close()
+	h := sha256.New()
+	if _, err := io.Copy(h, f); err != nil {
+		return "", err
+	}
+	return "sha256:" + hex.EncodeToString(h.Sum(nil)), nil
 }
 
 // storedManifest resolves a reference through the object store, or nil if the store

@@ -153,7 +153,7 @@ func (s *GRPCServer) BuildImage(req *nodev1.BuildImageRequest,
 	logs := newBuildLogSender(stream)
 	defer logs.close()
 
-	ref, err := s.mgr.BuildImage(stream.Context(), runtime.BuildRequest{
+	res, err := s.mgr.BuildImage(stream.Context(), runtime.BuildRequest{
 		Tag:        req.Tag,
 		Dockerfile: req.Dockerfile,
 		ContextTar: req.ContextTar,
@@ -173,9 +173,17 @@ func (s *GRPCServer) BuildImage(req *nodev1.BuildImageRequest,
 	// Flushed before the result so a caller reading frames in order has the
 	// whole log by the time it learns the build finished.
 	logs.close()
+	// The artifact coordinates ride the result frame so the control plane records
+	// where the image lives; an empty overlaybd_ref means the build stayed
+	// node-local, which the control plane records as such.
 	return stream.Send(&nodev1.BuildImageEvent{
 		Event: &nodev1.BuildImageEvent_Result{
-			Result: &nodev1.BuildImageResponse{ImageRef: ref},
+			Result: &nodev1.BuildImageResponse{
+				ImageRef:     res.ImageRef,
+				OverlaybdRef: res.OverlaybdRef,
+				SizeBytes:    res.SizeBytes,
+				LayerDigests: res.LayerDigests,
+			},
 		},
 	})
 }

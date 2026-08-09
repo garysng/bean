@@ -398,6 +398,18 @@ message BuildImageRequest {
 
 message BuildImageResponse {
   string image_ref = 1;
+  // overlaybd_ref names the published artifact in the shared layer store, so a
+  // node that did not build the image can start from it. Empty when the node has
+  // no object store configured: the build still succeeds as a node-local .ext4,
+  // which is the historical single-node behaviour.
+  string overlaybd_ref = 2;
+  // size_bytes is the sealed layer's length, which a remote create range-reads
+  // against; a wrong value reads past the end.
+  int64 size_bytes = 3;
+  // layer_digests is the sealed layer chain, base first. A build produces a
+  // single base layer today, but the field is a list so a future layered build
+  // reports its chain without a proto change.
+  repeated string layer_digests = 4;
 }
 
 // BuildImageEvent is one frame of a build's progress. Log frames arrive as

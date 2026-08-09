@@ -296,8 +296,25 @@ type ImageConfigReader interface {
 // Building is optional per node: it needs BuildKit, and a cluster may well want
 // dedicated builder nodes rather than every sandbox host carrying the dependency.
 type ImageBuilder interface {
-	// BuildImage builds a base image and returns its reference.
-	BuildImage(ctx context.Context, req BuildRequest) (string, error)
+	// BuildImage builds a base image and returns its reference and, when the node
+	// published it to a shared store, where the artifact lives.
+	BuildImage(ctx context.Context, req BuildRequest) (BuildResult, error)
+}
+
+// BuildResult is what a build produced, at the runtime boundary. It mirrors the
+// node's image.BuildResult without importing it, so the runtime interface stays free
+// of the image package's internals.
+type BuildResult struct {
+	// ImageRef is the built image's reference, always set on success.
+	ImageRef string
+	// OverlaybdRef names the published shared artifact, empty when the build stayed
+	// node-local (no store configured, or the upload was declined).
+	OverlaybdRef string
+	// SizeBytes is the published layer's sealed length, zero when nothing was
+	// published.
+	SizeBytes int64
+	// LayerDigests is the published layer chain, base first.
+	LayerDigests []string
 }
 
 // BuildRequest describes a build at the runtime boundary. It mirrors the node's

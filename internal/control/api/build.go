@@ -215,7 +215,8 @@ func (s *Server) runBuild(ctx context.Context, cancel context.CancelFunc,
 		return
 	}
 
-	if err := drainBuildStream(stream, log); err != nil {
+	result, err := drainBuildStream(stream, log)
+	if err != nil {
 		// A cancelled build is not a failed one, but it is not a usable image
 		// either: the tag has to stop claiming to be on its way, or the ref is
 		// unusable until someone deletes the record by hand.
@@ -230,15 +231,16 @@ func (s *Server) runBuild(ctx context.Context, cancel context.CancelFunc,
 		return
 	}
 
-	// A built image needs no conversion — BuildKit's flat output is already the
-	// format the tier boots — so it goes straight to READY.
+	// A built image needs no conversion — BuildKit's flat output is sealed into an
+	// overlaybd layer and published, so it goes straight to READY with the artifact's
+	// real coordinates.
 	//
-	// READY overstates the reach of the artifact in a multi-node cluster: it
-	// exists only in the building node's ImageDir and is never uploaded, so no
-	// other node can start from it. Ownership is recorded regardless of where
-	// the bytes are, so the upload can land later without revisiting who the
-	// image belongs to.
-	if err := s.images.MarkReady(req.Tag, "", 0); err != nil {
+	// The node reports an empty overlaybd_ref when it has no object store: the build
+	// then exists only in the building node's ImageDir, and READY overstates its reach
+	// in a multi-node cluster. Ownership is recorded regardless of where the bytes are,
+	// so a later prewarm can publish it without revisiting who the image belongs to.
+	if err := s.images.MarkReady(req.Tag, result.GetOverlaybdRef(), result.GetSizeBytes(),
+		result.GetLayerDigests()); err != nil {
 		slog.Error("cannot mark build ready", logging.KeyImage, req.Tag, logging.KeyError, err)
 		fail(err.Error())
 		return
@@ -252,24 +254,24 @@ func (s *Server) runBuild(ctx context.Context, cancel context.CancelFunc,
 // A missing result frame is an error rather than a success: the node sends it
 // last, so a stream that ends without one means the build did not get to the end
 // and marking the image READY would publish a tag with no image behind it.
-func drainBuildStream(stream nodev1.SandboxService_BuildImageClient, log *buildLog) error {
-	gotResult := false
+func drainBuildStream(stream nodev1.SandboxService_BuildImageClient, log *buildLog) (*nodev1.BuildImageResponse, error) {
+	var result *nodev1.BuildImageResponse
 	for {
 		ev, err := stream.Recv()
 		if err == io.EOF {
-			if !gotResult {
-				return errors.New("node ended the build stream without a result")
+			if result == nil {
+				return nil, errors.New("node ended the build stream without a result")
 			}
-			return nil
+			return result, nil
 		}
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if data := ev.GetLog(); len(data) > 0 {
 			_, _ = log.Write(data)
 		}
-		if ev.GetResult() != nil {
-			gotResult = true
+		if r := ev.GetResult(); r != nil {
+			result = r
 		}
 	}
 }
