@@ -78,44 +78,71 @@ hash),且 fail-closed —— 凭据缺失即拒。它的全部意义(据代码�
 (vsock、local)没有 guest IP,proxy 到不了。
 
 **现有代码里没有任何可运行的档位能"不带 token 走 proxy"**:有网就要 token,没网 forwarder 就
-到不了 agent。所以凭据交付不是可选的润色 —— 它在关键路径上。
+到不了 agent。所以这条路上*总得有人*出示 per-sandbox token —— 唯一的问题是谁。下面的设计给出
+答案:**noded 来注入 token**,client 全程不碰它。
 
 ## 3. 设计
 
-三部分。凭据交付是唯一有真实安全分量的;另两部分是机械的。
+定案:**client 全程不碰 per-sandbox token。** 由 **noded 在 forwarder 处注入**,因为 noded
+是唯一本来就握着明文的进程。client 只对平台外层的 apikey 层认证;proxy 往里的一切都归节点信任
+域管理。这是 Daytona 范式 —— proxy 层拥有 agent 认证、调用方只持一个平台凭据 —— 而不是 E2B
+范式的"client 自己持 per-sandbox token 直连"。
 
-### 3.1 凭据交付
+三部分。注入认证是唯一有真实安全分量的;另两部分是机械的。
 
-拨 proxy 的 client 必须带上 agent 期望的 per-sandbox token。两个选项及权衡:
+### 3.1 认证:noded 在 forwarder 处注入 token
 
-- **create 时返回。** `POST /v1/sandboxes` 在响应里(一次性)带上 token;client 为该沙箱终生
-  保留。最简单、一个往返,但 token 从此活在 client 里、并可能进 create 日志(除非小心处理)。
-- **专用取回端点。** `GET /v1/sandboxes/{id}/agent-token` 按需返回,受 bean-api 上和其他一切
-  相同的 API-key 认证保护。把它挡在 create 响应之外、多一个往返,并给出一个可审计、日后可吊销
-  的单点。
+凭据链变成:
 
-无论哪种,今天从不离开 noded 的明文,都必须上浮到 bean-api 再到 client。这是对"秘密存放范围"
-的一次刻意扩大,应明确点出:token 不再是 noded-only 的秘密,而成为数据面的 client 持有 bearer
-凭据。推荐:**取回端点**,因为它可审计、且不给每个 create 响应塞进一个秘密。
+```
+client ──apikey──► bean-proxy ──node-token──► noded PortForwarder ──注入 per-sandbox token──► agent
+        (平台外层)              (现有边界 F)           (noded 握着明文)
+```
 
-### 3.2 客户端:一个数据面 gRPC client
+- **client → proxy:只需 apikey。** 我们假设每个到达 proxy 的请求都已过平台的 apikey 层(最终
+  产品会包一层)。bean 本身在这里不再重复校验;client 不出示任何 per-sandbox 凭据,因为它根本
+  没有。
+- **proxy → noded:`bean-node-token`。** 不变 —— 现有的 forwarding port 边界
+  (`portforward.go:295`)。
+- **noded → agent:per-sandbox token,由 PortForwarder 注入。** 今天 PortForwarder 是纯透传,
+  **不**注入 token(只有 noded 控制路径上的 `AgentConn` 才经 `sbxtoken.WithAgentToken` 注入)。
+  改动是:forwarder 往 `GuestIP:10001` 转发某沙箱时,查出该沙箱的 `agentToken`(明文在
+  `manager.go:213` 铸造后就存在 `sandbox.agentToken` 里),给出站请求带上 agent 的认证
+  metadata/header。
 
-CLI 和 SDK 今天只认 `BEAN_BASE_URL` → bean-api REST。新增:
+这是**唯一**有安全分量的改动,且刻意只落在 noded。明文 token 一如今天仍是 noded-only 的秘密 ——
+**不**上浮到 bean-api 或 client。agent 侧的校验(`beand/auth.go`)保持 fail-closed、原样不动:
+不带 token 到达 agent 的请求(比如沙箱自己的 root 拨 10001)照样被拒。forwarder 注入并不削弱
+这一点 —— 它只是让*合法*的 proxy 路径带上 agent 本就要求的凭据。
 
-- **`BEAN_PROXY_URL`** —— 数据面调用用的 proxy 地址。
-- 一个 **gRPC client**,用 authority `10001-{sandbox}` 拨 proxy、直接调 `AgentService/Exec` /
-  `ReadFile` / `WriteFile` / `ListDir` / `DeleteFile`,把 per-sandbox token 作为 gRPC metadata
-  带上(agent 读的同一个 key)。
-- 回退:若 `BEAN_PROXY_URL` 未设,保留当前 bean-api 路径,所以这是增量的,单节点/开发环境不受影响。
+实现时要验证一点:PortForwarder 只对 agent 端口(10001)注入,不能对它同样转发的任意用户端口
+注入。用户跑在 8080 上的自己的 server 绝不能收到 agent token。
+
+### 3.2 寻址:sandbox 返回 domain,client 拼 URL
+
+create 返回沙箱的 **domain**(或 client 该用的 proxy base)。CLI/SDK 在调用时据此拼出请求
+URL —— 对该 domain 拼 `{port}-{sandbox}`。proxy 只转发,所有端口映射默认通(按端口访问控制是
+另一个尚未构建的功能 —— [#50](https://github.com/garysng/bean/issues/50)),所以没有注册调用、
+没有宿主端口池。这是 E2B 的 subdomain 范式,但 domain 由服务端返回,而非 client 端按约定拼。
+
+- **`create` 响应**新增该沙箱的 domain/proxy base。
+- **CLI/SDK** 对该 domain 拼 `10001-{sandbox}`(agent)或 `{port}-{sandbox}`(用户端口)再发起
+  调用。
+- 未配置 proxy domain 时回退当前 bean-api 路径,所以这是增量的,单节点/开发环境不受影响。
+
+### 3.3 客户端:一个数据面 gRPC client
+
+CLI 和 SDK 今天只认 `BEAN_BASE_URL` → bean-api REST。数据面路径新增一个 **gRPC client**,用
+authority `10001-{sandbox}` 拨 proxy、直接调 `AgentService/Exec` / `ReadFile` / `WriteFile` /
+`ListDir` / `DeleteFile`。**不**附带任何 per-sandbox token —— client 除了外层 apikey 层所需的,
+什么都不出示。
+
+传输层无需 proxy 或 forwarder 的协议改动 —— 两者对 10001 端口都已经做 h2c。proxy 经
+`NodeAddrFor`(已实现)解析节点并转发;forwarder 在 netns 里拨 `GuestIP:10001`,并新增注入
+agent token(§3.1)。传输完全复用,只有 token 注入是新的。
 
 Python SDK 现在纯 `urllib`;gRPC client 意味着要么引 `grpcio` 依赖,要么另做 h2c/framed 方案。
 这个成本是真实的,是"SDK 也改"的一部分。
-
-### 3.3 寻址
-
-proxy 和 forwarder 都无需协议改动 —— 两者对 10001 端口都已经做 h2c。client 构造 authority
-`10001-{sandbox}`;proxy 经 `NodeAddrFor`(已实现)解析节点并转发;forwarder 在 netns 里拨
-`GuestIP:10001`。这部分完全是复用。
 
 ## 4. 验证只能在 fc 档真机上做
 
@@ -129,20 +156,27 @@ proxy 和 forwarder 都无需协议改动 —— 两者对 10001 端口都已经
 
 所以真正的"exec 经 proxy"e2e **必须在 fc 档、真 Linux/KVM 机上跑**,栈还要额外起 bean-proxy 并
 让 noded 带 `--sandbox-port-listen`。它在 local 档 CI 栈里跑不了。因此验证方案是一个 `hack/`
-脚本(形如 `guest-egress-probe.sh`),在真 microVM 机上:创建沙箱、取 token、经 proxy exec、断言
-输出、经 proxy 往返一个文件、断言字节 —— 然后把 token 改坏、断言 agent 拒绝。最后这步要紧:证明
-数据面路径上认证仍然 fail-closed,是整个安全论证的核心。
+脚本(形如 `guest-egress-probe.sh`),在真 microVM 机上:创建沙箱、经 proxy exec、断言输出、经
+proxy 往返一个文件、断言字节 —— 然后为证明认证仍 fail-closed,走 forwarder 路径但**不**经 noded
+注入(模拟沙箱自己的 root)拨 `10001-{sandbox}`、断言 agent 拒绝。最后这步要紧:整个安全论证就是
+"只有 noded 注入的路径才带 token",而 agent 对其余一切照拒。
 
 ## 5. 分阶段
 
-1. **凭据交付**(§3.1)—— bean-api 上的取回端点,token 从 noded 上浮。没有它其他都测不了。
-2. **CLI 的数据面 gRPC client**(§3.2),挂在 `BEAN_PROXY_URL` 后,未设时回退网关路径。
-3. **真机 e2e**(§4)—— `hack/` 探针断言经 proxy 的 exec + 文件往返,含 fail-closed 检查。
-4. **SDK** —— 给 Python SDK 加数据面 gRPC client(`grpcio` 依赖的决定落在这)。
-5. **文档** —— 一旦 ship,修正 README,让"不再经控制面中转"由"数据面路径成为默认"支撑,并注明
+1. **forwarder 里注入 token**(§3.1)—— PortForwarder 只对 agent 端口注入该沙箱的
+   `agentToken`。这是唯一有安全分量的改动,也是整条路径的依赖点。
+2. **`create` 返回沙箱 domain**(§3.2)—— 在响应里带出,好让 client 拼数据面 URL。
+3. **CLI 的数据面 gRPC client**(§3.3),对返回的 domain 拼 `{port}-{sandbox}`,未配置 proxy
+   domain 时回退网关路径。
+4. **真机 e2e**(§4)—— `hack/` 探针断言经 proxy 的 exec + 文件往返,含 fail-closed 检查
+   (未注入的拨号被拒)。
+5. **SDK** —— 给 Python SDK 加数据面 gRPC client(`grpcio` 依赖的决定落在这)。
+6. **文档** —— 一旦 ship,修正 README,让"不再经控制面中转"由"数据面路径成为默认"支撑,并注明
    网关路径作为回退。
 
-会触及的文件:`internal/control/api/server.go`(token 端点)、`internal/node/manager.go`(上浮
-token)、`cli/cli.go`(proxy client)、`sdk/python/bean/__init__.py`(gRPC client)、一个新的
-`hack/` 探针,以及 e2e/文档更新。proxy(`proxy.go`)和 forwarder(`portforward.go`)无需改动 ——
-这正是重点。
+会触及的文件:`internal/node/portforward.go`(对 10001 端口注入 agent token —— 唯一有安全
+分量的改动)、`internal/control/api/server.go`(create 响应返回沙箱 domain)、`cli/cli.go`
+(proxy client)、`sdk/python/bean/__init__.py`(gRPC client)、一个新的 `hack/` 探针,以及
+e2e/文档更新。注意与早先草稿的区别:client 不再取回或持有 per-sandbox token,所以没有 token
+端点、也没有秘密上浮到 bean-api —— 明文始终 noded-only。proxy(`proxy.go`)无需改动;forwarder
+(`portforward.go`)要改,而那处注入正是整个设计的关键。
