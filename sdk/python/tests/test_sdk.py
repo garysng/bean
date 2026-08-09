@@ -313,5 +313,124 @@ class SDKTest(unittest.TestCase):
         self.assertEqual(c.timeout, 1.5)
 
 
+import base64  # noqa: E402
+import struct  # noqa: E402
+
+
+class ProxyHandler(BaseHTTPRequestHandler):
+    """A stub bean-proxy speaking Connect HTTP/JSON, enough for the SDK's data
+    plane: unary Exec as JSON, ReadFile/WriteFile as enveloped streams. It
+    records the Host header so the test can assert the SDK addresses the agent
+    as {port}-{sandbox}.{domain}."""
+
+    last_host = None
+    protocol_version = "HTTP/1.0"
+
+    def log_message(self, *a):
+        pass
+
+    def _read_body(self):
+        length = int(self.headers.get("Content-Length", 0))
+        return self.rfile.read(length)
+
+    @staticmethod
+    def _envelope(payload: bytes, end: bool = False) -> bytes:
+        flags = 0x02 if end else 0x00
+        return struct.pack(">BI", flags, len(payload)) + payload
+
+    def do_POST(self):
+        ProxyHandler.last_host = self.headers.get("Host")
+        raw = self._read_body()
+        if self.path.endswith("/Exec"):
+            req = json.loads(raw)
+            out = base64.b64encode((" ".join(req["cmd"])).encode()).decode()
+            body = json.dumps({"exitCode": 0, "stdout": out, "stderr": "",
+                               "truncated": False, "durationMs": 7}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(body)
+            return
+        if self.path.endswith("/ReadFile"):
+            chunk = json.dumps({"data": base64.b64encode(b"proxied-bytes").decode()}).encode()
+            trailer = json.dumps({}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/connect+json")
+            self.end_headers()
+            self.wfile.write(self._envelope(chunk))
+            self.wfile.write(self._envelope(trailer, end=True))
+            return
+        if self.path.endswith("/WriteFile"):
+            # Sum the data frames the client sent, echo it back as bytesWritten.
+            total = 0
+            off = 0
+            while off + 5 <= len(raw):
+                flags, length = struct.unpack(">BI", raw[off:off + 5])
+                off += 5
+                frame = json.loads(raw[off:off + length] or b"{}")
+                off += length
+                if "data" in frame:
+                    total += len(base64.b64decode(frame["data"]))
+            resp = json.dumps({"bytesWritten": total}).encode()
+            self.send_response(200)
+            self.send_header("Content-Type", "application/connect+json")
+            self.end_headers()
+            self.wfile.write(self._envelope(resp))
+            self.wfile.write(self._envelope(b"{}", end=True))
+            return
+        self.send_response(404)
+        self.end_headers()
+
+
+class DataPlaneTest(unittest.TestCase):
+    """The SDK reaches the agent through the proxy when BEAN_PROXY_URL is set,
+    with no gRPC dependency -- pure urllib against Connect HTTP/JSON."""
+
+    @classmethod
+    def setUpClass(cls):
+        cls.proxy = HTTPServer(("127.0.0.1", 0), ProxyHandler)
+        threading.Thread(target=cls.proxy.serve_forever, daemon=True).start()
+        cls.proxy_url = f"http://127.0.0.1:{cls.proxy.server_port}"
+
+    @classmethod
+    def tearDownClass(cls):
+        cls.proxy.shutdown()
+        cls.proxy.server_close()
+
+    def _sandbox(self, domain="sandbox.local"):
+        from bean import Sandbox
+        client = BeanClient(api_key="k", base_url="http://127.0.0.1:1",
+                            proxy_url=self.proxy_url)
+        return Sandbox(id="sbx_dp1", state="RUNNING", image="x",
+                       domain=domain, _client=client)
+
+    def test_exec_goes_through_the_proxy(self):
+        sb = self._sandbox()
+        r = sb.exec(["echo", "viaproxy"])
+        self.assertEqual(r.exit_code, 0)
+        self.assertEqual(r.stdout, "echo viaproxy")
+        self.assertEqual(r.duration_ms, 7)
+        # Addressed to the agent port of this sandbox under its domain.
+        self.assertEqual(ProxyHandler.last_host, "10001-sbx_dp1.sandbox.local")
+
+    def test_read_file_through_the_proxy(self):
+        sb = self._sandbox()
+        self.assertEqual(sb.read_file("/x"), b"proxied-bytes")
+
+    def test_write_file_through_the_proxy(self):
+        sb = self._sandbox()
+        self.assertEqual(sb.write_file("/x", b"hello world"), 11)
+
+    def test_no_proxy_keeps_the_relay(self):
+        # Without a proxy URL the data plane is off: _dataplane_for returns None.
+        client = BeanClient(api_key="k", base_url="http://127.0.0.1:1")
+        self.assertIsNone(client._dataplane_for("sbx", ""))
+
+    def test_authority_without_domain_is_bare_label(self):
+        sb = self._sandbox(domain="")
+        sb.exec(["echo", "hi"])
+        self.assertEqual(ProxyHandler.last_host, "10001-sbx_dp1")
+
+
 if __name__ == "__main__":
     unittest.main()

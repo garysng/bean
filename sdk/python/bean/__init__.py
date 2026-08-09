@@ -117,6 +117,10 @@ class Sandbox:
     state: str
     image: str
     labels: Dict[str, str] = field(default_factory=dict)
+    # domain is the data-plane base the server returns; the SDK builds
+    # "{port}-{id}.{domain}" against it when reaching the agent through the proxy.
+    # Empty means no proxy domain, so operations use the bean-api relay.
+    domain: str = ""
     _client: "BeanClient" = field(default=None, repr=False, compare=False)
 
     def exec(
@@ -128,6 +132,16 @@ class Sandbox:
     ) -> ExecResult:
         if isinstance(cmd, str):
             cmd = ["/bin/sh", "-c", cmd]
+        dp = self._client._dataplane_for(self.id, self.domain)
+        if dp is not None:
+            r = dp.exec(self.id, cmd, cwd=cwd, env=env, timeout_seconds=timeout)
+            return ExecResult(
+                exit_code=r["exitCode"],
+                stdout=r["stdout"].decode(errors="replace"),
+                stderr=r["stderr"].decode(errors="replace"),
+                truncated=r["truncated"],
+                duration_ms=r["durationMs"],
+            )
         body = {"cmd": cmd, "cwd": cwd, "env": env or {}, "timeoutSeconds": timeout}
         data = self._client._request("POST", f"/v1/sandboxes/{self.id}/exec", body)
         return ExecResult(
@@ -141,6 +155,9 @@ class Sandbox:
     def write_file(self, path: str, content, mkdirs: bool = True) -> int:
         if isinstance(content, str):
             content = content.encode()
+        dp = self._client._dataplane_for(self.id, self.domain)
+        if dp is not None:
+            return dp.write_file(self.id, path, content, mkdirs=mkdirs)
         q = urllib.parse.urlencode({"path": path, "mkdirs": "true" if mkdirs else "false"})
         data = self._client._request_raw(
             "PUT", f"/v1/sandboxes/{self.id}/files?{q}", content
@@ -148,6 +165,9 @@ class Sandbox:
         return json.loads(data)["bytesWritten"]
 
     def read_file(self, path: str) -> bytes:
+        dp = self._client._dataplane_for(self.id, self.domain)
+        if dp is not None:
+            return dp.read_file(self.id, path)
         q = urllib.parse.urlencode({"path": path})
         return self._client._request_raw("GET", f"/v1/sandboxes/{self.id}/files?{q}")
 
@@ -283,14 +303,16 @@ class _Sandboxes:
         data = self._client._request("POST", "/v1/sandboxes", body)["sandbox"]
         return Sandbox(
             id=data["id"], state=data["state"], image=data["image"],
-            labels=data.get("labels") or {}, _client=self._client,
+            labels=data.get("labels") or {}, domain=data.get("domain", ""),
+            _client=self._client,
         )
 
     def get(self, sandbox_id: str) -> Sandbox:
         data = self._client._request("GET", f"/v1/sandboxes/{sandbox_id}")["sandbox"]
         return Sandbox(
             id=data["id"], state=data["state"], image=data["image"],
-            labels=data.get("labels") or {}, _client=self._client,
+            labels=data.get("labels") or {}, domain=data.get("domain", ""),
+            _client=self._client,
         )
 
     def list(self, labels: Optional[Dict[str, str]] = None) -> List[Sandbox]:
@@ -301,7 +323,8 @@ class _Sandboxes:
         data = self._client._request("GET", path)["sandboxes"]
         return [
             Sandbox(id=d["id"], state=d["state"], image=d["image"],
-                    labels=d.get("labels") or {}, _client=self._client)
+                    labels=d.get("labels") or {}, domain=d.get("domain", ""),
+                    _client=self._client)
             for d in data
         ]
 
@@ -457,9 +480,15 @@ class BeanClient:
         api_key: Optional[str] = None,
         base_url: Optional[str] = None,
         timeout: float = 900.0,
+        proxy_url: Optional[str] = None,
     ):
         self.api_key = api_key or os.environ.get("BEAN_API_KEY", "")
         self.base_url = (base_url or os.environ.get("BEAN_BASE_URL", "http://127.0.0.1:8080")).rstrip("/")
+        # proxy_url (or BEAN_PROXY_URL) opts into the data plane: exec and file ops
+        # go straight to the agent through bean-proxy (Connect HTTP/JSON, no grpc
+        # dependency) instead of relaying through bean-api. Unset keeps the relay,
+        # so nothing changes for a single-node/dev setup.
+        self.proxy_url = proxy_url if proxy_url is not None else os.environ.get("BEAN_PROXY_URL", "")
         self.timeout = timeout
         self.sandboxes = _Sandboxes(self)
         self.snapshots = _Snapshots(self)
@@ -491,6 +520,20 @@ class BeanClient:
         if not data:
             return {}
         return json.loads(data)
+
+    def _dataplane_for(self, sandbox_id: str, domain: Optional[str]):
+        """Build a data-plane client for a sandbox, or None to use the relay.
+
+        Returns None when no proxy is configured. The domain comes from the
+        sandbox record; if the caller does not have it, a GET resolves it.
+        """
+        if not self.proxy_url:
+            return None
+        from ._dataplane import DataPlane
+        if domain is None:
+            rec = self._request("GET", f"/v1/sandboxes/{sandbox_id}")
+            domain = (rec.get("sandbox") or {}).get("domain", "")
+        return DataPlane(self.proxy_url, domain or "", self.timeout)
 
 
 def _pack_context(directory: str) -> bytes:

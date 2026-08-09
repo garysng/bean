@@ -13,3 +13,7 @@ bean.db
 
 # Personal permission overrides, not team-wide
 .claude/settings.local.json
+
+# Python bytecode caches from the SDK and its tests
+__pycache__/
+*.pyc
