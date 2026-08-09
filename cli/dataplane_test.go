@@ -1,8 +1,18 @@
 package cli
 
 import (
+	"context"
+	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 
+	"connectrpc.com/connect"
+	"golang.org/x/net/http2"
+	"golang.org/x/net/http2/h2c"
+
+	commonv1 "github.com/garysng/bean/internal/gen/bean/common/v1"
+	"github.com/garysng/bean/internal/gen/bean/agent/v1/agentv1connect"
 	"github.com/garysng/bean/internal/node/runtime"
 )
 
@@ -18,7 +28,7 @@ func TestDataPlaneForOptsInOnlyWithAProxyURL(t *testing.T) {
 }
 
 func TestDataPlaneForStripsTheScheme(t *testing.T) {
-	// The gRPC dial wants a bare host:port; a scheme left on would make it dial a
+	// The transport dials a bare host:port; a scheme left on would make it dial a
 	// host literally named "http".
 	for _, in := range []string{
 		"http://proxy.example:7480",
@@ -55,5 +65,60 @@ func TestAuthorityIsPortDashSandbox(t *testing.T) {
 	// serve both the agent and a user's server.
 	if got, want := noDomain.authority(8000, "sbx_abc"), "8000-sbx_abc"; got != want {
 		t.Errorf("user-port authority = %q, want %q", got, want)
+	}
+}
+
+// stubAgent is a minimal AgentService that echoes the command back as stdout, so
+// a test can assert the exec round-tripped over the wire.
+type stubAgent struct {
+	agentv1connect.UnimplementedAgentServiceHandler
+}
+
+func (stubAgent) Exec(_ context.Context, req *connect.Request[commonv1.ExecRequest]) (*connect.Response[commonv1.ExecResponse], error) {
+	return connect.NewResponse(&commonv1.ExecResponse{
+		Stdout: []byte(strings.Join(req.Msg.GetCmd(), " ")),
+	}), nil
+}
+
+func TestExecReachesTheAgentOverConnectThroughTheProxyHost(t *testing.T) {
+	// This is the crux of the CLI's switch to Connect: no gRPC stack, the same
+	// h2c transport the SDK uses, and the sandbox chosen by the Host header the
+	// proxy would route on. The fake proxy stands in for bean-proxy: it records
+	// the Host it was addressed with and forwards to the stub agent.
+	agentPath, agentHandler := agentv1connect.NewAgentServiceHandler(stubAgent{})
+	agentMux := http.NewServeMux()
+	agentMux.Handle(agentPath, agentHandler)
+	agent := httptest.NewUnstartedServer(h2c.NewHandler(agentMux, &http2.Server{}))
+	agent.EnableHTTP2 = true
+	agent.Start()
+	defer agent.Close()
+
+	var gotHost string
+	proxy := httptest.NewUnstartedServer(h2c.NewHandler(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			gotHost = r.Host
+			// Forward to the agent unchanged; the point under test is the CLI's
+			// transport and addressing, not the proxy's own routing table.
+			agentMux.ServeHTTP(w, r)
+		}), &http2.Server{}))
+	proxy.EnableHTTP2 = true
+	proxy.Start()
+	defer proxy.Close()
+
+	dp, ok := dataPlaneFor(proxy.URL, "sbx.example.com")
+	if !ok {
+		t.Fatal("dataPlaneFor did not opt in for a set proxy URL")
+	}
+	res, err := dp.execViaProxy(context.Background(), "sbx_abc", []string{"echo", "hi"})
+	if err != nil {
+		t.Fatalf("exec over Connect through the proxy: %v", err)
+	}
+	if got := string(res.Stdout); got != "echo hi" {
+		t.Fatalf("stdout = %q, want %q", got, "echo hi")
+	}
+	// The proxy saw the routing authority as its Host, which is what selects the
+	// sandbox and port -- the whole addressing convention, carried over HTTP.
+	if want := "10001-sbx_abc.sbx.example.com"; gotHost != want {
+		t.Fatalf("proxy Host = %q, want %q", gotHost, want)
 	}
 }

@@ -2,11 +2,12 @@
 // bean-proxy, rather than relaying through bean-api.
 //
 // The relay path (bean-api -> noded's control gRPC -> agent) still exists and is
-// the fallback. This path dials bean-proxy directly with a gRPC authority of
-// "{port}-{sandbox}", which is how the proxy and the node's forwarder route to a
-// port inside a guest. For the agent that port is 10001, and the call is
-// AgentService/Exec (and the file RPCs) rather than the SandboxService the
-// control plane speaks.
+// the fallback. This path reaches bean-proxy directly over Connect (connectrpc)
+// with a Host of "{port}-{sandbox}", which is how the proxy and the node's
+// forwarder route to a port inside a guest. It is the same transport the SDK
+// uses -- Connect over cleartext HTTP/2 -- so the CLI needs no gRPC stack. For
+// the agent that port is 10001, and the call is AgentService/Exec (and the file
+// RPCs) rather than the SandboxService the control plane speaks.
 //
 // The client presents no per-sandbox credential. The forwarder on the node
 // injects the agent token (it holds the plaintext; the client never does), and
@@ -18,16 +19,18 @@ package cli
 
 import (
 	"context"
-	"errors"
+	"crypto/tls"
 	"fmt"
 	"io"
+	"net"
+	"net/http"
 	"strings"
 
-	"google.golang.org/grpc"
-	"google.golang.org/grpc/credentials/insecure"
+	"connectrpc.com/connect"
+	"golang.org/x/net/http2"
 
-	agentv1 "github.com/garysng/bean/internal/gen/bean/agent/v1"
 	commonv1 "github.com/garysng/bean/internal/gen/bean/common/v1"
+	"github.com/garysng/bean/internal/gen/bean/agent/v1/agentv1connect"
 	"github.com/garysng/bean/internal/node/runtime"
 )
 
@@ -77,42 +80,49 @@ func (d *dataPlane) authority(port int, sandboxID string) string {
 	return label + "." + d.domain
 }
 
-// dialAgent opens a gRPC client to a sandbox's agent through the proxy.
+// dialAgent builds a Connect client to a sandbox's agent through the proxy.
 //
-// The connection is cleartext HTTP/2 (h2c): the proxy terminates no TLS and the
-// hop is expected to sit behind the platform's own edge. insecure credentials are
-// what select h2c here, and WithAuthority is what makes the proxy route to this
-// sandbox's agent port rather than anywhere else.
-func (d *dataPlane) dialAgent(sandboxID string) (agentv1.AgentServiceClient, func() error, error) {
+// The addressing trick is the same as the SDK's: the base URL's host is the
+// routing authority "{port}-{sandbox}.{domain}", which the proxy reads off the
+// Host header to pick the sandbox and port -- but the HTTP transport always dials
+// the proxy's own address, ignoring that host. The hop is cleartext HTTP/2 (h2c):
+// the proxy terminates no TLS and sits behind the platform's edge, so the
+// transport forces HTTP/2 over a plain TCP connection.
+func (d *dataPlane) dialAgent(sandboxID string) (agentv1connect.AgentServiceClient, error) {
 	auth := d.authority(runtime.AgentGuestPort, sandboxID)
-	conn, err := grpc.NewClient(d.proxyAddr,
-		grpc.WithTransportCredentials(insecure.NewCredentials()),
-		grpc.WithAuthority(auth),
-	)
-	if err != nil {
-		return nil, nil, fmt.Errorf("dial proxy %s (authority %s): %w", d.proxyAddr, auth, err)
+	proxyAddr := d.proxyAddr
+	httpClient := &http.Client{
+		Transport: &http2.Transport{
+			AllowHTTP: true,
+			// Ignore the base URL's host; every call goes to the proxy over
+			// cleartext TCP. The base URL host survives only as the Host header,
+			// which is exactly what the proxy routes on.
+			DialTLSContext: func(ctx context.Context, network, _ string, _ *tls.Config) (net.Conn, error) {
+				return (&net.Dialer{}).DialContext(ctx, network, proxyAddr)
+			},
+		},
 	}
-	return agentv1.NewAgentServiceClient(conn), conn.Close, nil
+	baseURL := "http://" + auth
+	return agentv1connect.NewAgentServiceClient(httpClient, baseURL), nil
 }
 
 // execViaProxy runs a command through the data plane and returns the agent's
 // response. The context bounds the call; the caller supplies the timeout.
 func (d *dataPlane) execViaProxy(ctx context.Context, sandboxID string, cmd []string) (*execResult, error) {
-	client, closeConn, err := d.dialAgent(sandboxID)
+	client, err := d.dialAgent(sandboxID)
 	if err != nil {
 		return nil, err
 	}
-	defer closeConn()
-
-	resp, err := client.Exec(ctx, &commonv1.ExecRequest{SandboxId: sandboxID, Cmd: cmd})
+	resp, err := client.Exec(ctx, connect.NewRequest(
+		&commonv1.ExecRequest{SandboxId: sandboxID, Cmd: cmd}))
 	if err != nil {
 		return nil, err
 	}
 	return &execResult{
-		ExitCode:  int(resp.GetExitCode()),
-		Stdout:    resp.GetStdout(),
-		Stderr:    resp.GetStderr(),
-		Truncated: resp.GetTruncated(),
+		ExitCode:  int(resp.Msg.GetExitCode()),
+		Stdout:    resp.Msg.GetStdout(),
+		Stderr:    resp.Msg.GetStderr(),
+		Truncated: resp.Msg.GetTruncated(),
 	}, nil
 }
 
@@ -163,19 +173,15 @@ func (c *Client) writeFileViaDataPlane(dp *dataPlane, id, remote string, data []
 	if err := c.resolveDomain(dp, id); err != nil {
 		return err
 	}
-	client, closeConn, err := dp.dialAgent(id)
+	client, err := dp.dialAgent(id)
 	if err != nil {
 		return err
 	}
-	defer closeConn()
 
 	ctx, cancel := context.WithTimeout(context.Background(), c.HTTP.Timeout)
 	defer cancel()
 
-	stream, err := client.WriteFile(ctx)
-	if err != nil {
-		return err
-	}
+	stream := client.WriteFile(ctx)
 	if err := stream.Send(&commonv1.WriteFileFrame{
 		Frame: &commonv1.WriteFileFrame_Meta{Meta: &commonv1.WriteFileMeta{
 			SandboxId: id, Path: remote, Mkdirs: true,
@@ -188,7 +194,7 @@ func (c *Client) writeFileViaDataPlane(dp *dataPlane, id, remote string, data []
 	}); err != nil {
 		return err
 	}
-	_, err = stream.CloseAndRecv()
+	_, err = stream.CloseAndReceive()
 	return err
 }
 
@@ -198,29 +204,23 @@ func (c *Client) readFileViaDataPlane(dp *dataPlane, id, remote string, w io.Wri
 	if err := c.resolveDomain(dp, id); err != nil {
 		return err
 	}
-	client, closeConn, err := dp.dialAgent(id)
+	client, err := dp.dialAgent(id)
 	if err != nil {
 		return err
 	}
-	defer closeConn()
 
 	ctx, cancel := context.WithTimeout(context.Background(), c.HTTP.Timeout)
 	defer cancel()
 
-	stream, err := client.ReadFile(ctx, &commonv1.ReadFileRequest{SandboxId: id, Path: remote})
+	stream, err := client.ReadFile(ctx, connect.NewRequest(
+		&commonv1.ReadFileRequest{SandboxId: id, Path: remote}))
 	if err != nil {
 		return err
 	}
-	for {
-		chunk, err := stream.Recv()
-		if errors.Is(err, io.EOF) {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		if _, werr := w.Write(chunk.GetData()); werr != nil {
+	for stream.Receive() {
+		if _, werr := w.Write(stream.Msg().GetData()); werr != nil {
 			return werr
 		}
 	}
+	return stream.Err()
 }
