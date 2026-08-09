@@ -40,6 +40,13 @@ func listenVsock(port uint32) (net.Listener, error) {
 	return &vsockListener{fd: fd, port: port}, nil
 }
 
+// isVsockListener reports whether a listener is this package's AF_VSOCK
+// listener, so Serve can pick the direct HTTP/2 path for it.
+func isVsockListener(lis net.Listener) bool {
+	_, ok := lis.(*vsockListener)
+	return ok
+}
+
 // vsockListener implements net.Listener over a raw AF_VSOCK descriptor.
 type vsockListener struct {
 	fd   int
@@ -51,7 +58,17 @@ type vsockListener struct {
 
 func (l *vsockListener) Accept() (net.Conn, error) {
 	for {
-		nfd, sa, err := unix.Accept4(l.fd, unix.SOCK_CLOEXEC)
+		// SOCK_NONBLOCK is not optional. The accepted descriptor is handed to
+		// os.NewFile, which only registers a descriptor with the runtime poller --
+		// and only then supports deadlines -- when it is already non-blocking. A
+		// blocking descriptor becomes a non-pollable os.File whose SetReadDeadline
+		// returns ErrNoDeadline, and net/http2's server aborts the connection when
+		// it cannot set the deadline it uses to read the client preface: it accepts
+		// the connection and then never emits its own SETTINGS frame, so every gRPC
+		// client fails with "error reading server preface". The unix-socket
+		// transport never hits this because net.Listen returns pollable conns; only
+		// this hand-rolled vsock path has to ask for non-blocking explicitly.
+		nfd, sa, err := unix.Accept4(l.fd, unix.SOCK_CLOEXEC|unix.SOCK_NONBLOCK)
 
 		// Close's wake-up connection arrives as an ordinary accept, so the
 		// closed flag is checked either way. Reporting the connection instead

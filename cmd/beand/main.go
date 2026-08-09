@@ -135,10 +135,16 @@ func main() {
 	mux := http.NewServeMux()
 	mux.Handle(path, handler)
 
-	httpSrv := &http.Server{Handler: h2c.NewHandler(mux, &http2.Server{})}
+	// TCP carries Connect over HTTP/1.1 and gRPC-Web as well as gRPC, so it is
+	// served through h2c, which negotiates HTTP/2 by upgrade or prior knowledge.
+	// vsock and Unix carry only the node's gRPC client (HTTP/2 with prior
+	// knowledge), and beand.Serve hands those connections straight to the HTTP/2
+	// server with a background context -- see the comment on Serve for why h2c's
+	// request-scoped context breaks gRPC over the local transports.
+	h2cHandler := h2c.NewHandler(mux, &http2.Server{})
 	slog.Info("beand listening", "version", version, "addr", *listenAddr, "root", *rootDir,
 		"authenticated", authRequired)
-	if err := httpSrv.Serve(lis); err != nil {
+	if err := beand.Serve(lis, h2cHandler, mux); err != nil {
 		log.Fatal(err)
 	}
 }
