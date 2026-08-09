@@ -74,6 +74,32 @@ bean 已经在节点间分发*导入的*镜像,build 只是还没走这条路:
 build 产物只是没走它 —— 停在了本地 ext4。补上这个缺口用的是同一套机制,而 `build.go:238-240`
 已经为此预留("上传可以之后再落")。
 
+## 3.5 第二个、独立的问题:日志流
+
+暴露 build 老化的不止分发。build 日志今天走**双重中转** —— noded 经 gRPC 把日志推给 bean-api,
+bean-api 缓冲后再回吐给客户端 —— 而这个缓冲是**进程本地内存**:
+
+- `s.builds` 是一个用 mutex 保护的 `map[string]*buildLog`(`buildlog.go:42-49`),上限 4 MiB、
+  30 分钟,从不落 DB 或 S3。noded 也不留存 —— 每帧流一次、什么都不留(`node/buildlog.go:9-16`)。
+- **这是真实的多副本裂缝。** bean-api 对着 Postgres 跑多副本。一次 build 落在副本 A,它的日志
+  缓冲在 A 的内存里;客户端把 `GET .../build/logs?ref=` 或 `POST .../build/cancel?ref=` 打到
+  副本 B,`s.builds.get(ref)` 查的是 B 自己的 map,miss,返回 404(`build.go:295`、`:364`)——
+  尽管镜像的*状态*在 Postgres 里从任一副本都可见。日志和取消是一个本该水平扩展的系统里的副本
+  本地状态,进程重启还会丢。
+
+**能不能不中转、走 node-direct?** 本次盘点纠正了一个常见误解:exec 和文件传输今天*也*经
+bean-api 中转(`cli.go:321` → `handleExec` → `router.Client`),尽管 README 暗示不是 —— 所以
+build 在这点上并不特殊。真正 node-direct 的数据面(bean-proxy 和 noded 的 `PortForwarder`)
+完全按 **sandbox id** 寻址(`ParseSandboxHost` 拒绝空 sandbox 段;`TargetFor` 查 `m.sandboxes`),
+而 build 没有 sandbox —— 它跑的是 buildkitd。noded 侧也**没有按 ref 的 build 日志端点**,只有
+那个一次性、不留存的 `BuildImage` stream。
+
+所以 node-direct 化的 build 日志需要两样新东西:①一个 noded 侧按 build-ref 留存、可重连的端点;
+②一个不是 sandbox id 的寻址 key。两条数据面里,**bean-proxy 的模型更贴合** —— 它已经在做
+"id → node 地址 → node 上的端点",所以增量是把 id 空间从 sandbox 扩到 `build-{ref}`,而不是
+从零造一条 client→noded 直连。但注意顺序:**多副本裂缝是正确性 bug**,本身就值得修(比如按 ref
+做 sticky routing,或共享/DB 支撑的日志),与日志是否走 node-direct 无关。
+
 ## 4. 前置条件,以及它为何排在最前
 
 **无论拆不拆,产物都必须变成可分发的。** 像 prewarm publish 一个导入镜像那样 publish build

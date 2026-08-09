@@ -99,6 +99,45 @@ shipped for imported/overlaybd images**. Build outputs just don't go through it 
 they stop at a local ext4. Closing that gap is the same mechanism, and
 `build.go:238-240` already reserves for it ("the upload can land later").
 
+## 3.5 A second, independent problem: the log stream
+
+Distribution is not the only place build's plumbing shows its age. Build logs
+today take a **double relay** — noded streams them over gRPC to bean-api, which
+buffers them and re-serves them to the client — and the buffer is
+**process-local in-memory**:
+
+- `s.builds` is a `map[string]*buildLog` guarded by a mutex (`buildlog.go:42-49`),
+  bounded to 4 MiB and 30 minutes, never persisted to DB or S3. noded does not
+  retain it either — it streams each frame once and keeps nothing
+  (`node/buildlog.go:9-16`).
+- **This is a real multi-replica crack.** bean-api runs multiple replicas against
+  Postgres. A build lands on replica A and its log buffer lives in A's memory; a
+  client hitting `GET .../build/logs?ref=` or `POST .../build/cancel?ref=` on
+  replica B calls `s.builds.get(ref)` against B's own map, misses, and gets a 404
+  (`build.go:295`, `:364`) — even though the image's *state* is visible in
+  Postgres from either replica. Logs and cancel are replica-local state in a
+  system that otherwise scales horizontally, and a process restart drops them.
+
+**Could it go node-direct instead of relaying?** The audit corrects a common
+belief: exec and file transfer *also* relay through bean-api today
+(`cli.go:321` → `handleExec` → `router.Client`), despite the README implying
+otherwise — so build is not special here. The genuinely node-direct data plane
+(bean-proxy and noded's `PortForwarder`) keys entirely on **sandbox id**
+(`ParseSandboxHost` rejects an empty sandbox segment; `TargetFor` looks up
+`m.sandboxes`), and a build has no sandbox — it runs buildkitd. noded also has
+**no per-ref build-log endpoint**, only the one-shot `BuildImage` stream that
+retains nothing.
+
+So node-direct build logs would need two new things: (1) a noded endpoint that
+retains logs by build-ref and can be re-attached to, and (2) an addressing key
+that is not a sandbox id. Of the two data planes, **bean-proxy's model fits
+better** — it already resolves "id → node address → endpoint on that node", so
+the increment is widening the id space from sandbox to `build-{ref}` rather than
+inventing a client→noded path from scratch. But note the ordering: the
+**multi-replica crack is a correctness bug** worth fixing on its own (e.g. sticky
+routing by ref, or a shared/DB-backed log), independent of whether logs ever go
+node-direct.
+
 ## 4. The prerequisite, and why it comes first
 
 **Whether or not build is split, the output must become distributable.** Publish
