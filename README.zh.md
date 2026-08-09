@@ -340,6 +340,7 @@ flowchart TB
 | [api-design.md](docs/zh/api-design.md) | REST 与 gRPC 表面、认证、错误码 |
 | [snapshot-resume.md](docs/zh/snapshot-resume.md) | pause/resume、snapshot、从快照创建 —— 以及它们为何是不同的操作 |
 | [image-build.md](docs/zh/image-build.md) | 构建与 commit |
+| [build-service.md](docs/zh/build-service.md) | 📐 讨论 —— build 是否该从 noded 拆出,以及卡在哪 |
 | [security-and-startup.md](docs/zh/security-and-startup.md) | 威胁模型、加固、冷启动预算 |
 | [sdk-cli-design.md](docs/zh/sdk-cli-design.md) | SDK 与 CLI |
 | [network.md](docs/zh/network.md) | ✅ 每沙箱一个 netns、两个过滤作用域,以及恢复的快照为何保留原地址 |

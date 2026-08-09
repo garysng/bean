@@ -352,6 +352,7 @@ made networking and jailer look shipped. Convention in
 | [api-design.md](docs/api-design.md) | REST and gRPC surface, auth, error codes |
 | [snapshot-resume.md](docs/snapshot-resume.md) | pause/resume, snapshot, and create-from-snapshot — and why they are different operations |
 | [image-build.md](docs/image-build.md) | build and commit |
+| [build-service.md](docs/build-service.md) | 📐 discussion — should build be split out of noded, and what blocks it |
 | [security-and-startup.md](docs/security-and-startup.md) | threat model, hardening, cold-start budget |
 | [sdk-cli-design.md](docs/sdk-cli-design.md) | SDK and CLI |
 | [network.md](docs/network.md) | ✅ netns per sandbox, the two filter scopes, and why a restored snapshot keeps its address |
