@@ -730,11 +730,18 @@ func overlaybdBlobStore(endpoint, bucket, readURL, region string, pathStyle bool
 		// single-host case.
 		readURL = endpoint
 	}
-	store, err := image.NewS3BlobStore(client, bucket, "blobs", readURL)
+	// One BucketStore over the shared object-store contract backs both the layer blobs
+	// and the manifest/tag index: they share a bucket and a lifecycle (docs/s3-storage.md
+	// section 8). The bucket is ensured once here at construction.
+	objStore, err := s3.NewBucketStore(context.Background(), client, bucket)
 	if err != nil {
 		return nil, nil, err
 	}
-	index, err := image.NewS3ImageIndex(client, bucket)
+	store, err := image.NewS3BlobStore(objStore, bucket, "blobs", readURL)
+	if err != nil {
+		return nil, nil, err
+	}
+	index, err := image.NewS3ImageIndex(objStore)
 	if err != nil {
 		return nil, nil, err
 	}

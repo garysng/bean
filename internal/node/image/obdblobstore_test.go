@@ -3,58 +3,93 @@ package image
 import (
 	"bytes"
 	"context"
-	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+
+	"github.com/garysng/bean/internal/control/s3"
 )
 
-// fakePutter stands in for the S3 client so the store's own logic is testable without
-// a bucket. It records keys, because the key layout is the contract with overlaybd:
-// the daemon builds "<repoBlobUrl>/<digest>" itself, so a key that does not match
-// that shape produces a device whose reads 404 with the cause only in the daemon's log.
+// fakePutter is an in-memory s3.ObjectStore so the store's own logic is testable
+// without a bucket. It records keys, because the key layout is the contract with
+// overlaybd: the daemon builds "<repoBlobUrl>/<digest>" itself, so a key that does not
+// match that shape produces a device whose reads 404 with the cause only in the
+// daemon's log. Keys carry no bucket prefix -- the store is bucket-bound, exactly as
+// the real BucketStore is.
 type fakePutter struct {
-	objects   map[string][]byte
-	buckets   []string
-	putErr    error
-	bucketErr error
+	objects map[string][]byte
+	putErr  error
 }
 
 func newFakePutter() *fakePutter {
 	return &fakePutter{objects: map[string][]byte{}}
 }
 
-func (f *fakePutter) HeadObject(_ context.Context, bucket, key string) (int64, error) {
-	b, ok := f.objects[bucket+"/"+key]
-	if !ok {
-		return 0, errors.New("not found")
-	}
-	return int64(len(b)), nil
+// fakeWriter buffers until Close, then commits under key; Abort discards it. This is
+// the half-product guarantee the real stores make (multipart completion / temp-file
+// rename), reproduced so a short-read abort in Put leaves nothing behind.
+type fakeWriter struct {
+	f    *fakePutter
+	key  string
+	buf  bytes.Buffer
+	done bool
 }
 
-func (f *fakePutter) PutObject(_ context.Context, bucket, key string, body []byte) error {
-	if f.putErr != nil {
-		return f.putErr
+func (w *fakeWriter) Write(p []byte) (int, error) { return w.buf.Write(p) }
+
+func (w *fakeWriter) Close() error {
+	if w.done {
+		return nil
 	}
-	f.objects[bucket+"/"+key] = body
+	w.done = true
+	if w.f.putErr != nil {
+		return w.f.putErr
+	}
+	w.f.objects[w.key] = append([]byte(nil), w.buf.Bytes()...)
 	return nil
 }
 
-func (f *fakePutter) GetObject(_ context.Context, bucket, key string) (io.ReadCloser, error) {
-	b, ok := f.objects[bucket+"/"+key]
+func (w *fakeWriter) Abort() { w.done = true }
+
+func (f *fakePutter) Writer(_ context.Context, key string) (io.WriteCloser, error) {
+	return &fakeWriter{f: f, key: key}, nil
+}
+
+func (f *fakePutter) Get(_ context.Context, key string) (io.ReadCloser, error) {
+	b, ok := f.objects[key]
 	if !ok {
-		return nil, errors.New("not found")
+		return nil, s3.ErrNotFound
 	}
 	return io.NopCloser(bytes.NewReader(b)), nil
 }
 
-func (f *fakePutter) EnsureBucket(_ context.Context, bucket string) error {
-	if f.bucketErr != nil {
-		return f.bucketErr
+func (f *fakePutter) GetRange(_ context.Context, key string, off, length int64) (io.ReadCloser, error) {
+	b, ok := f.objects[key]
+	if !ok {
+		return nil, s3.ErrNotFound
 	}
-	f.buckets = append(f.buckets, bucket)
+	if off > int64(len(b)) {
+		off = int64(len(b))
+	}
+	end := off + length
+	if end > int64(len(b)) {
+		end = int64(len(b))
+	}
+	return io.NopCloser(bytes.NewReader(b[off:end])), nil
+}
+
+func (f *fakePutter) Head(_ context.Context, key string) (int64, error) {
+	b, ok := f.objects[key]
+	if !ok {
+		return 0, s3.ErrNotFound
+	}
+	return int64(len(b)), nil
+}
+
+func (f *fakePutter) Delete(_ context.Context, key string) error {
+	delete(f.objects, key)
 	return nil
 }
 
@@ -79,8 +114,9 @@ func TestBlobStoreURLAndKeyMatchWhatOverlaybdRequests(t *testing.T) {
 	if got := store.BlobURL(); got != wantURL {
 		t.Errorf("BlobURL() = %q, want %q", got, wantURL)
 	}
-	// What the store actually wrote. These must correspond, or reads 404.
-	wantKey := "bean-obd/blobs/" + digest
+	// What the store actually wrote. These must correspond, or reads 404. The store
+	// is bucket-bound, so the object key carries no bucket -- only the prefix and digest.
+	wantKey := "blobs/" + digest
 	if _, ok := f.objects[wantKey]; !ok {
 		keys := make([]string, 0, len(f.objects))
 		for k := range f.objects {

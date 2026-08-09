@@ -240,3 +240,141 @@ behaviour** rather than our wrapper's, and a fake server can only verify what we
 a real S3 responds.
 
 CI runs a real MinIO, so this layer is not "optional extra verification".
+
+## 8. Unifying the object store across snapshots, images and builds 📐
+
+> This section is the design for the four-phase convergence: one object-store contract that
+> snapshot blobs, overlaybd layers and build outputs all share, then build outputs and
+> snapshot filesystems moving onto the same content-addressed layer storage. It is written
+> before the code so the boundaries are settled first.
+
+### 8.1 What is already shared, and what is not
+
+The **wire layer is already single**: `internal/control/s3.Client` (SigV4, multipart, range
+reads) is the one S3 implementation, imported by both `bean-api` and `noded`. There is no
+duplicate protocol code to merge.
+
+What is **not** shared is the layer above it — three unrelated facades over the same client:
+
+| Facade | Side | Key scheme | Shape |
+|---|---|---|---|
+| `snapshot.Blobs` (`snapshot/store.go:20`) | control (`bean-api`) | `snapshots/<id>/data` | id-keyed, streaming `Writer`/`Reader`/`Size`/`Delete` |
+| `image.BlobStore` (`image/obdblobstore.go:36`) | node (`noded`) | `blobs/<digest>` | digest-keyed, buffered `Put` + `BlobURL`/`CheckReadable` |
+| `image.ImageIndex` (`image/obdindex.go:37`) | node (`noded`) | `manifests/<digest>`, `tags/...` | typed manifest/tag objects |
+
+Plus two parallel config namespaces reading the same credentials: `-s3-*` (bean-api) and
+`-fc-overlaybd-s3-*` (noded), both from `BEAN_S3_ACCESS_KEY` / `BEAN_S3_SECRET_KEY`.
+
+### 8.2 The unified contract
+
+A single object-store interface with a **streaming `Writer` as its write primitive** and the
+range read folded in, so all three facades become thin key-scheme adapters over it:
+
+```go
+// ObjectStore is the one contract every artifact store bottoms out on. Keys are
+// opaque; each caller owns its own key scheme (see 8.3). Implementations: a
+// BucketStore over the S3 client for production, a DirStore for dev/CI -- the same
+// DirBlobs/S3 equivalence snapshots already rely on, lifted to one type.
+type ObjectStore interface {
+    // Writer streams an object to key. Nothing is readable there until Close
+    // returns nil -- the half-product guarantee both prior implementations made.
+    // A writer that also satisfies Aborter can discard a partial write. This is
+    // the streaming primitive: a snapshot bundle can be guest-RAM-sized, so it is
+    // never buffered whole.
+    Writer(ctx context.Context, key string) (io.WriteCloser, error)
+    Get(ctx context.Context, key string) (io.ReadCloser, error)
+    GetRange(ctx context.Context, key string, off, length int64) (io.ReadCloser, error)
+    Head(ctx context.Context, key string) (size int64, err error) // ErrNotFound if absent
+    Delete(ctx context.Context, key string) error                 // absent is not an error
+}
+```
+
+`Put(ctx, store, key, r, size)` is a package-level convenience over `Writer` for callers that
+already hold a reader (a sealed layer, a small manifest); it aborts the partial write on a copy
+failure so no truncated object is published. The seams and how they resolve:
+
+- **Streaming, not buffered.** An earlier draft had a buffering `Put(r, size)` on the interface;
+  it was dropped because a memory snapshot is guest-RAM-sized and must not sit in memory whole.
+  `Writer` is the primitive; the overlaybd layer upload's old whole-object `io.ReadAll` is
+  retired in favour of an `io.Copy` into the writer with the same declared-size check, aborting
+  on a short read so nothing lands at the key.
+- **`BlobURL` / `CheckReadable` stay on the overlaybd adapter.** They encode overlaybd's
+  anonymous-daemon-read requirement, which is specific to how the overlaybd daemon reads and has
+  no meaning for snapshots or builds. They do not belong on the shared core; they remain methods
+  of the overlaybd layer adapter (`image.BlobStore`), which now holds an `ObjectStore` for its
+  bytes and keeps only the bucket and read-URL for building `BlobURL`.
+- **`Aborter` stays a type assertion**, exactly as `AbortWrite` did: the S3 path aborts its
+  multipart upload, the local path deletes its temp file. `AbortWriter(ctx, store, key, w)` is
+  the package helper that uses it, falling back to close+delete when a writer does not implement
+  it.
+
+### 8.3 Key schemes stay per-artifact, on adapters
+
+The shared store has no opinion on keys. Each artifact keeps its own scheme on a thin adapter,
+so the three concerns stay legible and independently GC-able:
+
+| Artifact | Key | Owner side |
+|---|---|---|
+| snapshot bytes | `snapshots/<id>/data` (unchanged) | control |
+| overlaybd layer | `blobs/<digest>` (unchanged) | node |
+| manifest / tag | `manifests/<digest>`, `tags/<host>/<repo>/<tag>` (unchanged) | node |
+| **build output** | `blobs/<digest>` — the **same** content-addressed layer space (see 8.5) | node |
+
+Keeping the existing keys verbatim means the unification is a refactor with no data migration
+for snapshots or overlaybd: the same bytes land at the same keys, only the Go types above them
+change.
+
+### 8.4 Control-side vs node-side is a deployment fact, not an obstacle
+
+The builder runs on **noded** (`internal/node/image/build_linux.go`, wired at
+`cmd/noded/main.go`), which is exactly where the overlaybd store already has a working
+node-side S3 client on the same `BEAN_S3_*` credentials. So build-output upload lives in the
+same process as overlaybd upload — no routing build bytes through the control plane. The
+snapshot store stays control-side; it shares the interface and the low-level client, not the
+process. The unified abstraction is instantiated once per process (once in `bean-api`, once in
+`noded`), each with its own key-scheme adapters.
+
+Config converges to one namespace: a single `--s3-endpoint` / `--s3-bucket` set (with the
+overlaybd read-URL kept as the one genuinely overlaybd-specific extra), both processes reading
+the same `BEAN_S3_*` credentials. The flag rename is deferred to **Phase 2**, not done in
+Phase 1: today noded's `-fc-overlaybd-s3-*` flags name a store that holds *only* overlaybd
+layers, so the prefix is honest; it is Phase 2 that makes that same store hold build outputs
+too, at which point the general `-s3-*` name is the accurate one and the rename lands with the
+change that earns it. Phase 1 keeps the flags as they are — the unification it delivers is the
+shared `ObjectStore` contract and the one `BucketStore` backing both node-side facades, under
+the interface, where no deployment sees a flag change.
+
+### 8.5 Phases 2-4: build outputs and snapshot filesystems onto shared layers
+
+The convergence the unified store enables, in order:
+
+- **Phase 2 — build output to S3.** Today a built image is a flat `<ImageDir>/<name>.ext4`,
+  **never uploaded** (`internal/control/api/build.go:236` says so outright: "it exists only in
+  the building node's ImageDir ... no other node can start from it"). With the node-side store
+  in place, a build publishes its output to the shared `blobs/<digest>` space and records the
+  digest, so any node can start from it and the `image` API's list/delete operate on a real
+  stored artifact. This removes the single-node limitation.
+- **Phase 3 — filesystem layers unified on overlaybd, deduplicated by digest.** An image's
+  filesystem and a snapshot's filesystem both become overlaybd layer chains keyed by content
+  digest. A snapshot taken from an image shares that image's layer digests, so S3 stores one
+  copy — the same dedup that already makes a second image's conversion cheap. The snapshot's
+  filesystem member moves off the standalone bundle onto this shared layer space; **memory and
+  device state remain a separate blob**, because that is the one part no image ever has and the
+  only thing that distinguishes a memory snapshot from a filesystem one.
+- **Phase 4 — remove commit.** Once a filesystem-only snapshot and a committed image are the
+  same content-addressed layers under the hood, `commit` is redundant: "save this environment
+  to share" is a filesystem snapshot promoted into the image namespace. The dedicated
+  `commit` verb, its handler and its gRPC are removed; the use case routes through snapshot.
+
+The end state: **one object store, one layer space for every filesystem, and memory state as
+the single artifact-distinguishing blob** — which is the unified `{filesystem, config,
+?memory}` model the glossary defines, made real in storage.
+
+### 8.6 Verification
+
+Every phase is verified end-to-end on a real KVM host (the fc tier), not only in unit tests,
+because the properties that matter here — a real S3 accepting the upload, another node starting
+from a digest it never built, overlaybd range-reading a shared layer, a snapshot restoring from
+deduplicated layers — are the server's and the guest's behaviour, which a fake cannot show. The
+existing MinIO-backed integration tests (§7) are the unit layer; the `hack/` fc-tier probes are
+the e2e layer.

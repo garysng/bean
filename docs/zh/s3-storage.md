@@ -211,3 +211,117 @@ range 读的边界 —— 这些是**服务端的行为**而不是我们包装�
 假服务端只能验证我们发了什么,不能验证真实 S3 会怎么回应。
 
 CI 里跑真 MinIO,所以这一层不是「可选的额外验证」。
+
+## 8. 把对象存储在 snapshot、image、build 之间统一 📐
+
+> 本节是四阶段收敛的设计:一套 object-store 契约,让 snapshot blob、overlaybd 层、
+> build 产物都共用;之后 build 产物和 snapshot 文件系统进一步落到同一套内容寻址的
+> 层存储上。先写设计再写代码,把边界定清楚。
+
+### 8.1 现在已经共享什么、还没共享什么
+
+**wire 层已经是单一的**:`internal/control/s3.Client`(SigV4、multipart、range 读)是唯一
+一套 S3 实现,`bean-api` 和 `noded` 都在 import。没有重复的协议代码要合并。
+
+**没共享的是它上面那一层** —— 三个互不相干的 facade 架在同一个 client 上:
+
+| Facade | 侧 | key 方案 | 形状 |
+|---|---|---|---|
+| `snapshot.Blobs`(`snapshot/store.go:20`) | 控制面(`bean-api`) | `snapshots/<id>/data` | id 键,流式 `Writer`/`Reader`/`Size`/`Delete` |
+| `image.BlobStore`(`image/obdblobstore.go:36`) | 节点(`noded`) | `blobs/<digest>` | digest 键,缓冲 `Put` + `BlobURL`/`CheckReadable` |
+| `image.ImageIndex`(`image/obdindex.go:37`) | 节点(`noded`) | `manifests/<digest>`、`tags/...` | 带类型的 manifest/tag 对象 |
+
+外加两套并行的配置命名空间,读同一批凭证:`-s3-*`(bean-api)与 `-fc-overlaybd-s3-*`
+(noded),都来自 `BEAN_S3_ACCESS_KEY` / `BEAN_S3_SECRET_KEY`。
+
+### 8.2 统一契约
+
+一个 object-store 接口,**以流式 `Writer` 为写原语**,并把 range 读并进来,于是三个
+facade 都变成它上面的薄 key 方案适配器:
+
+```go
+// ObjectStore 是每个产物存储最终落到的唯一契约。key 是不透明的,各调用方
+// 自己拥有自己的 key 方案(见 8.3)。实现:生产用 BucketStore(基于 S3 client),
+// 开发/CI 用 DirStore —— 就是 snapshot 已经依赖的那套 DirBlobs/S3 等价关系,收敛成一个类型。
+type ObjectStore interface {
+    // Writer 把对象流式写到 key。Close 返回 nil 之前那里读不到任何东西 —— 就是两个
+    // 现有实现都已保证的「不留半成品」。若 writer 同时满足 Aborter,可丢弃半截写入。
+    // 这是流原语:一个 snapshot bundle 可能有 guest 内存那么大,绝不整块缓冲。
+    Writer(ctx context.Context, key string) (io.WriteCloser, error)
+    Get(ctx context.Context, key string) (io.ReadCloser, error)
+    GetRange(ctx context.Context, key string, off, length int64) (io.ReadCloser, error)
+    Head(ctx context.Context, key string) (size int64, err error) // 不存在返回 ErrNotFound
+    Delete(ctx context.Context, key string) error                 // 不存在不算错误
+}
+```
+
+`Put(ctx, store, key, r, size)` 是 `Writer` 之上的包级便捷函数,给已经持有 reader 的调用方
+(一个封好的层、一个小 manifest)用;拷贝失败时它 abort 半截写入,不发布截断对象。几处接缝怎么解决:
+
+- **流式,而非缓冲。** 早先的草稿在接口上放了个缓冲的 `Put(r, size)`;它被去掉了,因为一个
+  memory snapshot 有 guest 内存那么大,绝不能整块驻留内存。`Writer` 是原语;overlaybd 层上传
+  原先整块的 `io.ReadAll` 换成 `io.Copy` 进 writer,保留同样的声明长度校验,短读时 abort,
+  key 上不留东西。
+- **`BlobURL` / `CheckReadable` 留在 overlaybd 适配器上。** 它们编码的是 overlaybd 守护进程
+  匿名读的要求,只对 overlaybd 读方式有意义,对 snapshot 和 build 没有意义,不属于共享核心,
+  保留为 overlaybd 层适配器(`image.BlobStore`)的方法 —— 它现在持有一个 `ObjectStore` 存字节,
+  只保留 bucket 和 read-URL 用来拼 `BlobURL`。
+- **`Aborter` 仍是类型断言**,和 `AbortWrite` 一样:S3 路径 abort 它的 multipart 上传,本地
+  路径删它的临时文件。`AbortWriter(ctx, store, key, w)` 是用它的包级 helper,writer 不实现时
+  退化为 close+delete。
+
+### 8.3 key 方案按产物分,放在适配器上
+
+共享存储对 key 不持观点。每个产物在薄适配器上保留自己的方案,三块关注点保持清晰、可各自 GC:
+
+| 产物 | key | 拥有方 |
+|---|---|---|
+| snapshot 字节 | `snapshots/<id>/data`(不变) | 控制面 |
+| overlaybd 层 | `blobs/<digest>`(不变) | 节点 |
+| manifest / tag | `manifests/<digest>`、`tags/<host>/<repo>/<tag>`(不变) | 节点 |
+| **build 产物** | `blobs/<digest>` —— 与层**同一个**内容寻址空间(见 8.5) | 节点 |
+
+key 原样保留,意味着对 snapshot 和 overlaybd 而言这次统一是纯重构、无数据迁移:同样的字节落到
+同样的 key,只是上面的 Go 类型变了。
+
+### 8.4 控制面 vs 节点侧是部署事实,不是障碍
+
+builder 跑在 **noded** 上(`internal/node/image/build_linux.go`,在 `cmd/noded/main.go` 接线),
+正好就是 overlaybd 存储已经有一套可用的、用同一批 `BEAN_S3_*` 凭证的节点侧 S3 client 的地方。
+所以 build 产物上传和 overlaybd 上传在同一进程 —— 不用把 build 字节绕经控制面。snapshot 存储
+留在控制面;它共享的是接口和低层 client,不是进程。统一抽象每进程实例化一次(`bean-api` 一次、
+`noded` 一次),各带自己的 key 方案适配器。
+
+配置收敛成一个命名空间:单一的 `--s3-endpoint` / `--s3-bucket`(overlaybd 读 URL 作为唯一真正
+overlaybd 特有的额外项保留),两个进程读同一批 `BEAN_S3_*` 凭证。这次 flag 改名放到**阶段 2**,
+不在阶段 1 做:今天 noded 的 `-fc-overlaybd-s3-*` 命名的存储*只*放 overlaybd 层,前缀是诚实的;
+是阶段 2 让同一个存储也放 build 产物,那时通用的 `-s3-*` 名才准确,改名跟着那次配得上它的改动一起落地。
+阶段 1 保持 flag 不动 —— 它交付的统一是共享的 `ObjectStore` 契约,以及支撑两个节点侧 facade 的
+单一 `BucketStore`,都在接口之下,没有任何部署看到 flag 变化。
+
+### 8.5 阶段 2-4:build 产物与 snapshot 文件系统落到共享层
+
+统一存储使能的收敛,按顺序:
+
+- **阶段 2 —— build 产物上 S3。** 今天构建产物是扁平的 `<ImageDir>/<name>.ext4`,**从不上传**
+  (`internal/control/api/build.go:236` 明说:「只存在于构建节点的 ImageDir ...别的节点无法从它
+  启动」)。有了节点侧存储,build 把产物发布到共享的 `blobs/<digest>` 空间并记录 digest,任意
+  节点都能从它启动,`image` API 的 list/delete 操作在真实存储的产物上。这消除了单节点限制。
+- **阶段 3 —— 文件系统层统一到 overlaybd,按 digest 去重。** image 的文件系统和 snapshot 的
+  文件系统都变成按内容 digest 键的 overlaybd 层链。从某 image 拍的 snapshot 共享该 image 的层
+  digest,于是 S3 只存一份 —— 就是让第二个 image 转化便宜的那套去重。snapshot 的文件系统成员
+  从独立 bundle 迁到这个共享层空间;**内存和设备态仍是独立 blob**,因为那是任何 image 都没有的
+  部分,也是区分内存快照与文件系统快照的唯一东西。
+- **阶段 4 —— 移除 commit。** 一旦纯文件系统快照和一个 commit 出来的镜像在底层是同一批内容寻址
+  层,`commit` 就冗余了:「保存这个环境去分享」就是把文件系统快照提升进 image 命名空间。专门的
+  `commit` 动词、它的 handler 和 gRPC 都移除;该用例走 snapshot。
+
+终态:**一个对象存储、所有文件系统一个层空间、内存态作为唯一区分产物的 blob** —— 这就是 glossary
+定义的 `{文件系统, config, ?内存}` 统一模型,在存储层落地。
+
+### 8.6 验证
+
+每个阶段都在真实 KVM 主机(fc tier)上做端到端验证,不只是单测 —— 因为这里真正重要的性质
+(真实 S3 接受上传、另一个节点从它没构建过的 digest 启动、overlaybd range 读一个共享层、
+snapshot 从去重的层恢复)是服务端和 guest 的行为,假的显示不出来。现有打 MinIO 的集成测试(§7)
+是单测层;`hack/` 下的 fc-tier 探针是 e2e 层。
