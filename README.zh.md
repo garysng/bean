@@ -397,4 +397,4 @@ scp /tmp/img.test root@host:/tmp/ && ssh root@host /tmp/img.test
 
 ## 许可
 
-尚未选定。
+MIT —— 见 [LICENSE](LICENSE)。

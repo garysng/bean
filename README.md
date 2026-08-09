@@ -420,4 +420,4 @@ and the merge-ordering test.
 
 ## License
 
-Not yet chosen.
+MIT — see [LICENSE](LICENSE).
