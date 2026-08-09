@@ -2,25 +2,32 @@ GOBIN := $(shell go env GOPATH)/bin
 PROTO_FILES := $(shell find proto -name '*.proto')
 
 # Pinned so generated code is reproducible across machines and CI.
-PROTOC_GEN_GO_VERSION      := v1.36.11
-PROTOC_GEN_GO_GRPC_VERSION := v1.6.2
+PROTOC_GEN_GO_VERSION         := v1.36.11
+PROTOC_GEN_GO_GRPC_VERSION    := v1.6.2
+PROTOC_GEN_CONNECT_GO_VERSION := v1.20.0
 
 .PHONY: all build proto proto-tools test test-e2e lint vet cover clean
 
 proto-tools:
 	go install google.golang.org/protobuf/cmd/protoc-gen-go@$(PROTOC_GEN_GO_VERSION)
 	go install google.golang.org/grpc/cmd/protoc-gen-go-grpc@$(PROTOC_GEN_GO_GRPC_VERSION)
+	go install connectrpc.com/connect/cmd/protoc-gen-connect-go@$(PROTOC_GEN_CONNECT_GO_VERSION)
 
 all: build
 
 build:
 	go build ./...
 
+# The connect stubs sit beside the go-grpc ones: same messages, an extra client
+# and handler that speak the Connect protocol (gRPC + gRPC-Web + HTTP/JSON) from
+# one set of handlers. The gRPC stubs stay because noded's control path dials the
+# agent as a gRPC client and a Connect server accepts it unchanged.
 proto:
 	PATH="$(GOBIN):$$PATH" protoc \
 		--proto_path=proto \
 		--go_out=internal/gen --go_opt=module=github.com/garysng/bean/internal/gen \
 		--go-grpc_out=internal/gen --go-grpc_opt=module=github.com/garysng/bean/internal/gen \
+		--connect-go_out=internal/gen --connect-go_opt=module=github.com/garysng/bean/internal/gen \
 		$(PROTO_FILES)
 
 test:

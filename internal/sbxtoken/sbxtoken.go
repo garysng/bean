@@ -32,6 +32,7 @@ import (
 	"crypto/subtle"
 	"encoding/hex"
 	"fmt"
+	"net/http"
 
 	"google.golang.org/grpc/metadata"
 )
@@ -70,6 +71,15 @@ func FromIncoming(ctx context.Context) string {
 		return vals[0]
 	}
 	return ""
+}
+
+// FromHeader reads the credential from HTTP headers, which is where it arrives
+// for a Connect server: gRPC metadata travels as HTTP/2 headers under the same
+// key, and the data-plane forwarder sets that header directly. So one reader
+// covers both the gRPC control path (noded sets metadata) and the proxied data
+// path (the forwarder sets the header) once the agent is served over Connect.
+func FromHeader(h http.Header) string {
+	return h.Get(MDKey)
 }
 
 // New mints a token. The plaintext is what noded keeps and presents to the agent;

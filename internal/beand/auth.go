@@ -2,7 +2,10 @@ package beand
 
 import (
 	"context"
+	"errors"
+	"net/http"
 
+	"connectrpc.com/connect"
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -85,5 +88,64 @@ func (a *Authenticator) Stream() grpc.StreamServerInterceptor {
 			return err
 		}
 		return handler(srv, ss)
+	}
+}
+
+// authorizeHeader is the header-based form of the same check, for the Connect
+// server. The credential arrives as an HTTP header rather than gRPC metadata, but
+// it is the same key and the same fail-closed logic; the difference is only where
+// the value is read from.
+func (a *Authenticator) authorizeHeader(ctx context.Context, h http.Header) error {
+	expected, err := a.hashes.AgentTokenHash(ctx)
+	if err != nil {
+		return connect.NewError(connect.CodeUnavailable,
+			errors.New("agent cannot determine its expected credential"))
+	}
+	if expected == "" {
+		return connect.NewError(connect.CodePermissionDenied,
+			errors.New("agent has no credential configured"))
+	}
+	if !sbxtoken.Verify(expected, sbxtoken.FromHeader(h)) {
+		return connect.NewError(connect.CodePermissionDenied, errors.New("invalid agent token"))
+	}
+	return nil
+}
+
+// connectAuth is the Connect interceptor form of the Authenticator, covering both
+// unary and streaming handlers with one check -- the same coverage the gRPC unary
+// and stream interceptors give. It gates only handler (server) calls; a client
+// call is passed through, since the agent only ever serves.
+type connectAuth struct{ a *Authenticator }
+
+// Interceptor gates every Connect call on the per-sandbox token read from the
+// request header.
+func (a *Authenticator) Interceptor() connect.Interceptor { return connectAuth{a: a} }
+
+func (c connectAuth) WrapUnary(next connect.UnaryFunc) connect.UnaryFunc {
+	return func(ctx context.Context, req connect.AnyRequest) (connect.AnyResponse, error) {
+		if req.Spec().IsClient {
+			return next(ctx, req)
+		}
+		if err := c.a.authorizeHeader(ctx, req.Header()); err != nil {
+			return nil, err
+		}
+		return next(ctx, req)
+	}
+}
+
+// WrapStreamingClient is a pass-through: the agent is never a streaming client.
+func (c connectAuth) WrapStreamingClient(next connect.StreamingClientFunc) connect.StreamingClientFunc {
+	return next
+}
+
+// WrapStreamingHandler checks the header once at stream establishment, mirroring
+// the gRPC stream interceptor: the credential travels with the headers and cannot
+// change mid-stream, so one check at the top is enough.
+func (c connectAuth) WrapStreamingHandler(next connect.StreamingHandlerFunc) connect.StreamingHandlerFunc {
+	return func(ctx context.Context, conn connect.StreamingHandlerConn) error {
+		if err := c.a.authorizeHeader(ctx, conn.RequestHeader()); err != nil {
+			return err
+		}
+		return next(ctx, conn)
 	}
 }

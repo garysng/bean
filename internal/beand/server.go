@@ -205,6 +205,13 @@ func (s *Server) Exec(ctx context.Context, req *commonv1.ExecRequest) (*commonv1
 }
 
 func (s *Server) ReadFile(req *commonv1.ReadFileRequest, stream agentv1.AgentService_ReadFileServer) error {
+	return s.readFileTo(req, func(chunk *commonv1.FileChunk) error { return stream.Send(chunk) })
+}
+
+// readFileTo is the transport-independent core of ReadFile: it opens the file and
+// hands each chunk to send. The grpc-go method and the Connect adapter both wrap
+// it, so one implementation serves both and the file-safety logic lives once.
+func (s *Server) readFileTo(req *commonv1.ReadFileRequest, send func(*commonv1.FileChunk) error) error {
 	rel, err := s.rootRelative(req.Path)
 	if err != nil {
 		return err
@@ -219,7 +226,7 @@ func (s *Server) ReadFile(req *commonv1.ReadFileRequest, stream agentv1.AgentSer
 	for {
 		n, rerr := f.Read(buf)
 		if n > 0 {
-			if serr := stream.Send(&commonv1.FileChunk{Data: buf[:n]}); serr != nil {
+			if serr := send(&commonv1.FileChunk{Data: buf[:n]}); serr != nil {
 				return serr
 			}
 		}
@@ -233,21 +240,34 @@ func (s *Server) ReadFile(req *commonv1.ReadFileRequest, stream agentv1.AgentSer
 }
 
 func (s *Server) WriteFile(stream agentv1.AgentService_WriteFileServer) error {
-	first, err := stream.Recv()
-	if err != nil {
-		return status.Errorf(codes.InvalidArgument, "missing meta frame: %v", err)
-	}
-	meta := first.GetMeta()
-	if meta == nil {
-		return status.Error(codes.InvalidArgument, "first frame must be meta")
-	}
-	rel, err := s.rootRelative(meta.Path)
+	resp, err := s.writeFileFrom(stream.Recv)
 	if err != nil {
 		return err
 	}
+	return stream.SendAndClose(resp)
+}
+
+// writeFileFrom is the transport-independent core of WriteFile: it pulls frames
+// via recv (a meta frame then data frames) and returns the response. The grpc-go
+// method sends it with SendAndClose; the Connect adapter returns it directly. A
+// recv returning io.EOF ends the stream, exactly as grpc-go and Connect both
+// report a client's half-close.
+func (s *Server) writeFileFrom(recv func() (*commonv1.WriteFileFrame, error)) (*commonv1.WriteFileResponse, error) {
+	first, err := recv()
+	if err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "missing meta frame: %v", err)
+	}
+	meta := first.GetMeta()
+	if meta == nil {
+		return nil, status.Error(codes.InvalidArgument, "first frame must be meta")
+	}
+	rel, err := s.rootRelative(meta.Path)
+	if err != nil {
+		return nil, err
+	}
 	if meta.Mkdirs {
 		if err := s.mkdirAllRoot(filepath.Dir(rel)); err != nil {
-			return fsErr("mkdirs "+meta.Path, err)
+			return nil, fsErr("mkdirs "+meta.Path, err)
 		}
 	}
 	// Mask off setuid/setgid/sticky: callers may not create privileged files.
@@ -261,7 +281,7 @@ func (s *Server) WriteFile(stream agentv1.AgentService_WriteFileServer) error {
 	tmpRel := filepath.Join(filepath.Dir(rel), fmt.Sprintf(".bean-tmp-%s", randSuffix()))
 	f, err := s.root.OpenFile(tmpRel, os.O_CREATE|os.O_EXCL|os.O_WRONLY, mode)
 	if err != nil {
-		return fsErr("create temp for "+meta.Path, err)
+		return nil, fsErr("create temp for "+meta.Path, err)
 	}
 	committed := false
 	defer func() {
@@ -273,12 +293,12 @@ func (s *Server) WriteFile(stream agentv1.AgentService_WriteFileServer) error {
 
 	var written int64
 	for {
-		frame, rerr := stream.Recv()
+		frame, rerr := recv()
 		if rerr != nil {
 			if errors.Is(rerr, io.EOF) {
 				break
 			}
-			return status.Errorf(codes.Internal, "recv: %v", rerr)
+			return nil, status.Errorf(codes.Internal, "recv: %v", rerr)
 		}
 		data := frame.GetData()
 		if data == nil {
@@ -287,20 +307,20 @@ func (s *Server) WriteFile(stream agentv1.AgentService_WriteFileServer) error {
 		n, werr := f.Write(data)
 		written += int64(n)
 		if werr != nil {
-			return fsErr("write "+meta.Path, werr)
+			return nil, fsErr("write "+meta.Path, werr)
 		}
 	}
 	if err := f.Sync(); err != nil {
-		return fsErr("sync "+meta.Path, err)
+		return nil, fsErr("sync "+meta.Path, err)
 	}
 	if err := f.Close(); err != nil {
-		return fsErr("close "+meta.Path, err)
+		return nil, fsErr("close "+meta.Path, err)
 	}
 	if err := s.root.Rename(tmpRel, rel); err != nil {
-		return fsErr("commit "+meta.Path, err)
+		return nil, fsErr("commit "+meta.Path, err)
 	}
 	committed = true
-	return stream.SendAndClose(&commonv1.WriteFileResponse{BytesWritten: written})
+	return &commonv1.WriteFileResponse{BytesWritten: written}, nil
 }
 
 // mkdirAllRoot creates dir and parents inside the sandbox root.
@@ -376,12 +396,18 @@ func (s *Server) ListDir(ctx context.Context, req *commonv1.ListDirRequest) (*co
 }
 
 func (s *Server) GetLogs(req *commonv1.GetLogsRequest, stream agentv1.AgentService_GetLogsServer) error {
+	return s.getLogsTo(req, func(chunk *commonv1.LogChunk) error { return stream.Send(chunk) })
+}
+
+// getLogsTo is the transport-independent core of GetLogs, shared by the grpc-go
+// method and the Connect adapter.
+func (s *Server) getLogsTo(req *commonv1.GetLogsRequest, send func(*commonv1.LogChunk) error) error {
 	data := s.logs.Snapshot()
 	if req.TailLines > 0 {
 		data = tailLines(data, int(req.TailLines))
 	}
 	if len(data) > 0 {
-		if err := stream.Send(&commonv1.LogChunk{Data: data}); err != nil {
+		if err := send(&commonv1.LogChunk{Data: data}); err != nil {
 			return err
 		}
 	}

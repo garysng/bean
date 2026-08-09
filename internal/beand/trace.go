@@ -2,7 +2,9 @@ package beand
 
 import (
 	"context"
+	"net/http"
 
+	"connectrpc.com/connect"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
 	"google.golang.org/grpc"
@@ -77,4 +79,42 @@ func withCallerTrace(ctx context.Context) context.Context {
 		return ctx
 	}
 	return logging.WithRequest(ctx, sc.TraceID().String())
+}
+
+// withCallerTraceHeader is the header-based counterpart of withCallerTrace, for
+// the Connect server: the traceparent arrives as an HTTP header rather than gRPC
+// metadata, but the propagator and the outcome (adopt the caller's trace id as
+// this call's request id) are identical.
+func withCallerTraceHeader(ctx context.Context, h http.Header) context.Context {
+	sc := trace.SpanContextFromContext(
+		agentPropagator.Extract(ctx, propagation.HeaderCarrier(h)))
+	if !sc.HasTraceID() {
+		return ctx
+	}
+	return logging.WithRequest(ctx, sc.TraceID().String())
+}
+
+// ConnectTraceLogging adopts the caller's trace id for both unary and streaming
+// Connect calls, the header-based equivalent of the two gRPC trace interceptors.
+func ConnectTraceLogging() connect.Interceptor { return connectTrace{} }
+
+type connectTrace struct{}
+
+func (connectTrace) WrapUnary(next connect.UnaryFunc) connect.UnaryFunc {
+	return func(ctx context.Context, req connect.AnyRequest) (connect.AnyResponse, error) {
+		if req.Spec().IsClient {
+			return next(ctx, req)
+		}
+		return next(withCallerTraceHeader(ctx, req.Header()), req)
+	}
+}
+
+func (connectTrace) WrapStreamingClient(next connect.StreamingClientFunc) connect.StreamingClientFunc {
+	return next
+}
+
+func (connectTrace) WrapStreamingHandler(next connect.StreamingHandlerFunc) connect.StreamingHandlerFunc {
+	return func(ctx context.Context, conn connect.StreamingHandlerConn) error {
+		return next(withCallerTraceHeader(ctx, conn.RequestHeader()), conn)
+	}
 }
