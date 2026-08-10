@@ -377,6 +377,25 @@ func TestForkPartialFailureReportsWhichChildrenFailed(t *testing.T) {
 
 // TestForkFailsWhenNoChildCanStart checks the all-failed case reports the
 // children's own reason rather than burying it under a generic error.
+// TestForkFailureStatusMapsCodes pins the code->HTTP-status mapping the fork
+// handler uses to report a child's failure, including the catch-all 500.
+func TestForkFailureStatusMapsCodes(t *testing.T) {
+	cases := map[string]int{
+		"INCOMPATIBLE_CPU":      http.StatusConflict,
+		"NO_CAPACITY":           http.StatusServiceUnavailable,
+		"NODE_UNREACHABLE":      http.StatusServiceUnavailable,
+		"SNAPSHOT_DATA_MISSING": http.StatusNotFound,
+		"SNAPSHOT_BASE_MISSING": http.StatusNotFound,
+		"SOMETHING_ELSE":        http.StatusInternalServerError,
+		"":                      http.StatusInternalServerError,
+	}
+	for code, want := range cases {
+		if got := forkFailureStatus(code); got != want {
+			t.Errorf("forkFailureStatus(%q) = %d, want %d", code, got, want)
+		}
+	}
+}
+
 func TestForkFailsWhenNoChildCanStart(t *testing.T) {
 	// Room for the source only.
 	env := startEnv(t, envOpts{CPUPerNode: 1, MemoryPerNode: 512})

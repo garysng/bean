@@ -265,6 +265,66 @@ func TestFailSnapshotRecordsFailure(t *testing.T) {
 	}
 }
 
+// TestHandleBuildValidates covers handleBuild's request guards, none of which
+// need a builder: a bad tag, a missing dockerfile, non-base64 context, and a
+// tag that is already taken are all rejected before any node is picked.
+func TestHandleBuildValidates(t *testing.T) {
+	env := startEnv(t, envOpts{})
+
+	// Invalid JSON body.
+	resp, _ := env.raw("POST", "/v1/templates/build", "{not json")
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("bad JSON = %d, want 400", resp.StatusCode)
+	}
+
+	// Missing/invalid tag.
+	resp, _ = env.do("POST", "/v1/templates/build", map[string]any{"dockerfile": "FROM alpine"})
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("no tag = %d, want 400", resp.StatusCode)
+	}
+
+	// Missing dockerfile.
+	resp, _ = env.do("POST", "/v1/templates/build", map[string]any{"tag": "app:v1"})
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("no dockerfile = %d, want 400", resp.StatusCode)
+	}
+
+	// Context tar that is not valid base64.
+	resp, _ = env.do("POST", "/v1/templates/build", map[string]any{
+		"tag": "app:v1", "dockerfile": "FROM alpine", "contextTar": "!!!not base64!!!",
+	})
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("bad base64 context = %d, want 400", resp.StatusCode)
+	}
+
+	// A tag that already names a template is a conflict; templates are immutable.
+	existing := &store.Template{
+		ID: store.NewID(store.PrefixTemplate), Name: "taken:v1",
+		Source: store.TemplateBuilt, State: store.TemplateReady,
+	}
+	if err := env.Store.PutTemplate(existing); err != nil {
+		t.Fatal(err)
+	}
+	resp, _ = env.do("POST", "/v1/templates/build", map[string]any{
+		"tag": "taken:v1", "dockerfile": "FROM alpine",
+	})
+	if resp.StatusCode != http.StatusConflict {
+		t.Errorf("duplicate tag = %d, want 409", resp.StatusCode)
+	}
+}
+
+// TestHandleBuildWithoutImageServiceIs501 confirms the build endpoint reports
+// NOT_IMPLEMENTED when the node has no image service configured.
+func TestHandleBuildWithoutImageServiceIs501(t *testing.T) {
+	env := startEnv(t, envOpts{WithoutImages: true})
+	resp, _ := env.do("POST", "/v1/templates/build", map[string]any{
+		"tag": "app:v1", "dockerfile": "FROM alpine",
+	})
+	if resp.StatusCode != http.StatusNotImplemented {
+		t.Errorf("build with no image service = %d, want 501", resp.StatusCode)
+	}
+}
+
 type errPlain struct{}
 
 func (errPlain) Error() string { return "plain" }

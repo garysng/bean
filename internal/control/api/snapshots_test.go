@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/garysng/bean/internal/control/store"
 )
 
 // TestSnapshotRestoreEndToEnd is the flow the design exists for: set an
@@ -247,6 +249,37 @@ func TestSnapshotDisabledWithoutStorage(t *testing.T) {
 	code, _ := env.do("POST", "/v1/sandboxes/"+id+"/snapshot", nil)
 	if code.StatusCode != http.StatusNotImplemented {
 		t.Errorf("status = %d, want 501", code.StatusCode)
+	}
+}
+
+// TestCreateFromSnapshotDisabledStorageIs501 covers createFromSnapshot's guard
+// when snapshot storage is not configured: a create naming a snapshot refuses
+// rather than pretending.
+func TestCreateFromSnapshotDisabledStorageIs501(t *testing.T) {
+	env := startEnv(t, envOpts{WithoutSnapshots: true})
+	resp, _ := env.do("POST", "/v1/sandboxes", map[string]any{"snapshot": "snap_1"})
+	if resp.StatusCode != http.StatusNotImplemented {
+		t.Errorf("create-from-snapshot with no storage = %d, want 501", resp.StatusCode)
+	}
+}
+
+// TestCreateFromNotReadySnapshotIsConflict drives the SNAPSHOT_NOT_READY branch:
+// a snapshot that exists but is still being created cannot be booted from.
+func TestCreateFromNotReadySnapshotIsConflict(t *testing.T) {
+	env := startEnv(t, envOpts{})
+	snap := &store.Snapshot{
+		ID: store.NewID(store.PrefixSnapshot), SandboxID: "sbx-x",
+		State: store.SnapshotCreating,
+	}
+	if err := env.Store.PutSnapshot(snap); err != nil {
+		t.Fatal(err)
+	}
+	resp, out := env.do("POST", "/v1/sandboxes", map[string]any{"snapshot": snap.ID})
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("create from a not-ready snapshot = %d, want 409: %v", resp.StatusCode, out)
+	}
+	if c := out["error"].(map[string]any)["code"]; c != "SNAPSHOT_NOT_READY" {
+		t.Errorf("code = %v, want SNAPSHOT_NOT_READY", c)
 	}
 }
 
