@@ -124,13 +124,13 @@ type BuildStep struct {
 
 
 ```
-POST /v1/images/build      Dockerfile 或 steps → 202 { buildId }
+POST /v1/templates/build   Dockerfile 或 steps → 202 { buildId }
      { "tag": "...", "from": "...", "steps": [...],
        "dockerfile": "...", "contextRef": "..." }
-POST /v1/images/build/{id}/context   上传 build context（tar）
-GET  /v1/images/build/{id}           状态、日志位置、产出 digest
-GET  /v1/images/build?label=          列表
-POST /v1/images/build/{id}/cancel
+POST /v1/templates/build/{id}/context   上传 build context（tar）
+GET  /v1/templates/build/{id}           状态、日志位置、产出 digest
+GET  /v1/templates/build?label=          列表
+POST /v1/templates/build/{id}/cancel
 ```
 
 Build 状态机：`PENDING → RUNNING → CONVERTING → READY | FAILED | CANCELLED`。

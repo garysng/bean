@@ -181,7 +181,7 @@ cp LOCAL sbx:SBX:/path | 反向        events SBX | events -f
 build --tag REF [--file Dockerfile] [CONTEXT]
 snapshot create SBX [--name N] [--no-keep-running] [--no-memory] [--base SNAP]
 snapshot ls [--label k=v] | snapshot rm SNAP
-image ls | image status REF | image prewarm REF... [--replicas N]
+template ls [--source built|converted] | template status ID|NAME | template prewarm REF... [--replicas N]
 输出:--json / --quiet    退出码:0 / 64 / 69 / 70 / 125
 ```
 
@@ -189,7 +189,7 @@ image ls | image status REF | image prewarm REF... [--replicas N]
 **已实装**（`cli/cli.go`,与代码一致）：
 
 ```
-bean run --image IMG | --snapshot SNAP
+bean run (--image-ref IMG | --template ID|NAME | --snapshot SNAP)
          [--label k=v] [--idle-timeout 300s] [--on-idle pause|delete]
 bean ls   [--label k=v]
 bean exec SBX -- CMD...
@@ -199,10 +199,10 @@ bean events SBX             # 历史;`-f [SBX] [--label k=v]` 跟随实时流(SS
 bean kill SBX [--force]
 bean pause SBX / bean resume SBX   # 冻住并唤回同一个 sandbox
 bean run --snapshot SNAP           # 从快照创建:每调一次产出一个新 sandbox
-bean build  --tag REF [--file Dockerfile] [CONTEXT]   # 平台上构建镜像
+bean build  --tag REF [--file Dockerfile] [CONTEXT]   # 平台上构建 template
 bean snapshot create SBX [--name N] [--no-keep-running]
 bean snapshot ls [--label k=v] / bean snapshot rm SNAP
-bean image ls | image status REF | image prewarm REF... [--replicas N]
+bean template ls [--source built|converted] | template status ID|NAME | template prewarm REF... [--replicas N]
 bean version
 ```
 

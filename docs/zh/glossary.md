@@ -13,21 +13,39 @@ bean 用到的术语,一次定义清楚。凡是踩过坑的地方,定义里直�
 一棵进程树,跑在某一个 runtime 档之下。它是其他一切所围绕的基本单位。一个沙箱有一条
 生命周期(见下面的动词)和一个 id(`sbx_...`)。
 
-**image(镜像)** —— 一个 OCI 镜像:*layers*(文件系统,一叠 tarball)加上一个
-*配置 blob*(描述如何启动)。bean 拉取并转换镜像,从不需要每镜像一次模板构建。镜像是
-沙箱的只读输入,不是运行中的东西。
+**image(镜像)** —— 一个 OCI 注册表镜像引用(`python:3.12`、
+`registry/foo/bar:latest`),私有仓库时再带上认证。它是一个**创建时来源**,不是 bean
+存储的记录:节点拉取它并转换成 overlaybd,这次转换产出一个 *template*(见下)。"image"
+只指这个 OCI 来源;bean 存下来的可启动产物叫 template,从不叫 "image"。
 
-**base image(基础镜像)** —— 每个节点 loop 挂载一次、在其上所有沙箱间共享的只读镜像。
-一个沙箱**不会**拿到自己的副本;它在共享 base 之上获得一个写时复制层(见 *CoW 层*)。
-把文件系统快照提升进 image 命名空间,可以把运行中沙箱的文件系统冻结成一份新的可复用 base image。
+**template(模板)** —— 一份可启动的 overlaybd 文件系统,沙箱从它 boot,由 Dockerfile
+`build` 或转换一个 OCI 镜像产出(`source` 区分二者)。一个 `tpl_...` 对象,以
+**id + name + labels** 寻址,与 snapshot 对称。它携带沙箱启动时继承的镜像 config
+(ENV/ENTRYPOINT/CMD/WORKDIR/USER),其文件系统是一条共享 overlaybd 层链(见
+*FSArtifact*)。由 OCI 转换而来的 template 还记录一个 `ociSource`(OCI 引用 + 解析出的
+内容 digest)作为转换缓存键,于是之后用同一引用创建时直接复用它而不重新转换;由 build
+产出的 template 没有 `ociSource`。把文件系统快照提升,可以把运行中沙箱的文件系统冻结成
+一份新的可复用 template。
 
-**rootfs** —— 沙箱启动时的根文件系统,由共享 base image 加上沙箱自己的可写 CoW 层组装而成。
+**FSArtifact** —— 同时嵌在 template 和 snapshot 里的共享文件系统引用:一条 overlaybd
+层链,以其 manifest `digest` 命名于内容寻址存储(`blobs/<digest>`),外加层链、尺寸和
+镜像 config。两条记录指向同一 digest 就是逐字节共享一份文件系统;一个 snapshot 复用其
+base template 的层 digest 时只存自己的顶层。这就是为什么 template 的文件系统和 snapshot
+的文件系统被同样地描述 —— 收敛之后它们在同一个存储里是同一种形状。
+
+**base image(基础镜像)** —— 每个节点 loop 挂载一次、在其上所有沙箱间共享的只读文件系统。
+一个沙箱**不会**拿到自己的副本;它在共享 base 之上获得一个写时复制层(见 *CoW 层*)。这个
+base 就是某个 template 的 overlaybd 层链(或一个转换后的 OCI 镜像的)。
+
+**rootfs** —— 沙箱启动时的根文件系统,由共享 base 加上沙箱自己的可写 CoW 层组装而成。
 
 **CoW 层** —— 每个沙箱通过 device-mapper 在共享 base 之上获得的稀疏写时复制层。这正是
 为什么拉起一百个沙箱的代价是一百个稀疏文件、而非一百份镜像副本 —— create 时每沙箱 44 KiB 磁盘。
 
 **snapshot(快照)** —— 一份持久化的沙箱捕获,它比沙箱本身活得更久,且可被反复用于创建。
-一个 `snap_...` 对象,以 blob 形式存储(节点本地和/或 S3)。三种,**语义不同,不只是尺寸不同**:
+一个 `snap_...` 对象,以 **id + name + labels** 寻址,与 template 对称;其文件系统是一条
+共享 overlaybd 层链(见 *FSArtifact*),与 template 的文件系统同一种形状,而内存(若有)
+以 blob 形式存储(节点本地和/或 S3)。三种,**语义不同,不只是尺寸不同**:
 
 | 种类 | 参数 | 捕获什么 | 从快照创建后 | 可移植性 |
 |---|---|---|---|---|
@@ -49,8 +67,11 @@ bean 用到的术语,一次定义清楚。凡是踩过坑的地方,定义里直�
 这些是沙箱上的**外部操作**。每个都映射到一个按 runtime 而定的实现(见 *runtime 档*)——
 动词相同,底下发生的事随档而异,而且有些档并不实现全部动词。
 
-**create(创建)** —— 造一个新沙箱。一个端点(`POST /v1/sandboxes`),按输入分支:给
-**镜像**就冷启动;给**快照**就走从快照创建。没有单独的 `/restore` 端点。
+**create(创建)** —— 造一个新沙箱。一个端点(`POST /v1/sandboxes`),按三种来源之一分支:
+给 **`imageRef`**(一个 OCI 注册表引用,节点拉取并转换,落到或命中一个 template)就冷启动;
+给 **`template`**(一个已存的 `tpl_...`,按 id 或 name)就从它的 overlaybd 层链冷启动;
+给 **`snapshot`**(一个已存的 `snap_...`,按 id 或 name)就走从快照创建。没有单独的
+`/restore` 端点。
 
 **create-from-snapshot(从快照创建)** —— 从一份快照 blob 创建一个**新**沙箱(新 id)。
 快照是持久的,可以这样用任意多次,每次调用产出一个互相独立的沙箱。这就是早期草稿里作为
@@ -89,14 +110,16 @@ checkpoint,源沙箱保持运行。机制已实现;还没有专门的 API 动词
 | OCI + gVisor / runc | `runsc` / `runc` | gVisor sentry,或 runc 命名空间 | **不支持**(返回 unsupported) |
 | local | `local` | 无 —— 仅开发用 | 有限 |
 
-`fc` 是测得更充分的路径,所有实测数字都出自它。OCI 档服务 benchmark 负载(任意镜像、
-不需每镜像一次模板构建),但没有 checkpoint 可供 fork。
+`fc` 是测得更充分的路径,所有实测数字都出自它。OCI 档服务 benchmark 负载(任意 OCI
+镜像、不需构建步骤),但没有 checkpoint 可供 fork。
 
 **bean-api** —— 控制面(一个进程):API 网关、调度器(放置在同进程内,所以放置与承诺是
-同一个事务)、镜像服务。由 SQLite 或 Postgres 支撑。
+同一个事务)、template 服务(build、OCI 转换,以及 template/snapshot 记录)。由 SQLite
+或 Postgres 支撑。
 
 **noded** —— 节点守护进程,每宿主一个。运行 runtime 各档与镜像子系统(base image、CoW、
-overlaybd/TCMU)。
+overlaybd/TCMU)。节点这个包仍以 OCI 镜像命名 —— template 是控制面记录,节点处理的是它所
+转换的 OCI 镜像与 rootfs。
 
 **beand** —— 每个沙箱内的 PID 1,装在自己的只读磁盘上,所以用户镜像不需任何改动。它先建
 挂载矩阵,再 pivot 进用户镜像。

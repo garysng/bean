@@ -470,9 +470,9 @@ GET    /v1/sandboxes/{id}/files/ls?path=
 # 端口
 POST   /v1/sandboxes/{id}/ports      # 暴露端口 → 公网 URL
 
-# 镜像
-POST   /v1/images/prewarm            # ref 列表 + 目标节点数
-GET    /v1/images/{ref}/status       # 缓存分布、blob 就绪度
+# 模板
+POST   /v1/templates/prewarm         # ref 列表 + 目标节点数
+GET    /v1/templates/status?name=    # 缓存分布、blob 就绪度
 
 # 生命周期扩展 / 批量 / 卷 / 快照 / 日志（完整定义见 api-design.md）
 POST   /v1/sandboxes:batchCreate     # 批量创建（eval 高频）

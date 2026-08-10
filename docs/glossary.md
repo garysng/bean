@@ -15,18 +15,40 @@ and a process tree, running under one of the runtime tiers. It is the unit
 everything else is about. A sandbox has one lifecycle (see the verbs below) and
 one id (`sbx_...`).
 
-**image** — an OCI image: *layers* (the filesystem, as a stack of tarballs) plus
-a *configuration blob* describing how to start them. bean pulls and converts
-images; it never requires a per-image template build step. An image is
-read-only input to a sandbox, not a running thing.
+**image** — an OCI registry image reference (`python:3.12`,
+`registry/foo/bar:latest`), plus optional auth for a private registry. It is a
+**create-time source**, not a stored bean record: a node pulls it and converts it
+to overlaybd, and that conversion produces a *template* (below). "image" names
+only the OCI source; the startable artifact bean stores is a template, never an
+"image".
 
-**base image** — the shared, read-only image a node loop-mounts once and reuses
-across every sandbox on it. A sandbox does **not** get its own copy; it gets a
-copy-on-write layer over the shared base (see *CoW layer*). Promoting a filesystem
-snapshot can freeze a running sandbox's filesystem into a new reusable base image.
+**template** — a startable overlaybd filesystem a sandbox boots from, produced
+either by a Dockerfile `build` or by converting an OCI image (`source`
+distinguishes the two). A `tpl_...` object addressed by **id + name + labels**,
+symmetric with a snapshot. It carries the image config (ENV/ENTRYPOINT/CMD/
+WORKDIR/USER) a sandbox inherits at start, and its filesystem is a shared
+overlaybd layer chain (see *FSArtifact*). A converted-OCI template also records an
+`ociSource` (the OCI ref + resolved content digest) as a conversion-cache key, so
+a later create from the same reference reuses it instead of re-converting; a
+build-produced template has no `ociSource`. Promoting a filesystem snapshot can
+freeze a running sandbox's filesystem into a new reusable template.
+
+**FSArtifact** — the shared filesystem reference embedded in *both* a template and
+a snapshot: an overlaybd layer chain named by its manifest `digest` in the
+content-addressed store (`blobs/<digest>`), plus the layer chain, size, and image
+config. Two records pointing at the same digest share one filesystem
+byte-for-byte; a snapshot that shares its base template's layer digests stores
+only its own top layer. This is why a template's filesystem and a snapshot's are
+described identically — post-convergence they are the same shape in the same
+store.
+
+**base image** — the shared, read-only filesystem a node loop-mounts once and
+reuses across every sandbox on it. A sandbox does **not** get its own copy; it
+gets a copy-on-write layer over the shared base (see *CoW layer*). The base is a
+template's overlaybd chain (or a converted OCI image's).
 
 **rootfs** — the root filesystem a sandbox boots with, assembled from the shared
-base image plus the sandbox's own writable CoW layer.
+base plus the sandbox's own writable CoW layer.
 
 **CoW layer** — the sparse copy-on-write layer each sandbox gets over the shared
 base, through device-mapper. This is why fanning out a hundred sandboxes costs a
@@ -34,8 +56,11 @@ hundred sparse files rather than a hundred image copies — 44 KiB of disk per
 sandbox at create.
 
 **snapshot** — a durable, persisted capture of a sandbox that outlives it and can
-be created from repeatedly. A `snap_...` object, stored as a blob (node-local
-and/or S3). Three kinds, with **different semantics, not just different sizes**:
+be created from repeatedly. A `snap_...` object addressed by **id + name +
+labels**, symmetric with a template; its filesystem is a shared overlaybd chain
+(see *FSArtifact*), the same shape a template's is, and its memory (when present)
+is stored as a blob (node-local and/or S3). Three kinds, with **different
+semantics, not just different sizes**:
 
 | kind | flag | what it captures | on create-from-snapshot | portability |
 |---|---|---|---|---|
@@ -61,7 +86,10 @@ implementation (see *runtime tier*) — the verb is the same, what happens under
 differs by tier, and some tiers do not implement all of them.
 
 **create** — make a new sandbox. One endpoint (`POST /v1/sandboxes`) that branches
-on its input: from an **image** it cold-boots; from a **snapshot** it does
+on exactly one of three sources: an **`imageRef`** (an OCI registry reference the
+node pulls and converts, landing or hitting a template) cold-boots; a
+**`template`** (a stored `tpl_...` by id or name) cold-boots from its overlaybd
+chain; a **`snapshot`** (a stored `snap_...` by id or name) does
 create-from-snapshot. There is no separate `/restore` endpoint.
 
 **create-from-snapshot** — create a **new** sandbox (new id) from a snapshot blob.
@@ -110,15 +138,18 @@ mechanisms and different levels of support:
 | local | `local` | none — dev only | limited |
 
 `fc` is the more heavily tested path and the one all the measured numbers come
-from. The OCI tier serves the benchmark workload (any image, no per-image
-template build) but has no checkpoint to fork from.
+from. The OCI tier serves the benchmark workload (any OCI image, no build step)
+but has no checkpoint to fork from.
 
 **bean-api** — the control plane (one process): API gateway, scheduler
 (placement in-process so placement and commitment are one transaction), and
-image service. Backed by SQLite or Postgres.
+template service (build, OCI conversion, and the template/snapshot records).
+Backed by SQLite or Postgres.
 
 **noded** — the node daemon, one per host. Runs the runtime tiers and the image
-subsystem (base image, CoW, overlaybd/TCMU).
+subsystem (base image, CoW, overlaybd/TCMU). The node package is still named for
+OCI images — a template is a control-plane record; the node handles the OCI
+images and rootfs it converts.
 
 **beand** — PID 1 inside each sandbox, shipped on its own read-only disk so user
 images need no modification. Builds the mount matrix, then pivots into the user

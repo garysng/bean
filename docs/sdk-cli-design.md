@@ -192,7 +192,7 @@ cp LOCAL sbx:SBX:/path | and the reverse        events SBX | events -f
 build --tag REF [--file Dockerfile] [CONTEXT]
 snapshot create SBX [--name N] [--no-keep-running] [--no-memory] [--base SNAP]
 snapshot ls [--label k=v] | snapshot rm SNAP
-image ls | image status REF | image prewarm REF... [--replicas N]
+template ls [--source built|converted] | template status ID|NAME | template prewarm REF... [--replicas N]
 output: --json / --quiet    exit codes: 0 / 64 / 69 / 70 / 125
 ```
 
@@ -200,7 +200,7 @@ output: --json / --quiet    exit codes: 0 / 64 / 69 / 70 / 125
 **Shipped** (`cli/cli.go`, matching the code):
 
 ```
-bean run --image IMG | --snapshot SNAP
+bean run (--image-ref IMG | --template ID|NAME | --snapshot SNAP)
          [--label k=v] [--idle-timeout 300s] [--on-idle pause|delete]
 bean ls   [--label k=v]
 bean exec SBX -- CMD...
@@ -210,10 +210,10 @@ bean events SBX             # history; `-f [SBX] [--label k=v]` follows the live
 bean kill SBX [--force]
 bean pause SBX / bean resume SBX   # freeze and wake the same sandbox
 bean run --snapshot SNAP           # create from a snapshot: a new sandbox each time it is called
-bean build  --tag REF [--file Dockerfile] [CONTEXT]   # build an image on the platform
+bean build  --tag REF [--file Dockerfile] [CONTEXT]   # build a template on the platform
 bean snapshot create SBX [--name N] [--no-keep-running]
 bean snapshot ls [--label k=v] / bean snapshot rm SNAP
-bean image ls | image status REF | image prewarm REF... [--replicas N]
+bean template ls [--source built|converted] | template status ID|NAME | template prewarm REF... [--replicas N]
 bean version
 ```
 

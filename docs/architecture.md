@@ -541,9 +541,9 @@ GET    /v1/sandboxes/{id}/files/ls?path=
 # Ports
 POST   /v1/sandboxes/{id}/ports      # expose a port → public URL
 
-# Images
-POST   /v1/images/prewarm            # list of refs + target node count
-GET    /v1/images/{ref}/status       # cache distribution, blob readiness
+# Templates
+POST   /v1/templates/prewarm         # list of refs + target node count
+GET    /v1/templates/status?name=    # cache distribution, blob readiness
 
 # Lifecycle extensions / batch / volumes / snapshots / logs (full definition in api-design.md)
 POST   /v1/sandboxes:batchCreate     # batch create (frequent in eval)

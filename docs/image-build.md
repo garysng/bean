@@ -137,13 +137,13 @@ type BuildStep struct {
 
 
 ```
-POST /v1/images/build      Dockerfile or steps → 202 { buildId }
+POST /v1/templates/build   Dockerfile or steps → 202 { buildId }
      { "tag": "...", "from": "...", "steps": [...],
        "dockerfile": "...", "contextRef": "..." }
-POST /v1/images/build/{id}/context   upload the build context (tar)
-GET  /v1/images/build/{id}           status, log location, output digest
-GET  /v1/images/build?label=          list
-POST /v1/images/build/{id}/cancel
+POST /v1/templates/build/{id}/context   upload the build context (tar)
+GET  /v1/templates/build/{id}           status, log location, output digest
+GET  /v1/templates/build?label=          list
+POST /v1/templates/build/{id}/cancel
 ```
 
 Build state machine: `PENDING → RUNNING → CONVERTING → READY | FAILED | CANCELLED`.

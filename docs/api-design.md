@@ -54,13 +54,17 @@ Base: `https://api.<domain>/v1`. Error responses are uniform:
 ```
 POST /sandboxes
 {
-  "image": "registry.example.com/swebench/django__django-12345:latest",
+  "imageRef": "registry.example.com/swebench/django__django-12345:latest",
+                                        // one of imageRef | template | snapshot (see below):
+                                        //   imageRef  — an OCI registry reference, pulled+converted
+                                        //   template  — a stored tpl_... by id or name
+                                        //   snapshot  — a stored snap_... by id or name
   "resources": { "cpu": 2, "memoryMiB": 4096, "diskMiB": 20480 },
                                         // gpu/isolation are internal fields, not exposed;
                                         // the runtime tier is assigned by the scheduler
                                         // (architecture D3)
   "env": { "FOO": "bar" },
-  "cmd": null,                          // overrides the image CMD; null = keep the original
+  "cmd": null,                          // overrides the template CMD; null = keep the original
                                         // entrypoint (started under the agent)
   "autoStartCmd": false,                // true starts the original entrypoint right after create
   "region": "ap-east-1",                // optional; defaults to the key's default region;
@@ -103,12 +107,17 @@ POST   /sandboxes/{id}/fork     { "count": 3, "labels": {...} }    // separate A
 ```
 
 **There is one creation endpoint, and it branches internally.** `POST /sandboxes` takes
-*either* an `image` *or* a `snapshot` (mutually exclusive). Which one is present decides how
-the guest comes up, and nothing else about the call changes:
+*exactly one* of `imageRef`, `template`, or `snapshot` (mutually exclusive). Which one is
+present decides how the guest comes up, and nothing else about the call changes:
 
-- **from an image** — a cold boot. The runtime's `Create` path assembles a rootfs and boots
-  the guest kernel (vm-assembly.md).
-- **from a snapshot** — the runtime's `Fork` path: it seeds the CoW layer and brings the guest
+- **from an imageRef** — an OCI registry reference. The node pulls and converts it to
+  overlaybd, which lands (or reuses, keyed by the OCI ref + content digest) a `template`; the
+  guest then cold-boots from that template.
+- **from a template** — a stored `tpl_...`, by id or name. A cold boot from its overlaybd
+  chain: the runtime's `Create` path assembles a rootfs and boots the guest kernel
+  (vm-assembly.md).
+- **from a snapshot** — a stored `snap_...`, by id or name. The runtime's `Fork` path: it seeds
+  the CoW layer and brings the guest
   back through UFFD page-in instead of booting. This path is what earlier docs call *restore*;
   it is an internal branch of create, not a separate call or endpoint. It always produces a
   **new** sandbox with a new id — never a revival of the one that was snapshotted — and calling
@@ -217,31 +226,37 @@ must not be given a port it would not want its caller to see. The external auth 
 `10001` is reserved -- it is the agent -- and anything mapping ports on a user's behalf
 must refuse it.
 
-### 3.5 Images ✅
+### 3.5 Templates ✅
+
+A **template** is the startable overlaybd artifact a sandbox boots from — produced by a
+Dockerfile build or by converting an OCI image. An **image** is only an OCI registry
+reference (a create-time source); it is not a stored record. A template is addressed by
+**id + name + labels**, symmetric with a snapshot.
 
 **Terminology (these have to be kept apart)**:
 
 | Concept | Owner | Notes |
 |---|---|---|
-| `ref` | **user input** | The native OCI reference (`python:3.12`). This is the only thing the user supplies and the only thing they see |
-| `digest` | resolved by the platform | Resolved once from the tag and then fixed; scheduling, caching and reproducibility all key off the digest, so a moving tag cannot change the contents of a batch |
-| overlaybd artifact | **platform-internal** | The converted block-device form; invisible to the user and not selectable |
+| `imageRef` | **user input** | An OCI reference (`python:3.12`). A create-time source, pulled+converted; not a stored record |
+| `id` / `name` | template identity | A template is addressed by `tpl_...` id or by name (a converted-OCI template's name is its OCI ref) |
+| `ociSource` | recorded on convert | `{ref, digest}` — the OCI ref + resolved content digest a template was converted from; nil for a build. The conversion-cache key: a later create with the same ref reuses it |
+| fs `digest` | platform-internal | The overlaybd manifest digest (the shared `blobs/<digest>` key); invisible to the user and not selectable |
 | `state` | platform-internal | `PENDING → CONVERTING → READY \| FAILED` |
 
-The `format` field tells the caller which tier can currently run the image: `oci`
+The `format` field tells the caller which tier can currently run the template: `oci`
 (unconverted, standard pull path) or `overlaybd` (converted, usable by the fc tier).
 
 ```
-GET  /images                      list
-GET  /images/status?ref=<ref>     single-image status (ref goes in the query: it contains / and :)
-     → { ref, digest, state, format, cachedNodes, sizeBytes }
-POST /images/prewarm   { "refs": ["img:a"], "region": "ap-east-1",
-                         "targetNodes": 10, "priority": "high" }
+GET  /templates                      list
+GET  /templates/status?name=<name>   single-template status (name in the query: an OCI ref contains / and :)
+     → { id, name, labels, digest, config, ociSource?, state, format, cachedNodes, sizeBytes }
+POST /templates/prewarm   { "refs": ["img:a"], "region": "ap-east-1",
+                            "targetNodes": 10, "priority": "high" }
      → { jobId, refs, ready: {ref: nodeCount}, done }
-GET  /images/prewarm/{jobId}      per-image × per-node readiness matrix
-POST /images/build     { ... }    → kick off a remote image build
-GET  /images/build/logs?ref=<ref> build log stream (ref in the query: it contains / and :)
-POST /images/build/cancel { ... } cancel an in-flight build
+GET  /templates/prewarm/{jobId}      per-ref × per-node readiness matrix
+POST /templates/build     { ... }    → kick off a remote build
+GET  /templates/build/logs?ref=<ref> build log stream (ref in the query: it contains / and :)
+POST /templates/build/cancel { ... } cancel an in-flight build
 ```
 
 `cachedNodes` / `targetNodes` are **operator semantics, deliberately kept out of the
@@ -269,7 +284,7 @@ DELETE /registries/{host}
 
 ### 3.6 Volumes 📐
 
-Images and volumes are two orthogonal resources (image = environment, volume = data,
+Templates and volumes are two orthogonal resources (template = environment, volume = data,
 independent lifecycles). The data plane is in noded-design.md §3.3.
 
 The first pass carries only the `shared-fs` type (`dataset` is reserved and not yet scheduled):
