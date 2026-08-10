@@ -29,8 +29,8 @@ import (
 	"connectrpc.com/connect"
 	"golang.org/x/net/http2"
 
-	commonv1 "github.com/garysng/bean/internal/gen/bean/common/v1"
 	"github.com/garysng/bean/internal/gen/bean/agent/v1/agentv1connect"
+	commonv1 "github.com/garysng/bean/internal/gen/bean/common/v1"
 	"github.com/garysng/bean/internal/node/runtime"
 )
 

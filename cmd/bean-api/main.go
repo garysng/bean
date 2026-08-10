@@ -238,8 +238,8 @@ func main() {
 
 	srv := api.New(st, router, sched, api.Options{
 		Region: *region, APIKey: *apiKey, RuntimeTier: *runtimeTier,
-		Domain:  *sandboxDomain,
-		Images:  images, Secrets: secrets, Snapshots: blobs,
+		Domain: *sandboxDomain,
+		Images: images, Secrets: secrets, Snapshots: blobs,
 		CreateWait: *createWait, Identity: identity,
 	})
 

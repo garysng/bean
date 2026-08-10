@@ -16,7 +16,7 @@ func TestMultiNodePlacementSpreadsAndExecs(t *testing.T) {
 	var sandboxIDs []string
 	for i := 0; i < 6; i++ {
 		resp, out := env.do("POST", "/v1/sandboxes", map[string]any{
-			"imageRef":     "img:1",
+			"imageRef":  "img:1",
 			"resources": map[string]any{"cpu": 1, "memoryMiB": 512},
 			"labels":    map[string]string{"eval-run": "r1"},
 		})

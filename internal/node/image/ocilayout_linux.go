@@ -284,4 +284,3 @@ func blobPath(layoutDir, digest string) string {
 	}
 	return filepath.Join(layoutDir, "blobs", algo, hex)
 }
-

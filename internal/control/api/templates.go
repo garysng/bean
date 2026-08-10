@@ -121,16 +121,16 @@ func (s *Server) resolveTemplateRef(ref string) (*store.Template, error) {
 // OCI-converted template). It is the symmetric counterpart to a snapshot's JSON.
 func templateJSON(tpl *store.Template) map[string]any {
 	m := map[string]any{
-		"id":          tpl.ID,
-		"name":        tpl.Name,
-		"labels":      tpl.Labels,
-		"digest":      tpl.FS.Digest,
+		"id":           tpl.ID,
+		"name":         tpl.Name,
+		"labels":       tpl.Labels,
+		"digest":       tpl.FS.Digest,
 		"layerDigests": tpl.FS.LayerDigests,
-		"sizeBytes":   tpl.FS.SizeBytes,
-		"config":      tpl.FS.Config,
-		"state":       tpl.State,
-		"reason":      tpl.Reason,
-		"cachedNodes": tpl.CachedNodes,
+		"sizeBytes":    tpl.FS.SizeBytes,
+		"config":       tpl.FS.Config,
+		"state":        tpl.State,
+		"reason":       tpl.Reason,
+		"cachedNodes":  tpl.CachedNodes,
 		// format tells the caller which tier can run this template today.
 		"format": templateFormat(tpl.State),
 		// source answers "is this ours or something converted from outside".

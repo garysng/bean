@@ -296,7 +296,7 @@ func TestForkDisabledWithoutSnapshotStorage(t *testing.T) {
 func TestForkChildInheritsResourcesAndLabels(t *testing.T) {
 	env := startEnv(t, envOpts{})
 	srcID := env.sandboxID(map[string]any{
-		"imageRef":     "base:1",
+		"imageRef":  "base:1",
 		"resources": map[string]any{"cpu": 2, "memoryMiB": 1024},
 		"labels":    map[string]string{"suite": "fork", "eval-run": "run-7"},
 	})

@@ -25,8 +25,8 @@ func TestSandboxLifecycleViaREST(t *testing.T) {
 
 	// create
 	resp, out := env.do("POST", "/v1/sandboxes", map[string]any{
-		"imageRef":  "python:3.12",
-		"labels": map[string]string{"run": "t1"},
+		"imageRef": "python:3.12",
+		"labels":   map[string]string{"run": "t1"},
 	})
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("create status = %d: %v", resp.StatusCode, out)
@@ -165,14 +165,14 @@ func TestCreateValidation(t *testing.T) {
 		t.Errorf("status = %d", resp.StatusCode)
 	}
 	resp, out = env.do("POST", "/v1/sandboxes", map[string]any{
-		"imageRef":     "x",
+		"imageRef":  "x",
 		"lifecycle": map[string]any{"idleTimeout": "nonsense"},
 	})
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("bad idleTimeout status = %d: %v", resp.StatusCode, out)
 	}
 	resp, out = env.do("POST", "/v1/sandboxes", map[string]any{
-		"imageRef":     "x",
+		"imageRef":  "x",
 		"lifecycle": map[string]any{"idleTimeout": "10s", "onIdle": "explode"},
 	})
 	if resp.StatusCode != http.StatusBadRequest {

@@ -244,11 +244,11 @@ type fcVM struct {
 	// which names its base by imageRef. A snapshot seal resolves its shared base
 	// chain from whichever of the two is set.
 	baseFSDigest string
-	dir      string
-	cmd      *exec.Cmd
-	client   *fcClient
-	rootfs   *image.Rootfs
-	paused   bool
+	dir          string
+	cmd          *exec.Cmd
+	client       *fcClient
+	rootfs       *image.Rootfs
+	paused       bool
 	// uffd serves guest page faults for a VM restored from a snapshot. Nil for a
 	// cold boot, which has no memory image to fault against.
 	uffd *uffdHandler
@@ -548,7 +548,7 @@ func (r *FCRuntime) create(ctx context.Context, spec *Spec, layers []SnapshotLay
 		baseFSDigest: spec.FSManifestDigest,
 		dir:          dir,
 		rootfs:       rootfs,
-		done:     make(chan struct{}),
+		done:         make(chan struct{}),
 		// Resolved here, where the Spec is in hand. Empty on a node with no
 		// network pool, which keeps that node's launch identical to before.
 		netnsPath: netnsPathFor(spec),
