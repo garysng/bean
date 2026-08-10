@@ -1,6 +1,7 @@
 package store
 
 import (
+	"errors"
 	"testing"
 	"time"
 )
@@ -134,6 +135,86 @@ func TestSpreadCountsGroupsReservationsByNode(t *testing.T) {
 	}
 	if counts["node-s"] != 2 {
 		t.Errorf("spread count = %v, want node-s:2", counts)
+	}
+}
+
+// TestScanNodeRepairsLegacyCachedImages writes a cached_images blob in the old
+// bare-size shape (a row from before the value carried a digest) and confirms
+// GetNode repairs it into CachedImage entries rather than failing the load,
+// which would take the node out of placement on upgrade.
+// TestReserveRefusesWhenTheNodeNoLongerFits confirms the atomic capacity guard:
+// a request larger than the node's remaining CPU returns ErrCapacityChanged and
+// commits nothing, so a racing scheduler re-scores rather than overselling.
+func TestReserveRefusesWhenTheNodeNoLongerFits(t *testing.T) {
+	st := openTestStore(t)
+	if err := st.UpsertNode(node("node-tight", "r1")); err != nil {
+		t.Fatal(err)
+	}
+	// node() advertises 8 CPU; ask for 9.
+	err := st.Reserve("node-tight", &Reservation{SandboxID: "sbx-big", CPU: 9, MemoryMiB: 512, DiskMiB: 4096})
+	if !errors.Is(err, ErrCapacityChanged) {
+		t.Fatalf("over-capacity reserve = %v, want ErrCapacityChanged", err)
+	}
+	got, err := st.GetNode("node-tight")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got.CPUCommitted != 0 {
+		t.Errorf("a refused reserve committed %v CPU, want 0", got.CPUCommitted)
+	}
+}
+
+// TestReleaseReturnsCapacityAndIsIdempotent reserves, releases, and releases
+// again: the first release gives the capacity back, the second is a no-op.
+func TestReleaseReturnsCapacityAndIsIdempotent(t *testing.T) {
+	st := openTestStore(t)
+	if err := st.UpsertNode(node("node-rel", "r1")); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.Reserve("node-rel", &Reservation{SandboxID: "sbx-r", CPU: 2, MemoryMiB: 1024, DiskMiB: 8192}); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := st.GetNode("node-rel")
+	if got.CPUCommitted != 2 || got.MemoryCommitMiB != 1024 {
+		t.Fatalf("after reserve committed = %v/%v, want 2/1024", got.CPUCommitted, got.MemoryCommitMiB)
+	}
+
+	if err := st.Release("sbx-r"); err != nil {
+		t.Fatal(err)
+	}
+	got, _ = st.GetNode("node-rel")
+	if got.CPUCommitted != 0 || got.MemoryCommitMiB != 0 {
+		t.Errorf("after release committed = %v/%v, want 0/0", got.CPUCommitted, got.MemoryCommitMiB)
+	}
+
+	// Releasing an already-released reservation is a no-op, not an error.
+	if err := st.Release("sbx-r"); err != nil {
+		t.Errorf("second release = %v, want nil", err)
+	}
+}
+
+func TestScanNodeRepairsLegacyCachedImages(t *testing.T) {
+	st := openTestStore(t)
+	if err := st.UpsertNode(node("node-legacy", "r1")); err != nil {
+		t.Fatal(err)
+	}
+	// Overwrite the column with the pre-digest map[ref]size shape.
+	if _, err := st.exec(
+		`UPDATE nodes SET cached_images=? WHERE id=?`,
+		`{"python:3.12":2048}`, "node-legacy"); err != nil {
+		t.Fatal(err)
+	}
+	got, err := st.GetNode("node-legacy")
+	if err != nil {
+		t.Fatalf("GetNode on a legacy cached_images blob failed: %v", err)
+	}
+	ci, ok := got.CachedImages["python:3.12"]
+	if !ok {
+		t.Fatalf("legacy cached image not repaired: %+v", got.CachedImages)
+	}
+	// Size carries over; digest is left empty rather than invented.
+	if ci.SizeBytes != 2048 || ci.Digest != "" {
+		t.Errorf("repaired image = %+v, want size 2048 / empty digest", ci)
 	}
 }
 

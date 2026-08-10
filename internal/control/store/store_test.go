@@ -1,6 +1,7 @@
 package store
 
 import (
+	"database/sql"
 	"errors"
 	"fmt"
 	"path/filepath"
@@ -243,6 +244,35 @@ func TestOpenReadOnlyWorksWhileTheWriterHoldsTheFile(t *testing.T) {
 	// The writer keeps working with a reader attached, which is what WAL buys.
 	if err := writer.PutSandbox(&Sandbox{ID: "sbx_after", State: SandboxRunning}); err != nil {
 		t.Fatalf("writer blocked while a reader was attached: %v", err)
+	}
+}
+
+// TestOpenReadOnlyRefusesNonWAL pins the reader's half of the WAL contract: a
+// database left in rollback-journal mode is refused rather than opened, because
+// a reader and the control plane's writer would then block each other.
+func TestOpenReadOnlyRefusesNonWAL(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "delwal.db")
+	// Create a database in DELETE journal mode without going through Open (which
+	// forces WAL), so the reader has a non-WAL file to reject.
+	db, err := sql.Open("sqlite", "file:"+path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.Exec("PRAGMA journal_mode=DELETE; CREATE TABLE t(x)"); err != nil {
+		t.Fatal(err)
+	}
+	db.Close()
+
+	if _, err := OpenReadOnly(path); err == nil {
+		t.Error("OpenReadOnly accepted a database that is not in WAL mode")
+	}
+}
+
+// TestOpenReadOnlyReportsAnUnreadableFile confirms the PRAGMA probe surfaces an
+// error rather than returning a half-built handle when the file cannot be read.
+func TestOpenReadOnlyReportsAnUnreadableFile(t *testing.T) {
+	if _, err := OpenReadOnly(filepath.Join(t.TempDir(), "does-not-exist.db")); err == nil {
+		t.Error("OpenReadOnly returned no error for a missing database file")
 	}
 }
 
