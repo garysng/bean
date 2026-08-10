@@ -228,8 +228,8 @@ func api(t *testing.T, method, path string, body any) (int, map[string]any) {
 func TestE2EFullLoop(t *testing.T) {
 	// 1. create
 	code, out := api(t, "POST", "/v1/sandboxes", map[string]any{
-		"image":  "python:3.12",
-		"labels": map[string]string{"suite": "e2e"},
+		"imageRef": "python:3.12",
+		"labels":   map[string]string{"suite": "e2e"},
 	})
 	if code != 201 {
 		t.Fatalf("create: %d %v", code, out)
@@ -301,7 +301,7 @@ func TestE2EFullLoop(t *testing.T) {
 
 func TestE2EIdleDelete(t *testing.T) {
 	code, out := api(t, "POST", "/v1/sandboxes", map[string]any{
-		"image":     "x",
+		"imageRef":  "x",
 		"lifecycle": map[string]any{"idleTimeout": "1s", "onIdle": "delete"},
 	})
 	if code != 201 {
@@ -340,7 +340,7 @@ func TestE2EViaCLI(t *testing.T) {
 		return so.String(), se.String(), code
 	}
 
-	sout, serr, code := run("run", "--image", "busybox", "--label", "cli=e2e")
+	sout, serr, code := run("run", "--image-ref", "busybox", "--label", "cli=e2e")
 	if code != 0 {
 		t.Fatalf("run: %s %s", sout, serr)
 	}

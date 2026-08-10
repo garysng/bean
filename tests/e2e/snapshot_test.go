@@ -15,8 +15,8 @@ import (
 func TestE2ESnapshotRestore(t *testing.T) {
 	// 1. Create and populate a sandbox.
 	code, out := api(t, "POST", "/v1/sandboxes", map[string]any{
-		"image":  "python:3.12",
-		"labels": map[string]string{"suite": "snapshot"},
+		"imageRef": "python:3.12",
+		"labels":   map[string]string{"suite": "snapshot"},
 	})
 	if code != http.StatusCreated {
 		t.Fatalf("create: %d %v", code, out)
@@ -78,7 +78,7 @@ func TestE2ESnapshotRestore(t *testing.T) {
 // TestE2EImageAndRegistry covers the image metadata surface end to end.
 func TestE2EImageAndRegistry(t *testing.T) {
 	// Creating a sandbox registers its image.
-	code, out := api(t, "POST", "/v1/sandboxes", map[string]any{"image": "busybox:1.36"})
+	code, out := api(t, "POST", "/v1/sandboxes", map[string]any{"imageRef": "busybox:1.36"})
 	if code != http.StatusCreated {
 		t.Fatalf("create: %d %v", code, out)
 	}
