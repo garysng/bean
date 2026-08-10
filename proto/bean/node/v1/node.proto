@@ -264,6 +264,15 @@ message SandboxSpec {
   string network_policy = 11;
   string runtime = 12;              // internal tier: fc|runc|runsc; empty = node default
   string request_id = 13;
+
+  // publish_conversion asks the node to publish what it converts from `image`
+  // to the shared store and report the coordinates back, so the control plane
+  // can record a reusable template. Set only when `image` is a first-seen OCI
+  // reference the platform wants cached cluster-wide -- not for a create from an
+  // already-converted template (whose chain is published) nor a restore (which
+  // converts nothing). It moves the publish cost onto this first create so every
+  // later create of the reference, on any node, skips the conversion.
+  bool publish_conversion = 17;
 }
 
 message Lifecycle {
@@ -287,6 +296,38 @@ message CreateSandboxRequest {
 
 message CreateSandboxResponse {
   SandboxStatus status = 1;
+
+  // conversion reports what a cold start from an OCI image reference converted
+  // and published, so the control plane can record a reusable template and a
+  // later create of the same reference -- on any node reading the same store --
+  // skips the pull and conversion. Absent when the create resolved from a
+  // snapshot or an already-converted filesystem, which convert nothing.
+  ImageConversion conversion = 2;
+}
+
+// ImageConversion carries the coordinates a cold OCI create resolved, so the
+// control plane can turn a first-seen reference into a shared template. It is
+// the create-path counterpart of BuildImageResponse's artifact fields.
+message ImageConversion {
+  // overlaybd_ref names the published overlaybd artifact in the shared layer
+  // store -- the filesystem manifest digest a later create resolves from.
+  // Empty when the node published nothing (no object store configured, or the
+  // upload was declined), in which case the conversion stayed node-local and no
+  // template is recorded.
+  string overlaybd_ref = 1;
+  // oci_digest is the OCI content digest the reference resolved to, node-side.
+  // It completes the conversion-cache key so a later create with the same
+  // reference reuses this template. Empty leaves the template's OCI source
+  // unset.
+  string oci_digest = 2;
+  // size_bytes is the published chain's size, for cache accounting.
+  int64 size_bytes = 3;
+  // layer_digests is the published layer chain, base first.
+  repeated string layer_digests = 4;
+  // config is the converted image's configuration, so the control plane records
+  // the ENV/ENTRYPOINT/CMD/WORKDIR on the template a create can reuse. Nil when
+  // the image declared none.
+  ImageConfig config = 5;
 }
 
 message DestroySandboxRequest {
@@ -417,6 +458,19 @@ message BuildImageRequest {
   int64 size_mib = 5;
 }
 
+// ImageConfig is the OCI configuration a template carries -- the ENV, ENTRYPOINT,
+// CMD, WORKDIR and USER a sandbox inherits at start. The node recovers it (from a
+// build's OCI export, or from the converted image's config blob) and reports it so
+// the control plane records it on the template, which is what lets a create honour
+// it and a `template status` show it.
+message ImageConfig {
+  repeated string env = 1;
+  repeated string entrypoint = 2;
+  repeated string cmd = 3;
+  string working_dir = 4;
+  string user = 5;
+}
+
 message BuildImageResponse {
   string image_ref = 1;
   // overlaybd_ref names the published artifact in the shared layer store, so a
@@ -431,6 +485,10 @@ message BuildImageResponse {
   // single base layer today, but the field is a list so a future layered build
   // reports its chain without a proto change.
   repeated string layer_digests = 4;
+  // config is the image configuration recovered from the build's OCI export, so
+  // the control plane records the Dockerfile's ENV/ENTRYPOINT/CMD/WORKDIR on the
+  // template. Nil when the build declared none.
+  ImageConfig config = 5;
 }
 
 // BuildImageEvent is one frame of a build's progress. Log frames arrive as

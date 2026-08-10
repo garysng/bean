@@ -250,7 +250,7 @@ class _Sandboxes:
 
     def create(
         self,
-        image: str = "",
+        image_ref: str = "",
         cpu: float = 1,
         memory_mib: int = 512,
         disk_mib: int = 20480,
@@ -260,22 +260,29 @@ class _Sandboxes:
         labels: Optional[Dict[str, str]] = None,
         idle_timeout: Optional[str] = None,
         on_idle: str = "pause",
+        template: str = "",
         snapshot: str = "",
     ) -> Sandbox:
-        """Create a sandbox from an image, or restore one from a snapshot.
+        """Create a sandbox from one of three sources.
 
-        Exactly one of image or snapshot must be given.
+        Exactly one of image_ref (an OCI registry reference the node pulls and
+        converts), template (a bean template by id or name), or snapshot (a
+        saved snapshot by id or name) must be given.
         """
-        if bool(image) == bool(snapshot):
-            raise ValueError("provide exactly one of image or snapshot")
+        sources = [bool(image_ref), bool(template), bool(snapshot)]
+        if sum(sources) != 1:
+            raise ValueError(
+                "provide exactly one of image_ref, template or snapshot")
         body: Dict[str, Any] = {
             "resources": {"cpu": cpu, "memoryMiB": memory_mib, "diskMiB": disk_mib},
             "env": env or {},
             "labels": labels or {},
             "autoStartCmd": auto_start_cmd,
         }
-        if image:
-            body["image"] = image
+        if image_ref:
+            body["imageRef"] = image_ref
+        elif template:
+            body["template"] = template
         else:
             body["snapshot"] = snapshot
         if cmd:
@@ -331,26 +338,34 @@ class _Snapshots:
         self._client._request("DELETE", f"/v1/snapshots/{snapshot_id}")
 
 
-class _Images:
+class _Templates:
     def __init__(self, client: "BeanClient"):
         self._client = client
 
     def list(self, source: str = "") -> List[Dict[str, Any]]:
-        """List images visible to the caller.
+        """List templates visible to the caller.
 
-        source="built" narrows to images this platform produced, which is the
-        "what did I build" listing; "imported" narrows to refs pulled from
-        outside. The server scopes the result to the caller when the deployment
-        is behind an identity-aware layer.
+        source="built" narrows to templates this platform built from a
+        Dockerfile, which is the "what did I build" listing; "converted"
+        narrows to those produced by converting an OCI image. The server
+        scopes the result to the caller when the deployment is behind an
+        identity-aware layer.
         """
-        path = "/v1/images"
+        path = "/v1/templates"
         if source:
             path += "?" + urllib.parse.urlencode({"source": source})
-        return self._client._request("GET", path)["images"] or []
+        return self._client._request("GET", path)["templates"] or []
 
     def status(self, ref: str) -> Dict[str, Any]:
-        q = urllib.parse.urlencode({"ref": ref})
-        return self._client._request("GET", f"/v1/images/status?{q}")
+        """Look a template up by id (a "tpl_..." string) or by name."""
+        key = "id" if ref.startswith("tpl_") else "name"
+        q = urllib.parse.urlencode({key: ref})
+        return self._client._request("GET", f"/v1/templates/status?{q}")
+
+    def delete(self, ref: str) -> None:
+        key = "id" if ref.startswith("tpl_") else "name"
+        q = urllib.parse.urlencode({key: ref})
+        self._client._request("DELETE", f"/v1/templates?{q}")
 
     def prewarm(
         self,
@@ -359,13 +374,13 @@ class _Images:
         region: str = "",
         priority: str = "",
     ) -> Dict[str, Any]:
-        """Pull images onto nodes ahead of a batch."""
+        """Pull templates onto nodes ahead of a batch."""
         body = {"refs": refs, "targetNodes": target_nodes,
                 "region": region, "priority": priority}
-        return self._client._request("POST", "/v1/images/prewarm", body)
+        return self._client._request("POST", "/v1/templates/prewarm", body)
 
     def prewarm_status(self, job_id: str) -> Dict[str, Any]:
-        return self._client._request("GET", f"/v1/images/prewarm/{job_id}")
+        return self._client._request("GET", f"/v1/templates/prewarm/{job_id}")
 
     def build(
         self,
@@ -375,9 +390,9 @@ class _Images:
         build_args: Optional[Dict[str, str]] = None,
         size_mib: int = 0,
     ) -> Dict[str, Any]:
-        """Build an image from a Dockerfile on the platform.
+        """Build a template from a Dockerfile on the platform.
 
-        Returns immediately with the image reference and the node building it;
+        Returns immediately with the template name and the node building it;
         a build takes minutes, so follow it with status(tag) until the state is
         READY or FAILED.
 
@@ -394,7 +409,7 @@ class _Images:
             body["contextTar"] = base64.b64encode(
                 _pack_context(context_dir)
             ).decode("ascii")
-        return self._client._request("POST", "/v1/images/build", body)
+        return self._client._request("POST", "/v1/templates/build", body)
 
 
 class _Events:
@@ -474,7 +489,7 @@ class BeanClient:
         self.timeout = timeout
         self.sandboxes = _Sandboxes(self)
         self.snapshots = _Snapshots(self)
-        self.images = _Images(self)
+        self.templates = _Templates(self)
         self.events = _Events(self)
 
     def _request_raw(self, method: str, path: str, body: Optional[bytes] = None) -> bytes:

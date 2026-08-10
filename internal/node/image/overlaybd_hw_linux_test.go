@@ -363,7 +363,7 @@ func TestConcurrentCreatesConvertALayerOnce(t *testing.T) {
 		wg.Add(1)
 		go func(i int) {
 			defer wg.Done()
-			_, errs[i] = p.lowersFor(ctx, strings.TrimPrefix(srv.URL, "http://")+"/test/img:latest")
+			_, _, _, errs[i] = p.lowersFor(ctx, strings.TrimPrefix(srv.URL, "http://")+"/test/img:latest", false)
 		}(i)
 	}
 	wg.Wait()
@@ -500,7 +500,7 @@ func TestCreateDoesNotPublishButPrewarmDoes(t *testing.T) {
 
 	blobs := newCountingBlobs()
 	p := obdLazyProvider(t, reg, blobs)
-	if _, err := p.lowersFor(ctx, ref); err != nil {
+	if _, _, _, err := p.lowersFor(ctx, ref, false); err != nil {
 		t.Fatalf("lowersFor: %v", err)
 	}
 	if blobs.puts != 0 {
@@ -550,7 +550,7 @@ func TestCreateReadsAPublishedLayerInsteadOfConverting(t *testing.T) {
 
 	// Second node has its own empty layer directory.
 	second := obdLazyProvider(t, reg, blobs)
-	lowers, err := second.lowersFor(ctx, ref)
+	lowers, _, _, err := second.lowersFor(ctx, ref, false)
 	if err != nil {
 		t.Fatalf("lowersFor on the second node: %v", err)
 	}
@@ -599,7 +599,7 @@ func TestLocalLayerIsPreferredOverThePublishedCopy(t *testing.T) {
 	}
 
 	// The same node now has both a local file and a published blob.
-	lowers, err := p.lowersFor(ctx, ref)
+	lowers, _, _, err := p.lowersFor(ctx, ref, false)
 	if err != nil {
 		t.Fatalf("lowersFor: %v", err)
 	}
@@ -668,7 +668,7 @@ func TestPrewarmConvertsLocallyEvenWhenLayersArePublished(t *testing.T) {
 	// in when it prewarms an image whose base it shares with something published.
 	blobs := newCountingBlobs()
 	seeder := obdLazyProvider(t, reg, blobs)
-	if _, err := seeder.walk(ctx, ref, resolveOpts{publish: true}); err != nil {
+	if _, _, err := seeder.walk(ctx, ref, resolveOpts{publish: true}); err != nil {
 		t.Fatalf("seeding the store: %v", err)
 	}
 	blobs.mu.Lock()
@@ -737,7 +737,7 @@ func TestCreateFallsBackToLocalConversionWhenOnlySomeLayersArePublished(t *testi
 
 	blobs := newCountingBlobs()
 	seeder := obdLazyProvider(t, reg, blobs)
-	if _, err := seeder.walk(ctx, ref, resolveOpts{publish: true}); err != nil {
+	if _, _, err := seeder.walk(ctx, ref, resolveOpts{publish: true}); err != nil {
 		t.Fatalf("seeding the store: %v", err)
 	}
 	blobs.mu.Lock()
@@ -745,7 +745,7 @@ func TestCreateFallsBackToLocalConversionWhenOnlySomeLayersArePublished(t *testi
 	blobs.mu.Unlock()
 
 	fresh := obdLazyProvider(t, reg, blobs)
-	lowers, err := fresh.lowersFor(ctx, ref)
+	lowers, _, _, err := fresh.lowersFor(ctx, ref, false)
 	if err != nil {
 		t.Fatalf("create against a partly published image: %v", err)
 	}
@@ -783,7 +783,7 @@ func TestCreateSurvivesTheRegistryGoingDown(t *testing.T) {
 	p := obdLazyProvider(t, reg, newCountingBlobs())
 
 	// First create with the registry up: this is what records the chain.
-	if _, err := p.lowersFor(ctx, ref); err != nil {
+	if _, _, _, err := p.lowersFor(ctx, ref, false); err != nil {
 		t.Fatalf("first create: %v", err)
 	}
 
@@ -795,7 +795,7 @@ func TestCreateSurvivesTheRegistryGoingDown(t *testing.T) {
 	p.Registry = NewRegistry(nil)
 	p.Registry.Client = &http.Client{Transport: redirectTo{host: strings.TrimPrefix(deadURL, "http://")}}
 
-	lowers, err := p.lowersFor(ctx, ref)
+	lowers, _, _, err := p.lowersFor(ctx, ref, false)
 	if err != nil {
 		t.Fatalf("create with the registry down: %v", err)
 	}
@@ -899,11 +899,11 @@ func TestDigestReferenceResolvesWithoutTheRegistryButATagDoesNot(t *testing.T) {
 	p := obdLazyProvider(t, reg, newCountingBlobs())
 
 	byDigest := host + "/test/img@" + manifestDigest
-	if _, err := p.lowersFor(ctx, byDigest); err != nil {
+	if _, _, _, err := p.lowersFor(ctx, byDigest, false); err != nil {
 		t.Fatalf("first create by digest: %v", err)
 	}
 	afterFirst := manifestFetches.Load()
-	if _, err := p.lowersFor(ctx, byDigest); err != nil {
+	if _, _, _, err := p.lowersFor(ctx, byDigest, false); err != nil {
 		t.Fatalf("second create by digest: %v", err)
 	}
 	if got := manifestFetches.Load(); got != afterFirst {
@@ -911,11 +911,11 @@ func TestDigestReferenceResolvesWithoutTheRegistryButATagDoesNot(t *testing.T) {
 	}
 
 	byTag := host + "/test/img:latest"
-	if _, err := p.lowersFor(ctx, byTag); err != nil {
+	if _, _, _, err := p.lowersFor(ctx, byTag, false); err != nil {
 		t.Fatalf("create by tag: %v", err)
 	}
 	beforeRepeat := manifestFetches.Load()
-	if _, err := p.lowersFor(ctx, byTag); err != nil {
+	if _, _, _, err := p.lowersFor(ctx, byTag, false); err != nil {
 		t.Fatalf("repeat create by tag: %v", err)
 	}
 	if got := manifestFetches.Load(); got == beforeRepeat {
@@ -978,7 +978,7 @@ func TestASecondNodeResolvesFromTheStoreWithNoRegistry(t *testing.T) {
 
 	second := obdLazyProvider(t, deadReg, blobs)
 	second.Index = index
-	lowers, err := second.lowersFor(ctx, ref)
+	lowers, _, _, err := second.lowersFor(ctx, ref, false)
 	if err != nil {
 		t.Fatalf("second node could not resolve from the store: %v", err)
 	}

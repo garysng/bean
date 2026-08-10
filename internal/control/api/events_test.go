@@ -127,7 +127,7 @@ func TestEventStreamDeliversLifecycleEvents(t *testing.T) {
 	// Creating a sandbox must produce events on the stream.
 	go func() {
 		time.Sleep(100 * time.Millisecond)
-		env.do("POST", "/v1/sandboxes", map[string]any{"image": "img:1"})
+		env.do("POST", "/v1/sandboxes", map[string]any{"imageRef": "img:1"})
 	}()
 
 	seen := map[string]bool{}

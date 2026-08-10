@@ -235,9 +235,9 @@ func (s *Server) captureSnapshot(ctx context.Context, rec *store.Sandbox,
 	// its filesystem instead and legitimately returns no digest; there written > 0
 	// even for a memoryless checkpoint.
 	if fsResult != nil {
-		snap.FSManifestDigest = fsResult.GetFsManifestDigest()
-		snap.FSLayerDigests = fsResult.GetFsLayerDigests()
-		snap.FSSizeBytes = fsResult.GetFsSizeBytes()
+		snap.FS.Digest = fsResult.GetFsManifestDigest()
+		snap.FS.LayerDigests = fsResult.GetFsLayerDigests()
+		snap.FS.SizeBytes = fsResult.GetFsSizeBytes()
 	}
 
 	snap.State = store.SnapshotReady
@@ -402,22 +402,33 @@ func (s *Server) launchFromSnapshot(ctx context.Context, snap *store.Snapshot,
 		return faultf(http.StatusServiceUnavailable, "NODE_UNREACHABLE", "%s", err.Error())
 	}
 
-	// The whole chain travels, base first: a diff holds only what changed since
-	// its base, so the node cannot reconstruct the guest from the leaf alone.
-	// Ancestors need no reference of their own — a base cannot be deleted while
-	// anything descends from it, so the leaf's reference holds the chain.
-	chain, err := s.store.SnapshotChain(snap.ID)
-	if err != nil {
-		s.failCreate(rec, err)
-		if errors.Is(err, store.ErrNotFound) {
-			return faultf(http.StatusNotFound, "SNAPSHOT_BASE_MISSING", "%s", err.Error())
+	// The memory diff chain travels only when the snapshot has memory. A
+	// filesystem-only checkpoint captured no guest memory and wrote no bundle, so
+	// there is nothing to stream: its filesystem is resolved from the manifest
+	// digest below and the node cold-boots from it. Enrolling the leaf as a
+	// memory layer anyway would stream an empty blob, and the node's gzip reader
+	// would fail the restore with EOF.
+	var chain []*store.Snapshot
+	if snap.HasMemory() {
+		// The whole chain travels, base first: a diff holds only what changed since
+		// its base, so the node cannot reconstruct the guest from the leaf alone.
+		// Ancestors need no reference of their own — a base cannot be deleted while
+		// anything descends from it, so the leaf's reference holds the chain.
+		var err error
+		chain, err = s.store.SnapshotChain(snap.ID)
+		if err != nil {
+			s.failCreate(rec, err)
+			if errors.Is(err, store.ErrNotFound) {
+				return faultf(http.StatusNotFound, "SNAPSHOT_BASE_MISSING", "%s", err.Error())
+			}
+			return faultf(http.StatusInternalServerError, "INTERNAL", "%s", err.Error())
 		}
-		return faultf(http.StatusInternalServerError, "INTERNAL", "%s", err.Error())
 	}
 	// Declared on the spec rather than discovered from the stream: the node has to
 	// create one reader per layer before reading any of them, since each layer is
-	// its own gzip stream. This is now the guest-memory diff chain only; the
-	// filesystem resolves from the leaf's manifest digest below.
+	// its own gzip stream. This is the guest-memory diff chain only and is empty
+	// for a memoryless snapshot; the filesystem resolves from the leaf's manifest
+	// digest below.
 	spec.SnapshotChain = make([]string, len(chain))
 	for i, link := range chain {
 		spec.SnapshotChain[i] = link.ID
@@ -429,7 +440,7 @@ func (s *Server) launchFromSnapshot(ctx context.Context, snap *store.Snapshot,
 	// with a fresh writable on top. Empty for a local-tier snapshot, whose
 	// filesystem is still carried in the streamed bundle. The leaf's digest names
 	// the whole filesystem; a memory diff chain does not change the disk.
-	spec.FsManifestDigest = snap.FSManifestDigest
+	spec.FsManifestDigest = snap.FS.Digest
 
 	// The proto RPC keeps its name: it is a published interface, and renaming it
 	// would break every deployed node for a change that adds a verb.

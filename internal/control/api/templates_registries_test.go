@@ -7,28 +7,28 @@ import (
 	"testing"
 )
 
-func TestImageStatusUnknownRef(t *testing.T) {
+func TestTemplateStatusUnknownName(t *testing.T) {
 	env := startEnv(t, envOpts{})
-	resp, out := env.do("GET", "/v1/images/status?ref=never%3Aseen", nil)
+	resp, out := env.do("GET", "/v1/templates/status?name=never%3Aseen", nil)
 	if resp.StatusCode != http.StatusNotFound {
 		t.Fatalf("status = %d: %v", resp.StatusCode, out)
 	}
-	if code := out["error"].(map[string]any)["code"]; code != "IMAGE_NOT_FOUND" {
+	if code := out["error"].(map[string]any)["code"]; code != "TEMPLATE_NOT_FOUND" {
 		t.Errorf("code = %v", code)
 	}
 }
 
-func TestImageStatusRequiresRef(t *testing.T) {
+func TestTemplateStatusRequiresIdentifier(t *testing.T) {
 	env := startEnv(t, envOpts{})
-	resp, _ := env.do("GET", "/v1/images/status", nil)
+	resp, _ := env.do("GET", "/v1/templates/status", nil)
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("status = %d, want 400", resp.StatusCode)
 	}
 }
 
-func TestPrewarmRegistersImages(t *testing.T) {
+func TestPrewarmRegistersTemplates(t *testing.T) {
 	env := startEnv(t, envOpts{})
-	resp, out := env.do("POST", "/v1/images/prewarm", map[string]any{
+	resp, out := env.do("POST", "/v1/templates/prewarm", map[string]any{
 		"refs":        []string{"python:3.12", "registry.example.com/team/app:v1"},
 		"targetNodes": 2,
 	})
@@ -40,9 +40,9 @@ func TestPrewarmRegistersImages(t *testing.T) {
 		t.Errorf("jobId = %q, want pw_ prefix", jobID)
 	}
 
-	// The referenced images are now known, with the OCI format because
+	// The referenced templates are now known, with the OCI format because
 	// nothing has been converted.
-	_, out = env.do("GET", "/v1/images/status?ref="+url.QueryEscape("python:3.12"), nil)
+	_, out = env.do("GET", "/v1/templates/status?name="+url.QueryEscape("python:3.12"), nil)
 	if out["state"] != "PENDING" {
 		t.Errorf("state = %v, want PENDING", out["state"])
 	}
@@ -50,13 +50,13 @@ func TestPrewarmRegistersImages(t *testing.T) {
 		t.Errorf("format = %v, want oci", out["format"])
 	}
 
-	_, out = env.do("GET", "/v1/images", nil)
-	if n := len(out["images"].([]any)); n != 2 {
-		t.Errorf("images = %d, want 2", n)
+	_, out = env.do("GET", "/v1/templates", nil)
+	if n := len(out["templates"].([]any)); n != 2 {
+		t.Errorf("templates = %d, want 2", n)
 	}
 
 	// Job status reflects readiness (no nodes report cache in this stack).
-	_, out = env.do("GET", "/v1/images/prewarm/"+jobID, nil)
+	_, out = env.do("GET", "/v1/templates/prewarm/"+jobID, nil)
 	if out["jobId"] != jobID {
 		t.Errorf("jobId = %v", out["jobId"])
 	}
@@ -64,11 +64,11 @@ func TestPrewarmRegistersImages(t *testing.T) {
 
 func TestPrewarmValidationViaAPI(t *testing.T) {
 	env := startEnv(t, envOpts{})
-	resp, _ := env.do("POST", "/v1/images/prewarm", map[string]any{"refs": []string{}})
+	resp, _ := env.do("POST", "/v1/templates/prewarm", map[string]any{"refs": []string{}})
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("status = %d, want 400", resp.StatusCode)
 	}
-	resp, _ = env.do("POST", "/v1/images/prewarm", map[string]any{"refs": []string{"bad ref"}})
+	resp, _ = env.do("POST", "/v1/templates/prewarm", map[string]any{"refs": []string{"bad ref"}})
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("bad ref status = %d, want 400", resp.StatusCode)
 	}
@@ -76,7 +76,7 @@ func TestPrewarmValidationViaAPI(t *testing.T) {
 
 func TestPrewarmJobNotFound(t *testing.T) {
 	env := startEnv(t, envOpts{})
-	resp, _ := env.do("GET", "/v1/images/prewarm/pw_missing", nil)
+	resp, _ := env.do("GET", "/v1/templates/prewarm/pw_missing", nil)
 	if resp.StatusCode != http.StatusNotFound {
 		t.Errorf("status = %d, want 404", resp.StatusCode)
 	}
@@ -176,9 +176,9 @@ func TestNormalizeRegistryHost(t *testing.T) {
 	}
 }
 
-func TestImageEndpointsDisabledWithoutService(t *testing.T) {
+func TestTemplateEndpointsDisabledWithoutService(t *testing.T) {
 	env := startEnv(t, envOpts{WithoutImages: true})
-	for _, path := range []string{"/v1/images", "/v1/images/status?ref=x"} {
+	for _, path := range []string{"/v1/templates", "/v1/templates/status?name=x"} {
 		resp, _ := env.do("GET", path, nil)
 		if resp.StatusCode != http.StatusNotImplemented {
 			t.Errorf("%s status = %d, want 501", path, resp.StatusCode)

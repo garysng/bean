@@ -39,7 +39,7 @@ func TestMetricsEndpointNeedsNoAuth(t *testing.T) {
 func TestMetricsRecordCreateAndExec(t *testing.T) {
 	env := startEnv(t, envOpts{})
 
-	_, out := env.do("POST", "/v1/sandboxes", map[string]any{"image": "img:1"})
+	_, out := env.do("POST", "/v1/sandboxes", map[string]any{"imageRef": "img:1"})
 	id := out["sandbox"].(map[string]any)["id"].(string)
 	env.do("POST", "/v1/sandboxes/"+id+"/exec", map[string]any{"cmd": []string{"true"}})
 
@@ -59,7 +59,7 @@ func TestMetricsRecordCreateAndExec(t *testing.T) {
 
 func TestMetricsStateGaugesReflectStore(t *testing.T) {
 	env := startEnv(t, envOpts{})
-	_, out := env.do("POST", "/v1/sandboxes", map[string]any{"image": "img:1"})
+	_, out := env.do("POST", "/v1/sandboxes", map[string]any{"imageRef": "img:1"})
 	id := out["sandbox"].(map[string]any)["id"].(string)
 
 	if body := scrape(t, env); !strings.Contains(body, `bean_sandboxes{state="RUNNING"} 1`) {

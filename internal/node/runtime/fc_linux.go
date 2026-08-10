@@ -236,8 +236,14 @@ type fcVM struct {
 	id string
 	// imageRef is what this sandbox was started from. Kept because a commit has to
 	// carry the source image's configuration onto its output, and by then the spec
-	// that named the image is gone.
+	// that named the image is gone. Empty for a sandbox created from a template or
+	// restored from a snapshot, whose base is named by baseFSDigest instead.
 	imageRef string
+	// baseFSDigest is the filesystem manifest digest a sandbox created from a
+	// template or restored from a snapshot runs from. Empty for a cold OCI start,
+	// which names its base by imageRef. A snapshot seal resolves its shared base
+	// chain from whichever of the two is set.
+	baseFSDigest string
 	dir      string
 	cmd      *exec.Cmd
 	client   *fcClient
@@ -400,6 +406,7 @@ func (r *FCRuntime) BuildImage(ctx context.Context, req BuildRequest) (BuildResu
 		OverlaybdRef: res.OverlaybdRef,
 		SizeBytes:    res.SizeBytes,
 		LayerDigests: res.LayerDigests,
+		Config:       res.Config,
 	}, nil
 }
 
@@ -420,7 +427,11 @@ func (r *FCRuntime) Create(ctx context.Context, spec *Spec) (*Handle, error) {
 // more than one means the leaf is incremental and its memory has to be
 // reassembled from its ancestors before the guest can run.
 func (r *FCRuntime) Fork(ctx context.Context, spec *Spec, layers []SnapshotLayer) (*Handle, error) {
-	if len(layers) == 0 {
+	// A filesystem-only snapshot captured no guest memory, so its restore carries
+	// no layer: the filesystem is resolved from the manifest digest and the guest
+	// cold-boots from it. Only a memory restore needs a layer, and its absence
+	// there is the real error this guards.
+	if len(layers) == 0 && spec.FSManifestDigest == "" {
 		return nil, errors.New("fc: fork needs at least one snapshot layer")
 	}
 	return r.create(ctx, spec, layers)
@@ -480,6 +491,7 @@ func (r *FCRuntime) create(ctx context.Context, spec *Spec, layers []SnapshotLay
 	rootfs, err := r.Images.Prepare(ctx, spec.SandboxID, spec.Image, image.PrepareOptions{
 		SizeMiB:          spec.DiskMiB,
 		FSManifestDigest: spec.FSManifestDigest,
+		Publish:          spec.PublishConversion,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("fc: prepare rootfs: %w", err)
@@ -531,10 +543,11 @@ func (r *FCRuntime) create(ctx context.Context, spec *Spec, layers []SnapshotLay
 	}
 
 	vm := &fcVM{
-		id:       spec.SandboxID,
-		imageRef: spec.Image,
-		dir:      dir,
-		rootfs:   rootfs,
+		id:           spec.SandboxID,
+		imageRef:     spec.Image,
+		baseFSDigest: spec.FSManifestDigest,
+		dir:          dir,
+		rootfs:       rootfs,
 		done:     make(chan struct{}),
 		// Resolved here, where the Spec is in hand. Empty on a node with no
 		// network pool, which keeps that node's launch identical to before.
@@ -573,6 +586,7 @@ func (r *FCRuntime) create(ctx context.Context, spec *Spec, layers []SnapshotLay
 		StartedAt:  time.Now(),
 		PID:        vm.cmd.Process.Pid,
 		RuntimeTag: r.Name(),
+		Conversion: rootfs.Conversion,
 	}, nil
 }
 

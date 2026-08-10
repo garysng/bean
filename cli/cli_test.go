@@ -68,7 +68,7 @@ func TestUsageOnUnknownCommand(t *testing.T) {
 func TestRunRequiresImage(t *testing.T) {
 	var out, errBuf bytes.Buffer
 	code := Run([]string{"run"}, &out, &errBuf)
-	if code != 125 || !strings.Contains(errBuf.String(), "--image or --snapshot") {
+	if code != 125 || !strings.Contains(errBuf.String(), "--image-ref, --template or --snapshot") {
 		t.Errorf("code=%d stderr=%q", code, errBuf.String())
 	}
 }

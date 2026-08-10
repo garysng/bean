@@ -20,10 +20,10 @@ import (
 // caching, .dockerignore and heredocs add up to months of work and would still
 // be an incomplete imitation; e2b and Daytona reach the same conclusion.
 //
-// What the platform does own is the output shape. BuildKit can export a flat
-// rootfs tar, which is exactly what a base image needs — so there is no layer
-// assembly, no registry round trip, and the result goes through the same writer
-// as a pulled image.
+// What the platform does own is the output shape. BuildKit exports an OCI image
+// layout, from which bean recovers the image config and flattens the layers into
+// the single rootfs a base image needs -- so there is no registry round trip, and
+// the result goes through the same writer and seal path as a pulled image.
 
 // Builder produces base images from Dockerfiles.
 type Builder struct {
@@ -50,10 +50,11 @@ type Builder struct {
 // holds it as a narrow capability rather than reaching into the provider.
 type LayerPublisher interface {
 	// PublishBuiltRootfs seals tarPath as a base overlaybd layer for imageRef, sized
-	// with at least sizeMiB, publishes it and records a manifest+tag. It returns the
+	// with at least sizeMiB, publishes it and records a manifest+tag carrying cfg (the
+	// image config the Dockerfile declared, nil when it declared none). It returns the
 	// published artifact's ref, its layer digests and the sealed size, or an empty ref
 	// (no error) when there is no store to publish to.
-	PublishBuiltRootfs(ctx context.Context, tarPath, imageRef string, sizeMiB int64) (overlaybdRef string, layerDigests []string, sealed int64, err error)
+	PublishBuiltRootfs(ctx context.Context, tarPath, imageRef string, cfg *Config, sizeMiB int64) (overlaybdRef string, layerDigests []string, sealed int64, err error)
 }
 
 // BuildResult is what a build produced: the local image path always, and the shared
@@ -69,6 +70,10 @@ type BuildResult struct {
 	// LayerDigests is the published layer chain, base first. A build is one base
 	// layer today; the slice leaves room for a layered build to report a chain.
 	LayerDigests []string
+	// Config is the image configuration recovered from the build's OCI export --
+	// the Dockerfile's ENV/ENTRYPOINT/CMD/WORKDIR/USER. Nil when the build declared
+	// none. Reported to the control plane so the template records it.
+	Config *Config
 }
 
 // Available reports whether this node can build, so a node advertises the
@@ -148,23 +153,36 @@ func (b *Builder) Build(ctx context.Context, req BuildRequest) (result BuildResu
 		return BuildResult{}, fmt.Errorf("image: write dockerfile: %w", err)
 	}
 
-	rootfsTar := filepath.Join(buildDir, "rootfs.tar")
-	if err := b.runBuildctl(ctx, contextDir, rootfsTar, req.BuildArgs, req.Logs); err != nil {
+	layoutTar := filepath.Join(buildDir, "image.oci.tar")
+	if err := b.runBuildctl(ctx, contextDir, layoutTar, req.BuildArgs, req.Logs); err != nil {
 		return BuildResult{}, err
 	}
+
+	// BuildKit writes the OCI layout as a tar; unpack it so parseOCILayout can read
+	// index.json and the blob tree, then recover the config and a flattened rootfs.
+	layoutDir := filepath.Join(buildDir, "layout")
+	if err := os.MkdirAll(layoutDir, 0o700); err != nil {
+		return BuildResult{}, fmt.Errorf("image: create layout dir: %w", err)
+	}
+	if err := unpackTarFile(layoutTar, layoutDir); err != nil {
+		return BuildResult{}, err
+	}
+	layout, err := parseOCILayout(layoutDir, buildDir)
+	if err != nil {
+		return BuildResult{}, err
+	}
+	defer os.Remove(layout.RootfsTar)
+	rootfsTar := layout.RootfsTar
 
 	size := req.SizeMiB
 	if size <= 0 {
 		size = b.sizeForTar(rootfsTar)
 	}
 
-	// No config recorded: buildctl is asked for `type=tar`, a flat rootfs, which
-	// carries filesystem content and no image metadata -- so the Dockerfile's ENV
-	// and ENTRYPOINT are not available at this point. A sandbox from a built image
-	// therefore runs what the caller asks for and nothing implicit. Recovering them
-	// means exporting an OCI image from the builder rather than a tar, which changes
-	// how base images are assembled and is deliberately not bundled in here.
-	localPath, err := writeBaseImage(b.ImageDir, b.WorkDir, req.Tag, "", nil, size, func(root string) error {
+	// The config the Dockerfile declared, recovered from the OCI layout, so a sandbox
+	// from a built image inherits its ENV/ENTRYPOINT/CMD/WORKDIR/USER exactly as one
+	// from a pulled image does. writeBaseImage records it beside the local image.
+	localPath, err := writeBaseImage(b.ImageDir, b.WorkDir, req.Tag, "", layout.Config, size, func(root string) error {
 		f, err := os.Open(rootfsTar)
 		if err != nil {
 			return fmt.Errorf("image: open build output: %w", err)
@@ -177,7 +195,7 @@ func (b *Builder) Build(ctx context.Context, req BuildRequest) (result BuildResu
 	if err != nil {
 		return BuildResult{}, err
 	}
-	result = BuildResult{Path: localPath}
+	result = BuildResult{Path: localPath, Config: layout.Config}
 
 	// Publish the same rootfs as a shared overlaybd layer, so a node that did not
 	// build the image can start from it. The local image is already written and is
@@ -185,7 +203,7 @@ func (b *Builder) Build(ctx context.Context, req BuildRequest) (result BuildResu
 	// failure (or the absence of a store) leaves a working node-local build rather
 	// than failing the build -- the same trade the prewarm path makes.
 	if b.Publisher != nil {
-		ref, digests, sealed, perr := b.Publisher.PublishBuiltRootfs(ctx, rootfsTar, req.Tag, size)
+		ref, digests, sealed, perr := b.Publisher.PublishBuiltRootfs(ctx, rootfsTar, req.Tag, layout.Config, size)
 		if perr != nil {
 			return BuildResult{}, perr
 		}
@@ -196,7 +214,22 @@ func (b *Builder) Build(ctx context.Context, req BuildRequest) (result BuildResu
 	return result, nil
 }
 
-// runBuildctl invokes BuildKit, exporting a flat rootfs rather than an image.
+// unpackTarFile extracts the tar at path into dest, honouring the same whiteout and
+// containment rules as every other layer extraction. BuildKit's type=oci exporter
+// writes the OCI layout as a tar; this unpacks it so the layout can be read as files.
+func unpackTarFile(path, dest string) error {
+	f, err := os.Open(path)
+	if err != nil {
+		return fmt.Errorf("image: open oci layout tar: %w", err)
+	}
+	defer f.Close()
+	if err := extractTar(tar.NewReader(f), dest); err != nil {
+		return fmt.Errorf("image: extract oci layout tar: %w", err)
+	}
+	return nil
+}
+
+// runBuildctl invokes BuildKit, exporting an OCI image layout tar.
 func (b *Builder) runBuildctl(ctx context.Context, contextDir, outTar string,
 	buildArgs map[string]string, logs io.Writer) error {
 
@@ -206,10 +239,13 @@ func (b *Builder) runBuildctl(ctx context.Context, contextDir, outTar string,
 		"--frontend", "dockerfile.v0",
 		"--local", "context=" + contextDir,
 		"--local", "dockerfile=" + contextDir,
-		// type=tar gives a flat filesystem, which is what a base image is.
-		// Exporting an image instead would mean assembling layers only to
-		// flatten them again.
-		"--output", "type=tar,dest=" + outTar,
+		// type=oci exports an OCI image layout: the layers plus the image config
+		// the Dockerfile declared (ENV/ENTRYPOINT/CMD/WORKDIR/USER). A flat
+		// type=tar would drop that config; parseOCILayout recovers it and
+		// flattens the layers back into the single rootfs tar the seal and write
+		// paths consume, so a built image starts with the config its Dockerfile
+		// set rather than none.
+		"--output", "type=oci,dest=" + outTar,
 	}
 	for k, v := range buildArgs {
 		args = append(args, "--opt", "build-arg:"+k+"="+v)

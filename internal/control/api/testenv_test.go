@@ -299,7 +299,7 @@ func (e *testEnv) raw(method, path, body string) (*http.Response, string) {
 func (e *testEnv) createSandbox(body map[string]any) map[string]any {
 	e.T.Helper()
 	if body == nil {
-		body = map[string]any{"image": "test:latest"}
+		body = map[string]any{"imageRef": "test:latest"}
 	}
 	resp, out := e.do("POST", "/v1/sandboxes", body)
 	if resp.StatusCode != http.StatusCreated {

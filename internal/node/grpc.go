@@ -13,6 +13,7 @@ import (
 	agentv1 "github.com/garysng/bean/internal/gen/bean/agent/v1"
 	commonv1 "github.com/garysng/bean/internal/gen/bean/common/v1"
 	nodev1 "github.com/garysng/bean/internal/gen/bean/node/v1"
+	"github.com/garysng/bean/internal/node/image"
 	"github.com/garysng/bean/internal/node/runtime"
 )
 
@@ -49,10 +50,25 @@ func (s *GRPCServer) CreateSandbox(ctx context.Context, req *nodev1.CreateSandbo
 		}
 		return nil, status.Errorf(codes.Internal, "create: %v", err)
 	}
-	return &nodev1.CreateSandboxResponse{Status: &nodev1.SandboxStatus{
+	resp := &nodev1.CreateSandboxResponse{Status: &nodev1.SandboxStatus{
 		SandboxId: req.Spec.SandboxId,
 		State:     string(sb.State),
-	}}, nil
+	}}
+	// A cold start from an OCI reference that was asked to publish reports the
+	// converted chain's coordinates, so the control plane can record a reusable
+	// template keyed by the OCI source. Nil on every other path (restore, warm
+	// snapshot, a provider with no store, or a create that did not ask to publish).
+	if sb.Handle != nil && sb.Handle.Conversion != nil {
+		c := sb.Handle.Conversion
+		resp.Conversion = &nodev1.ImageConversion{
+			OverlaybdRef: c.ManifestDigest,
+			OciDigest:    c.OCIDigest,
+			SizeBytes:    c.SizeBytes,
+			LayerDigests: c.LayerDigests,
+			Config:       imageConfigToProto(c.Config),
+		}
+	}
+	return resp, nil
 }
 
 func (s *GRPCServer) DestroySandbox(ctx context.Context, req *nodev1.DestroySandboxRequest) (*nodev1.DestroySandboxResponse, error) {
@@ -169,9 +185,26 @@ func (s *GRPCServer) BuildImage(req *nodev1.BuildImageRequest,
 				OverlaybdRef: res.OverlaybdRef,
 				SizeBytes:    res.SizeBytes,
 				LayerDigests: res.LayerDigests,
+				Config:       imageConfigToProto(res.Config),
 			},
 		},
 	})
+}
+
+// imageConfigToProto converts a recovered image config to its wire form, or nil when
+// the build or conversion declared none. The control plane records it on the template
+// so a create honours the ENV/ENTRYPOINT/CMD/WORKDIR and `template status` shows it.
+func imageConfigToProto(cfg *image.Config) *nodev1.ImageConfig {
+	if cfg == nil {
+		return nil
+	}
+	return &nodev1.ImageConfig{
+		Env:        cfg.Env,
+		Entrypoint: cfg.Entrypoint,
+		Cmd:        cfg.Cmd,
+		WorkingDir: cfg.WorkingDir,
+		User:       cfg.User,
+	}
 }
 
 // ---- data plane passthrough ----
@@ -413,8 +446,17 @@ func recvLayers(stream nodev1.SandboxService_RestoreSandboxServer, spec *nodev1.
 
 	ids := spec.GetSnapshotChain()
 	if len(ids) == 0 {
-		// No chain declared: the stream is one self-contained bundle. Its id may
-		// also be empty, which means "do not cache" rather than "no layer".
+		if spec.GetFsManifestDigest() != "" {
+			// An overlaybd filesystem-only restore: no guest memory was captured, so
+			// no bundle is streamed. The filesystem is resolved from the manifest
+			// digest and the guest cold-boots from it, so there is no layer to read.
+			// Synthesizing one here would make the runtime wait on a bundle the
+			// control plane never sends and fail the restore with EOF.
+			return nil, &atomic.Int64{}, func(error) {}, nil
+		}
+		// No chain declared and no filesystem digest: the stream is one
+		// self-contained bundle (the local tier carries its filesystem in it). Its
+		// id may also be empty, which means "do not cache" rather than "no layer".
 		ids = []string{spec.GetSnapshotId()}
 	}
 	if len(ids) > maxRestoreLayers {

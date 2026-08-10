@@ -22,8 +22,8 @@ func TestZeroPolicyPermitsEverything(t *testing.T) {
 }
 
 func TestPolicyOnlyBuiltRejectsUnknownRef(t *testing.T) {
-	p := Policy{AllowedSources: []store.ImageSource{store.ImageBuilt}}
-	// A ref the platform has never seen is about to become an import, so it
+	p := Policy{AllowedSources: []store.TemplateSource{store.TemplateBuilt}}
+	// A ref the platform has never seen is about to become a conversion, so it
 	// must be judged as one. Treating it as unknown-and-therefore-fine would
 	// let any caller past the policy by naming a fresh ref.
 	err := p.Check("python:3.12", nil)
@@ -32,15 +32,15 @@ func TestPolicyOnlyBuiltRejectsUnknownRef(t *testing.T) {
 	}
 }
 
-func TestPolicyOnlyBuiltAllowsPlatformImage(t *testing.T) {
-	p := Policy{AllowedSources: []store.ImageSource{store.ImageBuilt}}
-	built := &store.Image{Ref: "team/app:v1", Source: store.ImageBuilt}
+func TestPolicyOnlyBuiltAllowsPlatformTemplate(t *testing.T) {
+	p := Policy{AllowedSources: []store.TemplateSource{store.TemplateBuilt}}
+	built := &store.Template{Name: "team/app:v1", Source: store.TemplateBuilt}
 	if err := p.Check("team/app:v1", built); err != nil {
-		t.Errorf("built image refused: %v", err)
+		t.Errorf("built template refused: %v", err)
 	}
-	imported := &store.Image{Ref: "python:3.12", Source: store.ImageImported}
-	if err := p.Check("python:3.12", imported); !errors.Is(err, ErrPolicyDenied) {
-		t.Errorf("imported image allowed: %v", err)
+	converted := &store.Template{Name: "python:3.12", Source: store.TemplateConverted}
+	if err := p.Check("python:3.12", converted); !errors.Is(err, ErrPolicyDenied) {
+		t.Errorf("converted template allowed: %v", err)
 	}
 }
 
@@ -66,9 +66,9 @@ func TestPolicyRegistryAllowlistSkipsBuiltImages(t *testing.T) {
 	// Otherwise every deployment setting an allowlist would also have to list
 	// its own registry to keep running its own builds.
 	p := Policy{AllowedRegistries: []string{"registry.example.com"}}
-	built := &store.Image{Ref: "ghcr.io/us/built:v1", Source: store.ImageBuilt}
+	built := &store.Template{Name: "ghcr.io/us/built:v1", Source: store.TemplateBuilt}
 	if err := p.Check("ghcr.io/us/built:v1", built); err != nil {
-		t.Errorf("built image refused by registry allowlist: %v", err)
+		t.Errorf("built template refused by registry allowlist: %v", err)
 	}
 }
 
@@ -81,7 +81,7 @@ func TestPolicyRegistryMatchIsCaseInsensitive(t *testing.T) {
 
 func TestPolicyBothAxesApply(t *testing.T) {
 	p := Policy{
-		AllowedSources:    []store.ImageSource{store.ImageImported},
+		AllowedSources:    []store.TemplateSource{store.TemplateConverted},
 		AllowedRegistries: []string{"registry.example.com"},
 	}
 	if err := p.Check("registry.example.com/app:v1", nil); err != nil {
@@ -92,7 +92,7 @@ func TestPolicyBothAxesApply(t *testing.T) {
 		t.Errorf("wrong registry allowed: %v", err)
 	}
 	// Right registry, wrong source.
-	built := &store.Image{Ref: "registry.example.com/b:v1", Source: store.ImageBuilt}
+	built := &store.Template{Name: "registry.example.com/b:v1", Source: store.TemplateBuilt}
 	if err := p.Check("registry.example.com/b:v1", built); !errors.Is(err, ErrPolicyDenied) {
 		t.Errorf("wrong source allowed: %v", err)
 	}
@@ -109,7 +109,7 @@ func TestParsePolicyEmptyIsPermissive(t *testing.T) {
 }
 
 func TestParsePolicyLists(t *testing.T) {
-	p, err := ParsePolicy(" built , imported ", "a.io, b.io")
+	p, err := ParsePolicy(" built , converted ", "a.io, b.io")
 	if err != nil {
 		t.Fatal(err)
 	}

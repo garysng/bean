@@ -51,11 +51,13 @@ func TestPostgresEveryMethodExecutes(t *testing.T) {
 	_, err = s.ListEvents("sbx-1", 10)
 	check("ListEvents", err)
 
-	check("PutImage", s.PutImage(&Image{Ref: "img:1", State: ImageReady, UpdatedAt: now}))
-	_, err = s.GetImage("img:1")
-	check("GetImage", err)
-	_, err = s.ListImages("")
-	check("ListImages", err)
+	check("PutTemplate", s.PutTemplate(&Template{ID: "tpl_1", Name: "img:1", State: TemplateReady, UpdatedAt: now}))
+	_, err = s.GetTemplate("tpl_1")
+	check("GetTemplate", err)
+	_, err = s.GetTemplateByName("img:1")
+	check("GetTemplateByName", err)
+	_, err = s.ListTemplates("")
+	check("ListTemplates", err)
 
 	check("PutBuild", s.PutBuild(&ImageBuild{ID: "b-1", State: BuildPending, CreatedAt: now}))
 	_, err = s.GetBuild("b-1")
@@ -108,7 +110,7 @@ func TestPostgresEveryMethodExecutes(t *testing.T) {
 
 	check("DeleteSnapshot/child", s.DeleteSnapshot("sn-2"))
 	check("DeleteSnapshot", s.DeleteSnapshot("sn-1"))
-	check("DeleteImage", s.DeleteImage("img:1"))
+	check("DeleteTemplate", s.DeleteTemplate("tpl_1"))
 	check("DeleteSandbox", s.DeleteSandbox("sbx-1"))
 }
 
@@ -133,7 +135,7 @@ func TestEveryInterfaceMethodIsExercisedOnPostgres(t *testing.T) {
 	var union = []reflect.Type{
 		reflect.TypeOf((*Sandboxes)(nil)).Elem(),
 		reflect.TypeOf((*Snapshots)(nil)).Elem(),
-		reflect.TypeOf((*Images)(nil)).Elem(),
+		reflect.TypeOf((*Templates)(nil)).Elem(),
 		reflect.TypeOf((*Placement)(nil)).Elem(),
 		reflect.TypeOf((*Nodes)(nil)).Elem(),
 		reflect.TypeOf((*RegistryCredentials)(nil)).Elem(),

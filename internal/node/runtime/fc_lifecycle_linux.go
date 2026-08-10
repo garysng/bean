@@ -187,7 +187,14 @@ func (r *FCRuntime) Checkpoint(ctx context.Context, id string, w io.Writer, opts
 	if !ok {
 		return CheckpointResult{}, fmt.Errorf("fc: sandbox %s runtime cannot seal a snapshot filesystem", id)
 	}
-	fsDigest, fsLayers, fsSize, err := sealer.SealSnapshotFS(ctx, id, vm.imageRef)
+	// The base is named by whichever identity the sandbox started from: an OCI
+	// reference on a cold start, or the filesystem manifest digest for a sandbox
+	// created from a template or restored from a snapshot (which has no reference).
+	base := vm.imageRef
+	if base == "" {
+		base = vm.baseFSDigest
+	}
+	fsDigest, fsLayers, fsSize, err := sealer.SealSnapshotFS(ctx, id, base)
 	if err != nil {
 		return CheckpointResult{}, fmt.Errorf("fc: seal snapshot filesystem: %w", err)
 	}

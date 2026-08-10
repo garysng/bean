@@ -61,20 +61,21 @@ const (
 	SnapshotFailed   SnapshotState = "FAILED"
 )
 
-// ImageState tracks platform-side image preparation. Users only ever
-// supply a native OCI reference; conversion is invisible to them.
-type ImageState string
+// TemplateState tracks platform-side template preparation. A template is a
+// startable overlaybd artifact, produced by a build or by converting an OCI
+// image; conversion is invisible to the user who supplied an OCI reference.
+type TemplateState string
 
 const (
-	// ImagePending: the ref is registered but nothing has been prepared.
-	ImagePending ImageState = "PENDING"
-	// ImageBuilding: a platform-side build is producing this image.
-	ImageBuilding ImageState = "BUILDING"
-	// ImageConverting: an overlaybd conversion is in progress.
-	ImageConverting ImageState = "CONVERTING"
-	// ImageReady: an overlaybd artifact exists and the fc tier can use it.
-	ImageReady  ImageState = "READY"
-	ImageFailed ImageState = "FAILED"
+	// TemplatePending: the source is registered but nothing has been prepared.
+	TemplatePending TemplateState = "PENDING"
+	// TemplateBuilding: a platform-side build is producing this template.
+	TemplateBuilding TemplateState = "BUILDING"
+	// TemplateConverting: an overlaybd conversion is in progress.
+	TemplateConverting TemplateState = "CONVERTING"
+	// TemplateReady: an overlaybd artifact exists and the fc tier can use it.
+	TemplateReady  TemplateState = "READY"
+	TemplateFailed TemplateState = "FAILED"
 )
 
 // NodeState is a node's liveness as the control plane sees it. The scheduler
@@ -92,18 +93,18 @@ const (
 	NodeDraining NodeState = "DRAINING"
 )
 
-// ImageSource records how an image came to exist, which determines its
+// TemplateSource records how a template came to exist, which determines its
 // conversion cost (see docs/image-build.md §2).
-type ImageSource string
+type TemplateSource string
 
 const (
-	// ImageImported is a native OCI reference the caller supplied. Its
-	// layers are tar.gz and must be converted before the fc tier can use it.
-	ImageImported ImageSource = "imported"
-	// ImageBuilt was produced by the platform. A commit-built image needs no
-	// conversion because an overlaybd writable layer is already LSMT; a
-	// BuildKit-built one still does, because BuildKit emits standard OCI.
-	ImageBuilt ImageSource = "built"
+	// TemplateConverted is produced by converting an OCI reference the caller
+	// supplied. Its layers are tar.gz and must be converted before the fc tier
+	// can use it; the converted artifact is published and recorded as a template.
+	TemplateConverted TemplateSource = "converted"
+	// TemplateBuilt was produced by the platform from a Dockerfile. BuildKit
+	// emits standard OCI, which is flattened and sealed into an overlaybd layer.
+	TemplateBuilt TemplateSource = "built"
 )
 
 // BuildState tracks a build's progress.
@@ -228,7 +229,7 @@ type ImageBuild struct {
 const (
 	PrefixSandbox    = "sbx"
 	PrefixSnapshot   = "snap"
-	PrefixImage      = "img"
+	PrefixTemplate   = "tpl"
 	PrefixVolume     = "vol"
 	PrefixPrewarmJob = "pw"
 	PrefixBuild      = "bld"
@@ -281,6 +282,52 @@ type Sandbox struct {
 
 	CreatedAt    time.Time `json:"createdAt"`
 	LastActivity time.Time `json:"lastActivityAt"`
+}
+
+// Config is the image config a template or snapshot carries: the
+// ENV/ENTRYPOINT/CMD/WORKDIR/USER a sandbox inherits at start. It mirrors the
+// node-side image.Config field-for-field; the control plane keeps its own copy
+// rather than importing the node package.
+type Config struct {
+	Env        []string `json:"Env,omitempty"`
+	Entrypoint []string `json:"Entrypoint,omitempty"`
+	Cmd        []string `json:"Cmd,omitempty"`
+	WorkingDir string   `json:"WorkingDir,omitempty"`
+	User       string   `json:"User,omitempty"`
+}
+
+// FSArtifact names a filesystem as an overlaybd layer chain in the shared store,
+// the content-addressed space at blobs/<digest> that both templates and
+// snapshots resolve against. Two records pointing at the same Digest share one
+// filesystem byte-for-byte; a snapshot sharing its base template's LayerDigests
+// stores only its own top layer. It mirrors the node-side StoredManifest shape,
+// so a template's fs and a snapshot's fs are described identically.
+type FSArtifact struct {
+	// Digest is the fs manifest digest -- the content key into blobs/<digest>.
+	// A restore/attach resolves it exactly as it resolves an image tag.
+	Digest string `json:"digest,omitempty"`
+	// LayerDigests is the layer chain, base first. Shared base layers are stored
+	// once; a record's own new layer is the tail.
+	LayerDigests []string `json:"layerDigests,omitempty"`
+	// Config is the image config (ENV/ENTRYPOINT/CMD/WORKDIR/USER) recorded so a
+	// cache-cleared node resolves it fully offline. Nil means none was recorded.
+	Config *Config `json:"config,omitempty"`
+	// SizeBytes is this record's own top layer's sealed size, not the whole
+	// chain: shared base layers are accounted to the record that introduced them.
+	SizeBytes int64 `json:"sizeBytes,omitempty"`
+}
+
+// OCISource is the registry provenance of a template produced by converting an
+// OCI image. It is nil for a build-produced template. It is not identity and not
+// the fs key: it is the conversion-cache key, so a later create with the same
+// OCI reference reuses the already-converted template instead of re-converting.
+type OCISource struct {
+	// Ref is the OCI reference the template was converted from, e.g. "python:3.12".
+	Ref string `json:"ref"`
+	// Digest is the OCI *content* digest ("sha256:...") the ref resolved to. It
+	// is distinct from FSArtifact.Digest (the overlaybd manifest key): together
+	// (Ref, Digest) is the reuse key.
+	Digest string `json:"digest,omitempty"`
 }
 
 // Snapshot is a persisted sandbox state that can be restored later,
@@ -342,25 +389,17 @@ type Snapshot struct {
 	// "assume memory", the behaviour those snapshots were created under.
 	IncludeMemory *bool `json:"includeMemory,omitempty"`
 
-	// FSManifestDigest names the snapshot's filesystem as an overlaybd layer
-	// chain in the shared store, the same content-addressed space image layers
-	// live in. A restore resolves it exactly as it resolves an image tag: the
-	// chain becomes read-only lowers with a fresh writable on top, and no
-	// filesystem bytes travel in the restore stream.
+	// FS names the snapshot's filesystem as an overlaybd layer chain in the
+	// shared store, the same content-addressed space template layers live in. A
+	// restore resolves FS.Digest exactly as it resolves an image tag: the chain
+	// becomes read-only lowers with a fresh writable on top, and no filesystem
+	// bytes travel in the restore stream.
 	//
-	// Empty means the checkpoint carries its filesystem in the bundle instead --
-	// the local tier, which has no shared store. SizeBytes then covers the whole
-	// checkpoint; when this is set, SizeBytes is only the memory bundle and the
-	// filesystem is accounted by FSSizeBytes.
-	FSManifestDigest string `json:"fsManifestDigest,omitempty"`
-	// FSLayerDigests is the filesystem's layer chain, base first. It shares the
-	// base image's layer digests, so the store holds one copy of those layers and
-	// only the snapshot's own top layer is new -- which is the whole point of
-	// keying the filesystem by digest rather than bundling it.
-	FSLayerDigests []string `json:"fsLayerDigests,omitempty"`
-	// FSSizeBytes is the sealed size of the snapshot's own top layer, not the
-	// whole chain: the shared base layers are already accounted to the image.
-	FSSizeBytes int64 `json:"fsSizeBytes,omitempty"`
+	// An empty FS.Digest means the checkpoint carries its filesystem in the
+	// bundle instead -- the local tier, which has no shared store. SizeBytes then
+	// covers the whole checkpoint; when FS.Digest is set, SizeBytes is only the
+	// memory bundle and the filesystem is accounted by FS.SizeBytes.
+	FS FSArtifact `json:"fs,omitempty"`
 
 	Labels map[string]string `json:"labels,omitempty"`
 	// RefCount counts in-progress restores; a snapshot with refs cannot be
@@ -379,48 +418,53 @@ func (s *Snapshot) HasMemory() bool {
 	return s.IncludeMemory == nil || *s.IncludeMemory
 }
 
-// Image is platform-side metadata for a native OCI reference. Callers
-// supply Ref only; everything else is derived by the platform.
-type Image struct {
-	// Ref is the native OCI reference exactly as the caller wrote it,
-	// e.g. "python:3.12" or "registry/swebench/django-12345:latest".
-	Ref string `json:"ref"`
-	// Digest pins the resolved content. Scheduling, caching and
-	// reproducibility all key off the digest, never the tag.
-	Digest string `json:"digest,omitempty"`
-	// OverlaybdRef points at the converted block-device artifact. It is
-	// internal — API handlers select fields explicitly and never include
-	// it — but it must persist, so it keeps a JSON name.
-	OverlaybdRef string `json:"overlaybdRef,omitempty"`
+// Template is a startable overlaybd artifact: a filesystem a sandbox boots
+// from, produced by a Dockerfile build or by converting an OCI image. It is
+// addressed by ID and Name, symmetric with a Snapshot; its filesystem is the
+// embedded FS, the same shared overlaybd chain a snapshot uses.
+type Template struct {
+	// ID is the primary identifier, e.g. "tpl_9f8745cbb1".
+	ID string `json:"id"`
+	// Name is a human-friendly handle. For a converted OCI image it is set to
+	// the OCI reference; a create by name resolves against it.
+	Name string `json:"name,omitempty"`
+	// Labels are free-form key/value tags, symmetric with a snapshot's labels: a
+	// template and a snapshot are both addressed and displayed by id/name/labels.
+	Labels map[string]string `json:"labels,omitempty"`
 
-	State  ImageState `json:"state"`
-	Reason string     `json:"reason,omitempty"`
+	// FS is the template's filesystem as a shared overlaybd layer chain. FS.Digest
+	// is the overlaybd manifest key the node attaches; FS.Config is the image
+	// config the sandbox inherits.
+	FS FSArtifact `json:"fs,omitempty"`
 
-	// Source distinguishes an imported OCI reference from a platform build.
-	Source ImageSource `json:"source"`
-	// Owner is the identity that caused this image to exist: the caller who
-	// built it, or the first caller to reference it. Empty means unowned,
-	// which is what every image predating this field is and what a
-	// deployment with no identity source produces — so an empty owner has to
-	// keep meaning "visible to everyone" rather than "belongs to nobody",
-	// or an upgrade would hide the platform base images from every caller.
+	// OCISource is the registry provenance when this template was produced by
+	// converting an OCI image; nil for a build-produced template. It is the
+	// conversion-cache key, so a later create with the same OCI reference reuses
+	// this template instead of re-converting.
+	OCISource *OCISource `json:"ociSource,omitempty"`
+
+	State  TemplateState `json:"state"`
+	Reason string        `json:"reason,omitempty"`
+
+	// Source distinguishes a converted OCI image from a platform build.
+	Source TemplateSource `json:"source"`
+	// Owner is the identity that caused this template to exist: the caller who
+	// built it, or the first caller to reference the OCI image it converts.
+	// Empty means unowned -- visible to everyone -- which is what every template
+	// predating this field is and what a deployment with no identity source
+	// produces.
 	//
 	// Ownership is recorded, not enforced: it scopes listings. Access control
-	// belongs to whatever fronts this API, because that layer is the only one
-	// that knows whether two identities are allowed to see each other's work.
+	// belongs to whatever fronts this API.
 	Owner string `json:"owner,omitempty"`
-	// BaseRef is the image this one was built on top of; layer reuse and
+	// BaseRef is the template this one was built on top of; layer reuse and
 	// garbage collection both need it.
 	BaseRef string `json:"baseRef,omitempty"`
-	// BuildID traces a built image back to the build that produced it.
+	// BuildID traces a built template back to the build that produced it.
 	BuildID string `json:"buildId,omitempty"`
-	// LayerDigests is the layer manifest, which drives layer-level dedup
-	// and cache accounting.
-	LayerDigests []string `json:"layerDigests,omitempty"`
 
-	SizeBytes int64 `json:"sizeBytes,omitempty"`
-	// CachedNodes counts nodes reporting local blocks for this image,
-	// which drives image-affinity scoring and prewarm decisions.
+	// CachedNodes counts nodes reporting local blocks for this template,
+	// which drives affinity scoring and prewarm decisions.
 	CachedNodes int `json:"cachedNodes"`
 
 	CreatedAt time.Time `json:"createdAt"`

@@ -46,7 +46,7 @@ type NodeCacheSource interface {
 // through it, which is the point -- an image service that could move a reservation
 // would be a second scheduler.
 type Store interface {
-	store.Images
+	store.Templates
 }
 
 type Service struct {
@@ -79,26 +79,28 @@ func (s *Service) Policy() Policy { return s.policy }
 // here: they need a registry client and a converter, which arrive with the
 // fc tier. Until then an image stays PENDING, which the container/local
 // tiers can still run because they pull through the standard path.
-func (s *Service) Resolve(ref string) (*store.Image, error) {
+func (s *Service) Resolve(ref string) (*store.Template, error) {
 	return s.ResolveFor(ref, "")
 }
 
 // ResolveFor is Resolve on behalf of an identity: it applies the operator's
 // policy and attributes a first-seen reference to owner.
 //
-// Ownership is claimed only on first registration and never reassigned. A
-// shared base image would otherwise change hands with every caller that ran
-// it, and the last one to touch it is not a useful answer to "whose is this".
-// An empty owner leaves the image unowned, which is what a deployment with no
-// identity source produces and what every pre-existing image already is.
-func (s *Service) ResolveFor(ref, owner string) (*store.Image, error) {
+// A converted OCI image is a template whose name is the OCI reference, so an
+// unseen ref registers a new PENDING template named by the ref; a ref already
+// converted resolves to its existing template. Ownership is claimed only on
+// first registration and never reassigned. A shared base image would otherwise
+// change hands with every caller that ran it, and the last one to touch it is
+// not a useful answer to "whose is this". An empty owner leaves the template
+// unowned, which is what a deployment with no identity source produces.
+func (s *Service) ResolveFor(ref, owner string) (*store.Template, error) {
 	if err := ValidateRef(ref); err != nil {
 		return nil, err
 	}
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	img, err := s.store.GetImage(ref)
+	tpl, err := s.store.GetTemplateByName(ref)
 	if err != nil {
 		return nil, err
 	}
@@ -106,73 +108,76 @@ func (s *Service) ResolveFor(ref, owner string) (*store.Image, error) {
 	// reference already registered: an operator who tightens the policy means
 	// it to apply to the next create, not only to refs nobody has run yet.
 	if s.policy.Enabled() {
-		if err := s.policy.Check(ref, img); err != nil {
+		if err := s.policy.Check(ref, tpl); err != nil {
 			return nil, err
 		}
 	}
-	if img != nil {
-		return s.withCacheCount(img), nil
+	if tpl != nil {
+		return s.withCacheCount(tpl), nil
 	}
 	now := time.Now()
-	img = &store.Image{
-		Ref:       ref,
-		State:     store.ImagePending,
-		Source:    store.ImageImported,
+	tpl = &store.Template{
+		ID:        store.NewID(store.PrefixTemplate),
+		Name:      ref,
+		OCISource: &store.OCISource{Ref: ref},
+		State:     store.TemplatePending,
+		Source:    store.TemplateConverted,
 		Owner:     owner,
 		CreatedAt: now,
 		UpdatedAt: now,
 	}
-	if err := s.store.PutImage(img); err != nil {
+	if err := s.store.PutTemplate(tpl); err != nil {
 		return nil, err
 	}
-	return s.withCacheCount(img), nil
+	return s.withCacheCount(tpl), nil
 }
 
-// Get returns image metadata, or nil if the reference was never used.
-func (s *Service) Get(ref string) (*store.Image, error) {
-	img, err := s.store.GetImage(ref)
-	if err != nil || img == nil {
+// Get returns template metadata by its OCI ref (its name), or nil if the
+// reference was never used.
+func (s *Service) Get(ref string) (*store.Template, error) {
+	tpl, err := s.store.GetTemplateByName(ref)
+	if err != nil || tpl == nil {
 		return nil, err
 	}
-	return s.withCacheCount(img), nil
+	return s.withCacheCount(tpl), nil
 }
 
-// List returns every known image, most recently updated first. It is the
+// List returns every known template, most recently updated first. It is the
 // operator's view; a per-caller listing goes through ListFor.
-func (s *Service) List() ([]*store.Image, error) {
+func (s *Service) List() ([]*store.Template, error) {
 	return s.ListFor("")
 }
 
-// ListFor returns the images an identity may see: its own plus the unowned
+// ListFor returns the templates an identity may see: its own plus the unowned
 // ones. An empty owner returns everything, which is both the operator's view
 // and what a deployment with no identity source can answer.
-func (s *Service) ListFor(owner string) ([]*store.Image, error) {
-	imgs, err := s.store.ListImages(owner)
+func (s *Service) ListFor(owner string) ([]*store.Template, error) {
+	tpls, err := s.store.ListTemplates(owner)
 	if err != nil {
 		return nil, err
 	}
-	for _, img := range imgs {
-		s.withCacheCount(img)
+	for _, tpl := range tpls {
+		s.withCacheCount(tpl)
 	}
-	return imgs, nil
+	return tpls, nil
 }
 
-// Delete removes an image record. It is the operator's unscoped delete; a
+// Delete removes a template record. It is the operator's unscoped delete; a
 // per-caller delete goes through DeleteFor.
 func (s *Service) Delete(ref string) error {
 	return s.DeleteFor(ref, "")
 }
 
-// DeleteFor removes an image an identity is allowed to remove: its own, or an
+// DeleteFor removes a template an identity is allowed to remove: its own, or an
 // unowned one. It returns ErrNotFound when the reference is unknown, and
 // ErrForbidden when it belongs to another identity, so a caller cannot use delete
-// to probe for the existence of images it may not see.
+// to probe for the existence of templates it may not see.
 //
 // The scope mirrors ListFor: an empty owner is the operator's view and may delete
-// anything, an identity may delete what it owns and the unowned images every
+// anything, an identity may delete what it owns and the unowned templates every
 // identity shares. Deletion removes only the control-plane record; published layers
 // are content-addressed and shared, so they are reclaimed by garbage collection, not
-// by deleting one image that referenced them.
+// by deleting one template that referenced them.
 func (s *Service) DeleteFor(ref, owner string) error {
 	if err := ValidateRef(ref); err != nil {
 		return err
@@ -180,67 +185,83 @@ func (s *Service) DeleteFor(ref, owner string) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
-	img, err := s.store.GetImage(ref)
+	tpl, err := s.store.GetTemplateByName(ref)
 	if err != nil {
 		return err
 	}
-	if img == nil {
+	if tpl == nil {
 		return ErrNotFound
 	}
-	if owner != "" && img.Owner != "" && img.Owner != owner {
+	if owner != "" && tpl.Owner != "" && tpl.Owner != owner {
 		return ErrForbidden
 	}
-	return s.store.DeleteImage(ref)
+	return s.store.DeleteTemplate(tpl.ID)
 }
 
 // MarkConverting records that a conversion has started.
 func (s *Service) MarkConverting(ref string) error {
-	return s.transition(ref, store.ImageConverting, "", func(img *store.Image) {})
+	return s.transition(ref, store.TemplateConverting, "", func(tpl *store.Template) {})
 }
 
-// MarkReady records a successful conversion along with the artifact ref, size and
-// layer chain, making the image usable by the fc tier.
+// MarkReady records a successful conversion along with the artifact digest, size
+// and layer chain, making the template usable by the fc tier.
 //
 // layerDigests is the published layer chain, base first. It is recorded so per-layer
 // dedup and cache accounting have it without a second round trip; a build that stayed
-// node-local publishes nothing and passes an empty ref, zero size and no digests.
-func (s *Service) MarkReady(ref, overlaybdRef string, sizeBytes int64, layerDigests []string) error {
-	return s.transition(ref, store.ImageReady, "", func(img *store.Image) {
-		img.OverlaybdRef = overlaybdRef
-		img.SizeBytes = sizeBytes
-		img.LayerDigests = layerDigests
+// node-local publishes nothing and passes an empty digest, zero size and no digests.
+//
+// ociDigest is the OCI content sha256 an OCI conversion resolved node-side; it
+// completes the OCISource{ref, digest} conversion-cache key so a later create with
+// the same ref reuses this template without re-converting. A built template has no
+// OCI origin and passes an empty ociDigest, leaving OCISource nil.
+//
+// cfg is the image configuration the node recovered -- the ENV/ENTRYPOINT/CMD/WORKDIR
+// a build declared or a converted image carries -- recorded on the template so a create
+// honours it and `template status` shows it. Nil when the artifact declared none.
+func (s *Service) MarkReady(ref, fsDigest string, sizeBytes int64, layerDigests []string, ociDigest string, cfg *store.Config) error {
+	return s.transition(ref, store.TemplateReady, "", func(tpl *store.Template) {
+		tpl.FS.Digest = fsDigest
+		tpl.FS.SizeBytes = sizeBytes
+		tpl.FS.LayerDigests = layerDigests
+		tpl.FS.Config = cfg
+		if ociDigest != "" {
+			if tpl.OCISource == nil {
+				tpl.OCISource = &store.OCISource{Ref: ref}
+			}
+			tpl.OCISource.Digest = ociDigest
+		}
 	})
 }
 
 // MarkFailed records a conversion failure with its reason.
 func (s *Service) MarkFailed(ref, reason string) error {
-	return s.transition(ref, store.ImageFailed, reason, func(img *store.Image) {})
+	return s.transition(ref, store.TemplateFailed, reason, func(tpl *store.Template) {})
 }
 
-func (s *Service) transition(ref string, to store.ImageState, reason string,
-	mutate func(*store.Image)) error {
+func (s *Service) transition(ref string, to store.TemplateState, reason string,
+	mutate func(*store.Template)) error {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	img, err := s.store.GetImage(ref)
+	tpl, err := s.store.GetTemplateByName(ref)
 	if err != nil {
 		return err
 	}
-	if img == nil {
-		return fmt.Errorf("image %s not registered", ref)
+	if tpl == nil {
+		return fmt.Errorf("template %s not registered", ref)
 	}
-	img.State = to
-	img.Reason = reason
-	mutate(img)
-	return s.store.PutImage(img)
+	tpl.State = to
+	tpl.Reason = reason
+	mutate(tpl)
+	return s.store.PutTemplate(tpl)
 }
 
 // withCacheCount fills in the live node-cache count, which is not persisted
 // because it changes with every heartbeat.
-func (s *Service) withCacheCount(img *store.Image) *store.Image {
-	if s.cache != nil {
-		img.CachedNodes = s.cache.CachedNodeCount(img.Ref)
+func (s *Service) withCacheCount(tpl *store.Template) *store.Template {
+	if s.cache != nil && tpl.OCISource != nil {
+		tpl.CachedNodes = s.cache.CachedNodeCount(tpl.OCISource.Ref)
 	}
-	return img
+	return tpl
 }
 
 // PrewarmRequest asks the platform to pull images onto nodes ahead of a

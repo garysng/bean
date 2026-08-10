@@ -57,12 +57,18 @@ type Spec struct {
 	// the streamed extents) rather than from a sealed snapshot chain.
 	FSManifestDigest string
 	Image            string
-	CPU              float64
-	MemoryMiB        int64
-	DiskMiB          int64
-	Env              map[string]string
-	Cmd              []string
-	AutoStartCmd     bool
+	// PublishConversion asks a cold start from an OCI reference to publish what it
+	// converts to the shared store and report the coordinates back, so the control
+	// plane records a reusable template. Empty for a restore, a warm-snapshot
+	// create, or a create from an already-converted template -- none of which
+	// convert an OCI reference. See SandboxSpec.publish_conversion.
+	PublishConversion bool
+	CPU               float64
+	MemoryMiB         int64
+	DiskMiB           int64
+	Env               map[string]string
+	Cmd               []string
+	AutoStartCmd      bool
 
 	// Network is the addressing this sandbox was assigned, or nil on a node with
 	// no networking configured.
@@ -96,6 +102,13 @@ type Handle struct {
 	StartedAt  time.Time
 	PID        int // primary host process (fc process or local agent), 0 if n/a
 	RuntimeTag string
+
+	// Conversion reports what a cold start from an OCI reference converted and
+	// published to the shared store, so the control plane can record a reusable
+	// template. Nil unless the create asked to publish (spec.PublishConversion)
+	// and the provider actually converted and published a chain -- a restore, a
+	// warm-snapshot create, or a provider with no store all leave it nil.
+	Conversion *image.ConversionResult
 }
 
 // Runtime creates and manages sandbox instances. Implementations are
@@ -343,6 +356,10 @@ type BuildResult struct {
 	SizeBytes int64
 	// LayerDigests is the published layer chain, base first.
 	LayerDigests []string
+	// Config is the image configuration recovered from the build's OCI export, so
+	// the control plane records the Dockerfile's ENV/ENTRYPOINT/CMD/WORKDIR on the
+	// template. Nil when the build declared none.
+	Config *image.Config
 }
 
 // BuildRequest describes a build at the runtime boundary. It mirrors the node's

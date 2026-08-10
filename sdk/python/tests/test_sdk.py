@@ -45,15 +45,16 @@ class StubHandler(BaseHTTPRequestHandler):
         length = int(self.headers.get("Content-Length", 0))
         body = json.loads(self.rfile.read(length) or b"{}")
         if self.path == "/v1/sandboxes":
-            image, snap = body.get("image"), body.get("snapshot")
-            if not image and not snap:
+            image_ref = body.get("imageRef")
+            tpl, snap = body.get("template"), body.get("snapshot")
+            if not image_ref and not tpl and not snap:
                 return self._json(400, {"error": {"code": "INVALID_ARGUMENT",
-                                                  "message": "image or snapshot required"}})
-            if image == "reject-me":
+                                                  "message": "one source required"}})
+            if image_ref == "reject-me":
                 return self._json(400, {"error": {"code": "IMAGE_REF_INVALID",
                                                   "message": "image rejected"}})
             sb = {"id": "sbx_stub1", "state": "RUNNING",
-                  "image": image or "python:3.12",
+                  "image": image_ref or tpl or "python:3.12",
                   "snapshotId": snap or "",
                   "labels": body.get("labels", {})}
             StubHandler.store["sbx_stub1"] = sb
@@ -69,11 +70,11 @@ class StubHandler(BaseHTTPRequestHandler):
                              "sandboxId": "sbx_stub1", "image": "python:3.12",
                              "name": body.get("name", ""), "sizeBytes": 2048},
             })
-        if self.path == "/v1/images/build":
-            return self._json(202, {"imageRef": body["tag"], "nodeId": "node-a",
+        if self.path == "/v1/templates/build":
+            return self._json(202, {"template": body["tag"], "nodeId": "node-a",
                                     "state": "BUILDING",
                                     "hadContext": bool(body.get("contextTar"))})
-        if self.path == "/v1/images/prewarm":
+        if self.path == "/v1/templates/prewarm":
             return self._json(202, {"jobId": "pw_stub1",
                                     "ready": {r: 1 for r in body.get("refs", [])}})
         if self.path.endswith("/pause") or self.path.endswith("/resume"):
@@ -110,14 +111,16 @@ class StubHandler(BaseHTTPRequestHandler):
             return self._json(200, {"snapshots": [{
                 "id": "snap_stub1", "state": "READY", "sandboxId": "sbx_stub1",
                 "image": "python:3.12", "sizeBytes": 2048}]})
-        if self.path == "/v1/images":
-            return self._json(200, {"images": [
-                {"ref": "python:3.12", "state": "PENDING", "cachedNodes": 0}]})
-        if self.path.startswith("/v1/images/status"):
-            return self._json(200, {"ref": "python:3.12", "state": "PENDING",
-                                    "format": "oci", "cachedNodes": 0})
-        if self.path.startswith("/v1/images/prewarm/"):
+        if self.path.startswith("/v1/templates/status"):
+            return self._json(200, {"id": "tpl_stub1", "name": "python:3.12",
+                                    "state": "PENDING", "format": "oci",
+                                    "cachedNodes": 0})
+        if self.path.startswith("/v1/templates/prewarm/"):
             return self._json(200, {"jobId": "pw_stub1", "done": True})
+        if self.path.startswith("/v1/templates"):
+            return self._json(200, {"templates": [
+                {"id": "tpl_stub1", "name": "python:3.12", "state": "PENDING",
+                 "source": "converted", "cachedNodes": 0}]})
         if self.path.startswith("/v1/sandboxes/sbx_stub1/files?"):
             self.send_response(200)
             self.end_headers()
@@ -151,7 +154,7 @@ class SDKTest(unittest.TestCase):
         cls.httpd.server_close()
 
     def test_create_and_exec(self):
-        sb = self.client.sandboxes.create(image="python:3.12", labels={"a": "b"})
+        sb = self.client.sandboxes.create(image_ref="python:3.12", labels={"a": "b"})
         self.assertEqual(sb.id, "sbx_stub1")
         self.assertEqual(sb.state, "RUNNING")
         r = sb.exec(["echo", "hi"])
@@ -159,12 +162,12 @@ class SDKTest(unittest.TestCase):
         self.assertEqual(r.stdout, "echo hi")
 
     def test_exec_str_wraps_shell(self):
-        sb = self.client.sandboxes.create(image="x")
+        sb = self.client.sandboxes.create(image_ref="x")
         r = sb.exec("echo hi")
         self.assertEqual(r.stdout, "/bin/sh -c echo hi")
 
     def test_files(self):
-        sb = self.client.sandboxes.create(image="x")
+        sb = self.client.sandboxes.create(image_ref="x")
         n = sb.write_file("/a.txt", "hello")
         self.assertEqual(n, 5)
         self.assertEqual(sb.read_file("/a.txt"), b"file-content")
@@ -180,11 +183,11 @@ class SDKTest(unittest.TestCase):
     def test_create_validation_error(self):
         # A server-side rejection surfaces as BeanAPIError with its code.
         with self.assertRaises(BeanAPIError) as cm:
-            self.client.sandboxes.create(image="reject-me")
+            self.client.sandboxes.create(image_ref="reject-me")
         self.assertEqual(cm.exception.code, "IMAGE_REF_INVALID")
 
     def test_context_manager_kills(self):
-        with self.client.sandboxes.create(image="x") as sb:
+        with self.client.sandboxes.create(image_ref="x") as sb:
             self.assertEqual(sb.state, "RUNNING")
         self.assertEqual(sb.state, "STOPPED")
 
@@ -226,7 +229,7 @@ class SDKTest(unittest.TestCase):
             list(c.events.subscribe(timeout=1))
 
     def test_sandbox_snapshot(self):
-        sb = self.client.sandboxes.create(image="python:3.12")
+        sb = self.client.sandboxes.create(image_ref="python:3.12")
         snap = sb.snapshot(name="after-setup")
         self.assertIsInstance(snap, Snapshot)
         self.assertEqual(snap.id, "snap_stub1")
@@ -236,16 +239,16 @@ class SDKTest(unittest.TestCase):
         self.assertEqual(sb.state, "RUNNING")
 
     def test_snapshot_stops_source_when_asked(self):
-        sb = self.client.sandboxes.create(image="python:3.12")
+        sb = self.client.sandboxes.create(image_ref="python:3.12")
         sb.snapshot(keep_running=False)
         self.assertEqual(sb.state, "STOPPED")
 
     def test_build_accepts_dockerfile_without_a_context(self):
-        out = self.client.images.build(
+        out = self.client.templates.build(
             tag="myteam/app:v1",
             dockerfile="FROM alpine:3.20\nRUN echo hi\n",
         )
-        self.assertEqual(out["imageRef"], "myteam/app:v1")
+        self.assertEqual(out["template"], "myteam/app:v1")
         self.assertEqual(out["state"], "BUILDING")
         # A Dockerfile that only runs commands should not upload anything.
         self.assertFalse(out["hadContext"])
@@ -261,7 +264,7 @@ class SDKTest(unittest.TestCase):
             os.makedirs(os.path.join(d, ".git"))
             with open(os.path.join(d, ".git", "config"), "w") as f:
                 f.write("secret\n")
-            out = self.client.images.build(
+            out = self.client.templates.build(
                 tag="myteam/withctx:v1",
                 dockerfile="FROM alpine:3.20\nCOPY app.py /app.py\n",
                 context_dir=d,
@@ -272,9 +275,16 @@ class SDKTest(unittest.TestCase):
         sb = self.client.sandboxes.create(snapshot="snap_stub1")
         self.assertEqual(sb.id, "sbx_stub1")
 
+    def test_create_from_template(self):
+        sb = self.client.sandboxes.create(template="tpl_stub1")
+        self.assertEqual(sb.id, "sbx_stub1")
+        self.assertEqual(sb.image, "tpl_stub1")
+
     def test_create_requires_exactly_one_source(self):
         with self.assertRaises(ValueError):
-            self.client.sandboxes.create(image="x", snapshot="y")
+            self.client.sandboxes.create(image_ref="x", snapshot="y")
+        with self.assertRaises(ValueError):
+            self.client.sandboxes.create(image_ref="x", template="t")
         with self.assertRaises(ValueError):
             self.client.sandboxes.create()
 
@@ -288,15 +298,17 @@ class SDKTest(unittest.TestCase):
         self.client.snapshots.delete("snap_stub1")
         one.delete()
 
-    def test_images_namespace(self):
-        imgs = self.client.images.list()
-        self.assertEqual(imgs[0]["ref"], "python:3.12")
-        status = self.client.images.status("python:3.12")
+    def test_templates_namespace(self):
+        tpls = self.client.templates.list()
+        self.assertEqual(tpls[0]["id"], "tpl_stub1")
+        self.assertEqual(tpls[0]["name"], "python:3.12")
+        status = self.client.templates.status("python:3.12")
         self.assertEqual(status["format"], "oci")
-        job = self.client.images.prewarm(["python:3.12"], target_nodes=1)
+        self.assertEqual(status["id"], "tpl_stub1")
+        job = self.client.templates.prewarm(["python:3.12"], target_nodes=1)
         self.assertEqual(job["jobId"], "pw_stub1")
         self.assertEqual(job["ready"]["python:3.12"], 1)
-        self.assertTrue(self.client.images.prewarm_status("pw_stub1")["done"])
+        self.assertTrue(self.client.templates.prewarm_status("pw_stub1")["done"])
 
     def test_timeout_configurable(self):
         c = BeanClient(api_key="k", base_url=self.client.base_url, timeout=1.5)

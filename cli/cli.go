@@ -133,8 +133,8 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		err = cmdSnapshot(c, rest, stdout)
 	case "build":
 		err = cmdBuild(c, rest, stdout)
-	case "image":
-		err = cmdImage(c, rest, stdout)
+	case "template":
+		err = cmdTemplate(c, rest, stdout)
 	case "version":
 		fmt.Fprintln(stdout, "bean CLI (dev)")
 	default:
@@ -150,7 +150,8 @@ func Run(args []string, stdout, stderr io.Writer) int {
 
 const usage = `usage: bean <command> [args]
 commands:
-  run --image IMG [--label k=v] [--idle-timeout 300s] [--on-idle pause|kill]
+  run (--image-ref IMG | --template ID|NAME | --snapshot SNAP) [--label k=v]
+      [--idle-timeout 300s] [--on-idle pause|kill]
   ls [--label k=v]
   exec SBX -- CMD...
   kill SBX [--force]
@@ -171,9 +172,8 @@ commands:
                                                 # --base: store only what changed
                                                 # since SNAP (needs guest memory)
   snapshot ls [--label k=v] | snapshot rm SNAP
-  run --snapshot SNAP                           # restore instead of image
-  image ls [--source built|imported] | image status REF
-  image prewarm REF... [--replicas N]
+  template ls [--source built|converted] | template status ID|NAME
+  template rm ID|NAME | template prewarm REF... [--replicas N]
 
 output: --json for machine-readable output, --quiet for identifiers only
 exit:   0 ok, 64 not found, 69 unavailable (retry may help), 70 failed,
@@ -224,14 +224,23 @@ func parseFlags(args []string) (map[string]string, []string) {
 
 func cmdRun(c *Client, args []string, stdout io.Writer) error {
 	flags, _ := parseFlags(args)
-	image, snap := flags["image"], flags["snapshot"]
-	if (image == "") == (snap == "") {
-		return usagef("provide exactly one of --image or --snapshot")
+	imageRef, tpl, snap := flags["image-ref"], flags["template"], flags["snapshot"]
+	set := 0
+	for _, v := range []string{imageRef, tpl, snap} {
+		if v != "" {
+			set++
+		}
+	}
+	if set != 1 {
+		return usagef("provide exactly one of --image-ref, --template or --snapshot")
 	}
 	body := map[string]any{}
-	if image != "" {
-		body["image"] = image
-	} else {
+	switch {
+	case imageRef != "":
+		body["imageRef"] = imageRef
+	case tpl != "":
+		body["template"] = tpl
+	default:
 		body["snapshot"] = snap
 	}
 	if lbl := flags["label"]; lbl != "" {
@@ -453,10 +462,10 @@ func cmdBuild(c *Client, args []string, stdout io.Writer) error {
 	}
 
 	var out struct {
-		ImageRef string `json:"imageRef"`
+		Template string `json:"template"`
 		State    string `json:"state"`
 	}
-	if err := c.doJSON("POST", "/v1/images/build", body, &out); err != nil {
+	if err := c.doJSON("POST", "/v1/templates/build", body, &out); err != nil {
 		return err
 	}
 
@@ -465,18 +474,18 @@ func cmdBuild(c *Client, args []string, stdout io.Writer) error {
 	// depends on, and because Ctrl-C on a followed build stops watching without
 	// stopping the build — `bean build cancel` is what stops it.
 	if flags["follow"] == "true" || flags["f"] == "true" {
-		if err := p.result(out.ImageRef, field{"state", out.State}); err != nil {
+		if err := p.result(out.Template, field{"state", out.State}); err != nil {
 			return err
 		}
-		return streamBuildLogs(c, out.ImageRef, stdout)
+		return streamBuildLogs(c, out.Template, stdout)
 	}
 
-	if err := p.result(out.ImageRef, field{"state", out.State}); err != nil {
+	if err := p.result(out.Template, field{"state", out.State}); err != nil {
 		return err
 	}
 	// A build takes minutes, so the next step is worth naming — but only for a
 	// person: a script already knows what it is going to poll.
-	p.note("follow with: bean build logs %s", out.ImageRef)
+	p.note("follow with: bean build logs %s", out.Template)
 	return nil
 }
 
@@ -485,7 +494,7 @@ func cmdBuild(c *Client, args []string, stdout io.Writer) error {
 // The body is copied through rather than parsed: it is a log, and the server's
 // trailing "build failed: ..." line is meant for the same eyes as the rest of it.
 func streamBuildLogs(c *Client, ref string, stdout io.Writer) error {
-	resp, err := c.do("GET", "/v1/images/build/logs?ref="+url.QueryEscape(ref), nil)
+	resp, err := c.do("GET", "/v1/templates/build/logs?ref="+url.QueryEscape(ref), nil)
 	if err != nil {
 		return err
 	}
@@ -538,14 +547,14 @@ func cmdBuildCancel(c *Client, flags map[string]string, pos []string, stdout io.
 		return usagef("usage: bean build cancel REF")
 	}
 	var out struct {
-		ImageRef string `json:"imageRef"`
+		Template string `json:"template"`
 		State    string `json:"state"`
 	}
-	if err := c.doJSON("POST", "/v1/images/build/cancel?ref="+url.QueryEscape(pos[0]),
+	if err := c.doJSON("POST", "/v1/templates/build/cancel?ref="+url.QueryEscape(pos[0]),
 		nil, &out); err != nil {
 		return err
 	}
-	return newPrinter(stdout, flags).result(out.ImageRef, field{"state", out.State})
+	return newPrinter(stdout, flags).result(out.Template, field{"state", out.State})
 }
 
 // needsContext reports whether a Dockerfile references the build context. COPY
@@ -871,25 +880,26 @@ func cmdSnapshot(c *Client, args []string, stdout io.Writer) error {
 	}
 }
 
-// cmdImage handles image ls/status/prewarm.
-func cmdImage(c *Client, args []string, stdout io.Writer) error {
+// cmdTemplate handles template ls/status/rm/prewarm.
+func cmdTemplate(c *Client, args []string, stdout io.Writer) error {
 	flags, pos := parseFlags(args)
 	if len(pos) == 0 {
-		return usagef("usage: bean image ls [--source built|imported] | " +
-			"status REF | prewarm REF...")
+		return usagef("usage: bean template ls [--source built|converted] | " +
+			"status ID|NAME | rm ID|NAME | prewarm REF...")
 	}
 	switch pos[0] {
 	case "ls":
 		var out struct {
-			Images []struct {
-				Ref       string `json:"ref"`
+			Templates []struct {
+				ID        string `json:"id"`
+				Name      string `json:"name"`
 				State     string `json:"state"`
 				Source    string `json:"source"`
 				SizeBytes int64  `json:"sizeBytes"`
-			} `json:"images"`
+			} `json:"templates"`
 		}
-		path := "/v1/images"
-		// --source built is the "images I built" listing. It is a filter rather
+		path := "/v1/templates"
+		// --source built is the "templates I built" listing. It is a filter rather
 		// than its own subcommand because the alternative grows a command per
 		// field, and the server already scopes the list to the caller.
 		if src := flags["source"]; src != "" {
@@ -898,38 +908,53 @@ func cmdImage(c *Client, args []string, stdout io.Writer) error {
 		if err := c.doJSON("GET", path, nil, &out); err != nil {
 			return err
 		}
-		rows := make([]row, 0, len(out.Images))
-		for _, i := range out.Images {
-			source := i.Source
+		rows := make([]row, 0, len(out.Templates))
+		for _, t := range out.Templates {
+			source := t.Source
 			if source == "" {
-				source = "imported"
+				source = "converted"
 			}
-			rows = append(rows, newRow("ref", i.Ref).
-				with("state", i.State).
+			rows = append(rows, newRow("id", t.ID).
+				with("name", t.Name).
+				with("state", t.State).
 				with("source", source).
-				with("sizeBytes", i.SizeBytes))
+				with("sizeBytes", t.SizeBytes))
 		}
-		return newPrinter(stdout, flags).table("images", rows)
+		return newPrinter(stdout, flags).table("templates", rows)
 
 	case "status":
 		if len(pos) < 2 {
-			return usagef("usage: bean image status REF")
+			return usagef("usage: bean template status ID|NAME")
 		}
 		var out map[string]any
-		if err := c.doJSON("GET", "/v1/images/status?ref="+url.QueryEscape(pos[1]), nil, &out); err != nil {
+		if err := c.doJSON("GET", "/v1/templates/status?"+templateQuery(pos[1]), nil, &out); err != nil {
 			return err
 		}
-		r := newRow("ref", fmt.Sprint(out["ref"]))
-		for _, k := range []string{"digest", "state", "format", "source", "owner", "sizeBytes"} {
+		r := newRow("id", fmt.Sprint(out["id"]))
+		for _, k := range []string{"name", "digest", "state", "format", "source", "owner", "sizeBytes"} {
 			if v, ok := out[k]; ok {
 				r = r.with(k, v)
 			}
 		}
+		// ociSource (ref + content sha256) is present only for a converted
+		// template; surface it so a caller can see what it came from.
+		if oci, ok := out["ociSource"].(map[string]any); ok {
+			r = r.with("ociRef", oci["ref"]).with("ociDigest", oci["digest"])
+		}
 		return newPrinter(stdout, flags).record(r)
+
+	case "rm":
+		if len(pos) < 2 {
+			return usagef("usage: bean template rm ID|NAME")
+		}
+		if err := c.doJSON("DELETE", "/v1/templates?"+templateQuery(pos[1]), nil, nil); err != nil {
+			return err
+		}
+		return newPrinter(stdout, flags).result(pos[1], field{"state", "deleted"})
 
 	case "prewarm":
 		if len(pos) < 2 {
-			return usagef("usage: bean image prewarm REF... [--replicas N]")
+			return usagef("usage: bean template prewarm REF... [--replicas N]")
 		}
 		body := map[string]any{"refs": pos[1:]}
 		// How widely to warm an image is a capacity decision a caller can act
@@ -946,7 +971,7 @@ func cmdImage(c *Client, args []string, stdout io.Writer) error {
 			JobID string         `json:"jobId"`
 			Ready map[string]int `json:"ready"`
 		}
-		if err := c.doJSON("POST", "/v1/images/prewarm", body, &out); err != nil {
+		if err := c.doJSON("POST", "/v1/templates/prewarm", body, &out); err != nil {
 			return err
 		}
 		p := newPrinter(stdout, flags)
@@ -974,8 +999,19 @@ func cmdImage(c *Client, args []string, stdout io.Writer) error {
 		return nil
 
 	default:
-		return usagef("unknown image subcommand %q", pos[0])
+		return usagef("unknown template subcommand %q", pos[0])
 	}
+}
+
+// templateQuery builds the id-or-name query for the template status/delete
+// endpoints. A name carries slashes and colons (a converted template's name is
+// its OCI reference), so both go in a query param rather than a path segment. A
+// "tpl_" prefix marks an id; anything else is treated as a name.
+func templateQuery(ref string) string {
+	if strings.HasPrefix(ref, "tpl_") {
+		return "id=" + url.QueryEscape(ref)
+	}
+	return "name=" + url.QueryEscape(ref)
 }
 
 // streamEvents follows the SSE event stream until interrupted.

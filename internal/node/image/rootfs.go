@@ -33,8 +33,39 @@ type Rootfs struct {
 	// Writable is the path holding this sandbox's changes, if the provider
 	// keeps them separately from Device. Checkpointing captures it.
 	Writable string
+	// Conversion, when set, reports what a cold start from an OCI image reference
+	// converted and published to the shared store, so the control plane can record
+	// a reusable template. Nil when nothing was converted or published: a restore,
+	// a create from an already-converted filesystem, or a provider with no store.
+	Conversion *ConversionResult
 	// release tears down whatever the provider set up.
 	release func() error
+}
+
+// ConversionResult carries the coordinates a cold OCI create resolved and
+// published, so the control plane can turn a first-seen reference into a shared
+// template that later creates -- on any node reading the same store -- reuse
+// without a pull or a conversion.
+//
+// For an OCI conversion the overlaybd chain is keyed by the OCI manifest digest,
+// so ManifestDigest is both the filesystem key a later create resolves from and
+// the OCI content digest that completes the conversion-cache key. The two roles
+// share one value here but stay distinct fields in the control-plane record.
+type ConversionResult struct {
+	// ManifestDigest is the overlaybd manifest digest, the filesystem key a later
+	// create resolves the chain from.
+	ManifestDigest string
+	// OCIDigest is the OCI content digest the reference resolved to, the other
+	// half of the conversion-cache key.
+	OCIDigest string
+	// SizeBytes is the published chain's size, for cache accounting.
+	SizeBytes int64
+	// LayerDigests is the published layer chain, base first.
+	LayerDigests []string
+	// Config is the converted image's configuration, so the control plane records
+	// the ENV/ENTRYPOINT/CMD/WORKDIR on the template a later create reuses. Nil when
+	// the image declared none.
+	Config *Config
 }
 
 // Release frees the device. It is safe to call more than once, so cleanup on
@@ -66,6 +97,15 @@ type PrepareOptions struct {
 	// copied. Overlaybd-tier only -- the local tier restores through its own tar
 	// checkpoint, never through a provider.
 	FSManifestDigest string
+
+	// Publish asks a cold conversion from imageRef to publish its layers to the
+	// shared store and report the resolved coordinates on the returned Rootfs, so
+	// a later create of the same reference on any node reuses the chain without
+	// converting. It moves the publish cost -- an S3 upload of the converted
+	// layers -- onto this create instead of leaving it to a prewarm. Ignored when
+	// FSManifestDigest is set (a restore converts nothing) and a no-op on backends
+	// with no object store.
+	Publish bool
 }
 
 // Provider turns an image reference into a rootfs. Implementations differ in

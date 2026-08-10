@@ -306,7 +306,15 @@ func (m *Manager) resolveProcess(spec *nodev1.SandboxSpec) (image.Process, error
 	if !ok {
 		return image.MergeConfig(nil, spec.Cmd, spec.Env, ""), nil
 	}
-	cfg, err := reader.ImageConfig(spec.GetImage())
+	// The base is named by an OCI reference on a cold start, or by a filesystem
+	// manifest digest for a sandbox created from a template or restored from a
+	// snapshot. Both carry the same recorded config; passing whichever is set lets
+	// a template-created sandbox inherit its ENV/ENTRYPOINT rather than booting bare.
+	base := spec.GetImage()
+	if base == "" {
+		base = spec.GetFsManifestDigest()
+	}
+	cfg, err := reader.ImageConfig(base)
 	if err != nil {
 		return image.Process{}, err
 	}
@@ -1279,16 +1287,17 @@ const guestSyncTimeout = 2 * time.Second
 // specToRuntime projects the proto spec onto the runtime's view.
 func specToRuntime(spec *nodev1.SandboxSpec) *runtime.Spec {
 	return &runtime.Spec{
-		SandboxID:        spec.SandboxId,
-		SnapshotID:       spec.SnapshotId,
-		FSManifestDigest: spec.FsManifestDigest,
-		Image:            spec.Image,
-		CPU:              spec.Cpu,
-		MemoryMiB:        spec.MemoryMib,
-		DiskMiB:          spec.DiskMib,
-		Env:              spec.Env,
-		Cmd:              spec.Cmd,
-		AutoStartCmd:     spec.AutoStartCmd,
+		SandboxID:         spec.SandboxId,
+		SnapshotID:        spec.SnapshotId,
+		FSManifestDigest:  spec.FsManifestDigest,
+		Image:             spec.Image,
+		PublishConversion: spec.PublishConversion,
+		CPU:               spec.Cpu,
+		MemoryMiB:         spec.MemoryMib,
+		DiskMiB:           spec.DiskMib,
+		Env:               spec.Env,
+		Cmd:               spec.Cmd,
+		AutoStartCmd:      spec.AutoStartCmd,
 	}
 }
 

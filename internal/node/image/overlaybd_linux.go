@@ -134,10 +134,35 @@ func (p *OverlaybdProvider) Prepare(ctx context.Context, sandboxID, imageRef str
 	// from the image reference instead. Either way the sandbox gets its own writable,
 	// so the two paths differ only in where the lowers come from.
 	var lowers []obdLayer
+	var conversion *ConversionResult
 	if opts.FSManifestDigest != "" {
 		lowers, err = p.snapshotFSLowers(ctx, opts.FSManifestDigest)
 	} else {
-		lowers, err = p.lowersFor(ctx, imageRef)
+		var manifest *Manifest
+		var published bool
+		lowers, manifest, published, err = p.lowersFor(ctx, imageRef, opts.Publish)
+		if err == nil && published && manifest != nil && manifest.Digest != "" {
+			// A first-seen OCI create the control plane asked to publish: report the
+			// coordinates so it records a reusable template. The overlaybd chain is keyed
+			// by the OCI manifest digest, so that one value is both the filesystem key a
+			// later create resolves from and the OCI content digest that completes the
+			// conversion-cache key.
+			conversion = &ConversionResult{
+				ManifestDigest: manifest.Digest,
+				OCIDigest:      manifest.Digest,
+				SizeBytes:      chainSize(lowers),
+				LayerDigests:   layerDigestsOf(lowers),
+			}
+			// The converted image's config rides along so the control plane records it
+			// on the template, exactly as a build reports the config it recovered. A
+			// failure to resolve it is not fatal to the create -- the sandbox still boots
+			// from the chain -- so the template simply records no config.
+			if ref, perr := ParseReference(imageRef); perr == nil {
+				if cfg, cerr := p.imageConfig(ctx, ref, imageRef, manifest); cerr == nil {
+					conversion.Config = cfg
+				}
+			}
+		}
 	}
 	if err != nil {
 		return nil, err
@@ -240,7 +265,8 @@ func (p *OverlaybdProvider) Prepare(ctx context.Context, sandboxID, imageRef str
 		Device: link,
 		// The writable layer is what a checkpoint captures: it holds everything
 		// this sandbox changed, and the lowers are reproducible from their digests.
-		Writable: data,
+		Writable:   data,
+		Conversion: conversion,
 		release: func() error {
 			p.mu.Lock()
 			delete(p.attached, sandboxID)
@@ -270,8 +296,18 @@ func (p *OverlaybdProvider) Prepare(ctx context.Context, sandboxID, imageRef str
 // Layers are shared by digest, so an image sharing a base with one already here
 // resolves the shared layers for free. That is the whole point of the backend: the
 // flattening path pays for the shared bytes once per image.
-func (p *OverlaybdProvider) lowersFor(ctx context.Context, imageRef string) ([]obdLayer, error) {
-	lowers, err := p.resolve(ctx, imageRef, false)
+//
+// publish moves the shared-store upload onto this create when the caller wants the
+// reference cached cluster-wide (a first-seen OCI create the control plane asked to
+// publish). It is otherwise false, and a create looks only locally and remotely
+// before converting for itself -- the historical behaviour, kept because a create's
+// latency should not pay for a later create that may never come.
+// published reports whether the chain was uploaded to the shared store, which is
+// true only on the publish path that ran to completion: the errRemoteParent
+// fallback converts locally and publishes nothing, so its manifest digest is not a
+// shared key and must not be reported as a reusable template.
+func (p *OverlaybdProvider) lowersFor(ctx context.Context, imageRef string, publish bool) (lowers []obdLayer, manifest *Manifest, published bool, err error) {
+	lowers, manifest, err = p.resolve(ctx, imageRef, publish)
 	if errors.Is(err, errRemoteParent) {
 		// A partly published image: some layers are in the store and a later one is
 		// not, so it has to be converted and has no local parent to apply over. This
@@ -283,15 +319,24 @@ func (p *OverlaybdProvider) lowersFor(ctx context.Context, imageRef string) ([]o
 		// slowly beats one that does not start.
 		slog.Warn("image is only partly published; converting the whole chain locally",
 			logging.KeyImage, imageRef, logging.KeyError, err)
-		return p.resolveLocal(ctx, imageRef)
+		lowers, manifest, err = p.resolveLocal(ctx, imageRef)
+		return lowers, manifest, false, err
 	}
-	return lowers, err
+	return lowers, manifest, publish && err == nil, err
 }
 
 // resolveLocal resolves an image without consulting the store, so every layer is
 // either already here or converted.
-func (p *OverlaybdProvider) resolveLocal(ctx context.Context, imageRef string) ([]obdLayer, error) {
+func (p *OverlaybdProvider) resolveLocal(ctx context.Context, imageRef string) ([]obdLayer, *Manifest, error) {
 	return p.walk(ctx, imageRef, resolveOpts{})
+}
+
+// isManifestDigest reports whether a base identifier is a bare filesystem manifest
+// digest (a template or snapshot base) rather than an OCI reference. A manifest digest
+// is exactly "sha256:" followed by 64 hex characters; an OCI reference that pins content
+// carries its digest after an "@", so the bare-digest form is unambiguous.
+func isManifestDigest(base string) bool {
+	return strings.HasPrefix(base, "sha256:") && len(base) == 71
 }
 
 // snapshotFSLowers resolves a snapshot's sealed filesystem chain into read-only
@@ -362,7 +407,7 @@ type resolveOpts struct {
 var errRemoteParent = errors.New("image: layer must be converted but its parent is only available remotely")
 
 // resolve walks an image's layers for a create, consulting the store.
-func (p *OverlaybdProvider) resolve(ctx context.Context, imageRef string, publish bool) ([]obdLayer, error) {
+func (p *OverlaybdProvider) resolve(ctx context.Context, imageRef string, publish bool) ([]obdLayer, *Manifest, error) {
 	return p.walk(ctx, imageRef, resolveOpts{publish: publish, remote: !publish})
 }
 
@@ -486,9 +531,10 @@ func (p *OverlaybdProvider) recordInStore(ctx context.Context, ref Reference, ma
 // prewarmed OCI image. It is how a Dockerfile build enters the same lazy-pull path
 // pulled images use (docs/s3-storage.md section 8.5, Phase 2).
 //
-// tarPath is the decompressed rootfs BuildKit exported. A built image is a single
-// base layer -- there is no chain to diff against -- so the tar is applied with no
-// parents, which is what makes buildLayer format a filesystem (--mkfs) into it.
+// tarPath is the flattened rootfs recovered from the build's OCI layout, and cfg is
+// the image config recovered alongside it. A built image is a single base layer --
+// there is no chain to diff against -- so the tar is applied with no parents, which
+// is what makes buildLayer format a filesystem (--mkfs) into it.
 //
 // The layer is keyed by the sha256 of the rootfs tar rather than a registry digest,
 // which a built image has none of: it is stable (same tar, same key, so a rebuild
@@ -501,7 +547,7 @@ func (p *OverlaybdProvider) recordInStore(ctx context.Context, ref Reference, ma
 // single-node behaviour, and the caller reports the empty ref upward. Publication and
 // recording failures warn rather than propagate, exactly as the prewarm path's do -- a
 // build is not failed over a cache-warming miss.
-func (p *OverlaybdProvider) PublishBuiltRootfs(ctx context.Context, tarPath, imageRef string, sizeMiB int64) (overlaybdRef string, layerDigests []string, sealed int64, err error) {
+func (p *OverlaybdProvider) PublishBuiltRootfs(ctx context.Context, tarPath, imageRef string, cfg *Config, sizeMiB int64) (overlaybdRef string, layerDigests []string, sealed int64, err error) {
 	if p.Blobs == nil || p.Index == nil {
 		return "", nil, 0, nil
 	}
@@ -540,19 +586,20 @@ func (p *OverlaybdProvider) PublishBuiltRootfs(ctx context.Context, tarPath, ima
 
 	// A synthetic manifest keyed by the sealed layer, recorded exactly as a prewarm
 	// records a converted chain. The lower's Size is the sealed length, which is what a
-	// remote reader range-reads against. No config: a flat rootfs carries none, matching
-	// what build.go already documents about built images.
+	// remote reader range-reads against.
 	manifest := &Manifest{Digest: digest, Layers: []Descriptor{{Digest: digest, Size: sealed}}}
 	lowers := []obdLayer{{File: path, Digest: digest, Size: sealed}}
-	// An empty but non-nil config, recorded so a node that did not build the image can
-	// resolve it fully offline. A built image carries no OCI config -- buildctl exports a
-	// flat rootfs tar, so there is no ENV/ENTRYPOINT/CMD, which is what build.go documents
-	// about built images running only what the caller asks. The distinction that matters
-	// here is non-nil vs nil: imageConfig treats a nil stored config as "go ask the
-	// registry", and a built tag is in no registry, so a cache-cleared create would fail
-	// with "no reachable config and none recorded". A recorded empty config is the honest
-	// value and the one that lets the offline resolve complete.
-	p.recordInStore(ctx, ref, manifest, lowers, &Config{})
+	// The image config recovered from the build's OCI layout, so a node that did not
+	// build the image resolves its ENV/ENTRYPOINT/CMD fully offline -- a built tag is in
+	// no registry, and imageConfig treats a nil stored config as "go ask the registry",
+	// which would fail a cache-cleared create with "no reachable config and none
+	// recorded". cfg is non-nil whenever the build recovered a config (the common case);
+	// a nil cfg (a Dockerfile that declared none) is recorded as an empty config for the
+	// same offline-resolve reason.
+	if cfg == nil {
+		cfg = &Config{}
+	}
+	p.recordInStore(ctx, ref, manifest, lowers, cfg)
 
 	return digest, []string{digest}, sealed, nil
 }
@@ -562,7 +609,55 @@ func (p *OverlaybdProvider) PublishBuiltRootfs(ctx context.Context, tarPath, ima
 // shares the base image's layers. It is satisfied by the overlaybd provider and held by the
 // runtime as a narrow capability, exactly as LayerPublisher is for builds.
 type SnapshotFSSealer interface {
-	SealSnapshotFS(ctx context.Context, sandboxID, baseImageRef string) (fsManifestDigest string, layerDigests []string, sealed int64, err error)
+	// base names what the sandbox is running from: an OCI reference on a cold start,
+	// or a filesystem manifest digest for a sandbox created from a template or restored
+	// from a snapshot. Either resolves to the same read-only chain the seal shares.
+	SealSnapshotFS(ctx context.Context, sandboxID, base string) (fsManifestDigest string, layerDigests []string, sealed int64, err error)
+}
+
+// snapshotBase resolves the read-only chain and config a snapshot inherits from its
+// base, accepting the two forms a running sandbox's base takes.
+//
+// A cold OCI start names its base by reference: the chain is resolved locally (every
+// layer is a file already here because the sandbox is running from it) and the config
+// comes from the manifest, falling back to the registry only if the store lacks it.
+//
+// A sandbox created from a template or restored from a snapshot has no registry
+// reference -- its base is a filesystem manifest digest. That manifest is
+// self-contained in the store (it lists the whole chain and carries the config), so the
+// chain resolves through snapshotFSLowers and the config through the stored manifest,
+// with no registry consulted. Without this branch a seal of such a sandbox failed with
+// "reference required", which is what blocked snapshotting a template-created sandbox.
+func (p *OverlaybdProvider) snapshotBase(ctx context.Context, base string) ([]obdLayer, *Config, error) {
+	if isManifestDigest(base) {
+		lowers, err := p.snapshotFSLowers(ctx, base)
+		if err != nil {
+			return nil, nil, fmt.Errorf("image: resolve snapshot base %s: %w", base, err)
+		}
+		var cfg *Config
+		if m := p.storedManifest(ctx, Reference{Digest: base}); m != nil {
+			cfg = m.storedConfig
+		}
+		return lowers, cfg, nil
+	}
+
+	baseRef, err := ParseReference(base)
+	if err != nil {
+		return nil, nil, err
+	}
+	lowers, _, err := p.resolveLocal(ctx, base)
+	if err != nil {
+		return nil, nil, fmt.Errorf("image: resolve snapshot base %s: %w", base, err)
+	}
+	manifest, err := p.resolveManifest(ctx, baseRef, base, resolveOpts{remote: true})
+	if err != nil {
+		return nil, nil, fmt.Errorf("image: resolve snapshot base manifest: %w", err)
+	}
+	cfg, err := p.imageConfig(ctx, baseRef, base, manifest)
+	if err != nil {
+		return nil, nil, fmt.Errorf("image: resolve snapshot base config: %w", err)
+	}
+	return lowers, cfg, nil
 }
 
 // SealSnapshotFS seals a sandbox's writable overlaybd layer into a shared, digest-keyed
@@ -586,7 +681,7 @@ type SnapshotFSSealer interface {
 // none. Returns an empty digest with no error when this provider has no store: the caller
 // keeps the sandbox running and records no shared filesystem, which a non-overlaybd or
 // storeless node degrades to.
-func (p *OverlaybdProvider) SealSnapshotFS(ctx context.Context, sandboxID, baseImageRef string) (fsManifestDigest string, layerDigests []string, sealed int64, err error) {
+func (p *OverlaybdProvider) SealSnapshotFS(ctx context.Context, sandboxID, base string) (fsManifestDigest string, layerDigests []string, sealed int64, err error) {
 	if p.Blobs == nil || p.Index == nil {
 		return "", nil, 0, nil
 	}
@@ -597,24 +692,14 @@ func (p *OverlaybdProvider) SealSnapshotFS(ctx context.Context, sandboxID, baseI
 		return "", nil, 0, fmt.Errorf("image: sandbox %s is not attached", sandboxID)
 	}
 
-	// The base image's resolved chain, which the snapshot shares. Resolved locally so
-	// every base layer is a file this seal can key and record; the layers are already
-	// here because the sandbox is running from them.
-	baseRef, err := ParseReference(baseImageRef)
+	// The base's resolved chain, which the snapshot shares and whose config it
+	// inherits. The base is named either by an OCI reference (a cold start) or by a
+	// filesystem manifest digest (a sandbox created from a template or restored from a
+	// snapshot); the latter has no registry reference, so its chain and config come
+	// from the stored manifest instead of a resolveLocal/registry walk.
+	baseLowers, baseCfg, err := p.snapshotBase(ctx, base)
 	if err != nil {
 		return "", nil, 0, err
-	}
-	baseLowers, err := p.resolveLocal(ctx, baseImageRef)
-	if err != nil {
-		return "", nil, 0, fmt.Errorf("image: resolve snapshot base %s: %w", baseImageRef, err)
-	}
-	baseManifest, err := p.resolveManifest(ctx, baseRef, baseImageRef, resolveOpts{remote: true})
-	if err != nil {
-		return "", nil, 0, fmt.Errorf("image: resolve snapshot base manifest: %w", err)
-	}
-	baseCfg, err := p.imageConfig(ctx, baseRef, baseImageRef, baseManifest)
-	if err != nil {
-		return "", nil, 0, fmt.Errorf("image: resolve snapshot base config: %w", err)
 	}
 
 	// Seal the sandbox's writable layer into a read-only layer, then key it by the sha256
@@ -806,24 +891,24 @@ func (p *OverlaybdProvider) imageConfig(ctx context.Context, ref Reference, imag
 // One implementation for create and prewarm on purpose: they must agree on what a
 // layer chain is, or an image would assemble differently depending on which call
 // arrived first.
-func (p *OverlaybdProvider) walk(ctx context.Context, imageRef string, opts resolveOpts) ([]obdLayer, error) {
+func (p *OverlaybdProvider) walk(ctx context.Context, imageRef string, opts resolveOpts) ([]obdLayer, *Manifest, error) {
 	publish := opts.publish
 	if p.Registry == nil {
-		return nil, errors.New("image: overlaybd needs a registry")
+		return nil, nil, errors.New("image: overlaybd needs a registry")
 	}
 	ref, err := ParseReference(imageRef)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	manifest, err := p.resolveManifest(ctx, ref, imageRef, opts)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 	if len(manifest.Layers) == 0 {
-		return nil, fmt.Errorf("image: %s has no layers", imageRef)
+		return nil, nil, fmt.Errorf("image: %s has no layers", imageRef)
 	}
 	if len(manifest.Layers) > maxLayers {
-		return nil, fmt.Errorf("image: %s has %d layers, overlaybd allows %d",
+		return nil, nil, fmt.Errorf("image: %s has %d layers, overlaybd allows %d",
 			imageRef, len(manifest.Layers), maxLayers)
 	}
 
@@ -862,7 +947,7 @@ func (p *OverlaybdProvider) walk(ctx context.Context, imageRef string, opts reso
 			// the opposite of what prewarming is for.
 			if publish {
 				if _, err := p.publish(ctx, path, layer.Digest); err != nil {
-					return nil, fmt.Errorf("image: layer %d/%d: %w", i+1, len(manifest.Layers), err)
+					return nil, nil, fmt.Errorf("image: layer %d/%d: %w", i+1, len(manifest.Layers), err)
 				}
 			}
 			// Size is the sealed file's own length, not the manifest's figure for the
@@ -903,12 +988,12 @@ func (p *OverlaybdProvider) walk(ctx context.Context, imageRef string, opts reso
 			// remotely has none. Reported as errRemoteParent so lowersFor can retry the
 			// whole image locally, rather than converting the parents here -- which
 			// would leave this walk half remote and half local with no record of why.
-			return nil, fmt.Errorf("%w: layer %d/%d of %s over parent %s",
+			return nil, nil, fmt.Errorf("%w: layer %d/%d of %s over parent %s",
 				errRemoteParent, i+1, len(manifest.Layers), imageRef, shortHash(remoteParent))
 		}
 		path, err := p.materialiseLayer(ctx, ref, layer, vsizeGB, parents)
 		if err != nil {
-			return nil, fmt.Errorf("image: layer %d/%d: %w", i+1, len(manifest.Layers), err)
+			return nil, nil, fmt.Errorf("image: layer %d/%d: %w", i+1, len(manifest.Layers), err)
 		}
 		lower := obdLayer{File: path, Digest: layer.Digest, Size: sealedSize(path)}
 
@@ -918,7 +1003,7 @@ func (p *OverlaybdProvider) walk(ctx context.Context, imageRef string, opts reso
 			// a local file for this caller: it has the bytes, and switching to a remote
 			// reference would make the read depend on the upload it just did.
 			if _, err := p.publish(ctx, path, layer.Digest); err != nil {
-				return nil, fmt.Errorf("image: layer %d/%d: %w", i+1, len(manifest.Layers), err)
+				return nil, nil, fmt.Errorf("image: layer %d/%d: %w", i+1, len(manifest.Layers), err)
 			}
 		}
 		lowers = append(lowers, lower)
@@ -932,7 +1017,7 @@ func (p *OverlaybdProvider) walk(ctx context.Context, imageRef string, opts reso
 	// nothing would report the difference.
 	cfg, err := p.imageConfig(ctx, ref, imageRef, manifest)
 	if err != nil {
-		return nil, err
+		return nil, nil, err
 	}
 
 	if publish {
@@ -957,9 +1042,9 @@ func (p *OverlaybdProvider) walk(ctx context.Context, imageRef string, opts reso
 		SizeBytes: chainSize(lowers),
 		Layers:    recordedLayers(manifest),
 	}); err != nil {
-		return nil, fmt.Errorf("image: record reference: %w", err)
+		return nil, nil, fmt.Errorf("image: record reference: %w", err)
 	}
-	return lowers, nil
+	return lowers, manifest, nil
 }
 
 // recordedLayers is the manifest's layer list, reduced to what a later resolution
@@ -1160,6 +1245,17 @@ func chainSize(lowers []obdLayer) int64 {
 	return total
 }
 
+// layerDigestsOf is the chain's digests, base first, for reporting a published
+// conversion's layer chain to the control plane. Taken from the resolved lowers
+// because that is what was published; the order is the order overlaybd applies.
+func layerDigestsOf(lowers []obdLayer) []string {
+	digests := make([]string, 0, len(lowers))
+	for _, l := range lowers {
+		digests = append(digests, l.Digest)
+	}
+	return digests
+}
+
 // firstRemote reports the digest of the first layer that has no local file, or "".
 func firstRemote(lowers []obdLayer) string {
 	for _, l := range lowers {
@@ -1218,7 +1314,7 @@ func sealedSize(path string) int64 {
 // store. A fleet that never prewarms still functions; every node just converts for
 // itself.
 func (p *OverlaybdProvider) Prewarm(ctx context.Context, imageRef string) error {
-	_, err := p.resolve(ctx, imageRef, true)
+	_, _, err := p.resolve(ctx, imageRef, true)
 	return err
 }
 
@@ -1230,10 +1326,24 @@ func (p *OverlaybdProvider) Digest(imageRef string) (string, error) {
 	return digestOf(p.ImageDir, imageRef)
 }
 
-// Config reports the image configuration this node recorded, written by lowersFor
-// when the image's layers were resolved.
-func (p *OverlaybdProvider) Config(imageRef string) (*Config, error) {
-	return cachedConfig(p.ImageDir, imageRef)
+// Config reports the configuration recorded for a base, accepting the two forms a
+// sandbox's base takes.
+//
+// A cold OCI start names its base by reference, whose config lowersFor wrote to this
+// node's image dir when it resolved the layers. A sandbox created from a template or
+// restored from a snapshot names its base by a filesystem manifest digest, which has no
+// image-dir record -- its config rides on the stored manifest, put there when the
+// template was built or converted. Reading it from the store lets a template-created
+// sandbox inherit its ENV/ENTRYPOINT; without this branch the digest missed the
+// image-dir lookup and the guest booted with no config.
+func (p *OverlaybdProvider) Config(base string) (*Config, error) {
+	if isManifestDigest(base) {
+		if m := p.storedManifest(context.Background(), Reference{Digest: base}); m != nil {
+			return m.storedConfig, nil
+		}
+		return nil, nil
+	}
+	return cachedConfig(p.ImageDir, base)
 }
 
 func exists(path string) bool {
