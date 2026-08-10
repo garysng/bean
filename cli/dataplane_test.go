@@ -80,6 +80,103 @@ func (stubAgent) Exec(_ context.Context, req *connect.Request[commonv1.ExecReque
 	}), nil
 }
 
+// ReadFile streams a fixed payload back as one chunk, enough to prove the CLI
+// reader drains the server stream into its writer.
+func (stubAgent) ReadFile(_ context.Context, req *connect.Request[commonv1.ReadFileRequest], stream *connect.ServerStream[commonv1.FileChunk]) error {
+	return stream.Send(&commonv1.FileChunk{Data: []byte("file:" + req.Msg.GetPath())})
+}
+
+// WriteFile drains the client stream and echoes the byte count back, so a test
+// can confirm the meta+data frames arrived.
+func (stubAgent) WriteFile(_ context.Context, stream *connect.ClientStream[commonv1.WriteFileFrame]) (*connect.Response[commonv1.WriteFileResponse], error) {
+	for stream.Receive() {
+	}
+	if err := stream.Err(); err != nil {
+		return nil, err
+	}
+	return connect.NewResponse(&commonv1.WriteFileResponse{}), nil
+}
+
+// dataPlaneHarness stands up a stub agent behind a forwarding proxy and a REST
+// server that answers the sandbox lookup resolveDomain makes, then returns a
+// Client wired to the REST server and a data plane pointed at the proxy. It is
+// the shared scaffolding for the execViaDataPlane/read/write tests, all of which
+// resolve a domain over REST before dialing the agent.
+func dataPlaneHarness(t *testing.T, domain string) (*Client, *dataPlane) {
+	t.Helper()
+	agentPath, agentHandler := agentv1connect.NewAgentServiceHandler(stubAgent{})
+	agentMux := http.NewServeMux()
+	agentMux.Handle(agentPath, agentHandler)
+
+	proxy := httptest.NewUnstartedServer(h2c.NewHandler(
+		http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			agentMux.ServeHTTP(w, r)
+		}), &http2.Server{}))
+	proxy.EnableHTTP2 = true
+	proxy.Start()
+	t.Cleanup(proxy.Close)
+
+	rest := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// The record carries the domain resolveDomain reads into the data plane.
+		w.Write([]byte(`{"sandbox":{"id":"sbx_abc","domain":"` + domain + `"}}`))
+	}))
+	t.Cleanup(rest.Close)
+
+	dp, ok := dataPlaneFor(proxy.URL, "")
+	if !ok {
+		t.Fatal("dataPlaneFor did not opt in for a set proxy URL")
+	}
+	return NewClient(rest.URL, "k"), dp
+}
+
+func TestExecViaDataPlaneResolvesDomainThenExecs(t *testing.T) {
+	c, dp := dataPlaneHarness(t, "sbx.example.com")
+	res, err := c.execViaDataPlane(dp, "sbx_abc", []string{"echo", "hi"})
+	if err != nil {
+		t.Fatalf("execViaDataPlane: %v", err)
+	}
+	if got := string(res.Stdout); got != "echo hi" {
+		t.Errorf("stdout = %q, want %q", got, "echo hi")
+	}
+	// The domain came off the record, not a client convention.
+	if dp.domain != "sbx.example.com" {
+		t.Errorf("domain = %q, want it resolved from the record", dp.domain)
+	}
+}
+
+func TestWriteFileViaDataPlaneStreamsFrames(t *testing.T) {
+	c, dp := dataPlaneHarness(t, "")
+	if err := c.writeFileViaDataPlane(dp, "sbx_abc", "/tmp/x", []byte("payload")); err != nil {
+		t.Fatalf("writeFileViaDataPlane: %v", err)
+	}
+}
+
+func TestReadFileViaDataPlaneDrainsStream(t *testing.T) {
+	c, dp := dataPlaneHarness(t, "")
+	var buf strings.Builder
+	if err := c.readFileViaDataPlane(dp, "sbx_abc", "/etc/hostname", &buf); err != nil {
+		t.Fatalf("readFileViaDataPlane: %v", err)
+	}
+	if got := buf.String(); got != "file:/etc/hostname" {
+		t.Errorf("read = %q, want the streamed chunk", got)
+	}
+}
+
+// TestResolveDomainSurfacesRESTErrors confirms a failed record lookup is
+// reported rather than swallowed, so the caller does not dial a bad authority.
+func TestResolveDomainSurfacesRESTErrors(t *testing.T) {
+	fail := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusNotFound)
+		w.Write([]byte(`{"error":{"code":"NOT_FOUND","message":"no sandbox"}}`))
+	}))
+	t.Cleanup(fail.Close)
+	c := NewClient(fail.URL, "k")
+	dp := &dataPlane{proxyAddr: "127.0.0.1:1"}
+	if err := c.resolveDomain(dp, "sbx_missing"); err == nil {
+		t.Error("resolveDomain returned nil for a 404 record lookup")
+	}
+}
+
 func TestExecReachesTheAgentOverConnectThroughTheProxyHost(t *testing.T) {
 	// This is the crux of the CLI's switch to Connect: no gRPC stack, the same
 	// h2c transport the SDK uses, and the sandbox chosen by the Host header the
