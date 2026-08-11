@@ -321,6 +321,34 @@ is no flush among the backstore's configfs actions (`block_dev`, `free_kept_buf`
 so it needs either an upstream mechanism or the ublk route to grow its own sealer -- which is the
 same decision the ublk gap above requires.
 
+### snapshot on the ublk route works, and found two things upstream of it ⚠️
+
+The ublk route can now seal a snapshot without the overlaybd daemon: `lsmtwrite.go` writes a
+sealed LSMT layer, and the extents come from the overlay itself. That removes the dependency that
+made snapshots impossible here -- there is no daemon holding an index in memory and nothing to
+flush, so what the sandbox wrote is what gets captured. Verified on hardware: a checkpoint that
+failed outright two rounds ago now produces a snapshot record with an FS digest and both layer
+digests.
+
+Two things surfaced while getting there, and both are upstream of the sealer.
+
+**A guest's `sync` does not put its writes on the device.** Measured directly: after `sync` the
+overlay had **0 bytes allocated**; after `echo 3 > /proc/sys/vm/drop_caches` inside the guest it
+had 81920. So the checkpoint's flush -- which does exist, and does run for a memory-less snapshot
+-- is not sufficient for ext4 in the guest, and a snapshot taken right after a small write
+captures an empty filesystem. This is not specific to ublk; the tcmu route reads the same device.
+
+**The extents cannot come from the in-process bitmap alone.** The bitmap is built by `WriteAt`, so
+it knows only writes this process saw -- and a sandbox restored from a snapshot reattaches with a
+fresh backend over an overlay that already holds bytes. Sealing from the bitmap reported "written
+nothing" for a sandbox whose filesystem was on disk, which reads as a lost write rather than lost
+bookkeeping. `OwnedExtents` now asks the file first, via `SEEK_DATA`/`SEEK_HOLE`, because the
+filesystem's record of which regions are allocated survives a reattach and the bitmap does not.
+
+**Restore still fails**, and on a gate that has nothing to do with sealing: `remoteLayer` returns
+nothing unless `LazyPull` is on, so a restore cannot fetch its own sealed layer from the store even
+though publication is unconditional. That is the next thing to fix, and it is one condition.
+
 ### the worker split did not cost the other paths ✅
 
 The worker goroutines and the copy-on-write mutex went in to make lazy pull work, but they sit

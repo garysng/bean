@@ -157,6 +157,10 @@ func (p *OverlaybdProvider) prepareUblk(ctx context.Context, sandboxID, imageRef
 
 	p.mu.Lock()
 	p.ublkAttached[sandboxID] = dev
+	// The backend is registered alongside the device because a checkpoint seals from its
+	// ownership bitmap rather than from a writable layer on disk. Under the same lock so the
+	// two cannot disagree about whether this sandbox exists.
+	p.sealableUblk[sandboxID] = backend
 	p.mu.Unlock()
 
 	// Firecracker resolves drive paths relative to its working directory, so the device
@@ -175,6 +179,7 @@ func (p *OverlaybdProvider) prepareUblk(ctx context.Context, sandboxID, imageRef
 		release: func() error {
 			p.mu.Lock()
 			delete(p.ublkAttached, sandboxID)
+			delete(p.sealableUblk, sandboxID)
 			p.mu.Unlock()
 
 			var errs []error

@@ -116,6 +116,14 @@ type OverlaybdProvider struct {
 	// two transports leak different kinds of object, and one map of two types would
 	// make a leak's kind something a reader has to infer.
 	ublkAttached map[string]*ublkDevice
+	// sealableUblk holds the backend behind each live ublk device, which is what a
+	// checkpoint seals from.
+	//
+	// Separate from ublkAttached because the two answer different questions: teardown needs
+	// the device, a snapshot needs the ownership bitmap. Held as the concrete type rather than
+	// an interface because "which blocks did this sandbox write" has exactly one
+	// implementation, and inventing an interface for it would hide that.
+	sealableUblk map[string]*lsmtBackend
 
 	// layers collapses concurrent conversions of the same layer digest. Keyed by
 	// digest to match sealedLayerPath, so one flight corresponds to one output
@@ -135,6 +143,7 @@ func NewOverlaybdProvider(baseDir, layerDir, imageDir string, reg *Registry, bui
 		DefaultSizeMiB: defaultSizeMiB,
 		attached:       map[string]*tcmuDevice{},
 		ublkAttached:   map[string]*ublkDevice{},
+		sealableUblk:   map[string]*lsmtBackend{},
 	}
 }
 
@@ -766,11 +775,24 @@ func (p *OverlaybdProvider) SealSnapshotFS(ctx context.Context, sandboxID, base 
 	if p.Blobs == nil || p.Index == nil {
 		return "", nil, 0, nil
 	}
+	// The two routes are attached differently and sealed differently, so which one holds this
+	// sandbox decides both questions.
+	//
+	// The ublk route seals from its own ownership bitmap, which is why it works at all: there
+	// is no daemon holding an index in memory and nothing to flush, so a checkpoint captures
+	// what the sandbox actually wrote. The tcmu route has to go through overlaybd-commit, and
+	// runs into the empty-index gap the guard below explains.
 	p.mu.Lock()
 	_, attached := p.attached[sandboxID]
+	ublkBackend, ublkAttached := p.sealableUblk[sandboxID]
 	p.mu.Unlock()
+
+	if ublkAttached {
+		return p.sealFromBitmap(ctx, sandboxID, base, ublkBackend)
+	}
 	if !attached {
-		return "", nil, 0, fmt.Errorf("image: sandbox %s is not attached", sandboxID)
+		return "", nil, 0, fmt.Errorf("image: sandbox %s is not attached to either transport",
+			sandboxID)
 	}
 
 	dir := filepath.Join(p.BaseDir, sandboxID)
@@ -823,11 +845,21 @@ func (p *OverlaybdProvider) SealSnapshotFS(ctx context.Context, sandboxID, base 
 	}
 	defer os.Remove(sealedPath)
 
+	return p.publishSealedSnapshot(ctx, sealedPath, baseLowers, baseCfg)
+}
+
+// publishSealedSnapshot digests a sealed layer, publishes it, and records the chain's manifest.
+//
+// Shared by both routes because none of it depends on how the layer was produced -- only that it
+// exists. Keeping one copy is what stops the two transports from drifting into different ideas of
+// what a snapshot is, which is the failure the ublk route already had once when it skipped
+// reporting its conversion.
+func (p *OverlaybdProvider) publishSealedSnapshot(ctx context.Context, sealedPath string, baseLowers []obdLayer, baseCfg *Config) (string, []string, int64, error) {
 	layerDigest, err := sha256OfFile(sealedPath)
 	if err != nil {
 		return "", nil, 0, fmt.Errorf("image: digest snapshot layer: %w", err)
 	}
-	sealed = sealedSize(sealedPath)
+	sealed := sealedSize(sealedPath)
 
 	if ok, perr := p.publish(ctx, sealedPath, layerDigest); perr != nil {
 		return "", nil, 0, fmt.Errorf("image: publish snapshot layer: %w", perr)
@@ -860,6 +892,42 @@ func (p *OverlaybdProvider) SealSnapshotFS(ctx context.Context, sandboxID, base 
 	p.recordInStore(ctx, Reference{Digest: manifestDigest}, manifest, chain, baseCfg)
 
 	return manifestDigest, digests, sealed, nil
+}
+
+// sealFromBitmap captures a ublk-route sandbox's filesystem without the overlaybd daemon.
+//
+// The ownership bitmap is the index: this process already knows which blocks the sandbox wrote,
+// so there is nothing to flush and nobody to ask. That is the whole reason snapshots work on this
+// route and hit a wall on the tcmu one.
+//
+// A sandbox that has written nothing is refused rather than sealed as an empty layer. It is a
+// real state -- boot alone dirties very little, and a caller can snapshot immediately -- and the
+// honest answer is that there is no filesystem to capture, not a layer that claims one.
+func (p *OverlaybdProvider) sealFromBitmap(ctx context.Context, sandboxID, base string, backend *lsmtBackend) (string, []string, int64, error) {
+	extents := backend.OwnedExtents()
+	if len(extents) == 0 {
+		return "", nil, 0, fmt.Errorf("image: sandbox %s has written nothing, so there is no "+
+			"filesystem to seal", sandboxID)
+	}
+
+	baseLowers, baseCfg, err := p.snapshotBase(ctx, base)
+	if err != nil {
+		return "", nil, 0, err
+	}
+
+	dir := filepath.Join(p.BaseDir, sandboxID)
+	sealedPath := filepath.Join(dir, "snapshot-fs.obd")
+	// Removed if it survived a previous attempt: sealFileTo is O_EXCL so that a concurrent
+	// seal cannot overwrite a layer being published, but a crashed earlier attempt should not
+	// block this one forever.
+	_ = os.Remove(sealedPath)
+
+	if err := sealFileTo(sealedPath, uint64(backend.size), extents, backend.ReadAt); err != nil {
+		return "", nil, 0, err
+	}
+	defer os.Remove(sealedPath)
+
+	return p.publishSealedSnapshot(ctx, sealedPath, baseLowers, baseCfg)
 }
 
 // digestOfChain content-addresses a layer chain by the sha256 of its layer digests joined

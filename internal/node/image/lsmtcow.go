@@ -6,6 +6,8 @@ import (
 	"io"
 	"os"
 	"sync"
+
+	"golang.org/x/sys/unix"
 )
 
 // lsmtBackend serves a ublk device from a chain of overlaybd layers plus one writable
@@ -274,6 +276,22 @@ func (b *lsmtBackend) WriteAt(p []byte, off int64) (int, error) {
 // the map is not expected to change, but "not expected to" is what the copy-on-write bitmap's
 // missing mutex also relied on before workers made it a race.
 func (b *lsmtBackend) OwnedExtents() []sealedExtent {
+	// The overlay file is asked first, and the bitmap is only a fallback.
+	//
+	// The bitmap is in-process state built by WriteAt, so it knows only about writes this
+	// process saw. That is wrong in the case that matters most: a sandbox restored from a
+	// snapshot reattaches with a fresh backend, its overlay already holding the snapshot's
+	// bytes, and an empty bitmap. Sealing from the bitmap then reports "written nothing" for a
+	// sandbox whose filesystem is sitting on disk -- measured, and it looked like a lost write
+	// rather than lost bookkeeping.
+	//
+	// The filesystem already tracks which regions of a sparse file are allocated, and that
+	// answer survives a reattach because it is a property of the file rather than of this
+	// process. SEEK_DATA/SEEK_HOLE is how to ask.
+	if ext, err := b.allocatedExtents(); err == nil && len(ext) > 0 {
+		return ext
+	}
+
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -328,4 +346,70 @@ func (b *lsmtBackend) Flush() error {
 		return nil
 	}
 	return b.overlay.Sync()
+}
+
+// allocatedExtents reports the overlay's allocated regions, in sectors.
+//
+// Uses SEEK_DATA and SEEK_HOLE, which walk a sparse file's extents without reading it: a 20 GiB
+// overlay holding 2 MiB of writes is answered in a handful of syscalls rather than by scanning
+// five million blocks.
+//
+// Runs are rounded out to whole copy-on-write blocks. The filesystem's allocation granularity is
+// its own business and need not match this backend's 4 KiB block, so a partially allocated block
+// is treated as owned -- sealing a few zero bytes is harmless, while missing a written byte is
+// not.
+func (b *lsmtBackend) allocatedExtents() ([]sealedExtent, error) {
+	if b.overlay == nil {
+		return nil, errors.New("image: no overlay to scan")
+	}
+	fd := int(b.overlay.Fd())
+
+	var out []sealedExtent
+	var off int64
+	for off < b.size {
+		dataStart, err := unix.Seek(fd, off, unix.SEEK_DATA)
+		if err != nil {
+			// ENXIO means no data at or after this offset, which is the ordinary end of the
+			// walk rather than a failure.
+			if errors.Is(err, unix.ENXIO) {
+				break
+			}
+			return nil, fmt.Errorf("image: seek data in overlay: %w", err)
+		}
+		holeStart, err := unix.Seek(fd, dataStart, unix.SEEK_HOLE)
+		if err != nil {
+			return nil, fmt.Errorf("image: seek hole in overlay: %w", err)
+		}
+		if holeStart > b.size {
+			holeStart = b.size
+		}
+		if holeStart <= dataStart {
+			break
+		}
+
+		// Rounded out to whole blocks, then to sectors.
+		start := (dataStart / b.blockSize) * b.blockSize
+		end := ((holeStart + b.blockSize - 1) / b.blockSize) * b.blockSize
+		if end > b.size {
+			end = b.size
+		}
+
+		startSector := uint64(start / lsmtAlignment)
+		lengthSectors := uint32((end - start) / lsmtAlignment)
+		if lengthSectors == 0 {
+			off = holeStart
+			continue
+		}
+		// Merge with the previous run when rounding made them adjacent.
+		if n := len(out); n > 0 && out[n-1].offset+uint64(out[n-1].length) >= startSector {
+			prevEnd := out[n-1].offset + uint64(out[n-1].length)
+			if endSector := startSector + uint64(lengthSectors); endSector > prevEnd {
+				out[n-1].length += uint32(endSector - prevEnd)
+			}
+		} else {
+			out = append(out, sealedExtent{offset: startSector, length: lengthSectors})
+		}
+		off = holeStart
+	}
+	return out, nil
 }
