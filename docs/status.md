@@ -279,6 +279,35 @@ plus a reflection-based guard that fails when a method is missing from it — th
 hand-written call list would otherwise decay exactly as the interfaces did. The
 guard caught three snapshot methods left out of its own first draft.
 
+### snapshot and restore on the overlaybd routes: two separate gaps ⚠️
+
+Found by testing restore, which resolves layers through `snapshotFSLowers` rather than
+`lowersFor` -- a second route under the same `layerSources`, and the one that had not been
+exercised. `hack/obd-ublk-restore-probe.sh` reproduces both.
+
+**On the ublk route, snapshot fails outright.** `SealSnapshotFS` looks the sandbox up in
+`p.attached`, which only the tcmu route populates; the ublk route tracks devices in
+`p.ublkAttached`, so a checkpoint returns "sandbox is not attached". Behind that check the
+mismatch is real rather than cosmetic: sealing runs `overlaybd-commit` over a `writable.data` +
+`writable.index` pair, and the ublk route's writable layer is a sparse `overlay.img` with an
+in-process ownership bitmap. There is nothing for `overlaybd-commit` to read. Making snapshots
+work here needs either an overlaybd writable layer on this route or a sealer that can read the
+sparse-file form -- not a lookup fix.
+
+**On the tcmu route, snapshot succeeds and loses the data.** Measured: write a marker, snapshot
+with `--no-memory`, create from that snapshot, and the restored guest does not have the file.
+Everything downstream looks correct -- the snapshot record carries the FS digest and both layer
+digests, the manifest lists base + sealed layer, both blobs are in the store -- but the sealed
+layer is 36 KiB of metadata with no data in it. The cause is upstream of all of that:
+`writable.data` does contain the guest's writes (verified by grepping a 1 MB pattern out of it),
+while `writable.index` is **0 bytes**, because the overlaybd daemon holds the index in memory
+while the device is attached. `SealSnapshotFS` neither detaches the device nor flushes it, and
+`tcmuDevice` has no flush at all -- so `overlaybd-commit` reads an empty index and seals nothing.
+
+This is on main rather than in this branch's work: nothing here touches sealing. It is recorded
+because "snapshot on overlaybd" reads as delivered and is not, and because the failure is silent
+-- a restore that loses the filesystem still boots, since the base image underneath is intact.
+
 ### the worker split did not cost the other paths ✅
 
 The worker goroutines and the copy-on-write mutex went in to make lazy pull work, but they sit
