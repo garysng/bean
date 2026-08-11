@@ -395,8 +395,12 @@ fc 档需要：
 overlaybd 需要 ublk（内核 ≥ 6.0)或 tcmu 后端。已接入的那个后端是 **tcmu**
 （`target_core_user` + `tcm_loop` 模块）—— 当时验证机是 Ubuntu 20.04 + 内核 5.15,
 没有 `/dev/ublk-control`。**tcmu 已实测功能完备**。验证机现在已升到 6.8,
-但「ublk 只是性能更好」这句话要修正:tcmu 拆 128 个设备的 4.0 s 在两个内核上完全一样,
-那是传输层的限制而不是内核的,所以 ublk 是目标传输层而不是可选优化(见上表)。
+`/dev/ublk-control` 可用,但 overlaybd 自身仍走 tcmu。
+
+**「ublk 只是性能更好」这句已被实测推翻。** tcmu 拆 128 个设备要 4.0 s,
+而且在 5.15 和 6.8 上完全一样:daemon 卡在一条上游明确警告不要并发使用的
+netlink socket 上。那是传输层的限制不是内核版本的问题,换内核修不掉,
+所以 ublk 是目标传输层而不是可选优化(见上表)。
 
 tcmu 路径另需注意宿主上的 `multipathd`:TCMU 设备默认无唯一序列号,
 multipathd 会把多个 overlaybd 设备合并成一条 multipath,
