@@ -25,19 +25,24 @@ import (
 // share only their first step. Interleaving them would produce a function where half
 // the statements are reached on one path.
 func (p *OverlaybdProvider) prepareUblk(ctx context.Context, sandboxID, imageRef string, sizeMiB int64, opts PrepareOptions) (rootfs *Rootfs, err error) {
-	ctrl, err := p.ublkControl()
-	if err != nil {
-		return nil, err
-	}
-
-	// Refused before any layer work, because the reader in this process has no
-	// HTTP range-read: a lazily read layer is a URL, and lsmtStack needs a file.
-	// Refusing beats converting locally without saying so -- lazy pull is the property
-	// that was asked for, and quietly not providing it is invisible downstream.
+	// The configuration is checked before the hardware, so a node misconfigured *and*
+	// without ublk reports the thing an operator can fix. The other order hides it: the
+	// control device is absent on every machine without ublk, and that error would
+	// mask a flag combination that is wrong regardless of the kernel.
+	//
+	// Lazy pull cannot be served here because the reader in this process has no HTTP
+	// range-read: a lazily read layer is a URL, and lsmtStack needs a file it can seek.
+	// Refused rather than quietly converting locally -- lazy pull is the property that
+	// was asked for, and not providing it silently is invisible downstream.
 	if p.LazyPull {
 		return nil, errors.New("image: --fc-overlaybd-lazy-pull cannot be served over ublk: " +
 			"the ublk reader needs each layer as a local file, while lazy pull means " +
 			"range-reading blobs over HTTP. Use one or the other")
+	}
+
+	ctrl, err := p.ublkControl()
+	if err != nil {
+		return nil, err
 	}
 
 	// A restore resolves its whole filesystem from the snapshot's sealed chain, the
