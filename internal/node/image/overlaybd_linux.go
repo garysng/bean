@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/garysng/bean/internal/logging"
 )
@@ -292,12 +293,22 @@ func (p *OverlaybdProvider) Prepare(ctx context.Context, sandboxID, imageRef str
 			p.mu.Unlock()
 
 			var errs []error
+			// Timed because Release was measured at 4.414s of a 4.761s destroy under
+			// 128-way concurrency while every part of it is fast in isolation: the
+			// four configfs removals cost 92ms serially and 15ms each when 41 run
+			// concurrently, and the sandbox directory holds one sparse file whose
+			// removal takes 2ms. One of these two must be absorbing it.
+			detachStart := time.Now()
 			if err := dev.detach(); err != nil {
 				errs = append(errs, err)
 			}
+			obsPhase(ctx, "obd_detach", time.Since(detachStart))
+
+			rmStart := time.Now()
 			if err := os.RemoveAll(dir); err != nil {
 				errs = append(errs, fmt.Errorf("remove sandbox dir: %w", err))
 			}
+			obsPhase(ctx, "obd_remove_dir", time.Since(rmStart))
 			return errors.Join(errs...)
 		},
 	}, nil

@@ -3,6 +3,7 @@
 package image
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -260,16 +261,27 @@ func (d *tcmuDevice) detach() error {
 	var errs []error
 
 	tpgt := filepath.Join(configfsLoopback, d.wwn, "tpgt_1")
+	// Timed step by step because detach was measured at 4.688s of a 4.689s Release
+	// under 128-way concurrency, while the same four removals cost 92ms serially and
+	// 15ms each when 41 ran concurrently from a shell. Something here behaves
+	// differently when the caller is noded, and only per-step numbers can say which.
+	step := time.Now()
 	if err := os.Remove(filepath.Join(tpgt, "lun", "lun_0", "virtual_scsi_port")); err != nil &&
 		!os.IsNotExist(err) {
 		errs = append(errs, fmt.Errorf("unlink lun: %w", err))
 	}
+	obsPhase(context.Background(), "obd_unlink_scsi_port", time.Since(step))
+	step = time.Now()
 	if err := os.Remove(filepath.Join(tpgt, "lun", "lun_0")); err != nil && !os.IsNotExist(err) {
 		errs = append(errs, fmt.Errorf("remove lun: %w", err))
 	}
+	obsPhase(context.Background(), "obd_remove_lun", time.Since(step))
+	step = time.Now()
 	if err := os.RemoveAll(filepath.Join(configfsLoopback, d.wwn)); err != nil {
 		errs = append(errs, fmt.Errorf("remove loopback: %w", err))
 	}
+	obsPhase(context.Background(), "obd_remove_wwn", time.Since(step))
+	step = time.Now()
 
 	// No enable=0 here. The kernel rejects it -- "For dev_enable ops, only valid
 	// value is 1" -- so a backstore is torn down by removing its directory, and the
@@ -278,6 +290,7 @@ func (d *tcmuDevice) detach() error {
 	if err := os.Remove(base); err != nil && !os.IsNotExist(err) {
 		errs = append(errs, fmt.Errorf("remove backstore: %w", err))
 	}
+	obsPhase(context.Background(), "obd_remove_backstore", time.Since(step))
 	return errors.Join(errs...)
 }
 

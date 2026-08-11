@@ -52,6 +52,7 @@ for 128 devices on both.
 | Volumes | 📐 | |
 | Host resource reconciliation | 📐 | A crashed noded leaves dm mappings and sandbox directories behind |
 | Build logs and cancellation | ⚠️ | A build reports no progress and cannot be stopped |
+| ublk rootfs | ⚠️ | `UblkProvider` is implemented against a hand-written io_uring and ublk ABI -- there is no usable Go binding and `CGO_ENABLED=0` rules out wrapping liburing. **Verified single-sandbox on a 6.8 kernel**: a guest boots from a ublk device (`x86_64`, `3.20.10`, exit 0), copy-on-write holds with the base file byte-identical afterwards, and teardown leaks nothing. It serves the same converted ext4 from the same `ImageDir` as dm-snapshot, so an image prewarmed for either backend serves both; what differs is that creating the device writes io_uring commands instead of forking `losetup` twice and `dmsetup` once per sandbox, measured at ~26 ms a call. **Concurrency is not yet demonstrated**, and the attempt did real damage -- see "ublk: what 256 concurrent creates cost" below. Four defects were fixed as a result, including the one that mattered: nothing enforced `ublks_max`, so devices accumulated past the kernel's ceiling and could not be removed. The provider now reads that limit and refuses past it. **Operational constraint**: `ublks_max` defaults to 64, so a node cannot hold more than 64 ublk sandboxes without `modprobe ublk_drv ublks_max=N`. Opt-in with `--fc-ublk`; needs kernel 6.0 or later, and a node started with it on an older kernel refuses to start rather than falling back |
 | overlaybd | ⚠️ | `OverlaybdProvider` is implemented and **verified end to end on hardware**: a sandbox boots from an overlaybd device, the guest reads `PRETTY_NAME="Alpine Linux v3.20"` from its own rootfs, writes land in the writable layer, and teardown leaks nothing (`hack/overlaybd-e2e.sh`, with `overlaybd_hw_linux_test.go` at the provider level and `hack/overlaybd-probe.sh` covering the negative cases). Measured against dm-snapshot on the same host (`hack/overlaybd-bench.sh`): **392 MiB → 118 MiB** of allocated disk for three images sharing a base, and conversion CPU dropping from a flat 2.2 s per image to 1.37 s / 0.49 s / 0.44 s as the shared layer is reused. **Cold-start latency is unchanged** — this path still downloads and converts every layer before assembling the device, so it does strictly more work than flattening on a first use and wins only on the second image and on disk. Lazy pull, the part that would cut the cold path, requires blobs that are already sealed overlaybd layers; a standard OCI layer has no block index to range-read, so a create naming one is now refused rather than silently building an unopenable config. Producing such blobs is `Prewarm`'s job, not a central pipeline's: it converts an image and publishes each sealed layer under its OCI digest to bean's own object store (`--fc-overlaybd-s3-endpoint`, `obdblobstore.go` / `obdindex.go`), and any node reading that store resolves those layers remotely instead of converting them. A create never publishes — an S3 upload of tens of MiB does not belong on a sandbox's latency path. So a genuinely cold create is still a conversion, but it is one per **fleet** per image rather than one per node, provided something prewarms. The lazy-pull read path itself (`--fc-overlaybd-lazy-pull`) is **implemented and not yet exercised against a registry**: the 7 ms mount and 19.6%-of-layer-bytes figures come from the manual verification in [decisions.md](decisions.md) §3.1, against a blob that had been sealed first, not from this code. Opt-in with `--fc-overlaybd`; dm-snapshot is still the default. **Concurrent fan-out now measured** on a 128-core host at 256 simultaneous creates, and it is where this backend earns its keep: `fc_rootfs` 3.809 s -> 0.908 s, `runtime_create` 4.169 s -> 0.992 s, total 4.512 s -> 1.299 s, throughput 47.5 -> 88.0 creates/s, zero failures and no leaks on either backend. The cause is subprocess count: dm-snapshot forks `losetup` twice and `dmsetup` once per sandbox at ~26 ms a call, while `attachTCMU` is configfs writes with no fork at all. Two defects had to be fixed first -- the device was sized independently of the filesystem on it, so any request under 2 GiB built a device smaller than its own ext4 and the guest refused to boot; see "Attribution notes" below. See [image-pipeline.md](image-pipeline.md) §7 |
 
 ## Measured latency
@@ -276,6 +277,52 @@ Postgres by any test.** So there is now a smoke test calling every method once,
 plus a reflection-based guard that fails when a method is missing from it — the
 hand-written call list would otherwise decay exactly as the interfaces did. The
 guard caught three snapshot methods left out of its own first draft.
+
+### ublk: what 256 concurrent creates cost
+
+The single-sandbox ublk path was verified end to end — guest boots, copy-on-write
+holds, nothing leaks — and **none of that predicted concurrency**. Going straight
+from 1 to 256 exposed four defects and left the host needing a reboot, at load 68
+with 141 undeletable kernel objects and 37 processes unkillable in D state.
+
+The four, in the order they surfaced:
+
+1. **The shared control ring had no lock.** Submitting means writing the SQE at the
+   tail then advancing it; reading a result means taking the one at the head. Two
+   callers doing that at once take each other's completions. 255 of 256 creates
+   failed with `this kernel's ublk lacks UBLK_F_USER_COPY (features=0x0)` — on a
+   kernel that had answered `0x1fe` seconds earlier. **The error accused the kernel
+   of a missing feature when the fault was entirely local**, which is the most
+   misleading shape a message can take.
+2. **`submitAndWait` treated the first `io_uring_enter` return as proof of a
+   completion.** It is not: a signal, or the kernel completing asynchronously, both
+   return without one. 195 of 256 failed with `enter returned with no completion`.
+3. **A failed create left its device allocated**, because teardown returned early
+   when `STOP_DEV` failed — and `STOP_DEV` waits on a queue that a failed create has
+   already lost.
+4. **Nothing enforced `ublks_max`.** This is the one that did the damage. The
+   kernel's ceiling defaults to 64; 141 devices accumulated past it and could not be
+   removed at all — `STOP_DEV` waits on a dead queue, and `DEL_DEV` blocks behind the
+   kernel retrying IO to a server that is gone (`Buffer I/O error on dev ublkb68`).
+
+**The lesson is about scaling a test, not about ublk.** A ublk device is a kernel
+object with no force-remove: unlike `dmsetup remove`, there is no way back from
+userspace once its server dies. The right sequence was 1, 4, 16, 64 with a leak
+check at each step — and `ublks_max=64` had already been read during setup without
+being allowed to bound the test. A limit you have seen and not encoded is a limit
+you will exceed.
+
+The provider now reads `ublks_max` from the kernel and refuses before allocating
+anything, because refusing a create is recoverable and leaking a kernel object on a
+shared host is not.
+
+**One test was deleted rather than kept.** It launched 4× the limit concurrently and
+checked that exactly `limit` were admitted — and it passed against a deliberately
+broken `admit` that released the lock between the check and the increment, because
+that window is a few instructions wide and the scheduler rarely lands inside it. A
+test that passes against the bug it names reads as coverage. It now asserts the
+invariant instead: `inFlight` never exceeds the limit, which broken arithmetic
+violates whether or not the interleaving is ever observed.
 
 ## Attribution notes: the create and destroy paths, measured
 

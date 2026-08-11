@@ -116,6 +116,10 @@ func NewManager(rt runtime.Runtime) *Manager {
 	}); ok {
 		pr.SetPhaseObserver(m.observePhase)
 	}
+	// The image provider reports its own steps the same way. Set on the package rather
+	// than an instance because a rootfs release is a closure captured at Prepare time,
+	// and there is one provider per node either way.
+	image.ObservePhase = m.observePhase
 	go m.idleLoop()
 	return m
 }

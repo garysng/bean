@@ -20,3 +20,6 @@ bean.db
 # Python bytecode caches from the SDK and its tests
 __pycache__/
 *.pyc
+
+# Scratch git worktrees an agent creates while working in this repo
+.claude/worktrees/
