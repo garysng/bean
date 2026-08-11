@@ -3,7 +3,6 @@ package image
 import (
 	"bytes"
 	"encoding/binary"
-	"hash/crc32"
 	"testing"
 )
 
@@ -36,7 +35,11 @@ func zfileFromBlocks(blocks [][]byte, blockSize uint32, originalSize uint64, wit
 	for _, blk := range blocks {
 		out := blk
 		if withCRC {
-			sum := crc32.Update(^zfileCRCSalt, crc32.MakeTable(crc32.Castagnoli), blk) ^ 0xffffffff
+			// The production helper, deliberately. Computing the expected value
+			// independently here is exactly what let a wrong CRC variant pass: the test and
+			// the reader agreed with each other and with nothing else. What pins the variant
+			// down is a layer some other implementation wrote -- TestOpenRealSealedLayer.
+			sum := zfileBlockCRC(blk)
 			tail := make([]byte, 4)
 			binary.LittleEndian.PutUint32(tail, sum)
 			out = append(append([]byte{}, blk...), tail...)
@@ -73,7 +76,7 @@ func zfileFromBlocks(blocks [][]byte, blockSize uint32, originalSize uint64, wit
 	trailer.flags = zfileFlagData | zfileFlagSealed | zfileFlagCalcDigest
 	trailer.indexOffset = indexOffset
 	trailer.indexSize = uint64(len(lengths))
-	trailer.indexCRC = crc32.Checksum(index, crc32.MakeTable(crc32.Castagnoli))
+	trailer.indexCRC = zfileCRC(index)
 	out.Write(buildZFileHeader(trailer))
 	return out.Bytes()
 }

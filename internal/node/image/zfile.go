@@ -28,6 +28,49 @@ const (
 	zfileCRCSalt uint32 = 100007
 )
 
+// zfileCRC is the checksum a ZFile stores: CRC-32C over the raw register, seeded at zero
+// and *not* complemented at the end.
+//
+// This is not `crc32.Checksum` with the Castagnoli table, which seeds at all-ones and
+// complements. Upstream reaches into the running state directly, so the two differ on
+// every input -- and the difference only shows up against a file some other implementation
+// wrote. My first version used the standard form and passed every synthetic test, because
+// those tests computed the expected value the same wrong way; a layer sealed by
+// `overlaybd-commit` rejected it immediately (measured: got 0x4dd1aae4, wanted
+// 0xc1f9186e over the same 8 index bytes).
+//
+// Computed against the table directly rather than through crc32.Update, which treats its
+// argument as an already-complemented CRC and so complements on the way in and out: asking
+// it for "seed 0" actually seeds 0xffffffff. That produced 0xb22e551b where a real layer
+// stores 0xc1f9186e.
+func zfileCRC(data []byte) uint32 {
+	return zfileCRCFrom(0, data)
+}
+
+// zfileCRCFrom runs the CRC-32C register from an explicit initial state, with no
+// complement at either end.
+func zfileCRCFrom(init uint32, data []byte) uint32 {
+	tab := crc32.MakeTable(crc32.Castagnoli)
+	crc := init
+	for _, b := range data {
+		crc = tab[byte(crc)^b] ^ (crc >> 8)
+	}
+	return crc
+}
+
+// zfileBlockCRC is the checksum stored after each compressed block: the same raw-register
+// CRC-32C as the index, but seeded with the salt itself.
+//
+// The salt goes in **as** the initial state, not as its complement. Both forms are
+// plausible from the upstream source -- it calls a helper that "seeds the running CRC state
+// with the salt prime" -- and I picked the complement, which is wrong. Verified against a
+// layer sealed by `overlaybd-commit`: for its first block, seeding with 100007 gives the
+// stored 0xad348fb1 while seeding with ^100007 gives 0xd66cdfda. Every block of every real
+// layer would have been rejected.
+func zfileBlockCRC(data []byte) uint32 {
+	return zfileCRCFrom(zfileCRCSalt, data)
+}
+
 // zfileMagic0 is "ZFile\0\x01\0" read as a little-endian uint64.
 var zfileMagic0 = binary.LittleEndian.Uint64([]byte{'Z', 'F', 'i', 'l', 'e', 0, 0x01, 0})
 
@@ -250,9 +293,9 @@ func loadZFileIndex(src io.ReaderAt, h zfileHeader) ([]uint64, error) {
 	}
 
 	if h.digestEnabled() {
-		// Castagnoli, matching upstream's crc32c. A mismatch here means every block
-		// offset is suspect, so it is worth checking once at open.
-		if got := crc32.Checksum(raw, crc32.MakeTable(crc32.Castagnoli)); got != h.indexCRC {
+		// A mismatch here means every block offset is suspect, so it is worth checking
+		// once at open rather than discovering it as garbage per block.
+		if got := zfileCRC(raw); got != h.indexCRC {
 			return nil, fmt.Errorf("image: zfile index checksum is %#08x, want %#08x",
 				got, h.indexCRC)
 		}
@@ -339,9 +382,7 @@ func (z *zfileReader) block(idx int, scratch *zfileScratch) ([]byte, error) {
 		}
 		body := comp[:len(comp)-4]
 		want := binary.LittleEndian.Uint32(comp[len(comp)-4:])
-		// Upstream seeds the running CRC state with the salt rather than hashing it,
-		// so the seed is the salt's complement.
-		got := crc32.Update(^zfileCRCSalt, crc32.MakeTable(crc32.Castagnoli), body) ^ 0xffffffff
+		got := zfileBlockCRC(body)
 		if got != want {
 			return nil, fmt.Errorf("image: zfile block %d checksum is %#08x, want %#08x",
 				idx, got, want)
