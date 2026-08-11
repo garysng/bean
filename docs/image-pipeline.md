@@ -368,6 +368,38 @@ it omits the two that prewarm does **not** shadow: shared layers are stored once
 of once per image, and the CPU to convert a shared base is paid once per node rather than
 once per image.
 
+### overlaybd and ublk answer different questions ✅
+
+These two get conflated because both are "the alternative rootfs thing", and the
+conflation produced a wrong value ordering in this document twice. They are orthogonal:
+
+| | overlaybd | ublk |
+|---|---|---|
+| Axis | **what the disk is made of** | **how the disk reaches the guest** |
+| Replaces | flattening each image into its own ext4 | `losetup` + `dmsetup`, or TCMU |
+| Buys | layers shared by digest: less disk, and conversion CPU paid once per distinct layer instead of once per image | no `fork+exec` per sandbox, and a teardown that does not serialise |
+| Does **not** help | create latency (a cold create still converts) | disk usage or conversion CPU — it serves whatever it is given |
+| Flag | `--fc-overlaybd` | `--fc-ublk` |
+
+Because they are different axes they compose, and the four combinations are all
+meaningful:
+
+- neither: flattened ext4 over device-mapper — the default
+- `--fc-ublk`: flattened ext4 over ublk. Same bytes as the default, `fc_rootfs` 2.461 s
+  → 0.034 s at 60-way concurrency, because three `fork+exec` per sandbox become io_uring
+  commands
+- `--fc-overlaybd`: shared layers over TCMU. 392 MiB → 118 MiB for three images sharing a
+  base, conversion CPU 2.2 s → 0.44 s on the third — but teardown costs 4.0 s per 128
+  devices and a newer kernel does not fix it
+- both: shared layers over ublk. The combination exists because the previous row's
+  teardown cost is in the transport, so the only way past it is to change the transport
+  while keeping the layers
+
+The trap worth naming: **neither of them makes a cold create faster.** overlaybd still
+converts every layer before assembling a device, and ublk only changes how the assembled
+device is presented. The thing that would remove the cold path is lazy pull, and that
+needs layers already sealed in overlaybd form.
+
 ### Measured, both backends, same host ✅
 
 `hack/overlaybd-bench.sh`. Three python `-slim` images, which share one debian base

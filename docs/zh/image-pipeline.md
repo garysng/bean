@@ -336,6 +336,32 @@ beand 是 PID 1,降低自己的 uid 就会失去之后 exec 任何东西的能�
 而 prewarm 能遮掉它 —— 这话没错,但漏了 prewarm **遮不掉**的两项:共享的层只存一份
 而不是每个镜像各存一份,以及共享 base 的转换 CPU 每个节点只付一次而不是每个镜像付一次。
 
+### overlaybd 和 ublk 回答的是两个不同的问题 ✅
+
+这两个容易被混成「另一种 rootfs 方案」,而这个混淆已经让本文档的价值排序写错过两次。
+它们是正交的两个维度:
+
+| | overlaybd | ublk |
+|---|---|---|
+| 维度 | **磁盘由什么组成** | **磁盘怎么送到 guest** |
+| 替代的是 | 把每个镜像拍平成独立 ext4 | `losetup` + `dmsetup`,或者 TCMU |
+| 换来的是 | 层按 digest 共享:省磁盘,且转换 CPU 按「不同的层」付一次而不是按镜像付 | 每 sandbox 不再 `fork+exec`,且 teardown 不再串行化 |
+| **不**解决 | create 延迟(冷 create 照样要转换) | 磁盘占用和转换 CPU —— 给它什么它就服务什么 |
+| flag | `--fc-overlaybd` | `--fc-ublk` |
+
+因为是不同维度,所以可以组合,四种组合都有意义:
+
+- 都不开:拍平的 ext4 走 device-mapper —— 默认
+- 只开 `--fc-ublk`:拍平的 ext4 走 ublk。字节和默认完全一样,但 60 并发下
+  `fc_rootfs` 2.461s → 0.034s,因为每 sandbox 三次 `fork+exec` 变成了 io_uring 命令
+- 只开 `--fc-overlaybd`:共享层走 TCMU。三个共享 base 的镜像 392 MiB → 118 MiB,
+  第三个镜像的转换 CPU 2.2s → 0.44s —— 但拆 128 个设备要 4.0s,且换内核修不掉
+- 两个都开:共享层走 ublk。这个组合存在的理由就是上一行那个 teardown 开销在传输层,
+  所以唯一的出路是换掉传输层、同时保留层共享
+
+**必须点明的坑:这两个都不会让冷 create 变快。** overlaybd 仍然要先转换每一层才能组设备,
+ublk 只改变组好的设备如何呈现。能砍掉冷路径的是 lazy pull,而那需要已经封好的 overlaybd 层。
+
 ### 两个 backend 同机实测 ✅
 
 `hack/overlaybd-bench.sh`。三个 python `-slim` 镜像,共享同一个 debian base
