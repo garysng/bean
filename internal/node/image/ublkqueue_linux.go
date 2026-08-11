@@ -5,12 +5,15 @@ package image
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"runtime"
 	"sync"
 	"unsafe"
 
 	"golang.org/x/sys/unix"
+
+	"github.com/garysng/bean/internal/logging"
 )
 
 // A ublk queue: the loop that serves one device's block IO from userspace.
@@ -74,11 +77,41 @@ type ublkQueue struct {
 	// on the IO path would put the garbage collector between the guest and its disk.
 	bufs [][]byte
 
+	// pending counts requests handed to workers but not yet committed. It decides whether
+	// the loop may block in the kernel: with work outstanding it must also be able to wake
+	// on a worker's result, so it polls instead.
+	pending int
+	// completions carries a worker's finished request back to this thread, which is the
+	// only one allowed to submit to the ring.
+	completions chan ioCompletion
+	// slow marks a backend whose reads may block for milliseconds rather than
+	// microseconds -- a layer read over HTTP rather than from a file. Set for such a
+	// backend, requests are handled on worker goroutines; unset, they run inline, because
+	// for a local file the handoff costs more than the work.
+	slow bool
+	// commitFn substitutes for commit in tests, which have no kernel-backed ring. Nil in
+	// production.
+	commitFn func(tag uint16, res int32) error
+
 	stop     chan struct{}
 	stopOnce sync.Once
 	done     chan struct{}
 	err      error
 }
+
+// ioCompletion is one request finished by a worker, waiting to be committed.
+type ioCompletion struct {
+	tag uint16
+	res int32
+}
+
+// slowBackend is implemented by a backend whose reads may block long enough that serving
+// them on the queue's single thread would stall the device.
+//
+// An interface rather than a flag on the constructor so the property travels with the
+// backend that has it: the layer stack knows it holds a remote reader, and the queue does
+// not have to be told twice.
+type slowBackend interface{ MayBlock() bool }
 
 // newUblkQueue maps the queue's descriptor region and prepares its buffers.
 //
@@ -129,6 +162,13 @@ func newUblkQueue(cdev *os.File, qid, depth uint16, maxIOBytes uint32, backend u
 		bufs:    make([][]byte, depth),
 		stop:    make(chan struct{}),
 		done:    make(chan struct{}),
+		// Buffered to the queue depth: at most that many requests can be outstanding, so a
+		// worker never blocks handing its result back and the loop never deadlocks waiting
+		// to send while a worker waits to be received.
+		completions: make(chan ioCompletion, depth),
+	}
+	if sb, ok := backend.(slowBackend); ok {
+		q.slow = sb.MayBlock()
 	}
 	for i := range q.bufs {
 		q.bufs[i] = make([]byte, maxIOBytes)
@@ -229,6 +269,16 @@ func (q *ublkQueue) serve(armed chan<- error) {
 	runtime.LockOSThread()
 	defer runtime.UnlockOSThread()
 	defer close(q.done)
+	// Reported when it happens, not only when something tears the device down. A queue
+	// that dies mid-boot leaves a device that accepts requests and answers none, and the
+	// only symptom upstream is an agent that never becomes reachable -- which is
+	// indistinguishable from a corrupt filesystem. Waiting for Stop() to surface this cost
+	// a whole debugging round.
+	defer func() {
+		if q.err != nil {
+			slog.Error("ublk queue stopped serving", "qid", q.qid, logging.KeyError, q.err)
+		}
+	}()
 
 	for tag := uint16(0); tag < q.depth; tag++ {
 		if err := q.submitIOCmd(ublkIOFetchReq, tag, 0); err != nil {
@@ -252,11 +302,25 @@ func (q *ublkQueue) serve(armed chan<- error) {
 		default:
 		}
 
-		cqe, err := q.ring.waitCQE()
+		// Workers' results are committed first, and from this thread. Draining before the
+		// next wait is what keeps a slot from sitting finished-but-unreturned while the
+		// loop blocks in the kernel for a request that cannot arrive until that slot is
+		// re-armed.
+		if err := q.drainCompletions(); err != nil {
+			q.err = err
+			return
+		}
+
+		cqe, err := q.nextCQE()
 		if err != nil {
 			// EINTR is ordinary: Go's runtime signals threads, and a wait interrupted
 			// by that has nothing wrong with it.
 			if errors.Is(err, unix.EINTR) {
+				continue
+			}
+			if errors.Is(err, errNoCQEYet) {
+				// Nothing from the kernel, but workers are running: loop back and wait on
+				// them instead of blocking here, which is the whole point of the split.
 				continue
 			}
 			select {
@@ -281,16 +345,92 @@ func (q *ublkQueue) serve(armed chan<- error) {
 			return
 		}
 
+		// A slow backend's request goes to a worker so this thread stays free to accept the
+		// next one. A fast one runs inline: for a pread of a local file the handoff, the
+		// scheduling and the channel round trip all cost more than the read.
+		if q.slow {
+			q.pending++
+			go func(tag uint16) {
+				res := q.handle(tag)
+				select {
+				case q.completions <- ioCompletion{tag: tag, res: res}:
+				case <-q.stop:
+				}
+			}(tag)
+			continue
+		}
+
 		res := q.handle(tag)
-		if err := q.submitIOCmd(ublkIOCommitAndFetch, tag, res); err != nil {
+		if err := q.commit(tag, res); err != nil {
 			q.err = err
 			return
 		}
-		if err := q.ring.enter(1, 0); err != nil {
-			q.err = fmt.Errorf("image: ublk queue %d commit: %w", q.qid, err)
-			return
+	}
+}
+
+// errNoCQEYet means the kernel has nothing ready and the caller asked not to block.
+var errNoCQEYet = errors.New("image: no completion available")
+
+// nextCQE takes the next kernel completion, blocking only when nothing else can wake this
+// thread.
+//
+// With workers outstanding it must not block in io_uring_enter: a worker's result arrives on
+// a channel, which the kernel knows nothing about, so a blocking wait would sit there while
+// finished requests pile up uncommitted -- and since the guest cannot issue more IO than the
+// queue has slots, the device would wedge with every slot finished and none returned.
+func (q *ublkQueue) nextCQE() (ioUringCQE, error) {
+	if q.pending == 0 {
+		return q.ring.waitCQE()
+	}
+	if cqe, ok := q.ring.peekCQE(); ok {
+		return cqe, nil
+	}
+	// Nothing pending from the kernel. Block on the workers instead, so this thread is
+	// asleep rather than spinning while a request is in flight.
+	select {
+	case c := <-q.completions:
+		q.pending--
+		if err := q.commit(c.tag, c.res); err != nil {
+			return ioUringCQE{}, err
+		}
+	case <-q.stop:
+	}
+	return ioUringCQE{}, errNoCQEYet
+}
+
+// drainCompletions commits every worker result that is ready, without blocking.
+func (q *ublkQueue) drainCompletions() error {
+	for {
+		select {
+		case c := <-q.completions:
+			q.pending--
+			if err := q.commit(c.tag, c.res); err != nil {
+				return err
+			}
+		default:
+			return nil
 		}
 	}
+}
+
+// commit reports one finished request and re-arms its slot.
+//
+// Only ever called from the queue's own thread: the kernel requires every uring_cmd for a
+// queue to come from the thread that armed it (ubq_daemon == current), so a worker must hand
+// its result back here rather than submitting it.
+func (q *ublkQueue) commit(tag uint16, res int32) error {
+	// Substitutable so the dispatch and accounting can be tested without a kernel-backed
+	// ring. Nil in production, which is the real path.
+	if q.commitFn != nil {
+		return q.commitFn(tag, res)
+	}
+	if err := q.submitIOCmd(ublkIOCommitAndFetch, tag, res); err != nil {
+		return err
+	}
+	if err := q.ring.enter(1, 0); err != nil {
+		return fmt.Errorf("image: ublk queue %d commit: %w", q.qid, err)
+	}
+	return nil
 }
 
 // handle performs one request and returns the result the kernel expects: the number of
@@ -313,6 +453,11 @@ func (q *ublkQueue) handle(tag uint16) int32 {
 	case ublkIOOpRead:
 		n, err := q.backend.ReadAt(buf[:length], offset)
 		if err != nil && n < length {
+			// Logged, not just counted. A read that fails here becomes EIO to the guest, and
+			// a filesystem reports that as corruption -- so the offset and the underlying
+			// error are the only things that say which layer or which fetch went wrong.
+			slog.Error("ublk read failed", "qid", q.qid, "offset", offset,
+				"length", length, "got", n, logging.KeyError, err)
 			return -int32(unix.EIO)
 		}
 		// Written to the driver's buffer through the char device: that is what

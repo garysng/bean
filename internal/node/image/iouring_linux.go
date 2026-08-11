@@ -339,6 +339,22 @@ func (r *ioURing) enter(toSubmit, minComplete uint32) error {
 	return nil
 }
 
+// peekCQE consumes a completion if one is already there, without entering the kernel.
+//
+// For a caller with something else to wait on -- a ublk queue serving a slow backend also
+// receives worker results on a channel -- blocking in io_uring_enter would leave those
+// results unreachable until unrelated kernel work happened to arrive.
+func (r *ioURing) peekCQE() (ioUringCQE, bool) {
+	head := atomic.LoadUint32(r.cqHead)
+	if head == atomic.LoadUint32(r.cqTail) {
+		return ioUringCQE{}, false
+	}
+	cqe := *(*ioUringCQE)(unsafe.Pointer(uintptr(r.cqes) +
+		uintptr(head&atomic.LoadUint32(r.cqMask))*unsafe.Sizeof(ioUringCQE{})))
+	atomic.StoreUint32(r.cqHead, head+1)
+	return cqe, true
+}
+
 // waitCQE blocks for the next completion and consumes it.
 //
 // Checks the ring before entering the kernel: under load the completion is usually

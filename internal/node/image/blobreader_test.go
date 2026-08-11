@@ -242,3 +242,53 @@ func (f *failingFetcher) Size(context.Context) (int64, error) { return f.size, n
 func (f *failingFetcher) FetchRange(context.Context, []byte, int64) error {
 	return errors.New("network is down")
 }
+
+// A reader keeps working after the context that built it is cancelled.
+//
+// The device serves IO for the sandbox's whole life, so a reader holding the create's request
+// context dies the moment that create returns. Measured on hardware, and the symptom named
+// nothing useful: the guest booted, mounted its root, started its agent, and then every
+// subsequent read failed with `context canceled` -- which the queue turns into EIO and ext4
+// reports as `EXT4-fs error: reading directory`. Reads issued during the create succeeded,
+// which made it look like a corrupt region of the layer rather than a lifetime mistake.
+func TestRemoteBlobReaderOutlivesItsCreateContext(t *testing.T) {
+	data := patterned(4 << 20)
+	f := &fakeCtxFetcher{data: data}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	r := newRemoteBlobReader(context.WithoutCancel(ctx), f, newChunkCache(16<<20))
+
+	// One read while the create is still in flight, as a boot's first reads are.
+	if _, err := r.ReadAt(make([]byte, 512), 0); err != nil {
+		t.Fatalf("read during the create: %v", err)
+	}
+
+	// The create returns; its context is cancelled.
+	cancel()
+
+	// Every later read must still work: a different chunk, so it cannot be served from cache.
+	got := make([]byte, 512)
+	n, err := r.ReadAt(got, 2<<20)
+	if err != nil {
+		t.Fatalf("read after the create's context was cancelled: %v -- the device would "+
+			"return EIO for the rest of the sandbox's life", err)
+	}
+	if !bytes.Equal(got[:n], data[2<<20:(2<<20)+512]) {
+		t.Error("the read after cancellation returned the wrong bytes")
+	}
+}
+
+// fakeCtxFetcher honours its context, as a real HTTP client does.
+type fakeCtxFetcher struct{ data []byte }
+
+func (f *fakeCtxFetcher) CacheKey() string { return "ctx" }
+
+func (f *fakeCtxFetcher) Size(context.Context) (int64, error) { return int64(len(f.data)), nil }
+
+func (f *fakeCtxFetcher) FetchRange(ctx context.Context, p []byte, off int64) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	copy(p, f.data[off:])
+	return nil
+}

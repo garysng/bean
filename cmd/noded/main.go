@@ -209,7 +209,12 @@ func main() {
 			"from a registry cannot be read this way and a create naming one is "+
 			"refused. Producing such images needs a conversion-and-push step this "+
 			"node does not do. The other cost is that every block read then depends "+
-			"on the registry still being reachable and still serving that digest")
+			"on the registry still being reachable and still serving that digest. "+
+			"Works with --fc-ublk as well as with the TCMU transport: over TCMU the "+
+			"overlaybd daemon issues the range requests, over ublk noded does, and a "+
+			"registry that ignores a Range header is refused rather than worked "+
+			"around -- it answers with the whole blob from byte zero, which would "+
+			"serve the start of a layer for a read of its middle")
 	fcOverlaybdBinDir := flag.String("fc-overlaybd-bin-dir", "/opt/overlaybd/bin",
 		"directory holding the overlaybd binaries (overlaybd-create, -apply, "+
 			"-commit). Empty resolves them on PATH")
@@ -387,16 +392,11 @@ func main() {
 			"on demand when it downloads each one in full")
 	}
 
-	// Rejected at startup rather than on the create that needed it. Serving overlaybd
-	// layers over ublk means this process reads the layer files, and it has no HTTP
-	// range-read, so a lazily read layer is a URL where a file is needed. A node started
-	// with both would accept placements and fail every create against an image whose
-	// layers are only in the store.
-	if *fcOverlaybd && *fcUblk && *fcOverlaybdLazyPull {
-		log.Fatal("--fc-overlaybd-lazy-pull cannot be combined with --fc-ublk: the ublk " +
-			"reader needs each layer as a local file, while lazy pull means range-reading " +
-			"blobs over HTTP. Drop one of the two")
-	}
+	// --fc-overlaybd-lazy-pull with --fc-ublk used to be rejected here, because the ublk
+	// route read layers from files and a lazily read layer is a URL. It is supported now:
+	// the route reads a remote layer through range requests, which works because every
+	// reader below the transport takes io.ReaderAt, so a range-reading base substitutes
+	// for a file without the format code knowing.
 
 	tmpl, err := runtime.ParseCPUTemplate(*cpuTemplate)
 	if err != nil {

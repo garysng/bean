@@ -9,6 +9,94 @@ import (
 	"sync"
 )
 
+// urlRangeFetcher reads byte ranges of a blob addressed by a plain URL.
+//
+// This is the object-store case: a published layer lives at a URL the blob store hands out,
+// and it is read without credentials -- which is not a shortcut but the contract, since
+// overlaybd's own daemon reads the same store the same way. A store that refuses anonymous
+// GET is reported at startup rather than here (see s3BlobStore.CheckReadable), because a
+// node that will convert every layer instead of reading it should say so before it accepts
+// placements.
+type urlRangeFetcher struct {
+	url    string
+	digest string
+
+	sizeOnce sync.Once
+	size     int64
+	sizeErr  error
+}
+
+// CacheKey is the digest, so the same layer served from two stores is cached once.
+func (f *urlRangeFetcher) CacheKey() string { return f.digest }
+
+func (f *urlRangeFetcher) Size(ctx context.Context) (int64, error) {
+	if f.size > 0 {
+		return f.size, nil
+	}
+	f.sizeOnce.Do(func() {
+		req, err := http.NewRequestWithContext(ctx, http.MethodHead, f.url, nil)
+		if err != nil {
+			f.sizeErr = err
+			return
+		}
+		resp, err := http.DefaultClient.Do(req)
+		if err != nil {
+			f.sizeErr = fmt.Errorf("image: head %s: %w", f.url, err)
+			return
+		}
+		defer closeBody(resp)
+		if resp.StatusCode != http.StatusOK {
+			f.sizeErr = fmt.Errorf("image: head %s: HTTP %d", f.url, resp.StatusCode)
+			return
+		}
+		if resp.ContentLength < 0 {
+			f.sizeErr = fmt.Errorf("image: %s reported no length", f.url)
+			return
+		}
+		f.size = resp.ContentLength
+	})
+	return f.size, f.sizeErr
+}
+
+func (f *urlRangeFetcher) FetchRange(ctx context.Context, p []byte, off int64) error {
+	if len(p) == 0 {
+		return nil
+	}
+	req, err := http.NewRequestWithContext(ctx, http.MethodGet, f.url, nil)
+	if err != nil {
+		return err
+	}
+	end := off + int64(len(p)) - 1
+	req.Header.Set("Range", fmt.Sprintf("bytes=%d-%d", off, end))
+
+	resp, err := http.DefaultClient.Do(req)
+	if err != nil {
+		return fmt.Errorf("image: range %d-%d of %s: %w", off, end, f.url, err)
+	}
+	defer closeBody(resp)
+
+	switch resp.StatusCode {
+	case http.StatusPartialContent:
+	case http.StatusOK:
+		// The store ignored the Range header and is sending the whole object from byte
+		// zero, so reading len(p) bytes would return the start of the layer for a request
+		// about its middle. Refused for the same reason as on the registry path.
+		return fmt.Errorf("image: %s ignored the Range header, so it cannot serve a layer "+
+			"lazily", f.url)
+	default:
+		return fmt.Errorf("image: range %d-%d of %s: HTTP %d", off, end, f.url, resp.StatusCode)
+	}
+
+	if _, err := io.ReadFull(resp.Body, p); err != nil {
+		if errors.Is(err, io.ErrUnexpectedEOF) {
+			return fmt.Errorf("image: %s returned fewer bytes than the requested range %d-%d",
+				f.url, off, end)
+		}
+		return err
+	}
+	return nil
+}
+
 // registryRangeFetcher reads byte ranges of a registry blob over HTTP.
 //
 // This is what makes lazy pull possible on the ublk route: bean reads the layer itself

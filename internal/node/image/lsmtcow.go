@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"io"
 	"os"
+	"sync"
 )
 
 // lsmtBackend serves a ublk device from a chain of overlaybd layers plus one writable
@@ -36,7 +37,21 @@ type lsmtBackend struct {
 	size    int64
 
 	blockSize int64
-	owned     []uint64
+
+	// mu guards owned and the read-modify-write of a partially written block.
+	//
+	// Not defensive. Reads used to be serialised by the ublk queue's single thread, so the
+	// bitmap needed no lock; handing slow reads to workers removed that, and the race
+	// detector finds it immediately. The consequence is not a crash but a block served from
+	// the wrong source, which reaches the guest as `EXT4-fs error: reading directory` and a
+	// virtio I/O error -- nothing that names a race.
+	//
+	// One mutex rather than a striped set or atomics on the bitmap words: a write already
+	// costs a pread plus a pwrite, so the lock is not the expensive part, and a per-block
+	// scheme would still need a second lock to make "test, fill from base, then mark" one
+	// step. Being one step is the property that matters.
+	mu    sync.Mutex
+	owned []uint64
 }
 
 // newLSMTBackend opens a layer chain, oldest first, and creates the sandbox's overlay.
@@ -103,6 +118,7 @@ func (b *lsmtBackend) Close() error {
 	return errors.Join(errs...)
 }
 
+// isOwned reports whether the overlay holds a block. Callers hold mu.
 func (b *lsmtBackend) isOwned(block int64) bool {
 	i, bit := block/64, uint(block%64)
 	if i >= int64(len(b.owned)) {
@@ -111,6 +127,7 @@ func (b *lsmtBackend) isOwned(block int64) bool {
 	return b.owned[i]&(1<<bit) != 0
 }
 
+// setOwned records that the overlay holds a block. Callers hold mu.
 func (b *lsmtBackend) setOwned(block int64) {
 	i, bit := block/64, uint(block%64)
 	if i < int64(len(b.owned)) {
@@ -139,7 +156,20 @@ func (b *lsmtBackend) ReadAt(p []byte, off int64) (int, error) {
 		}
 		dst := p[done : done+int(chunk)]
 
-		if b.isOwned(block) {
+		// The bitmap is consulted under the lock and released before the read, which may go
+		// to the network and take milliseconds. Holding it across that would serialise every
+		// worker on the first slow read, which is the stall the worker split exists to avoid.
+		//
+		// Releasing early is safe for the direction that matters: a block that is owned stays
+		// owned, so a reader that saw "owned" cannot be wrong by the time it reads. The
+		// reverse -- a concurrent write marking a block between this check and the read --
+		// means serving the pre-write content, which is what a read racing a write to the
+		// same block is entitled to return anyway.
+		b.mu.Lock()
+		owned := b.isOwned(block)
+		b.mu.Unlock()
+
+		if owned {
 			n, err := b.overlay.ReadAt(dst, pos)
 			if err != nil && !isEOF(err) {
 				return done, err
@@ -194,11 +224,21 @@ func (b *lsmtBackend) WriteAt(p []byte, off int64) (int, error) {
 			chunk = int64(len(p) - done)
 		}
 
+		// Filling a block from the layers, writing it, and marking it owned has to be one
+		// step. Two writers to different halves of the same unowned block would otherwise
+		// both read the base, both write their own copy of it, and the second would erase
+		// the first's bytes -- silently, since each write reports success.
+		//
+		// The lock is held across the fill, which may read from the network. That is the one
+		// place a slow read is serialised, and it is the correct trade: this happens once per
+		// block over its lifetime, and the alternative is losing writes.
+		b.mu.Lock()
 		if !b.isOwned(block) && chunk < b.blockSize {
 			buf := make([]byte, b.blockSize)
 			if blockStart < b.stack.virtualSize {
 				n, err := b.stack.ReadAt(buf, blockStart)
 				if err != nil && !errors.Is(err, io.EOF) {
+					b.mu.Unlock()
 					return done, err
 				}
 				for i := n; i < len(buf); i++ {
@@ -206,17 +246,38 @@ func (b *lsmtBackend) WriteAt(p []byte, off int64) (int, error) {
 				}
 			}
 			if _, err := b.overlay.WriteAt(buf, blockStart); err != nil {
+				b.mu.Unlock()
 				return done, err
 			}
 		}
 
 		if _, err := b.overlay.WriteAt(p[done:done+int(chunk)], pos); err != nil {
+			b.mu.Unlock()
 			return done, err
 		}
 		b.setOwned(block)
+		b.mu.Unlock()
 		done += int(chunk)
 	}
 	return done, nil
+}
+
+// MayBlock reports whether a read of this backend can take milliseconds rather than
+// microseconds.
+//
+// True when any layer is read over the network. The ublk queue asks because its serving loop
+// is pinned to one OS thread, so handling a request inline there is handling it serially: a
+// request that waits on HTTP stops every other slot behind it.
+//
+// Measured, not precautionary. A guest booting from a lazily-pulled layer issued its first
+// root read, the queue thread blocked on the request, and the device never answered again --
+// the sandbox reached RUNNING with a device that completed no IO, which upstream saw only as
+// an unreachable agent, indistinguishable from a corrupt filesystem.
+//
+// A purely local stack answers false and keeps the inline path, where a pread is microseconds
+// and a goroutine handoff would cost more than the work it defers.
+func (b *lsmtBackend) MayBlock() bool {
+	return b.stack != nil && b.stack.remote
 }
 
 // Flush syncs the overlay. The layers are read-only, so there is nothing to flush there.

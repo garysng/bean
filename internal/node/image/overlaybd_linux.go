@@ -101,6 +101,13 @@ type OverlaybdProvider struct {
 	ublkCtrl     *ublkControl
 	ublkCtrlErr  error
 
+	// ChunkCacheBytes bounds the cache of layer chunks fetched for lazily read layers.
+	// Zero takes the default. It is a node-level budget because the cache is shared: many
+	// sandboxes from one image read the same chunks, which is the whole reason it exists.
+	ChunkCacheBytes int64
+	chunkOnce       sync.Once
+	chunkCache      *chunkCache
+
 	mu sync.Mutex
 	// attached tracks live devices so teardown can find them, and so a leaked
 	// configfs object is attributable.

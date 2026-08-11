@@ -23,6 +23,11 @@ type lsmtStack struct {
 	layers []io.ReaderAt
 	// virtualSize is the size of the disk the stack presents, in bytes.
 	virtualSize int64
+	// remote is true when any layer is read over the network rather than from a file.
+	// Carried on the stack because that is where the knowledge is: the caller assembling
+	// the sources knows which are remote, and everything downstream would otherwise have
+	// to be told.
+	remote bool
 }
 
 // stackMapping is a merged extent: a run of the virtual disk and which layer holds it.
@@ -46,7 +51,42 @@ func (m stackMapping) end() uint64 { return m.offset + uint64(m.length) }
 // reversal that happens in one of two call sites is exactly the bug this ordering
 // avoids.
 func openLSMTStack(paths []string) (*lsmtStack, func() error, error) {
-	if len(paths) == 0 {
+	srcs := make([]layerSource, 0, len(paths))
+	for _, p := range paths {
+		srcs = append(srcs, layerSource{Path: p})
+	}
+	return openLSMTStackFrom(srcs)
+}
+
+// layerSource says where one layer's bytes come from: a local file, or a remote blob read
+// through range requests.
+//
+// A struct rather than two entry points because a chain is legitimately mixed -- a node can
+// hold the base locally and read a leaf remotely -- and a caller that had to sort a chain
+// into two lists would also have to remember to keep them in order, which is the merge's
+// one load-bearing property.
+type layerSource struct {
+	// Path names a local file. Takes precedence: a layer already on disk is never fetched.
+	Path string
+	// Remote reads the layer over the network. Ignored when Path is set.
+	Remote io.ReaderAt
+	// RemoteSize is the blob's length, which a remote reader cannot infer from a stat.
+	RemoteSize int64
+	// Label identifies the layer in errors -- a digest for a remote one, since a caller
+	// looking at "open layer failed" needs to know which.
+	Label string
+}
+
+func (s layerSource) label() string {
+	if s.Label != "" {
+		return s.Label
+	}
+	return s.Path
+}
+
+// openLSMTStackFrom opens a chain from mixed local and remote sources, oldest first.
+func openLSMTStackFrom(srcs []layerSource) (*lsmtStack, func() error, error) {
+	if len(srcs) == 0 {
 		return nil, nil, errors.New("image: an lsmt stack needs at least one layer")
 	}
 
@@ -59,50 +99,75 @@ func openLSMTStack(paths []string) (*lsmtStack, func() error, error) {
 		return errors.Join(errs...)
 	}
 
-	layers := make([]*lsmtLayer, 0, len(paths))
-	readers := make([]io.ReaderAt, 0, len(paths))
-	for _, path := range paths {
-		f, err := os.Open(path)
-		if err != nil {
-			_ = closeAll()
-			return nil, nil, fmt.Errorf("image: open layer %s: %w", path, err)
-		}
-		files = append(files, f)
+	layers := make([]*lsmtLayer, 0, len(srcs))
+	readers := make([]io.ReaderAt, 0, len(srcs))
+	anyRemote := false
+	for _, src := range srcs {
+		var base io.ReaderAt
+		var baseSize int64
 
-		st, err := f.Stat()
-		if err != nil {
+		switch {
+		case src.Path != "":
+			f, err := os.Open(src.Path)
+			if err != nil {
+				_ = closeAll()
+				return nil, nil, fmt.Errorf("image: open layer %s: %w", src.Path, err)
+			}
+			files = append(files, f)
+
+			st, err := f.Stat()
+			if err != nil {
+				_ = closeAll()
+				return nil, nil, fmt.Errorf("image: stat layer %s: %w", src.Path, err)
+			}
+			base, baseSize = f, st.Size()
+
+		case src.Remote != nil:
+			anyRemote = true
+			if src.RemoteSize <= 0 {
+				_ = closeAll()
+				return nil, nil, fmt.Errorf("image: remote layer %s has no size, and the "+
+					"tar and trailer are both located from the end of the blob",
+					src.label())
+			}
+			base, baseSize = src.Remote, src.RemoteSize
+
+		default:
 			_ = closeAll()
-			return nil, nil, fmt.Errorf("image: stat layer %s: %w", path, err)
+			return nil, nil, fmt.Errorf("image: layer %s names neither a file nor a remote "+
+				"source", src.label())
 		}
 
 		// Three containers, outermost first. bean seals with `overlaybd-commit -z -t`, so
-		// a layer on disk is: a tar (from -t, which makes it a valid OCI blob), holding a
-		// ZFile (from -z, block-compressed so any one block can be expanded alone),
-		// holding the LSMT index and its extents.
+		// a layer is: a tar (from -t, which makes it a valid OCI blob), holding a ZFile
+		// (from -z, block-compressed so any one block can be expanded alone), holding the
+		// LSMT index and its extents.
 		//
 		// Unwrapping in that order is what lets each reader stay unaware of the one
 		// outside it: the index addresses uncompressed positions, and the ZFile beneath
-		// turns those into block reads.
-		src, size, err := openSealedLayerPayload(f, st.Size())
+		// turns those into block reads. It is also why a remote layer needs nothing extra
+		// here -- every level below reads through io.ReaderAt, so a range-reading base
+		// substitutes for a file without any of them knowing.
+		payload, size, err := openSealedLayerPayload(base, baseSize)
 		if err != nil {
 			_ = closeAll()
-			return nil, nil, fmt.Errorf("image: open layer %s: %w", path, err)
+			return nil, nil, fmt.Errorf("image: open layer %s: %w", src.label(), err)
 		}
-		if z, zerr := openZFile(src, size); zerr == nil {
-			src = z
+		if z, zerr := openZFile(payload, size); zerr == nil {
+			payload = z
 			size = z.size()
 		}
 
-		layer, err := openLSMTLayer(src, size)
+		layer, err := openLSMTLayer(payload, size)
 		if err != nil {
 			_ = closeAll()
-			return nil, nil, fmt.Errorf("image: open layer %s: %w", path, err)
+			return nil, nil, fmt.Errorf("image: open layer %s: %w", src.label(), err)
 		}
 		layers = append(layers, layer)
-		readers = append(readers, src)
+		readers = append(readers, payload)
 	}
 
-	stack := &lsmtStack{layers: readers}
+	stack := &lsmtStack{layers: readers, remote: anyRemote}
 	stack.mappings = mergeLSMTLayers(layers)
 	if len(stack.mappings) == 0 {
 		_ = closeAll()

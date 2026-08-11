@@ -8,6 +8,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"strings"
 	"time"
 )
 
@@ -30,15 +31,14 @@ func (p *OverlaybdProvider) prepareUblk(ctx context.Context, sandboxID, imageRef
 	// control device is absent on every machine without ublk, and that error would
 	// mask a flag combination that is wrong regardless of the kernel.
 	//
-	// Lazy pull cannot be served here because the reader in this process has no HTTP
-	// range-read: a lazily read layer is a URL, and lsmtStack needs a file it can seek.
-	// Refused rather than quietly converting locally -- lazy pull is the property that
-	// was asked for, and not providing it silently is invisible downstream.
-	if p.LazyPull {
-		return nil, errors.New("image: --fc-overlaybd-lazy-pull cannot be served over ublk: " +
-			"the ublk reader needs each layer as a local file, while lazy pull means " +
-			"range-reading blobs over HTTP. Use one or the other")
-	}
+	// Lazy pull is served here now, by reading the layer over range requests instead of
+	// from a file. It used to be refused: this process had no range client, so a layer
+	// available only as a URL had nothing to open. What closed the gap is that every
+	// reader below takes io.ReaderAt, so a range-reading base substitutes for a file
+	// without the format code knowing.
+	// Not gated on a registry client here: a layer published to the object store is read by
+	// URL without one, and that is the common lazy-pull case. remoteLayerFetcher refuses
+	// the registry case with no client, which is where the requirement actually is.
 
 	ctrl, err := p.ublkControl()
 	if err != nil {
@@ -93,7 +93,7 @@ func (p *OverlaybdProvider) prepareUblk(ctx context.Context, sandboxID, imageRef
 		}
 	}
 
-	paths, err := localLayerPaths(lowers, imageRef)
+	sources, err := p.layerSources(ctx, lowers, imageRef)
 	if err != nil {
 		return nil, err
 	}
@@ -114,7 +114,7 @@ func (p *OverlaybdProvider) prepareUblk(ctx context.Context, sandboxID, imageRef
 	}()
 	cleanup = append(cleanup, func() { os.RemoveAll(dir) })
 
-	stack, closeStack, err := openLSMTStack(paths)
+	stack, closeStack, err := openLSMTStackFrom(sources)
 	if err != nil {
 		return nil, err
 	}
@@ -201,24 +201,104 @@ func (p *OverlaybdProvider) prepareUblk(ctx context.Context, sandboxID, imageRef
 	}, nil
 }
 
-// localLayerPaths returns each layer's file, refusing a chain that names one only by
-// digest.
+// layerSources turns a resolved chain into what openLSMTStackFrom reads.
 //
-// A chain resolved against the object store can reference a layer the daemon would
-// range-read. The reader here needs a file it can seek, so such a chain is refused with
-// the layer and the image named: an operator's next step is to prewarm that image on
-// this node, and neither an index nor a digest alone says which image to prewarm.
-func localLayerPaths(lowers []obdLayer, imageRef string) ([]string, error) {
-	paths := make([]string, 0, len(lowers))
+// A layer on disk is read from the file; one available only by digest is read over range
+// requests, which is what lazy pull means on this route. Local wins when both are possible:
+// a file this node already holds costs nothing per read, while a remote layer costs a round
+// trip per uncached chunk, so preferring the file is not a policy choice.
+//
+// Without lazy pull a remote-only layer is still refused, and refused by name -- an
+// operator's next step is to prewarm that image here, and neither an index nor a bare digest
+// says which image to prewarm.
+func (p *OverlaybdProvider) layerSources(ctx context.Context, lowers []obdLayer, imageRef string) ([]layerSource, error) {
+	srcs := make([]layerSource, 0, len(lowers))
 	for i, l := range lowers {
-		if l.File == "" {
-			return nil, fmt.Errorf("image: layer %d of %s (%s) is only available remotely, "+
-				"and the ublk reader needs a local file: prewarm this image on this node, "+
-				"or run this node without --fc-ublk", i, imageRef, l.Digest)
+		if l.File != "" {
+			srcs = append(srcs, layerSource{Path: l.File, Label: l.Digest})
+			continue
 		}
-		paths = append(paths, l.File)
+		if !p.LazyPull {
+			return nil, fmt.Errorf("image: layer %d of %s (%s) is only available remotely, "+
+				"and this node is not configured for lazy pull: prewarm this image on this "+
+				"node, or start it with --fc-overlaybd-lazy-pull", i, imageRef, l.Digest)
+		}
+
+		// The size has to be known before the first read, because both the tar wrapper and
+		// the LSMT trailer are located from the *end* of the blob. A manifest carries it, so
+		// the usual case costs no extra request; the fetcher falls back to a HEAD when it
+		// does not.
+		fetcher, err := p.remoteLayerFetcher(l, imageRef)
+		if err != nil {
+			return nil, fmt.Errorf("image: layer %d of %s (%s): %w", i, imageRef, l.Digest, err)
+		}
+		size := l.Size
+		if size <= 0 {
+			size, err = fetcher.Size(ctx)
+			if err != nil {
+				return nil, fmt.Errorf("image: size of layer %d of %s (%s): %w",
+					i, imageRef, l.Digest, err)
+			}
+		}
+		srcs = append(srcs, layerSource{
+			// Deliberately not ctx. A reader built here serves the device for the
+			// sandbox's whole life, while ctx belongs to this create and is cancelled the
+			// moment it returns -- after which every read fails with `context canceled`,
+			// reaching the guest as EIO and reported as filesystem corruption. The reads
+			// during the create succeed, which is what made this look like a bad region of
+			// the layer rather than a lifetime bug.
+			Remote:     newRemoteBlobReader(context.WithoutCancel(ctx), fetcher, p.chunks()),
+			RemoteSize: size,
+			Label:      l.Digest,
+		})
 	}
-	return paths, nil
+	return srcs, nil
+}
+
+// remoteLayerFetcher builds the range client for one remote layer.
+//
+// Two shapes of source, and they are not interchangeable. A layer published to the object
+// store carries a *base URL* in RepoBlobURL -- "http://host/bucket/blobs" -- and its blob
+// sits at that URL plus "/<digest>", which is the convention overlaybd's own daemon
+// follows. A layer still in a registry is addressed by a reference, and its blob is at
+// /v2/<repo>/blobs/<digest>.
+//
+// Treating the first as the second is what my first version did, and it produced
+// `https://http/v2//127.0.0.1:9000/bean-obd-layers/blobs/blobs/sha256:...`: the scheme
+// parsed as a host, a /v2/ path inserted, and "blobs" appearing twice. Worth spelling out,
+// because the resulting error named DNS rather than the mistake.
+func (p *OverlaybdProvider) remoteLayerFetcher(l obdLayer, imageRef string) (rangeFetcher, error) {
+	if strings.HasPrefix(l.RepoBlobURL, "http://") || strings.HasPrefix(l.RepoBlobURL, "https://") {
+		return &urlRangeFetcher{
+			url:    strings.TrimSuffix(l.RepoBlobURL, "/") + "/" + l.Digest,
+			digest: l.Digest,
+			size:   l.Size,
+		}, nil
+	}
+
+	if p.Registry == nil {
+		return nil, errors.New("no registry client configured, and this layer is not in an " +
+			"object store")
+	}
+	src := l.RepoBlobURL
+	if src == "" {
+		src = imageRef
+	}
+	ref, err := ParseReference(src)
+	if err != nil {
+		return nil, fmt.Errorf("parse %q: %w", src, err)
+	}
+	return newRegistryRangeFetcher(p.Registry, ref, l.Digest, l.Size), nil
+}
+
+// chunks is the node's shared cache of fetched layer chunks.
+//
+// One per provider rather than per create: a node running many sandboxes from one image
+// reads the same chunks of the same layers, and a per-create cache would hold a copy each
+// and evict them independently, which is the case the cache exists for.
+func (p *OverlaybdProvider) chunks() *chunkCache {
+	p.chunkOnce.Do(func() { p.chunkCache = newChunkCache(p.ChunkCacheBytes) })
+	return p.chunkCache
 }
 
 func (p *OverlaybdProvider) ublkControl() (*ublkControl, error) {

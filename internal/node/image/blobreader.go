@@ -37,7 +37,17 @@ type rangeFetcher interface {
 // -- into a handful of requests.
 type remoteBlobReader struct {
 	fetch rangeFetcher
-	ctx   context.Context
+
+	// ctx bounds a fetch, and must outlive the create that built this reader.
+	//
+	// The device serves IO for as long as the sandbox exists, so a reader holding the
+	// create's request context stops working the moment that create returns. Measured, and
+	// the symptom named nothing useful: the guest booted, mounted its root, started its
+	// agent, and then every later read failed with `context canceled` -- which the queue
+	// turns into EIO and the filesystem reports as `EXT4-fs error: reading directory`. The
+	// first reads succeed because they happen during the create, which is what makes this
+	// look like corruption in a particular region rather than a lifetime mistake.
+	ctx context.Context
 
 	// chunkSize is the granularity of a fetch and of the cache. 1 MiB: large enough that
 	// a boot's reads coalesce into few requests, small enough that touching one file does

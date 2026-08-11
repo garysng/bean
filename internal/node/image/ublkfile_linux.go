@@ -22,6 +22,19 @@ import (
 // The overlay is a sparse file plus a bitmap of which blocks it owns. A block the sandbox
 // has written comes from the overlay; anything else comes from the base. That is exactly
 // dm-snapshot's exception table, kept in this process instead of in the kernel.
+//
+// Deliberately unlocked, and safe only because of who calls it. The ublk queue serves a
+// backend inline on its single pinned thread unless the backend reports MayBlock(); this one
+// does not, because a pread of a local file is microseconds and a worker handoff would cost
+// more than the read. Its requests are therefore serialised by the queue, and the bitmap
+// needs no mutex.
+//
+// If that changes -- if this backend is ever handed to workers, or reused somewhere
+// concurrent -- it needs the lock lsmtBackend carries. The failure would not look like a race:
+// two writers to different halves of one unowned block both fill it from the base and the
+// second erases the first, and a torn bitmap serves a block from the wrong file. On hardware
+// that reached the guest as "EXT4-fs error: reading directory" and a virtio I/O error, naming
+// neither the bitmap nor the concurrency.
 type fileBackend struct {
 	base    *os.File
 	overlay *os.File
