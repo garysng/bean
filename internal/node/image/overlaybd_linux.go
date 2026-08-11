@@ -773,6 +773,37 @@ func (p *OverlaybdProvider) SealSnapshotFS(ctx context.Context, sandboxID, base 
 		return "", nil, 0, fmt.Errorf("image: sandbox %s is not attached", sandboxID)
 	}
 
+	dir := filepath.Join(p.BaseDir, sandboxID)
+	writableData := filepath.Join(dir, "writable.data")
+	writableIndex := filepath.Join(dir, "writable.index")
+
+	// Refused when the index is still empty, because sealing it would succeed and produce
+	// nothing.
+	//
+	// The daemon keeps a writable layer's index in memory while the device is attached and
+	// writes it on close, so during a checkpoint -- the device is still attached, the guest
+	// is merely paused -- the on-disk index is zero bytes while the data file already holds
+	// every write. `overlaybd-commit` reads the index, so it seals a layer of pure metadata:
+	// measured at 36 KiB for a sandbox that had written a marker file.
+	//
+	// Everything downstream then looks correct. The snapshot records an FS digest, the
+	// manifest lists the base plus the sealed layer, both blobs reach the store, and a
+	// restore boots -- on the base image alone, without the sandbox's filesystem. The only
+	// way to notice is to read back a file written before the snapshot, which is why this
+	// went unseen: it is a silent loss of exactly the thing a snapshot exists to keep.
+	//
+	// Detaching first would make the daemon flush, but Firecracker holds the block device
+	// open for the life of the sandbox, so pulling it out from under a running VMM trades
+	// this bug for a worse one. Until the writable layer can be made durable without
+	// detaching, refusing is the honest answer: a checkpoint that fails is recoverable, and
+	// one that reports success over an empty layer is not.
+	if st, serr := os.Stat(writableIndex); serr == nil && st.Size() == 0 {
+		return "", nil, 0, fmt.Errorf("image: sandbox %s has an empty writable index (%s), "+
+			"so sealing it would capture no filesystem: the overlaybd daemon holds the index "+
+			"in memory until the device is closed, and the device is still attached. This is a "+
+			"known gap in snapshot-on-overlaybd, not a transient error", sandboxID, writableIndex)
+	}
+
 	// The base's resolved chain, which the snapshot shares and whose config it
 	// inherits. The base is named either by an OCI reference (a cold start) or by a
 	// filesystem manifest digest (a sandbox created from a template or restored from a
@@ -785,11 +816,8 @@ func (p *OverlaybdProvider) SealSnapshotFS(ctx context.Context, sandboxID, base 
 
 	// Seal the sandbox's writable layer into a read-only layer, then key it by the sha256
 	// of the sealed bytes -- the same content-addressing the build and pull paths use.
-	dir := filepath.Join(p.BaseDir, sandboxID)
 	sealedPath := filepath.Join(dir, "snapshot-fs.obd")
-	if err := p.Builder.sealWritable(ctx,
-		filepath.Join(dir, "writable.data"),
-		filepath.Join(dir, "writable.index"),
+	if err := p.Builder.sealWritable(ctx, writableData, writableIndex,
 		sealedPath); err != nil {
 		return "", nil, 0, fmt.Errorf("image: seal snapshot writable layer: %w", err)
 	}

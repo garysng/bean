@@ -305,8 +305,21 @@ while the device is attached. `SealSnapshotFS` neither detaches the device nor f
 `tcmuDevice` has no flush at all -- so `overlaybd-commit` reads an empty index and seals nothing.
 
 This is on main rather than in this branch's work: nothing here touches sealing. It is recorded
-because "snapshot on overlaybd" reads as delivered and is not, and because the failure is silent
--- a restore that loses the filesystem still boots, since the base image underneath is intact.
+because "snapshot on overlaybd" reads as delivered and is not.
+
+**The silence is fixed even though the gap is not.** Sealing now refuses an empty index instead
+of producing a 36 KiB layer that promises a filesystem it does not hold, and the refusal names
+the cause, the file, and the fact that this is a known gap rather than a transient error --
+verified on hardware. A checkpoint that fails is recoverable; one that reports success over an
+empty layer is not, and the difference only shows up much later, in a restored sandbox missing
+the work someone snapshotted.
+
+Making it actually work needs a way to flush the writable layer without detaching. Detaching
+first would make the daemon write its index, but Firecracker holds the block device open for the
+sandbox's life, so pulling it out from under a running VMM trades this bug for a worse one. There
+is no flush among the backstore's configfs actions (`block_dev`, `free_kept_buf`, `reset_ring`),
+so it needs either an upstream mechanism or the ublk route to grow its own sealer -- which is the
+same decision the ublk gap above requires.
 
 ### the worker split did not cost the other paths ✅
 
