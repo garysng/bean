@@ -5,6 +5,8 @@
 **面向 AI agent 的 sandbox 平台** —— 在硬件隔离里跑不可信代码:创建、exec 进去、打快照、成批克隆。
 任意 OCI 镜像,不需要模板构建步骤。
 
+*从零到一构建,每一步都在真机上迭代与重新验证。*
+
 ![runtime: Firecracker microVM](https://img.shields.io/badge/runtime-Firecracker%20microVM-E24329?style=flat-square)
 ![runtime: gVisor](https://img.shields.io/badge/runtime-gVisor%20%2F%20OCI-4285F4?style=flat-square)
 ![952 ms 到 agent 可达](https://img.shields.io/badge/boot-952%20ms%20to%20agent-3FB950?style=flat-square)
