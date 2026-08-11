@@ -33,8 +33,39 @@ type Rootfs struct {
 	// Writable is the path holding this sandbox's changes, if the provider
 	// keeps them separately from Device. Checkpointing captures it.
 	Writable string
+	// Conversion, when set, reports what a cold start from an OCI image reference
+	// converted and published to the shared store, so the control plane can record
+	// a reusable template. Nil when nothing was converted or published: a restore,
+	// a create from an already-converted filesystem, or a provider with no store.
+	Conversion *ConversionResult
 	// release tears down whatever the provider set up.
 	release func() error
+}
+
+// ConversionResult carries the coordinates a cold OCI create resolved and
+// published, so the control plane can turn a first-seen reference into a shared
+// template that later creates -- on any node reading the same store -- reuse
+// without a pull or a conversion.
+//
+// For an OCI conversion the overlaybd chain is keyed by the OCI manifest digest,
+// so ManifestDigest is both the filesystem key a later create resolves from and
+// the OCI content digest that completes the conversion-cache key. The two roles
+// share one value here but stay distinct fields in the control-plane record.
+type ConversionResult struct {
+	// ManifestDigest is the overlaybd manifest digest, the filesystem key a later
+	// create resolves the chain from.
+	ManifestDigest string
+	// OCIDigest is the OCI content digest the reference resolved to, the other
+	// half of the conversion-cache key.
+	OCIDigest string
+	// SizeBytes is the published chain's size, for cache accounting.
+	SizeBytes int64
+	// LayerDigests is the published layer chain, base first.
+	LayerDigests []string
+	// Config is the converted image's configuration, so the control plane records
+	// the ENV/ENTRYPOINT/CMD/WORKDIR on the template a later create reuses. Nil when
+	// the image declared none.
+	Config *Config
 }
 
 // Release frees the device. It is safe to call more than once, so cleanup on
@@ -53,18 +84,28 @@ type PrepareOptions struct {
 	// SizeMiB bounds the writable layer; zero means the provider's default.
 	SizeMiB int64
 
-	// SeedWritable, when set, populates the writable layer from a checkpoint. It
-	// is called with the layer's path once it exists at its final size and
-	// before the device is assembled from it.
+	// FSManifestDigest, when set, resolves the read-only lowers from a snapshot's
+	// sealed filesystem chain instead of from imageRef. The chain already includes
+	// the base image's layers -- a snapshot's manifest is the base layers plus the
+	// one sealed on capture -- so this is resolved as a digest reference through
+	// the same store path an image tag uses, and a fresh empty writable goes on
+	// top. Empty means resolve from imageRef, the cold-start path.
 	//
-	// The ordering is the whole reason this is a provider concern rather than
-	// something the runtime does after Prepare returns. A device-mapper
-	// snapshot reads its exception table into kernel memory when the device is
-	// activated and never re-reads it, so bytes written to the copy-on-write
-	// store afterwards are invisible: the device keeps serving the base image.
-	// That failure is silent — the guest's own metadata still describes the
-	// files, so they appear with the right size and read back as zeroes.
-	SeedWritable func(dest string) error
+	// It is the restore counterpart of sealing on capture: the filesystem travels
+	// as this identity rather than as bytes, so no extents are replayed and the
+	// snapshot layer is shared with the base image's in the store rather than
+	// copied. Overlaybd-tier only -- the local tier restores through its own tar
+	// checkpoint, never through a provider.
+	FSManifestDigest string
+
+	// Publish asks a cold conversion from imageRef to publish its layers to the
+	// shared store and report the resolved coordinates on the returned Rootfs, so
+	// a later create of the same reference on any node reuses the chain without
+	// converting. It moves the publish cost -- an S3 upload of the converted
+	// layers -- onto this create instead of leaving it to a prewarm. Ignored when
+	// FSManifestDigest is set (a restore converts nothing) and a no-op on backends
+	// with no object store.
+	Publish bool
 }
 
 // Provider turns an image reference into a rootfs. Implementations differ in
@@ -153,16 +194,6 @@ func (p *FileProvider) Prepare(ctx context.Context, sandboxID, imageRef string, 
 	if err := cloneSparse(base, path, sizeMiB); err != nil {
 		os.RemoveAll(dir)
 		return nil, err
-	}
-
-	// This provider has no device to assemble, so seeding is just a write. It is
-	// still done here rather than left to the caller so that every provider
-	// establishes the writable layer at the same point in the sequence.
-	if opts.SeedWritable != nil {
-		if err := opts.SeedWritable(path); err != nil {
-			os.RemoveAll(dir)
-			return nil, fmt.Errorf("image: seed writable layer: %w", err)
-		}
 	}
 
 	return &Rootfs{

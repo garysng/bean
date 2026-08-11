@@ -27,21 +27,21 @@ var ErrPolicyDenied = errors.New("image not permitted by policy")
 // AllowedRegistries answers "may we pull from there at all", which is about
 // egress and applies even to images this platform built and pushed.
 type Policy struct {
-	// AllowedSources restricts image provenance, e.g. only ImageBuilt to keep
-	// a deployment to images it produced itself. Empty allows any source.
+	// AllowedSources restricts template provenance, e.g. only TemplateBuilt to
+	// keep a deployment to templates it produced itself. Empty allows any source.
 	//
-	// A reference the platform has never seen is treated as ImageImported: it
+	// A reference the platform has never seen is treated as TemplateConverted: it
 	// is about to become one, and the alternative is a policy that a caller
 	// can pass by using a ref nobody registered yet.
-	AllowedSources []store.ImageSource
-	// AllowedRegistries is a registry host allowlist for imported references,
+	AllowedSources []store.TemplateSource
+	// AllowedRegistries is a registry host allowlist for converted references,
 	// e.g. "registry.example.com" or "index.docker.io" for Docker Hub. Empty
 	// allows any registry.
 	//
-	// Built images skip this check. Their host names a push destination the
-	// operator configured, not a place a caller chose to pull from, and
-	// including it here would mean every deployment that sets an allowlist
-	// also has to remember to list its own registry.
+	// Built templates skip this check. Their name is a tag the operator chose,
+	// not a place a caller chose to pull from, and including it here would mean
+	// every deployment that sets an allowlist also has to remember to list its
+	// own registry.
 	AllowedRegistries []string
 }
 
@@ -53,8 +53,8 @@ func (p Policy) Enabled() bool {
 
 // Check validates a reference against the policy. The known argument is the
 // existing image record, or nil when the reference has never been registered.
-func (p Policy) Check(ref string, known *store.Image) error {
-	source := store.ImageImported
+func (p Policy) Check(ref string, known *store.Template) error {
+	source := store.TemplateConverted
 	if known != nil && known.Source != "" {
 		source = known.Source
 	}
@@ -64,9 +64,9 @@ func (p Policy) Check(ref string, known *store.Image) error {
 			ErrPolicyDenied, ref, source, joinSources(p.AllowedSources))
 	}
 
-	// Only imported references are subject to the registry allowlist; see the
-	// field comment for why a built image's host is not the caller's choice.
-	if len(p.AllowedRegistries) > 0 && source == store.ImageImported {
+	// Only converted references are subject to the registry allowlist; see the
+	// field comment for why a built template's host is not the caller's choice.
+	if len(p.AllowedRegistries) > 0 && source == store.TemplateConverted {
 		host := RegistryHost(ref)
 		if !containsFold(p.AllowedRegistries, host) {
 			return fmt.Errorf("%w: %s is on %s, and this deployment allows only %s",
@@ -76,7 +76,7 @@ func (p Policy) Check(ref string, known *store.Image) error {
 	return nil
 }
 
-func containsSource(list []store.ImageSource, want store.ImageSource) bool {
+func containsSource(list []store.TemplateSource, want store.TemplateSource) bool {
 	for _, s := range list {
 		if s == want {
 			return true
@@ -94,7 +94,7 @@ func containsFold(list []string, want string) bool {
 	return false
 }
 
-func joinSources(list []store.ImageSource) string {
+func joinSources(list []store.TemplateSource) string {
 	out := make([]string, 0, len(list))
 	for _, s := range list {
 		out = append(out, string(s))
@@ -113,14 +113,14 @@ func joinSources(list []store.ImageSource) string {
 func ParsePolicy(sources, registries string) (Policy, error) {
 	var p Policy
 	for _, s := range splitList(sources) {
-		switch store.ImageSource(strings.ToLower(s)) {
-		case store.ImageBuilt:
-			p.AllowedSources = append(p.AllowedSources, store.ImageBuilt)
-		case store.ImageImported:
-			p.AllowedSources = append(p.AllowedSources, store.ImageImported)
+		switch store.TemplateSource(strings.ToLower(s)) {
+		case store.TemplateBuilt:
+			p.AllowedSources = append(p.AllowedSources, store.TemplateBuilt)
+		case store.TemplateConverted:
+			p.AllowedSources = append(p.AllowedSources, store.TemplateConverted)
 		default:
-			return Policy{}, fmt.Errorf("unknown image source %q: want %s or %s",
-				s, store.ImageBuilt, store.ImageImported)
+			return Policy{}, fmt.Errorf("unknown template source %q: want %s or %s",
+				s, store.TemplateBuilt, store.TemplateConverted)
 		}
 	}
 	for _, host := range splitList(registries) {

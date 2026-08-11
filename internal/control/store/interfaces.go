@@ -63,12 +63,15 @@ type Snapshots interface {
 	SnapshotChain(id string) ([]*Snapshot, error)
 }
 
-// Images is the image catalogue and the prewarm jobs that populate it.
-type Images interface {
-	GetImage(ref string) (*Image, error)
-	PutImage(img *Image) error
-	ListImages(owner string) ([]*Image, error)
-	DeleteImage(ref string) error
+// Templates is the launch-template catalogue and the prewarm jobs that populate it.
+// A template is addressed by id (primary) or by name; a converted OCI image's name
+// is its OCI reference.
+type Templates interface {
+	GetTemplate(id string) (*Template, error)
+	GetTemplateByName(name string) (*Template, error)
+	PutTemplate(t *Template) error
+	ListTemplates(owner string) ([]*Template, error)
+	DeleteTemplate(id string) error
 
 	GetPrewarmJob(id string) (*PrewarmJob, error)
 	PutPrewarmJob(j *PrewarmJob) error
@@ -158,7 +161,7 @@ type Builds interface {
 var (
 	_ Sandboxes           = (*Store)(nil)
 	_ Snapshots           = (*Store)(nil)
-	_ Images              = (*Store)(nil)
+	_ Templates           = (*Store)(nil)
 	_ Placement           = (*Store)(nil)
 	_ Nodes               = (*Store)(nil)
 	_ RegistryCredentials = (*Store)(nil)

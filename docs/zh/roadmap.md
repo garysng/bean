@@ -8,7 +8,7 @@
 权威记录是 `docs/status.md`。要点:
 
 - ✅ **已超出 P0/P1**:fc 直启(952ms)、多节点调度与承诺量落库、S3 快照 blob、
-  OCI 拉取转换、commit、BuildKit 构建、OTel trace 全链路
+  OCI 拉取转换、BuildKit 构建、OTel trace 全链路
 - ✅ **已提前做完 P3/P4 的快照部分**:pause/resume、full / `--no-memory` /
   `--base` 增量三种快照、UFFD 按需供页、CPU template 与调度器 CPU 过滤
 - ⚠️ **P0 里说的 overlaybd ublk 直驱做了一半**:默认仍是 dm-snapshot(每 sandbox 44 KiB),

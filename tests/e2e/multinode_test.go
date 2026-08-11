@@ -118,7 +118,7 @@ func TestE2EMultiNode(t *testing.T) {
 	deadline := time.Now().Add(30 * time.Second)
 	for len(placed) < 4 {
 		code, out := mnReq(t, apiURL, "POST", "/v1/sandboxes", map[string]any{
-			"image":     "img:1",
+			"imageRef":  "img:1",
 			"resources": map[string]any{"cpu": 1, "memoryMiB": 512},
 			"labels":    map[string]string{"eval-run": "mn"},
 		})
@@ -158,7 +158,7 @@ func TestE2EMultiNode(t *testing.T) {
 
 	// Capacity is exhausted (2 nodes x 2 CPU, 1 CPU each): expect 503.
 	code, out := mnReq(t, apiURL, "POST", "/v1/sandboxes", map[string]any{
-		"image": "img:1", "resources": map[string]any{"cpu": 1, "memoryMiB": 512},
+		"imageRef": "img:1", "resources": map[string]any{"cpu": 1, "memoryMiB": 512},
 	})
 	if code != http.StatusServiceUnavailable {
 		t.Errorf("status = %d, want 503 once both nodes are committed: %v", code, out)
@@ -174,7 +174,7 @@ func TestE2EMultiNode(t *testing.T) {
 		t.Fatalf("delete status = %d", code)
 	}
 	if code, out := mnReq(t, apiURL, "POST", "/v1/sandboxes", map[string]any{
-		"image": "img:1", "resources": map[string]any{"cpu": 1, "memoryMiB": 512},
+		"imageRef": "img:1", "resources": map[string]any{"cpu": 1, "memoryMiB": 512},
 	}); code != http.StatusCreated {
 		t.Errorf("create after delete: %d %v", code, out)
 	}

@@ -6,6 +6,8 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/garysng/bean/internal/control/store"
 )
 
 // TestSnapshotRestoreEndToEnd is the flow the design exists for: set an
@@ -15,7 +17,7 @@ func TestSnapshotRestoreEndToEnd(t *testing.T) {
 	blobs := env.Blobs
 
 	// 1. Create a sandbox and put state in it.
-	_, out := env.do("POST", "/v1/sandboxes", map[string]any{"image": "python:3.12"})
+	_, out := env.do("POST", "/v1/sandboxes", map[string]any{"imageRef": "python:3.12"})
 	srcID := out["sandbox"].(map[string]any)["id"].(string)
 
 	req, _ := http.NewRequest("PUT",
@@ -113,7 +115,7 @@ func TestSnapshotRestoreEndToEnd(t *testing.T) {
 
 func TestSnapshotFanOut(t *testing.T) {
 	env := startEnv(t, envOpts{})
-	_, out := env.do("POST", "/v1/sandboxes", map[string]any{"image": "base:1"})
+	_, out := env.do("POST", "/v1/sandboxes", map[string]any{"imageRef": "base:1"})
 	srcID := out["sandbox"].(map[string]any)["id"].(string)
 	_, out = env.do("POST", "/v1/sandboxes/"+srcID+"/snapshot", nil)
 	snapID := out["snapshotId"].(string)
@@ -138,7 +140,7 @@ func TestSnapshotFanOut(t *testing.T) {
 
 func TestSnapshotListAndGet(t *testing.T) {
 	env := startEnv(t, envOpts{})
-	_, out := env.do("POST", "/v1/sandboxes", map[string]any{"image": "base:1"})
+	_, out := env.do("POST", "/v1/sandboxes", map[string]any{"imageRef": "base:1"})
 	srcID := out["sandbox"].(map[string]any)["id"].(string)
 	_, out = env.do("POST", "/v1/sandboxes/"+srcID+"/snapshot", map[string]any{
 		"name": "s1", "labels": map[string]string{"kind": "test"},
@@ -173,7 +175,7 @@ func TestSnapshotListAndGet(t *testing.T) {
 
 func TestSnapshotKeepRunningFalseStopsSource(t *testing.T) {
 	env := startEnv(t, envOpts{})
-	_, out := env.do("POST", "/v1/sandboxes", map[string]any{"image": "base:1"})
+	_, out := env.do("POST", "/v1/sandboxes", map[string]any{"imageRef": "base:1"})
 	srcID := out["sandbox"].(map[string]any)["id"].(string)
 
 	code, out := env.do("POST", "/v1/sandboxes/"+srcID+"/snapshot", map[string]any{
@@ -202,7 +204,7 @@ func TestRestoreFromMissingSnapshot(t *testing.T) {
 func TestCreateRejectsBothImageAndSnapshot(t *testing.T) {
 	env := startEnv(t, envOpts{})
 	code, out := env.do("POST", "/v1/sandboxes", map[string]any{
-		"image": "x:1", "snapshot": "snap_1",
+		"imageRef": "x:1", "snapshot": "snap_1",
 	})
 	if code.StatusCode != http.StatusBadRequest {
 		t.Errorf("status = %d, want 400: %v", code.StatusCode, out)
@@ -216,7 +218,7 @@ func TestCreateRejectsBothImageAndSnapshot(t *testing.T) {
 func TestDeleteSnapshotRemovesBlob(t *testing.T) {
 	env := startEnv(t, envOpts{})
 	blobs := env.Blobs
-	_, out := env.do("POST", "/v1/sandboxes", map[string]any{"image": "base:1"})
+	_, out := env.do("POST", "/v1/sandboxes", map[string]any{"imageRef": "base:1"})
 	srcID := out["sandbox"].(map[string]any)["id"].(string)
 	_, out = env.do("POST", "/v1/sandboxes/"+srcID+"/snapshot", nil)
 	snapID := out["snapshotId"].(string)
@@ -242,11 +244,42 @@ func TestDeleteSnapshotRemovesBlob(t *testing.T) {
 func TestSnapshotDisabledWithoutStorage(t *testing.T) {
 	// Without configured storage the endpoints refuse rather than pretending.
 	env := startEnv(t, envOpts{WithoutSnapshots: true})
-	_, out := env.do("POST", "/v1/sandboxes", map[string]any{"image": "x"})
+	_, out := env.do("POST", "/v1/sandboxes", map[string]any{"imageRef": "x"})
 	id := out["sandbox"].(map[string]any)["id"].(string)
 	code, _ := env.do("POST", "/v1/sandboxes/"+id+"/snapshot", nil)
 	if code.StatusCode != http.StatusNotImplemented {
 		t.Errorf("status = %d, want 501", code.StatusCode)
+	}
+}
+
+// TestCreateFromSnapshotDisabledStorageIs501 covers createFromSnapshot's guard
+// when snapshot storage is not configured: a create naming a snapshot refuses
+// rather than pretending.
+func TestCreateFromSnapshotDisabledStorageIs501(t *testing.T) {
+	env := startEnv(t, envOpts{WithoutSnapshots: true})
+	resp, _ := env.do("POST", "/v1/sandboxes", map[string]any{"snapshot": "snap_1"})
+	if resp.StatusCode != http.StatusNotImplemented {
+		t.Errorf("create-from-snapshot with no storage = %d, want 501", resp.StatusCode)
+	}
+}
+
+// TestCreateFromNotReadySnapshotIsConflict drives the SNAPSHOT_NOT_READY branch:
+// a snapshot that exists but is still being created cannot be booted from.
+func TestCreateFromNotReadySnapshotIsConflict(t *testing.T) {
+	env := startEnv(t, envOpts{})
+	snap := &store.Snapshot{
+		ID: store.NewID(store.PrefixSnapshot), SandboxID: "sbx-x",
+		State: store.SnapshotCreating,
+	}
+	if err := env.Store.PutSnapshot(snap); err != nil {
+		t.Fatal(err)
+	}
+	resp, out := env.do("POST", "/v1/sandboxes", map[string]any{"snapshot": snap.ID})
+	if resp.StatusCode != http.StatusConflict {
+		t.Fatalf("create from a not-ready snapshot = %d, want 409: %v", resp.StatusCode, out)
+	}
+	if c := out["error"].(map[string]any)["code"]; c != "SNAPSHOT_NOT_READY" {
+		t.Errorf("code = %v, want SNAPSHOT_NOT_READY", c)
 	}
 }
 
@@ -265,7 +298,7 @@ func TestSnapshotDisabledWithoutStorage(t *testing.T) {
 // it fails on the regression and not on a slow machine.
 func TestSnapshotOfPausedSandboxDoesNotWaitForItsAgent(t *testing.T) {
 	env := startEnv(t, envOpts{})
-	id := env.sandboxID(map[string]any{"image": "base:1"})
+	id := env.sandboxID(map[string]any{"imageRef": "base:1"})
 	if resp, _ := env.do("POST", "/v1/sandboxes/"+id+"/pause", nil); resp.StatusCode != http.StatusAccepted {
 		t.Fatalf("pause: %d", resp.StatusCode)
 	}

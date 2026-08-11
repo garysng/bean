@@ -13,3 +13,6 @@ import (
 func listenVsock(port uint32) (net.Listener, error) {
 	return nil, fmt.Errorf("beand: vsock requires linux (asked for port %d)", port)
 }
+
+// isVsockListener is always false off Linux, where there is no vsock listener.
+func isVsockListener(net.Listener) bool { return false }

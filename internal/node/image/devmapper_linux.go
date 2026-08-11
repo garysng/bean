@@ -128,16 +128,6 @@ func (p *DevMapperProvider) Prepare(ctx context.Context, sandboxID, imageRef str
 		return nil, err
 	}
 
-	// A restore's exceptions have to be in the store before the device reads its
-	// exception table, which happens once at activation. Writing them afterwards
-	// leaves the table describing an empty store while the file holds data, and
-	// the device serves the base image as though nothing had been restored.
-	if opts.SeedWritable != nil {
-		if err := opts.SeedWritable(cowPath); err != nil {
-			return nil, fmt.Errorf("image: seed writable layer: %w", err)
-		}
-	}
-
 	cowLoop, err := attachLoop(cowPath, false)
 	if err != nil {
 		return nil, err

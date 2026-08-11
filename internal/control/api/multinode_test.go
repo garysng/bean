@@ -16,7 +16,7 @@ func TestMultiNodePlacementSpreadsAndExecs(t *testing.T) {
 	var sandboxIDs []string
 	for i := 0; i < 6; i++ {
 		resp, out := env.do("POST", "/v1/sandboxes", map[string]any{
-			"image":     "img:1",
+			"imageRef":  "img:1",
 			"resources": map[string]any{"cpu": 1, "memoryMiB": 512},
 			"labels":    map[string]string{"eval-run": "r1"},
 		})
@@ -64,7 +64,7 @@ func TestMultiNodeDeleteReleasesCapacity(t *testing.T) {
 	var ids []string
 	for i := 0; i < 4; i++ {
 		resp, out := env.do("POST", "/v1/sandboxes", map[string]any{
-			"image": "img:1", "resources": map[string]any{"cpu": 1, "memoryMiB": 512},
+			"imageRef": "img:1", "resources": map[string]any{"cpu": 1, "memoryMiB": 512},
 		})
 		if resp.StatusCode != http.StatusCreated {
 			t.Fatalf("create %d: %d %v", i, resp.StatusCode, out)
@@ -74,7 +74,7 @@ func TestMultiNodeDeleteReleasesCapacity(t *testing.T) {
 
 	// Node is committed to capacity: the next create must be rejected.
 	resp, out := env.do("POST", "/v1/sandboxes", map[string]any{
-		"image": "img:1", "resources": map[string]any{"cpu": 1, "memoryMiB": 512},
+		"imageRef": "img:1", "resources": map[string]any{"cpu": 1, "memoryMiB": 512},
 	})
 	if resp.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want 503 NO_CAPACITY: %v", resp.StatusCode, out)
@@ -95,7 +95,7 @@ func TestMultiNodeDeleteReleasesCapacity(t *testing.T) {
 		t.Errorf("committed after delete = %.1f, want 3", got)
 	}
 	if resp, out := env.do("POST", "/v1/sandboxes", map[string]any{
-		"image": "img:1", "resources": map[string]any{"cpu": 1, "memoryMiB": 512},
+		"imageRef": "img:1", "resources": map[string]any{"cpu": 1, "memoryMiB": 512},
 	}); resp.StatusCode != http.StatusCreated {
 		t.Errorf("create after delete: %d %v", resp.StatusCode, out)
 	}
@@ -109,7 +109,7 @@ func TestUnreachableNodeSurfacesAndReleasesCapacity(t *testing.T) {
 	delete(env.resolver.addrs, env.NodeIDs[0])
 	env.resolver.mu.Unlock()
 
-	resp, out := env.do("POST", "/v1/sandboxes", map[string]any{"image": "img:1"})
+	resp, out := env.do("POST", "/v1/sandboxes", map[string]any{"imageRef": "img:1"})
 	if resp.StatusCode != http.StatusServiceUnavailable {
 		t.Fatalf("status = %d, want 503: %v", resp.StatusCode, out)
 	}

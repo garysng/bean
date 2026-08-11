@@ -1,11 +1,14 @@
 package image
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"strings"
+
+	"github.com/garysng/bean/internal/control/s3"
 )
 
 // Publishing layer blobs alone does not make the store a source an image can be resolved
@@ -86,15 +89,14 @@ type StoredLayer struct {
 // cannot keep. Keeping them together means one thing to configure and one thing to
 // garbage-collect.
 type s3ImageIndex struct {
-	client blobPutter
-	bucket string
+	store s3.ObjectStore
 }
 
-func NewS3ImageIndex(client blobPutter, bucket string) (ImageIndex, error) {
-	if client == nil || bucket == "" {
-		return nil, fmt.Errorf("image: image index needs a client and a bucket")
+func NewS3ImageIndex(store s3.ObjectStore) (ImageIndex, error) {
+	if store == nil {
+		return nil, fmt.Errorf("image: image index needs an object store")
 	}
-	return &s3ImageIndex{client: client, bucket: bucket}, nil
+	return &s3ImageIndex{store: store}, nil
 }
 
 func (s *s3ImageIndex) manifestKey(digest string) string { return "manifests/" + digest }
@@ -116,17 +118,14 @@ func (s *s3ImageIndex) PutManifest(ctx context.Context, digest string, m *Stored
 	if err != nil {
 		return err
 	}
-	if err := s.client.EnsureBucket(ctx, s.bucket); err != nil {
-		return fmt.Errorf("image: ensure index bucket: %w", err)
-	}
-	if err := s.client.PutObject(ctx, s.bucket, s.manifestKey(digest), body); err != nil {
+	if err := s3.Put(ctx, s.store, s.manifestKey(digest), bytes.NewReader(body), int64(len(body))); err != nil {
 		return fmt.Errorf("image: record manifest %s: %w", digest, err)
 	}
 	return nil
 }
 
 func (s *s3ImageIndex) GetManifest(ctx context.Context, digest string) (*StoredManifest, error) {
-	r, err := s.client.GetObject(ctx, s.bucket, s.manifestKey(digest))
+	r, err := s.store.Get(ctx, s.manifestKey(digest))
 	if err != nil {
 		// Absent and unreachable are both reported as "not there". The caller's next
 		// move is the registry either way, and distinguishing them would only offer a
@@ -154,10 +153,7 @@ func (s *s3ImageIndex) PutTag(ctx context.Context, ref Reference, digest string)
 	if ref.Tag == "" || digest == "" {
 		return fmt.Errorf("image: tag pointer needs a tag and a digest")
 	}
-	if err := s.client.EnsureBucket(ctx, s.bucket); err != nil {
-		return fmt.Errorf("image: ensure index bucket: %w", err)
-	}
-	if err := s.client.PutObject(ctx, s.bucket, s.tagKey(ref), []byte(digest)); err != nil {
+	if err := s3.Put(ctx, s.store, s.tagKey(ref), strings.NewReader(digest), int64(len(digest))); err != nil {
 		return fmt.Errorf("image: record tag %s: %w", ref.Tag, err)
 	}
 	return nil
@@ -167,7 +163,7 @@ func (s *s3ImageIndex) GetTag(ctx context.Context, ref Reference) (string, error
 	if ref.Tag == "" {
 		return "", nil
 	}
-	r, err := s.client.GetObject(ctx, s.bucket, s.tagKey(ref))
+	r, err := s.store.Get(ctx, s.tagKey(ref))
 	if err != nil {
 		return "", nil
 	}

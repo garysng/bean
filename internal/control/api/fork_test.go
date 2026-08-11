@@ -69,7 +69,7 @@ func (e *testEnv) forkIDs(id string, body map[string]any) []string {
 
 func TestForkProducesUsableCopyAndLeavesSourceRunning(t *testing.T) {
 	env := startEnv(t, envOpts{})
-	srcID := env.sandboxID(map[string]any{"image": "python:3.12"})
+	srcID := env.sandboxID(map[string]any{"imageRef": "python:3.12"})
 	env.writeFile(srcID, "/work/setup.txt", "environment-is-ready")
 
 	resp, out := env.do("POST", "/v1/sandboxes/"+srcID+"/fork", nil)
@@ -111,7 +111,7 @@ func TestForkProducesUsableCopyAndLeavesSourceRunning(t *testing.T) {
 // one child's writes are invisible to its sibling and to the source.
 func TestForkTwiceYieldsIndependentChildren(t *testing.T) {
 	env := startEnv(t, envOpts{})
-	srcID := env.sandboxID(map[string]any{"image": "base:1"})
+	srcID := env.sandboxID(map[string]any{"imageRef": "base:1"})
 	env.writeFile(srcID, "/work/marker.txt", "original")
 
 	// Two separate fork calls rather than one call for two, so the shared state
@@ -154,7 +154,7 @@ func TestForkTwiceYieldsIndependentChildren(t *testing.T) {
 
 func TestForkCountProducesThatManyChildren(t *testing.T) {
 	env := startEnv(t, envOpts{})
-	srcID := env.sandboxID(map[string]any{"image": "base:1"})
+	srcID := env.sandboxID(map[string]any{"imageRef": "base:1"})
 	env.writeFile(srcID, "/work/shared.txt", "prepared-once")
 
 	ids := env.forkIDs(srcID, map[string]any{"count": 4})
@@ -184,7 +184,7 @@ func TestForkCountProducesThatManyChildren(t *testing.T) {
 // snapshot records to reap.
 func TestForkLeavesNoSnapshotBehind(t *testing.T) {
 	env := startEnv(t, envOpts{})
-	srcID := env.sandboxID(map[string]any{"image": "base:1"})
+	srcID := env.sandboxID(map[string]any{"imageRef": "base:1"})
 
 	for i := 0; i < 3; i++ {
 		env.forkIDs(srcID, nil)
@@ -208,7 +208,7 @@ func TestForkLeavesNoSnapshotBehind(t *testing.T) {
 // cleanup is targeted: a snapshot the caller asked for survives a later fork.
 func TestForkDoesNotDisturbExplicitSnapshots(t *testing.T) {
 	env := startEnv(t, envOpts{})
-	srcID := env.sandboxID(map[string]any{"image": "base:1"})
+	srcID := env.sandboxID(map[string]any{"imageRef": "base:1"})
 
 	_, out := env.do("POST", "/v1/sandboxes/"+srcID+"/snapshot",
 		map[string]any{"name": "keep-me"})
@@ -224,7 +224,7 @@ func TestForkDoesNotDisturbExplicitSnapshots(t *testing.T) {
 
 func TestForkRejectsStoppedSource(t *testing.T) {
 	env := startEnv(t, envOpts{})
-	srcID := env.sandboxID(map[string]any{"image": "base:1"})
+	srcID := env.sandboxID(map[string]any{"imageRef": "base:1"})
 	if resp, _ := env.do("DELETE", "/v1/sandboxes/"+srcID, nil); resp.StatusCode != http.StatusAccepted {
 		t.Fatalf("kill source: %d", resp.StatusCode)
 	}
@@ -242,7 +242,7 @@ func TestForkOfPausedSourceIsAllowed(t *testing.T) {
 	// A paused guest's memory is intact, which is the whole input to a fork, so
 	// pausing first is a legitimate way to branch from a quiescent instant.
 	env := startEnv(t, envOpts{})
-	srcID := env.sandboxID(map[string]any{"image": "base:1"})
+	srcID := env.sandboxID(map[string]any{"imageRef": "base:1"})
 	env.writeFile(srcID, "/work/f.txt", "paused-state")
 	if resp, _ := env.do("POST", "/v1/sandboxes/"+srcID+"/pause", nil); resp.StatusCode != http.StatusAccepted {
 		t.Fatalf("pause: %d", resp.StatusCode)
@@ -260,7 +260,7 @@ func TestForkOfPausedSourceIsAllowed(t *testing.T) {
 
 func TestForkRejectsBadCount(t *testing.T) {
 	env := startEnv(t, envOpts{})
-	srcID := env.sandboxID(map[string]any{"image": "base:1"})
+	srcID := env.sandboxID(map[string]any{"imageRef": "base:1"})
 
 	for _, count := range []int{-1, maxForkCount + 1} {
 		resp, out := env.do("POST", "/v1/sandboxes/"+srcID+"/fork",
@@ -286,7 +286,7 @@ func TestForkDisabledWithoutSnapshotStorage(t *testing.T) {
 	// Forking needs somewhere to put the intermediate checkpoint, so without
 	// storage it refuses rather than pretending.
 	env := startEnv(t, envOpts{WithoutSnapshots: true})
-	srcID := env.sandboxID(map[string]any{"image": "base:1"})
+	srcID := env.sandboxID(map[string]any{"imageRef": "base:1"})
 	resp, _ := env.do("POST", "/v1/sandboxes/"+srcID+"/fork", nil)
 	if resp.StatusCode != http.StatusNotImplemented {
 		t.Errorf("status = %d, want 501", resp.StatusCode)
@@ -296,7 +296,7 @@ func TestForkDisabledWithoutSnapshotStorage(t *testing.T) {
 func TestForkChildInheritsResourcesAndLabels(t *testing.T) {
 	env := startEnv(t, envOpts{})
 	srcID := env.sandboxID(map[string]any{
-		"image":     "base:1",
+		"imageRef":  "base:1",
 		"resources": map[string]any{"cpu": 2, "memoryMiB": 1024},
 		"labels":    map[string]string{"suite": "fork", "eval-run": "run-7"},
 	})
@@ -332,7 +332,7 @@ func TestForkPartialFailureReportsWhichChildrenFailed(t *testing.T) {
 	// Capacity for the source plus two children and no more, so a fork of four
 	// partially succeeds.
 	env := startEnv(t, envOpts{CPUPerNode: 3, MemoryPerNode: 3 * 512})
-	srcID := env.sandboxID(map[string]any{"image": "base:1"})
+	srcID := env.sandboxID(map[string]any{"imageRef": "base:1"})
 
 	resp, out := env.do("POST", "/v1/sandboxes/"+srcID+"/fork",
 		map[string]any{"count": 4})
@@ -377,10 +377,29 @@ func TestForkPartialFailureReportsWhichChildrenFailed(t *testing.T) {
 
 // TestForkFailsWhenNoChildCanStart checks the all-failed case reports the
 // children's own reason rather than burying it under a generic error.
+// TestForkFailureStatusMapsCodes pins the code->HTTP-status mapping the fork
+// handler uses to report a child's failure, including the catch-all 500.
+func TestForkFailureStatusMapsCodes(t *testing.T) {
+	cases := map[string]int{
+		"INCOMPATIBLE_CPU":      http.StatusConflict,
+		"NO_CAPACITY":           http.StatusServiceUnavailable,
+		"NODE_UNREACHABLE":      http.StatusServiceUnavailable,
+		"SNAPSHOT_DATA_MISSING": http.StatusNotFound,
+		"SNAPSHOT_BASE_MISSING": http.StatusNotFound,
+		"SOMETHING_ELSE":        http.StatusInternalServerError,
+		"":                      http.StatusInternalServerError,
+	}
+	for code, want := range cases {
+		if got := forkFailureStatus(code); got != want {
+			t.Errorf("forkFailureStatus(%q) = %d, want %d", code, got, want)
+		}
+	}
+}
+
 func TestForkFailsWhenNoChildCanStart(t *testing.T) {
 	// Room for the source only.
 	env := startEnv(t, envOpts{CPUPerNode: 1, MemoryPerNode: 512})
-	srcID := env.sandboxID(map[string]any{"image": "base:1"})
+	srcID := env.sandboxID(map[string]any{"imageRef": "base:1"})
 
 	resp, out := env.do("POST", "/v1/sandboxes/"+srcID+"/fork", nil)
 	if resp.StatusCode != http.StatusServiceUnavailable {

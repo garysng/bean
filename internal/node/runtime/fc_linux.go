@@ -135,9 +135,6 @@ type FCRuntime struct {
 	BaseDir string
 	// Images supplies the rootfs block device.
 	Images image.Provider
-	// Committer seals a sandbox's filesystem into a new base image. Nil
-	// disables commit, which is what a node that only runs sandboxes wants.
-	Committer *image.Committer
 	// Builder builds images from Dockerfiles. Nil disables builds on this node,
 	// which is the right default: building needs BuildKit, and a cluster may
 	// prefer dedicated builder nodes over the dependency everywhere.
@@ -239,13 +236,19 @@ type fcVM struct {
 	id string
 	// imageRef is what this sandbox was started from. Kept because a commit has to
 	// carry the source image's configuration onto its output, and by then the spec
-	// that named the image is gone.
+	// that named the image is gone. Empty for a sandbox created from a template or
+	// restored from a snapshot, whose base is named by baseFSDigest instead.
 	imageRef string
-	dir      string
-	cmd      *exec.Cmd
-	client   *fcClient
-	rootfs   *image.Rootfs
-	paused   bool
+	// baseFSDigest is the filesystem manifest digest a sandbox created from a
+	// template or restored from a snapshot runs from. Empty for a cold OCI start,
+	// which names its base by imageRef. A snapshot seal resolves its shared base
+	// chain from whichever of the two is set.
+	baseFSDigest string
+	dir          string
+	cmd          *exec.Cmd
+	client       *fcClient
+	rootfs       *image.Rootfs
+	paused       bool
 	// uffd serves guest page faults for a VM restored from a snapshot. Nil for a
 	// cold boot, which has no memory image to fault against.
 	uffd *uffdHandler
@@ -374,39 +377,37 @@ func (r *FCRuntime) CachedImages() (map[string]image.CachedImage, error) {
 	return cached, nil
 }
 
-// CommitSandbox seals a sandbox's filesystem into a base image under tag.
-//
-// The sandbox must be paused so the filesystem is not moving underneath the
-// read; the caller owns that, since only it knows whether the sandbox should
-// keep running afterwards.
-func (r *FCRuntime) CommitSandbox(ctx context.Context, id, tag string) error {
-	if r.Committer == nil {
-		return errors.New("fc: commit not configured")
-	}
-	vm, err := r.get(id)
-	if err != nil {
-		return err
-	}
-	_, err = r.Committer.Commit(ctx, vm.rootfs.Device, tag, vm.imageRef)
-	return err
-}
-
 // BuildImage builds a base image from a Dockerfile on this node.
-func (r *FCRuntime) BuildImage(ctx context.Context, req BuildRequest) (string, error) {
+func (r *FCRuntime) BuildImage(ctx context.Context, req BuildRequest) (BuildResult, error) {
 	if r.Builder == nil {
-		return "", errors.New("fc: builds not configured on this node")
+		return BuildResult{}, errors.New("fc: builds not configured on this node")
 	}
-	if _, err := r.Builder.Build(ctx, image.BuildRequest{
+	// The build publishes to the shared store through whatever the rootfs provider is,
+	// when that provider can seal and publish overlaybd layers. The provider already
+	// owns the store and the seal pipeline, so the builder borrows it rather than
+	// carrying its own. A provider that cannot (device-mapper, or overlaybd with no
+	// store) leaves the build node-local, which BuildImage still reports as success.
+	if publisher, ok := r.Images.(image.LayerPublisher); ok {
+		r.Builder.Publisher = publisher
+	}
+	res, err := r.Builder.Build(ctx, image.BuildRequest{
 		Tag:        req.Tag,
 		Dockerfile: req.Dockerfile,
 		ContextTar: req.ContextTar,
 		BuildArgs:  req.BuildArgs,
 		SizeMiB:    req.SizeMiB,
 		Logs:       req.Logs,
-	}); err != nil {
-		return "", err
+	})
+	if err != nil {
+		return BuildResult{}, err
 	}
-	return req.Tag, nil
+	return BuildResult{
+		ImageRef:     req.Tag,
+		OverlaybdRef: res.OverlaybdRef,
+		SizeBytes:    res.SizeBytes,
+		LayerDigests: res.LayerDigests,
+		Config:       res.Config,
+	}, nil
 }
 
 func (r *FCRuntime) Create(ctx context.Context, spec *Spec) (*Handle, error) {
@@ -426,7 +427,11 @@ func (r *FCRuntime) Create(ctx context.Context, spec *Spec) (*Handle, error) {
 // more than one means the leaf is incremental and its memory has to be
 // reassembled from its ancestors before the guest can run.
 func (r *FCRuntime) Fork(ctx context.Context, spec *Spec, layers []SnapshotLayer) (*Handle, error) {
-	if len(layers) == 0 {
+	// A filesystem-only snapshot captured no guest memory, so its restore carries
+	// no layer: the filesystem is resolved from the manifest digest and the guest
+	// cold-boots from it. Only a memory restore needs a layer, and its absence
+	// there is the real error this guards.
+	if len(layers) == 0 && spec.FSManifestDigest == "" {
 		return nil, errors.New("fc: fork needs at least one snapshot layer")
 	}
 	return r.create(ctx, spec, layers)
@@ -478,9 +483,15 @@ func (r *FCRuntime) create(ctx context.Context, spec *Spec, layers []SnapshotLay
 		defer stage.Close()
 	}
 
+	// A restore takes its filesystem from the snapshot's sealed layer chain, named
+	// by the manifest digest and resolved from the shared store as read-only lowers
+	// with a fresh writable on top. A cold start leaves the digest empty and takes
+	// its filesystem from the image. The writable layer is never seeded now: the
+	// snapshot's filesystem is in the lowers, not replayed as extents.
 	rootfs, err := r.Images.Prepare(ctx, spec.SandboxID, spec.Image, image.PrepareOptions{
-		SizeMiB:      spec.DiskMiB,
-		SeedWritable: stage.SeedWritable,
+		SizeMiB:          spec.DiskMiB,
+		FSManifestDigest: spec.FSManifestDigest,
+		Publish:          spec.PublishConversion,
 	})
 	if err != nil {
 		return nil, fmt.Errorf("fc: prepare rootfs: %w", err)
@@ -532,11 +543,12 @@ func (r *FCRuntime) create(ctx context.Context, spec *Spec, layers []SnapshotLay
 	}
 
 	vm := &fcVM{
-		id:       spec.SandboxID,
-		imageRef: spec.Image,
-		dir:      dir,
-		rootfs:   rootfs,
-		done:     make(chan struct{}),
+		id:           spec.SandboxID,
+		imageRef:     spec.Image,
+		baseFSDigest: spec.FSManifestDigest,
+		dir:          dir,
+		rootfs:       rootfs,
+		done:         make(chan struct{}),
 		// Resolved here, where the Spec is in hand. Empty on a node with no
 		// network pool, which keeps that node's launch identical to before.
 		netnsPath: netnsPathFor(spec),
@@ -574,6 +586,7 @@ func (r *FCRuntime) create(ctx context.Context, spec *Spec, layers []SnapshotLay
 		StartedAt:  time.Now(),
 		PID:        vm.cmd.Process.Pid,
 		RuntimeTag: r.Name(),
+		Conversion: rootfs.Conversion,
 	}, nil
 }
 

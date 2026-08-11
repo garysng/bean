@@ -13,7 +13,7 @@ import (
 func indexFor(t *testing.T) (*fakePutter, ImageIndex) {
 	t.Helper()
 	f := newFakePutter()
-	idx, err := NewS3ImageIndex(f, "bean-obd")
+	idx, err := NewS3ImageIndex(f)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -121,21 +121,21 @@ func TestIndexRejectsDamagedObjects(t *testing.T) {
 	f, idx := indexFor(t)
 	ctx := context.Background()
 
-	f.objects["bean-obd/manifests/sha256:bad"] = []byte("{not json")
+	f.objects["manifests/sha256:bad"] = []byte("{not json")
 	if _, err := idx.GetManifest(ctx, "sha256:bad"); err == nil {
 		t.Error("GetManifest accepted unparseable JSON")
 	}
 
 	// A manifest listing no layers assembles nothing, and would otherwise be handed
 	// back as a usable answer.
-	f.objects["bean-obd/manifests/sha256:empty"] = []byte(`{"digest":"sha256:empty","layers":[]}`)
+	f.objects["manifests/sha256:empty"] = []byte(`{"digest":"sha256:empty","layers":[]}`)
 	if _, err := idx.GetManifest(ctx, "sha256:empty"); err == nil {
 		t.Error("GetManifest accepted a manifest with no layers")
 	}
 
 	// A tag pointing at something that is not a digest would be used as a manifest key,
 	// producing a miss that looks like "image not published".
-	f.objects["bean-obd/tags/h/r/latest"] = []byte("not-a-digest")
+	f.objects["tags/h/r/latest"] = []byte("not-a-digest")
 	if _, err := idx.GetTag(ctx, Reference{Host: "h", Repository: "r", Tag: "latest"}); err == nil {
 		t.Error("GetTag accepted a value that is not a digest")
 	}

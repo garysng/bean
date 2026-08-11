@@ -92,7 +92,7 @@ func (s *Store) DropAllForTest() error {
 // nothing pointed at.
 func droppedTables() []string {
 	return []string{
-		"reservations", "nodes", "prewarm_jobs", "images", "snapshots", "events",
+		"reservations", "nodes", "prewarm_jobs", "templates", "snapshots", "events",
 		"sandboxes", "registry_credentials", "builds",
 	}
 }

@@ -117,6 +117,10 @@ class Sandbox:
     state: str
     image: str
     labels: Dict[str, str] = field(default_factory=dict)
+    # domain is the data-plane base the server returns; the SDK builds
+    # "{port}-{id}.{domain}" against it when reaching the agent through the proxy.
+    # Empty means no proxy domain, so operations use the bean-api relay.
+    domain: str = ""
     _client: "BeanClient" = field(default=None, repr=False, compare=False)
 
     def exec(
@@ -128,6 +132,16 @@ class Sandbox:
     ) -> ExecResult:
         if isinstance(cmd, str):
             cmd = ["/bin/sh", "-c", cmd]
+        dp = self._client._dataplane_for(self.id, self.domain)
+        if dp is not None:
+            r = dp.exec(self.id, cmd, cwd=cwd, env=env, timeout_seconds=timeout)
+            return ExecResult(
+                exit_code=r["exitCode"],
+                stdout=r["stdout"].decode(errors="replace"),
+                stderr=r["stderr"].decode(errors="replace"),
+                truncated=r["truncated"],
+                duration_ms=r["durationMs"],
+            )
         body = {"cmd": cmd, "cwd": cwd, "env": env or {}, "timeoutSeconds": timeout}
         data = self._client._request("POST", f"/v1/sandboxes/{self.id}/exec", body)
         return ExecResult(
@@ -141,6 +155,9 @@ class Sandbox:
     def write_file(self, path: str, content, mkdirs: bool = True) -> int:
         if isinstance(content, str):
             content = content.encode()
+        dp = self._client._dataplane_for(self.id, self.domain)
+        if dp is not None:
+            return dp.write_file(self.id, path, content, mkdirs=mkdirs)
         q = urllib.parse.urlencode({"path": path, "mkdirs": "true" if mkdirs else "false"})
         data = self._client._request_raw(
             "PUT", f"/v1/sandboxes/{self.id}/files?{q}", content
@@ -148,6 +165,9 @@ class Sandbox:
         return json.loads(data)["bytesWritten"]
 
     def read_file(self, path: str) -> bytes:
+        dp = self._client._dataplane_for(self.id, self.domain)
+        if dp is not None:
+            return dp.read_file(self.id, path)
         q = urllib.parse.urlencode({"path": path})
         return self._client._request_raw("GET", f"/v1/sandboxes/{self.id}/files?{q}")
 
@@ -199,24 +219,6 @@ class Sandbox:
             self.state = "STOPPED"
         return Snapshot._from_json(data["snapshot"], self._client)
 
-    def commit(self, tag: str) -> str:
-        """Freeze this sandbox's filesystem as a reusable base image.
-
-        Returns the image reference, which any sandbox can then start from.
-
-        This is not a snapshot. A snapshot carries memory and device state and
-        restores only on the runtime tier that produced it, so it recovers this
-        one sandbox. A committed image is just a filesystem, usable as anyone's
-        base — which is what sharing a prepared environment needs.
-
-        The sandbox keeps running. The tag must not already exist: images are
-        immutable, so a new version needs a new tag.
-        """
-        data = self._client._request(
-            "POST", f"/v1/sandboxes/{self.id}/commit", {"tag": tag}
-        )
-        return data["imageRef"]
-
     def events(self) -> List[Dict[str, Any]]:
         return self._client._request("GET", f"/v1/sandboxes/{self.id}/events")["events"]
 
@@ -248,7 +250,7 @@ class _Sandboxes:
 
     def create(
         self,
-        image: str = "",
+        image_ref: str = "",
         cpu: float = 1,
         memory_mib: int = 512,
         disk_mib: int = 20480,
@@ -258,22 +260,29 @@ class _Sandboxes:
         labels: Optional[Dict[str, str]] = None,
         idle_timeout: Optional[str] = None,
         on_idle: str = "pause",
+        template: str = "",
         snapshot: str = "",
     ) -> Sandbox:
-        """Create a sandbox from an image, or restore one from a snapshot.
+        """Create a sandbox from one of three sources.
 
-        Exactly one of image or snapshot must be given.
+        Exactly one of image_ref (an OCI registry reference the node pulls and
+        converts), template (a bean template by id or name), or snapshot (a
+        saved snapshot by id or name) must be given.
         """
-        if bool(image) == bool(snapshot):
-            raise ValueError("provide exactly one of image or snapshot")
+        sources = [bool(image_ref), bool(template), bool(snapshot)]
+        if sum(sources) != 1:
+            raise ValueError(
+                "provide exactly one of image_ref, template or snapshot")
         body: Dict[str, Any] = {
             "resources": {"cpu": cpu, "memoryMiB": memory_mib, "diskMiB": disk_mib},
             "env": env or {},
             "labels": labels or {},
             "autoStartCmd": auto_start_cmd,
         }
-        if image:
-            body["image"] = image
+        if image_ref:
+            body["imageRef"] = image_ref
+        elif template:
+            body["template"] = template
         else:
             body["snapshot"] = snapshot
         if cmd:
@@ -283,14 +292,16 @@ class _Sandboxes:
         data = self._client._request("POST", "/v1/sandboxes", body)["sandbox"]
         return Sandbox(
             id=data["id"], state=data["state"], image=data["image"],
-            labels=data.get("labels") or {}, _client=self._client,
+            labels=data.get("labels") or {}, domain=data.get("domain", ""),
+            _client=self._client,
         )
 
     def get(self, sandbox_id: str) -> Sandbox:
         data = self._client._request("GET", f"/v1/sandboxes/{sandbox_id}")["sandbox"]
         return Sandbox(
             id=data["id"], state=data["state"], image=data["image"],
-            labels=data.get("labels") or {}, _client=self._client,
+            labels=data.get("labels") or {}, domain=data.get("domain", ""),
+            _client=self._client,
         )
 
     def list(self, labels: Optional[Dict[str, str]] = None) -> List[Sandbox]:
@@ -301,7 +312,8 @@ class _Sandboxes:
         data = self._client._request("GET", path)["sandboxes"]
         return [
             Sandbox(id=d["id"], state=d["state"], image=d["image"],
-                    labels=d.get("labels") or {}, _client=self._client)
+                    labels=d.get("labels") or {}, domain=d.get("domain", ""),
+                    _client=self._client)
             for d in data
         ]
 
@@ -326,26 +338,34 @@ class _Snapshots:
         self._client._request("DELETE", f"/v1/snapshots/{snapshot_id}")
 
 
-class _Images:
+class _Templates:
     def __init__(self, client: "BeanClient"):
         self._client = client
 
     def list(self, source: str = "") -> List[Dict[str, Any]]:
-        """List images visible to the caller.
+        """List templates visible to the caller.
 
-        source="built" narrows to images this platform produced, which is the
-        "what did I build" listing; "imported" narrows to refs pulled from
-        outside. The server scopes the result to the caller when the deployment
-        is behind an identity-aware layer.
+        source="built" narrows to templates this platform built from a
+        Dockerfile, which is the "what did I build" listing; "converted"
+        narrows to those produced by converting an OCI image. The server
+        scopes the result to the caller when the deployment is behind an
+        identity-aware layer.
         """
-        path = "/v1/images"
+        path = "/v1/templates"
         if source:
             path += "?" + urllib.parse.urlencode({"source": source})
-        return self._client._request("GET", path)["images"] or []
+        return self._client._request("GET", path)["templates"] or []
 
     def status(self, ref: str) -> Dict[str, Any]:
-        q = urllib.parse.urlencode({"ref": ref})
-        return self._client._request("GET", f"/v1/images/status?{q}")
+        """Look a template up by id (a "tpl_..." string) or by name."""
+        key = "id" if ref.startswith("tpl_") else "name"
+        q = urllib.parse.urlencode({key: ref})
+        return self._client._request("GET", f"/v1/templates/status?{q}")
+
+    def delete(self, ref: str) -> None:
+        key = "id" if ref.startswith("tpl_") else "name"
+        q = urllib.parse.urlencode({key: ref})
+        self._client._request("DELETE", f"/v1/templates?{q}")
 
     def prewarm(
         self,
@@ -354,13 +374,13 @@ class _Images:
         region: str = "",
         priority: str = "",
     ) -> Dict[str, Any]:
-        """Pull images onto nodes ahead of a batch."""
+        """Pull templates onto nodes ahead of a batch."""
         body = {"refs": refs, "targetNodes": target_nodes,
                 "region": region, "priority": priority}
-        return self._client._request("POST", "/v1/images/prewarm", body)
+        return self._client._request("POST", "/v1/templates/prewarm", body)
 
     def prewarm_status(self, job_id: str) -> Dict[str, Any]:
-        return self._client._request("GET", f"/v1/images/prewarm/{job_id}")
+        return self._client._request("GET", f"/v1/templates/prewarm/{job_id}")
 
     def build(
         self,
@@ -370,9 +390,9 @@ class _Images:
         build_args: Optional[Dict[str, str]] = None,
         size_mib: int = 0,
     ) -> Dict[str, Any]:
-        """Build an image from a Dockerfile on the platform.
+        """Build a template from a Dockerfile on the platform.
 
-        Returns immediately with the image reference and the node building it;
+        Returns immediately with the template name and the node building it;
         a build takes minutes, so follow it with status(tag) until the state is
         READY or FAILED.
 
@@ -389,7 +409,7 @@ class _Images:
             body["contextTar"] = base64.b64encode(
                 _pack_context(context_dir)
             ).decode("ascii")
-        return self._client._request("POST", "/v1/images/build", body)
+        return self._client._request("POST", "/v1/templates/build", body)
 
 
 class _Events:
@@ -457,13 +477,19 @@ class BeanClient:
         api_key: Optional[str] = None,
         base_url: Optional[str] = None,
         timeout: float = 900.0,
+        proxy_url: Optional[str] = None,
     ):
         self.api_key = api_key or os.environ.get("BEAN_API_KEY", "")
         self.base_url = (base_url or os.environ.get("BEAN_BASE_URL", "http://127.0.0.1:8080")).rstrip("/")
+        # proxy_url (or BEAN_PROXY_URL) opts into the data plane: exec and file ops
+        # go straight to the agent through bean-proxy (Connect HTTP/JSON, no grpc
+        # dependency) instead of relaying through bean-api. Unset keeps the relay,
+        # so nothing changes for a single-node/dev setup.
+        self.proxy_url = proxy_url if proxy_url is not None else os.environ.get("BEAN_PROXY_URL", "")
         self.timeout = timeout
         self.sandboxes = _Sandboxes(self)
         self.snapshots = _Snapshots(self)
-        self.images = _Images(self)
+        self.templates = _Templates(self)
         self.events = _Events(self)
 
     def _request_raw(self, method: str, path: str, body: Optional[bytes] = None) -> bytes:
@@ -491,6 +517,20 @@ class BeanClient:
         if not data:
             return {}
         return json.loads(data)
+
+    def _dataplane_for(self, sandbox_id: str, domain: Optional[str]):
+        """Build a data-plane client for a sandbox, or None to use the relay.
+
+        Returns None when no proxy is configured. The domain comes from the
+        sandbox record; if the caller does not have it, a GET resolves it.
+        """
+        if not self.proxy_url:
+            return None
+        from ._dataplane import DataPlane
+        if domain is None:
+            rec = self._request("GET", f"/v1/sandboxes/{sandbox_id}")
+            domain = (rec.get("sandbox") or {}).get("domain", "")
+        return DataPlane(self.proxy_url, domain or "", self.timeout)
 
 
 def _pack_context(directory: str) -> bytes:

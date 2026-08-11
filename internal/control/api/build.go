@@ -23,18 +23,18 @@ import (
 // Builds run on a node, where BuildKit and the image cache already live. The
 // control plane picks a node, starts the build in the background and records the
 // outcome, so a caller gets an id immediately and follows progress through the
-// image endpoints — a build takes minutes, which is far longer than an HTTP
+// template endpoints — a build takes minutes, which is far longer than an HTTP
 // request should be held open.
 //
 // Progress and cancellation are two endpoints on top of that shape:
 //
-//   - GET  /v1/images/build/logs?ref=  streams the output
-//   - POST /v1/images/build/cancel?ref=  stops the build
+//   - GET  /v1/templates/build/logs?ref=  streams the output
+//   - POST /v1/templates/build/cancel?ref=  stops the build
 //
-// The build is keyed by the image ref rather than by a separate build id. The
-// ref is already claimed for the duration (immutable tags, one build per tag),
-// so a second identifier would be a second thing to plumb through and to explain
-// without describing anything the ref does not.
+// The build is keyed by the template's name (its tag) rather than by a separate
+// build id. The name is already claimed for the duration (immutable tags, one
+// build per tag), so a second identifier would be a second thing to plumb
+// through and to explain without describing anything the name does not.
 
 type buildRequest struct {
 	Tag        string            `json:"tag"`
@@ -92,29 +92,31 @@ func (s *Server) handleBuild(w http.ResponseWriter, r *http.Request) {
 
 	// The tag is claimed before the build starts, both so a caller can poll and
 	// so two builds cannot race to the same reference.
-	if existing, err := s.store.GetImage(req.Tag); err != nil {
+	if existing, err := s.store.GetTemplateByName(req.Tag); err != nil {
 		writeErr(w, http.StatusInternalServerError, "INTERNAL", err.Error())
 		return
 	} else if existing != nil {
-		writeErr(w, http.StatusConflict, "IMAGE_EXISTS",
-			"image "+req.Tag+" already exists; images are immutable, use a new tag")
+		writeErr(w, http.StatusConflict, "TEMPLATE_EXISTS",
+			"template "+req.Tag+" already exists; templates are immutable, use a new tag")
 		return
 	}
 
 	// The build's caller owns the result. This is the case ownership exists
-	// for: a caller asking "what did I build" is asking about exactly these.
-	img := &store.Image{
-		Ref: req.Tag, Source: store.ImageBuilt, State: store.ImageBuilding,
+	// for: a caller asking "what did I build" is asking about exactly these. A
+	// built template has no OCI origin, so OCISource stays nil.
+	tpl := &store.Template{
+		ID: store.NewID(store.PrefixTemplate), Name: req.Tag,
+		Source: store.TemplateBuilt, State: store.TemplateBuilding,
 		Owner: s.owner(r), CreatedAt: time.Now(),
 	}
-	if err := s.store.PutImage(img); err != nil {
+	if err := s.store.PutTemplate(tpl); err != nil {
 		writeErr(w, http.StatusInternalServerError, "INTERNAL", err.Error())
 		return
 	}
 
 	nodeID, err := s.pickBuilder()
 	if err != nil {
-		s.failImage(req.Tag, err.Error())
+		s.failTemplate(req.Tag, err.Error())
 		writeErr(w, http.StatusServiceUnavailable, "NO_BUILDER", err.Error())
 		return
 	}
@@ -131,9 +133,9 @@ func (s *Server) handleBuild(w http.ResponseWriter, r *http.Request) {
 	go s.runBuild(ctx, cancel, nodeID, req, contextTar, log)
 
 	writeJSON(w, http.StatusAccepted, map[string]string{
-		"imageRef": req.Tag,
+		"template": req.Tag,
 		"nodeId":   nodeID,
-		"state":    string(store.ImageBuilding),
+		"state":    string(store.TemplateBuilding),
 	})
 }
 
@@ -193,7 +195,7 @@ func (s *Server) runBuild(ctx context.Context, cancel context.CancelFunc,
 
 	fail := func(reason string) {
 		log.finish(true, reason)
-		s.failImage(req.Tag, reason)
+		s.failTemplate(req.Tag, reason)
 	}
 
 	client, err := s.router.Client(nodeID)
@@ -215,14 +217,15 @@ func (s *Server) runBuild(ctx context.Context, cancel context.CancelFunc,
 		return
 	}
 
-	if err := drainBuildStream(stream, log); err != nil {
+	result, err := drainBuildStream(stream, log)
+	if err != nil {
 		// A cancelled build is not a failed one, but it is not a usable image
 		// either: the tag has to stop claiming to be on its way, or the ref is
 		// unusable until someone deletes the record by hand.
 		if status.Code(err) == codes.Canceled || ctx.Err() != nil {
 			slog.Info("build cancelled", logging.KeyImage, req.Tag, logging.KeyNode, nodeID)
 			log.finish(true, "build cancelled")
-			s.failImage(req.Tag, "build cancelled")
+			s.failTemplate(req.Tag, "build cancelled")
 			return
 		}
 		slog.Error("build failed", logging.KeyImage, req.Tag, logging.KeyNode, nodeID, logging.KeyError, err)
@@ -230,15 +233,16 @@ func (s *Server) runBuild(ctx context.Context, cancel context.CancelFunc,
 		return
 	}
 
-	// A built image needs no conversion — BuildKit's flat output is already the
-	// format the tier boots — so it goes straight to READY.
+	// A built image needs no conversion — BuildKit's flat output is sealed into an
+	// overlaybd layer and published, so it goes straight to READY with the artifact's
+	// real coordinates.
 	//
-	// READY overstates the reach of the artifact in a multi-node cluster: it
-	// exists only in the building node's ImageDir and is never uploaded, so no
-	// other node can start from it. Ownership is recorded regardless of where
-	// the bytes are, so the upload can land later without revisiting who the
-	// image belongs to.
-	if err := s.images.MarkReady(req.Tag, "", 0); err != nil {
+	// The node reports an empty overlaybd_ref when it has no object store: the build
+	// then exists only in the building node's ImageDir, and READY overstates its reach
+	// in a multi-node cluster. Ownership is recorded regardless of where the bytes are,
+	// so a later prewarm can publish it without revisiting who the image belongs to.
+	if err := s.images.MarkReady(req.Tag, result.GetOverlaybdRef(), result.GetSizeBytes(),
+		result.GetLayerDigests(), "", protoImageConfig(result.GetConfig())); err != nil {
 		slog.Error("cannot mark build ready", logging.KeyImage, req.Tag, logging.KeyError, err)
 		fail(err.Error())
 		return
@@ -252,24 +256,24 @@ func (s *Server) runBuild(ctx context.Context, cancel context.CancelFunc,
 // A missing result frame is an error rather than a success: the node sends it
 // last, so a stream that ends without one means the build did not get to the end
 // and marking the image READY would publish a tag with no image behind it.
-func drainBuildStream(stream nodev1.SandboxService_BuildImageClient, log *buildLog) error {
-	gotResult := false
+func drainBuildStream(stream nodev1.SandboxService_BuildImageClient, log *buildLog) (*nodev1.BuildImageResponse, error) {
+	var result *nodev1.BuildImageResponse
 	for {
 		ev, err := stream.Recv()
 		if err == io.EOF {
-			if !gotResult {
-				return errors.New("node ended the build stream without a result")
+			if result == nil {
+				return nil, errors.New("node ended the build stream without a result")
 			}
-			return nil
+			return result, nil
 		}
 		if err != nil {
-			return err
+			return nil, err
 		}
 		if data := ev.GetLog(); len(data) > 0 {
 			_, _ = log.Write(data)
 		}
-		if ev.GetResult() != nil {
-			gotResult = true
+		if r := ev.GetResult(); r != nil {
+			result = r
 		}
 	}
 }
@@ -378,7 +382,35 @@ func (s *Server) handleBuildCancel(w http.ResponseWriter, r *http.Request) {
 	// it — two writers to that state is how it ends up disagreeing.
 	log.cancel()
 	writeJSON(w, http.StatusAccepted, map[string]string{
-		"imageRef": ref,
+		"template": ref,
 		"state":    "CANCELLING",
 	})
+}
+
+// failTemplate marks a building template failed so a client is not left waiting
+// on something that will never become ready.
+func (s *Server) failTemplate(ref, reason string) {
+	if s.images == nil {
+		return
+	}
+	if err := s.images.MarkFailed(ref, reason); err != nil {
+		slog.Error("cannot mark image failed", logging.KeyImage, ref, logging.KeyError, err)
+	}
+}
+
+// protoImageConfig converts the node's reported image config into the control-plane
+// record's form, or nil when the artifact declared none. The control plane keeps its
+// own Config type rather than importing the node package, so a build's or conversion's
+// recovered ENV/ENTRYPOINT/CMD/WORKDIR is copied field-for-field onto the template.
+func protoImageConfig(cfg *nodev1.ImageConfig) *store.Config {
+	if cfg == nil {
+		return nil
+	}
+	return &store.Config{
+		Env:        cfg.GetEnv(),
+		Entrypoint: cfg.GetEntrypoint(),
+		Cmd:        cfg.GetCmd(),
+		WorkingDir: cfg.GetWorkingDir(),
+		User:       cfg.GetUser(),
+	}
 }

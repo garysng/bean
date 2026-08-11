@@ -294,7 +294,7 @@ Env 按 key 合并而非整体替换,理由同源:镜像的 `PATH` 和调用方�
 | 来源 | config | 原因 |
 |---|---|---|
 | registry 拉取 | 来自 config blob | 转换时抓取 |
-| `commit` | 从源镜像继承 | commit 改的是文件系统,不是环境的启动方式 |
+| `snapshot` 提升 | 从源镜像继承 | 文件系统快照改的是文件系统,不是环境的启动方式 |
 | `build` | **没有** 📐 | buildctl 被要求导出 `type=tar` 扁平 rootfs,不含镜像元数据;要拿到 Dockerfile 的 `ENV`/`ENTRYPOINT` 得改成从 builder 导出 OCI 镜像 |
 
 没有 config 时读回来是 `nil`,而不是空的 `Config`;`nil` 的含义是「只按请求启动」——
@@ -308,15 +308,15 @@ beand 是 PID 1,降低自己的 uid 就会失去之后 exec 任何东西的能�
 而解析 `nobody` 这类名字还需要 guest 自己的 `/etc/passwd`,那要等 pivot 到镜像 rootfs
 之后才存在。所以这是一个独立改动,不是漏掉的一行。
 
-## 6. commit:反向路径 ✅
+## 6. 封装文件系统:反向路径 ✅
 
-`commit` 把运行中 sandbox 的文件系统封成新的 base 镜像。
+把**文件系统 snapshot** 提升进 image 命名空间,就是把运行中 sandbox 的文件系统封成新的 base 镜像。
 
 当前实现是**从 `/dev/mapper` 上的合成设备读出一个完整 ext4**,
 而不是「seal 一个增量层」。理由是 dm-snapshot 的 CoW 层不是 OCI 层格式,
 没法直接当层用。
 
-代价:commit 产物是全量镜像而非增量。overlaybd 接入后可以改成
+代价:产物是全量镜像而非增量。overlaybd 接入后可以改成
 `overlaybd-commit` seal LSMT 可写层 —— 那才是真正的零转换(image-build §2)。
 
 ## 7. overlaybd 路径 ✅
@@ -330,7 +330,7 @@ beand 是 PID 1,降低自己的 uid 就会失去之后 exec 任何东西的能�
 | 每 sandbox 成本 | 44 KiB(已实测) | 相当,都只存改动 |
 | 层共享 | **没有** —— 每个镜像一个独立 ext4 | 按 digest 共享,每层只存一份 |
 | 转换 CPU | 每个镜像都付一次,共享层也重复付 | 每个不同的层只付一次 |
-| commit | 读出全量 ext4 | 原地 seal 可写层 |
+| 封装文件系统 | 读出全量 ext4 | 原地 seal 可写层 |
 
 真正让这件事值得做的收益,不是原先写在这里的那个。旧版说价值在首次使用的等待时间、
 而 prewarm 能遮掉它 —— 这话没错,但漏了 prewarm **遮不掉**的两项:共享的层只存一份
@@ -715,7 +715,7 @@ AMD EPYC 7542)上全部通过:节点选中 overlaybd 而非降级、`bean run --
 
 **尚未验证**:对真 registry 的 lazy pull(`--fc-overlaybd-lazy-pull` 已实现但没测过 ——
 实测的 7ms 挂载和 19.6% 传输量来自 decisions §3.1 的手工验证,不是这份代码)、
-走 `CommitSandbox` 的 commit、以及并发批量创建下的表现。ublk 会比 TCMU 快但需要内核 ≥ 6.0;
+以及并发批量创建下的表现。ublk 会比 TCMU 快但需要内核 ≥ 6.0;
 TCMU 功能上是完整的。
 
 用之前值得知道的一个数:**镜像首次使用比 CLI 默认等待时间更慢**,因为要先转换层

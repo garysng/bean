@@ -202,14 +202,6 @@ func NewFCTier(cfg FCTierConfig) (Runtime, error) {
 		}
 	}
 
-	// Committed images land beside pulled ones, because a committed image is a
-	// base image like any other — that is the point of committing rather than
-	// snapshotting.
-	rt.Committer = &image.Committer{
-		ImageDir: cfg.ImageDir,
-		WorkDir:  filepath.Join(cfg.ImageDir, ".work"),
-	}
-
 	// Builds are enabled only when BuildKit is reachable, so a node that cannot
 	// build says so at startup rather than accepting a build and failing it.
 	if cfg.BuildkitAddr != "" {

@@ -211,17 +211,21 @@ CREATE INDEX IF NOT EXISTS idx_snapshots_sandbox ON snapshots(sandbox_id);
 -- Deleting a snapshot has to find its descendants, since a diff cannot be
 -- restored once its base is gone.
 CREATE INDEX IF NOT EXISTS idx_snapshots_base ON snapshots(base_id);
-CREATE TABLE IF NOT EXISTS images (
-  ref TEXT PRIMARY KEY,
+CREATE TABLE IF NOT EXISTS templates (
+  id TEXT PRIMARY KEY,
+  -- Promoted so a create by name (a converted OCI image's name is its OCI
+  -- reference) resolves without decoding every blob. Not unique: a rebuild may
+  -- reuse a name, and resolution takes the most recent.
+  name TEXT NOT NULL DEFAULT '',
   data TEXT NOT NULL,
   state TEXT NOT NULL,
   updated_at INTEGER NOT NULL,
-  -- Promoted so a caller's own images can be listed without decoding every
+  -- Promoted so a caller's own templates can be listed without decoding every
   -- blob. Empty means unowned, which reads as "visible to everyone": that is
-  -- what an imported public ref is, and what every image from before this
-  -- column became.
+  -- what a converted public OCI ref is.
   owner TEXT NOT NULL DEFAULT ''
 );
+CREATE INDEX IF NOT EXISTS idx_templates_name ON templates(name);
 CREATE TABLE IF NOT EXISTS prewarm_jobs (
   id TEXT PRIMARY KEY,
   data TEXT NOT NULL,
@@ -320,7 +324,7 @@ func (s *Store) addMissingColumns() error {
 		{"nodes", `cpu_template TEXT NOT NULL DEFAULT ''`},
 		{"snapshots", `base_id TEXT NOT NULL DEFAULT ''`},
 		{"nodes", `disk_used_mib INTEGER NOT NULL DEFAULT 0`},
-		{"images", `owner TEXT NOT NULL DEFAULT ''`},
+		{"templates", `owner TEXT NOT NULL DEFAULT ''`},
 	} {
 		stmt := s.d.ddl(s.d.addColumn(c.table, c.def))
 		if _, err := s.exec(stmt); err != nil && !s.d.isDuplicateColumn(err) {
@@ -330,8 +334,8 @@ func (s *Store) addMissingColumns() error {
 	// Indexes on migrated columns come last: on an old database the column does
 	// not exist until the ALTER above runs, and CREATE INDEX would fail.
 	if _, err := s.exec(
-		`CREATE INDEX IF NOT EXISTS idx_images_owner ON images(owner)`); err != nil {
-		return fmt.Errorf("migrate: index images(owner): %w", err)
+		`CREATE INDEX IF NOT EXISTS idx_templates_owner ON templates(owner)`); err != nil {
+		return fmt.Errorf("migrate: index templates(owner): %w", err)
 	}
 	return nil
 }
@@ -704,51 +708,66 @@ WHERE id = ?
 	return fmt.Errorf("%w: snapshot %s changed while being deleted", ErrInUse, id)
 }
 
-// ---- images ----
+// ---- templates ----
 
-func (s *Store) PutImage(img *Image) error {
-	img.UpdatedAt = time.Now()
-	blob, err := json.Marshal(img)
+func (s *Store) PutTemplate(t *Template) error {
+	t.UpdatedAt = time.Now()
+	blob, err := json.Marshal(t)
 	if err != nil {
 		return err
 	}
 	_, err = s.exec(
-		`INSERT INTO images(ref, data, state, updated_at, owner) VALUES(?,?,?,?,?)
-		 ON CONFLICT(ref) DO UPDATE SET data=excluded.data, state=excluded.state,
-		   updated_at=excluded.updated_at, owner=excluded.owner`,
-		img.Ref, string(blob), string(img.State), img.UpdatedAt.Unix(), img.Owner)
+		`INSERT INTO templates(id, name, data, state, updated_at, owner) VALUES(?,?,?,?,?,?)
+		 ON CONFLICT(id) DO UPDATE SET name=excluded.name, data=excluded.data,
+		   state=excluded.state, updated_at=excluded.updated_at, owner=excluded.owner`,
+		t.ID, t.Name, string(blob), string(t.State), t.UpdatedAt.UnixNano(), t.Owner)
 	return err
 }
 
-// GetImage returns nil (no error) when the image is not registered.
-func (s *Store) GetImage(ref string) (*Image, error) {
+// GetTemplate returns nil (no error) when no template has that id.
+func (s *Store) GetTemplate(id string) (*Template, error) {
+	return s.scanTemplate(s.queryRow(`SELECT data FROM templates WHERE id=?`, id))
+}
+
+// GetTemplateByName resolves a template by its name, returning the most
+// recently updated when a name was reused (a rebuild or a reconversion), and
+// nil (no error) when no template has that name. Name is how a create request
+// or the CLI addresses a template that has no id to hand -- symmetric with a
+// snapshot's by-name lookup.
+func (s *Store) GetTemplateByName(name string) (*Template, error) {
+	return s.scanTemplate(s.queryRow(
+		`SELECT data FROM templates WHERE name=? ORDER BY updated_at DESC LIMIT 1`, name))
+}
+
+// scanTemplate decodes a single template row, mapping no-rows to (nil, nil).
+func (s *Store) scanTemplate(row interface{ Scan(...any) error }) (*Template, error) {
 	var blob string
-	err := s.queryRow(`SELECT data FROM images WHERE ref=?`, ref).Scan(&blob)
+	err := row.Scan(&blob)
 	if err == sql.ErrNoRows {
 		return nil, nil
 	}
 	if err != nil {
 		return nil, err
 	}
-	var img Image
-	if err := json.Unmarshal([]byte(blob), &img); err != nil {
+	var t Template
+	if err := json.Unmarshal([]byte(blob), &t); err != nil {
 		return nil, err
 	}
-	return &img, nil
+	return &t, nil
 }
 
-// ListImages returns images most recently updated first.
+// ListTemplates returns templates most recently updated first.
 //
 // An empty owner lists everything, which is the operator's view and the
 // behaviour of every deployment that has no identity source. A non-empty owner
-// lists that owner's images together with the unowned ones, because unowned
+// lists that owner's templates together with the unowned ones, because unowned
 // means visible to everyone: excluding them would make an upgraded deployment
-// look like it had lost the base images it is still perfectly able to run.
-func (s *Store) ListImages(owner string) ([]*Image, error) {
-	query := `SELECT data FROM images ORDER BY updated_at DESC`
+// look like it had lost the base templates it is still perfectly able to run.
+func (s *Store) ListTemplates(owner string) ([]*Template, error) {
+	query := `SELECT data FROM templates ORDER BY updated_at DESC`
 	args := []any{}
 	if owner != "" {
-		query = `SELECT data FROM images WHERE owner=? OR owner=''
+		query = `SELECT data FROM templates WHERE owner=? OR owner=''
 		         ORDER BY updated_at DESC`
 		args = append(args, owner)
 	}
@@ -757,23 +776,23 @@ func (s *Store) ListImages(owner string) ([]*Image, error) {
 		return nil, err
 	}
 	defer rows.Close()
-	var out []*Image
+	var out []*Template
 	for rows.Next() {
 		var blob string
 		if err := rows.Scan(&blob); err != nil {
 			return nil, err
 		}
-		var img Image
-		if err := json.Unmarshal([]byte(blob), &img); err != nil {
+		var t Template
+		if err := json.Unmarshal([]byte(blob), &t); err != nil {
 			return nil, err
 		}
-		out = append(out, &img)
+		out = append(out, &t)
 	}
 	return out, rows.Err()
 }
 
-func (s *Store) DeleteImage(ref string) error {
-	_, err := s.exec(`DELETE FROM images WHERE ref=?`, ref)
+func (s *Store) DeleteTemplate(id string) error {
+	_, err := s.exec(`DELETE FROM templates WHERE id=?`, id)
 	return err
 }
 

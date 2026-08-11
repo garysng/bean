@@ -8,13 +8,16 @@ import (
 	"fmt"
 	"log"
 	"log/slog"
+	"net/http"
 	"os"
 	"strings"
 
-	"google.golang.org/grpc"
+	"connectrpc.com/connect"
+	"golang.org/x/net/http2"
+	"golang.org/x/net/http2/h2c"
 
 	"github.com/garysng/bean/internal/beand"
-	agentv1 "github.com/garysng/bean/internal/gen/bean/agent/v1"
+	"github.com/garysng/bean/internal/gen/bean/agent/v1/agentv1connect"
 	"github.com/garysng/bean/internal/logging"
 )
 
@@ -96,8 +99,13 @@ func main() {
 		log.Fatalf("listen %s: %v", *listenAddr, err)
 	}
 
-	unary := []grpc.UnaryServerInterceptor{beand.UnaryTraceLogging()}
-	stream := []grpc.StreamServerInterceptor{beand.StreamTraceLogging()}
+	// The agent is served over Connect, which speaks the Connect protocol, gRPC
+	// and gRPC-Web from one set of handlers. noded's control path keeps dialling
+	// as a gRPC client and reaches it unchanged; the data-plane client and the SDK
+	// reach the same methods over HTTP/JSON. It is served over h2c (cleartext
+	// HTTP/2) because there is no TLS on any of these transports -- vsock and the
+	// unix socket are host-local, and the tcp listener sits behind the node.
+	interceptors := []connect.Interceptor{beand.ConnectTraceLogging()}
 
 	// Authentication is required by the transport, not by a flag.
 	//
@@ -114,20 +122,29 @@ func main() {
 	// vsock and Unix sockets need none: the first is a host-to-guest address family
 	// no guest process can dial, and the second is a path outside the guest's mount
 	// namespace.
-	if authRequired := strings.HasPrefix(*listenAddr, "tcp:"); authRequired {
-		auth := beand.NewAuthenticator()
-		unary = append(unary, auth.Unary())
-		stream = append(stream, auth.Stream())
+	authRequired := strings.HasPrefix(*listenAddr, "tcp:")
+	if authRequired {
+		interceptors = append(interceptors, beand.NewAuthenticator().Interceptor())
 	}
 
-	srv := grpc.NewServer(
-		grpc.ChainUnaryInterceptor(unary...),
-		grpc.ChainStreamInterceptor(stream...),
+	agent := beand.NewServer(version, *rootDir)
+	path, handler := agentv1connect.NewAgentServiceHandler(
+		beand.NewConnectServer(agent),
+		connect.WithInterceptors(interceptors...),
 	)
-	agentv1.RegisterAgentServiceServer(srv, beand.NewServer(version, *rootDir))
+	mux := http.NewServeMux()
+	mux.Handle(path, handler)
+
+	// TCP carries Connect over HTTP/1.1 and gRPC-Web as well as gRPC, so it is
+	// served through h2c, which negotiates HTTP/2 by upgrade or prior knowledge.
+	// vsock and Unix carry only the node's gRPC client (HTTP/2 with prior
+	// knowledge), and beand.Serve hands those connections straight to the HTTP/2
+	// server with a background context -- see the comment on Serve for why h2c's
+	// request-scoped context breaks gRPC over the local transports.
+	h2cHandler := h2c.NewHandler(mux, &http2.Server{})
 	slog.Info("beand listening", "version", version, "addr", *listenAddr, "root", *rootDir,
-		"authenticated", strings.HasPrefix(*listenAddr, "tcp:"))
-	if err := srv.Serve(lis); err != nil {
+		"authenticated", authRequired)
+	if err := beand.Serve(lis, h2cHandler, mux); err != nil {
 		log.Fatal(err)
 	}
 }

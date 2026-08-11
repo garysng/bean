@@ -54,11 +54,13 @@ func diffImage(t *testing.T, dir, name string, totalPages int, dirty map[int]byt
 	return p
 }
 
-// bundleFor packages one layer the way Checkpoint does.
-func bundleFor(t *testing.T, state, mem, rootfs string, diff bool) []byte {
+// bundleFor packages one layer the way Checkpoint does. The filesystem is no
+// longer part of a bundle -- it is resolved from the snapshot's sealed layer
+// chain -- so a bundle carries only machine state and guest memory.
+func bundleFor(t *testing.T, state, mem string, diff bool) []byte {
 	t.Helper()
 	var buf bytes.Buffer
-	if err := writeSnapshotBundle(&buf, state, mem, rootfs, diff); err != nil {
+	if err := writeSnapshotBundle(&buf, state, mem, diff); err != nil {
 		t.Fatalf("write bundle: %v", err)
 	}
 	return buf.Bytes()
@@ -97,7 +99,6 @@ func TestMergeChainLayersDiffsOntoBase(t *testing.T) {
 	// Four pages: the base fills them 1,2,3,4.
 	base := memImage(t, src, "base-mem", 1, 2, 3, 4)
 	baseState := writeFile(t, src, "base-state", "base device state")
-	baseRootfs := writeFile(t, src, "base-rootfs", "base filesystem")
 
 	// The first diff rewrites pages 0 and 2; the second rewrites page 2 again
 	// plus page 3. Page 1 is never touched by either.
@@ -105,17 +106,15 @@ func TestMergeChainLayersDiffsOntoBase(t *testing.T) {
 	d1State := writeFile(t, src, "d1-state", "d1 device state")
 	d2 := diffImage(t, src, "d2-mem", 4, map[int]byte{2: 99, 3: 40})
 	d2State := writeFile(t, src, "d2-state", "d2 device state")
-	leafRootfs := writeFile(t, src, "leaf-rootfs", "leaf filesystem")
 
 	layers := []SnapshotLayer{
-		{ID: "snap_base", Data: bytes.NewReader(bundleFor(t, baseState, base, baseRootfs, false))},
-		{ID: "snap_d1", Data: bytes.NewReader(bundleFor(t, d1State, d1, "", true))},
-		{ID: "snap_d2", Data: bytes.NewReader(bundleFor(t, d2State, d2, leafRootfs, true))},
+		{ID: "snap_base", Data: bytes.NewReader(bundleFor(t, baseState, base, false))},
+		{ID: "snap_d1", Data: bytes.NewReader(bundleFor(t, d1State, d1, true))},
+		{ID: "snap_d2", Data: bytes.NewReader(bundleFor(t, d2State, d2, true))},
 	}
 
 	dir := t.TempDir()
-	rootfsDest := filepath.Join(t.TempDir(), "staged-rootfs")
-	entry, err := mergeChain(layers, dir, rootfsDest)
+	entry, err := mergeChain(layers, dir)
 	if err != nil {
 		t.Fatalf("merge chain: %v", err)
 	}
@@ -145,22 +144,6 @@ func TestMergeChainLayersDiffsOntoBase(t *testing.T) {
 	if string(state) != "d2 device state" {
 		t.Errorf("machine state is %q, want the leaf's", state)
 	}
-
-	// Only the leaf's filesystem is staged; the intermediate layers' would be
-	// overwritten by it anyway. It is staged in extent form and decoded onto the
-	// sandbox's device later, so the check goes through the same path a restore
-	// uses rather than reading the staging file directly.
-	restored := writeFile(t, t.TempDir(), "layer.img", "")
-	if err := (&snapshotStage{rootfs: rootfsDest}).SeedWritable(restored); err != nil {
-		t.Fatalf("seed writable layer: %v", err)
-	}
-	staged, err := os.ReadFile(restored)
-	if err != nil {
-		t.Fatal(err)
-	}
-	if string(staged) != "leaf filesystem" {
-		t.Errorf("staged rootfs is %q, want the leaf's", staged)
-	}
 }
 
 // TestMergeChainOrderMatters is what makes the test above trustworthy. A later
@@ -179,12 +162,12 @@ func TestMergeChainOrderMatters(t *testing.T) {
 	// Reversed: the older diff is applied last, so page 0 ends up holding the
 	// value that was superseded.
 	layers := []SnapshotLayer{
-		{ID: "snap_base", Data: bytes.NewReader(bundleFor(t, baseState, base, "", false))},
-		{ID: "snap_d2", Data: bytes.NewReader(bundleFor(t, d2State, d2, "", true))},
-		{ID: "snap_d1", Data: bytes.NewReader(bundleFor(t, d1State, d1, "", true))},
+		{ID: "snap_base", Data: bytes.NewReader(bundleFor(t, baseState, base, false))},
+		{ID: "snap_d2", Data: bytes.NewReader(bundleFor(t, d2State, d2, true))},
+		{ID: "snap_d1", Data: bytes.NewReader(bundleFor(t, d1State, d1, true))},
 	}
 
-	entry, err := mergeChain(layers, t.TempDir(), "")
+	entry, err := mergeChain(layers, t.TempDir())
 	if err != nil {
 		t.Fatalf("merge chain: %v", err)
 	}
@@ -209,8 +192,8 @@ func TestMergeChainRejectsDiffAsRoot(t *testing.T) {
 	dState := writeFile(t, src, "orphan-state", "orphan state")
 
 	_, err := mergeChain([]SnapshotLayer{
-		{ID: "snap_orphan", Data: bytes.NewReader(bundleFor(t, dState, d, "", true))},
-	}, t.TempDir(), "")
+		{ID: "snap_orphan", Data: bytes.NewReader(bundleFor(t, dState, d, true))},
+	}, t.TempDir())
 	if err == nil {
 		t.Fatal("merged a chain rooted in a diff")
 	}
@@ -223,7 +206,7 @@ func TestMergeChainRejectsDiffAsRoot(t *testing.T) {
 // would otherwise return a zero entry that reads as "boot fresh" — turning a
 // restore into a silent reboot.
 func TestMergeChainRejectsEmpty(t *testing.T) {
-	if _, err := mergeChain(nil, t.TempDir(), ""); err == nil {
+	if _, err := mergeChain(nil, t.TempDir()); err == nil {
 		t.Fatal("merged an empty chain")
 	}
 }
@@ -242,9 +225,9 @@ func TestMergeChainRejectsSizeMismatch(t *testing.T) {
 	smallState := writeFile(t, src, "small-state", "small state")
 
 	_, err := mergeChain([]SnapshotLayer{
-		{ID: "snap_base", Data: bytes.NewReader(bundleFor(t, baseState, base, "", false))},
-		{ID: "snap_small", Data: bytes.NewReader(bundleFor(t, smallState, small, "", true))},
-	}, t.TempDir(), "")
+		{ID: "snap_base", Data: bytes.NewReader(bundleFor(t, baseState, base, false))},
+		{ID: "snap_small", Data: bytes.NewReader(bundleFor(t, smallState, small, true))},
+	}, t.TempDir())
 	if err == nil {
 		t.Fatal("merged a layer sized for a different guest")
 	}

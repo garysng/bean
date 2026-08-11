@@ -25,8 +25,8 @@ func TestSandboxLifecycleViaREST(t *testing.T) {
 
 	// create
 	resp, out := env.do("POST", "/v1/sandboxes", map[string]any{
-		"image":  "python:3.12",
-		"labels": map[string]string{"run": "t1"},
+		"imageRef": "python:3.12",
+		"labels":   map[string]string{"run": "t1"},
 	})
 	if resp.StatusCode != http.StatusCreated {
 		t.Fatalf("create status = %d: %v", resp.StatusCode, out)
@@ -85,7 +85,7 @@ func TestSandboxLifecycleViaREST(t *testing.T) {
 
 func TestFilesViaREST(t *testing.T) {
 	env := startEnv(t, envOpts{})
-	_, out := env.do("POST", "/v1/sandboxes", map[string]any{"image": "x"})
+	_, out := env.do("POST", "/v1/sandboxes", map[string]any{"imageRef": "x"})
 	id := out["sandbox"].(map[string]any)["id"].(string)
 
 	// write
@@ -133,7 +133,7 @@ func TestFilesViaREST(t *testing.T) {
 
 func TestPauseResumeAndWakeViaREST(t *testing.T) {
 	env := startEnv(t, envOpts{})
-	_, out := env.do("POST", "/v1/sandboxes", map[string]any{"image": "x"})
+	_, out := env.do("POST", "/v1/sandboxes", map[string]any{"imageRef": "x"})
 	id := out["sandbox"].(map[string]any)["id"].(string)
 
 	resp, _ := env.do("POST", "/v1/sandboxes/"+id+"/pause", nil)
@@ -165,14 +165,14 @@ func TestCreateValidation(t *testing.T) {
 		t.Errorf("status = %d", resp.StatusCode)
 	}
 	resp, out = env.do("POST", "/v1/sandboxes", map[string]any{
-		"image":     "x",
+		"imageRef":  "x",
 		"lifecycle": map[string]any{"idleTimeout": "nonsense"},
 	})
 	if resp.StatusCode != http.StatusBadRequest {
 		t.Errorf("bad idleTimeout status = %d: %v", resp.StatusCode, out)
 	}
 	resp, out = env.do("POST", "/v1/sandboxes", map[string]any{
-		"image":     "x",
+		"imageRef":  "x",
 		"lifecycle": map[string]any{"idleTimeout": "10s", "onIdle": "explode"},
 	})
 	if resp.StatusCode != http.StatusBadRequest {
@@ -194,7 +194,7 @@ func TestNotFound(t *testing.T) {
 
 func TestExecNonZeroExit(t *testing.T) {
 	env := startEnv(t, envOpts{})
-	_, out := env.do("POST", "/v1/sandboxes", map[string]any{"image": "x"})
+	_, out := env.do("POST", "/v1/sandboxes", map[string]any{"imageRef": "x"})
 	id := out["sandbox"].(map[string]any)["id"].(string)
 	_, out = env.do("POST", fmt.Sprintf("/v1/sandboxes/%s/exec", id), map[string]any{
 		"cmd": []string{"sh", "-c", "exit 42"},
@@ -206,7 +206,7 @@ func TestExecNonZeroExit(t *testing.T) {
 
 func TestResumeAndLogsHandlers(t *testing.T) {
 	env := startEnv(t, envOpts{})
-	_, out := env.do("POST", "/v1/sandboxes", map[string]any{"image": "x"})
+	_, out := env.do("POST", "/v1/sandboxes", map[string]any{"imageRef": "x"})
 	id := out["sandbox"].(map[string]any)["id"].(string)
 
 	// Explicit pause then explicit resume (the transparent-wake path is

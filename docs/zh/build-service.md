@@ -50,7 +50,7 @@ CLI/SDK ──► bean-api (build.go) ──gRPC 流──► noded ──► bu
    传的是空 overlaybd ref、size 0(`build.go:241`)—— 代码注释很直白:READY *夸大了可达范围*,
    该镜像"只存在于构建节点的 ImageDir 里、从不上传,所以别的节点无法从它启动"
    (`build.go:236-240`)。**这是硬阻塞。** 一个集中式 build 服务若产出的镜像没有 sandbox 节点
-   能消费,就是没用的。`commit` 有完全相同的性质(`commit_linux.go:68`)。
+   能消费,就是没用的。
 2. **build 与 sandbox 共享节点,且零资源隔离。** build 和 `create`/`exec` 在同一个 noded 进程、
    同一个 `Manager`(`manager.go`)里,`buildkitd` 抢同一台主机的 CPU、磁盘、IO。没有并发上限、
    没有限流、没有 cgroup —— 唯一护栏是 60 分钟超时(`build.go:143`)。一个重 build 能饿死同机的

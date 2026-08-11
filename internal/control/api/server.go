@@ -83,7 +83,7 @@ type QueueingPlacer interface {
 type Store interface {
 	store.Sandboxes
 	store.Snapshots
-	store.Images
+	store.Templates
 	store.RegistryCredentials
 	store.Builds
 }
@@ -96,11 +96,15 @@ type Server struct {
 	// runtimeTier is the node capability sandboxes require. Runtime tiers
 	// are internal (docs/architecture.md D3): callers never choose one.
 	runtimeTier string
-	apiKey      string
-	images      *image.Service
-	snapshots   snapshot.Blobs
-	secrets     *secret.Box
-	bus         *eventBus
+	// domain is the data-plane base stamped onto every sandbox record so the
+	// client can build "{port}-{id}.{domain}" URLs through bean-proxy. Empty
+	// leaves the record's Domain empty and the client on the relay fallback.
+	domain    string
+	apiKey    string
+	images    *image.Service
+	snapshots snapshot.Blobs
+	secrets   *secret.Box
+	bus       *eventBus
 	// builds holds in-flight and recently finished builds, which is what the
 	// build log and cancel endpoints address. It is per-replica, unlike
 	// everything else here: a build's log is only reachable from the gateway that
@@ -124,6 +128,10 @@ type Options struct {
 	// RuntimeTier is the node capability required for placement; defaults
 	// to "fc" (the main tier) when empty.
 	RuntimeTier string
+	// Domain is the bean-proxy public base stamped onto every sandbox record,
+	// so a client can address a port as "{port}-{id}.{Domain}". Empty means no
+	// data-plane proxy is configured and clients use the bean-api relay path.
+	Domain string
 	// Images enables the image endpoints and image registration on create.
 	Images *image.Service
 	// Secrets encrypts persisted credentials; nil disables the registry
@@ -159,7 +167,7 @@ func New(st Store, router Router, placer Placer, opts Options) *Server {
 		region = "local"
 	}
 	s := &Server{store: st, router: router, placer: placer, region: region,
-		runtimeTier: tier, apiKey: opts.APIKey, images: opts.Images,
+		runtimeTier: tier, domain: opts.Domain, apiKey: opts.APIKey, images: opts.Images,
 		secrets: opts.Secrets, snapshots: opts.Snapshots,
 		bus: newEventBus(), builds: newBuildTracker(),
 		metrics: obs.NewRegistry(), mux: http.NewServeMux(),
@@ -224,23 +232,24 @@ func (s *Server) routes() {
 	// Live subscription (Server-Sent Events): no extra dependency, works
 	// through proxies, and the browser/SDK story is simple.
 	s.mux.HandleFunc("GET /v1/events", s.handleEventStream)
-	s.mux.HandleFunc("GET /v1/images", s.handleListImages)
-	// ref goes in a query param: it contains slashes and colons, which
+	s.mux.HandleFunc("GET /v1/templates", s.handleListTemplates)
+	// id or name goes in a query param: a name contains slashes and colons, which
 	// would otherwise collide with sibling routes like prewarm.
-	s.mux.HandleFunc("GET /v1/images/status", s.handleImageStatus)
-	s.mux.HandleFunc("POST /v1/images/prewarm", s.handlePrewarm)
-	s.mux.HandleFunc("POST /v1/images/build", s.handleBuild)
-	// ref goes in a query param for the same reason as image status: it contains
+	s.mux.HandleFunc("GET /v1/templates/status", s.handleTemplateStatus)
+	// Delete keys on the same query-param id/name as status, for the same reason.
+	s.mux.HandleFunc("DELETE /v1/templates", s.handleDeleteTemplate)
+	s.mux.HandleFunc("POST /v1/templates/prewarm", s.handlePrewarm)
+	s.mux.HandleFunc("POST /v1/templates/build", s.handleBuild)
+	// ref goes in a query param for the same reason as template status: it contains
 	// slashes, which a path segment cannot carry.
-	s.mux.HandleFunc("GET /v1/images/build/logs", s.handleBuildLogs)
-	s.mux.HandleFunc("POST /v1/images/build/cancel", s.handleBuildCancel)
-	s.mux.HandleFunc("GET /v1/images/prewarm/{jobId}", s.handlePrewarmStatus)
+	s.mux.HandleFunc("GET /v1/templates/build/logs", s.handleBuildLogs)
+	s.mux.HandleFunc("POST /v1/templates/build/cancel", s.handleBuildCancel)
+	s.mux.HandleFunc("GET /v1/templates/prewarm/{jobId}", s.handlePrewarmStatus)
 	s.mux.HandleFunc("PUT /v1/registries", s.handlePutRegistry)
 	s.mux.HandleFunc("GET /v1/registries", s.handleListRegistries)
 	s.mux.HandleFunc("DELETE /v1/registries/{host}", s.handleDeleteRegistry)
 	s.mux.HandleFunc("POST /v1/sandboxes/{id}/snapshot", s.handleCreateSnapshot)
 	s.mux.HandleFunc("POST /v1/sandboxes/{id}/fork", s.handleFork)
-	s.mux.HandleFunc("POST /v1/sandboxes/{id}/commit", s.handleCommit)
 	s.mux.HandleFunc("GET /v1/snapshots", s.handleListSnapshots)
 	s.mux.HandleFunc("GET /v1/snapshots/{id}", s.handleGetSnapshot)
 	s.mux.HandleFunc("DELETE /v1/snapshots/{id}", s.handleDeleteSnapshot)
@@ -373,11 +382,17 @@ func grpcToHTTP(w http.ResponseWriter, err error) {
 // ---- sandbox lifecycle ----
 
 type createRequest struct {
-	// Image is the native OCI reference to run. Mutually exclusive with
-	// Snapshot.
-	Image string `json:"image"`
-	// Snapshot restores a previously captured sandbox instead of starting
-	// from an image.
+	// ImageRef is an OCI registry reference to run (e.g. "python:3.12"). The
+	// node pulls and converts it; the conversion produces a template the
+	// platform can later reuse by its OCI content digest without re-converting.
+	ImageRef string `json:"imageRef"`
+	// Template names an already-produced bean template (from a build, or from a
+	// prior OCI conversion) by its id or name.
+	Template string `json:"template"`
+	// Snapshot restores a previously captured sandbox instead of starting from
+	// a template or an image.
+	//
+	// Exactly one of ImageRef, Template or Snapshot must be set.
 	Snapshot  string `json:"snapshot"`
 	Resources *struct {
 		CPU       float64 `json:"cpu"`
@@ -411,47 +426,115 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		writeErr(w, http.StatusBadRequest, "INVALID_ARGUMENT", "invalid JSON: "+err.Error())
 		return
 	}
-	switch {
-	case req.Image == "" && req.Snapshot == "":
-		writeErr(w, http.StatusBadRequest, "INVALID_ARGUMENT", "image or snapshot is required")
+	// Exactly one of the three create sources must be set. They are mutually
+	// exclusive because each resolves the filesystem a different way -- an OCI
+	// pull+convert, a stored template's overlaybd chain, or a snapshot's.
+	sources := 0
+	for _, set := range []bool{req.ImageRef != "", req.Template != "", req.Snapshot != ""} {
+		if set {
+			sources++
+		}
+	}
+	if sources == 0 {
+		writeErr(w, http.StatusBadRequest, "INVALID_ARGUMENT", "imageRef, template or snapshot is required")
 		return
-	case req.Image != "" && req.Snapshot != "":
+	}
+	if sources > 1 {
 		writeErr(w, http.StatusBadRequest, "INVALID_ARGUMENT",
-			"image and snapshot are mutually exclusive")
+			"imageRef, template and snapshot are mutually exclusive")
 		return
 	}
 
-	// Register the image so its metadata (and later, digest and conversion
-	// state) exists for anything the platform has been asked to run. This is
-	// also where an operator's image policy is applied, before any capacity is
-	// reserved: a refused image should cost the cluster nothing.
-	if s.images != nil && req.Image != "" {
-		if _, err := s.images.ResolveFor(req.Image, s.owner(r)); err != nil {
-			// A policy refusal is a statement about what this deployment
-			// permits, so it is 403 with its own code: a caller can tell it
-			// apart from a malformed ref and knows retrying will not help.
-			if errors.Is(err, image.ErrPolicyDenied) {
-				outcome = "image_denied"
-				writeErr(w, http.StatusForbidden, "IMAGE_NOT_PERMITTED", err.Error())
+	// imageOrigin is the OCI reference the node pulls and converts (cold start),
+	// or empty for a template/snapshot create whose filesystem resolves from a
+	// stored overlaybd manifest digest instead. Filled below per source.
+	var imageOrigin string
+	// fsManifestDigest, when set, names an already-converted filesystem as an
+	// overlaybd layer chain in the shared store -- what a stored template (or a
+	// snapshot) resolves from, skipping any pull or conversion.
+	var fsManifestDigest string
+	// publishConversion asks the node to publish what it converts from an OCI
+	// reference and report the coordinates back, so a first-seen ref becomes a
+	// reusable template. Set only on the cold-OCI-miss branch below.
+	var publishConversion bool
+
+	// A create from an OCI reference registers the template so its metadata (and
+	// later, digest and conversion state) exists for anything the platform has
+	// been asked to run. This is also where an operator's policy is applied,
+	// before any capacity is reserved: a refused image should cost nothing.
+	if req.ImageRef != "" {
+		imageOrigin = req.ImageRef
+		if s.images != nil {
+			tpl, err := s.images.ResolveFor(req.ImageRef, s.owner(r))
+			if err != nil {
+				// A policy refusal is a statement about what this deployment
+				// permits, so it is 403 with its own code: a caller can tell it
+				// apart from a malformed ref and knows retrying will not help.
+				if errors.Is(err, image.ErrPolicyDenied) {
+					outcome = "image_denied"
+					writeErr(w, http.StatusForbidden, "IMAGE_NOT_PERMITTED", err.Error())
+					return
+				}
+				outcome = "error"
+				writeErr(w, http.StatusBadRequest, "IMAGE_REF_INVALID", err.Error())
 				return
 			}
-			outcome = "error"
-			writeErr(w, http.StatusBadRequest, "IMAGE_REF_INVALID", err.Error())
+			// A prior conversion of this ref already published a template: reuse
+			// its overlaybd chain and skip the node-side pull+convert. A first-seen
+			// ref has no fs digest yet, so the node converts and (on publish)
+			// records it for next time -- and we ask it to publish, so the next
+			// create of this ref on any node reuses the chain rather than converting
+			// again.
+			if tpl != nil && tpl.FS.Digest != "" {
+				fsManifestDigest = tpl.FS.Digest
+				imageOrigin = ""
+			} else {
+				publishConversion = true
+			}
+		}
+	}
+
+	// A create from a stored template resolves the filesystem from its embedded
+	// FSArtifact: a published template carries an overlaybd manifest digest the
+	// node resolves through the shared store; a node-local build carries none, so
+	// its name (the tag) drives a node-local lookup instead.
+	if req.Template != "" {
+		tpl, err := s.resolveTemplateRef(req.Template)
+		if err != nil {
+			writeErr(w, http.StatusInternalServerError, "INTERNAL", err.Error())
 			return
+		}
+		if tpl == nil {
+			writeErr(w, http.StatusNotFound, "TEMPLATE_NOT_FOUND", "template not found")
+			return
+		}
+		if tpl.State != store.TemplateReady {
+			writeErr(w, http.StatusConflict, "TEMPLATE_NOT_READY",
+				"template "+req.Template+" is "+string(tpl.State))
+			return
+		}
+		if tpl.FS.Digest != "" {
+			fsManifestDigest = tpl.FS.Digest
+		} else {
+			// A node-local build published nothing; the node resolves its rootfs
+			// from ImageDir by the template's name.
+			imageOrigin = tpl.Name
 		}
 	}
 
 	id := store.NewID(store.PrefixSandbox)
 	spec := &nodev1.SandboxSpec{
-		SandboxId:    id,
-		Image:        req.Image,
-		Cpu:          1,
-		MemoryMib:    512,
-		DiskMib:      20480,
-		Env:          req.Env,
-		Cmd:          req.Cmd,
-		AutoStartCmd: req.AutoStartCmd,
-		Labels:       req.Labels,
+		SandboxId:         id,
+		Image:             imageOrigin,
+		FsManifestDigest:  fsManifestDigest,
+		PublishConversion: publishConversion,
+		Cpu:               1,
+		MemoryMib:         512,
+		DiskMib:           20480,
+		Env:               req.Env,
+		Cmd:               req.Cmd,
+		AutoStartCmd:      req.AutoStartCmd,
+		Labels:            req.Labels,
 	}
 	if req.Resources != nil {
 		if req.Resources.CPU > 0 {
@@ -465,8 +548,8 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 	rec := &store.Sandbox{
-		ID: id, Image: req.Image, State: store.SandboxPending,
-		Region: s.region, Runtime: s.runtimeTier,
+		ID: id, Image: imageOrigin, State: store.SandboxPending,
+		Region: s.region, Runtime: s.runtimeTier, Domain: s.domain,
 		CPU: spec.Cpu, MemoryMiB: spec.MemoryMib, DiskMiB: spec.DiskMib,
 		Labels: req.Labels, CreatedAt: time.Now(), LastActivity: time.Now(),
 	}
@@ -545,6 +628,21 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	rec.State = store.SandboxState(resp.Status.State)
 	_ = s.store.PutSandbox(rec)
 	s.emit(id, "sandbox.lifecycle.running", nil)
+
+	// A cold start that converted and published an OCI reference reports the
+	// chain's coordinates. Record them on the template ResolveFor registered
+	// (named by the ref), so a later create of the same ref -- on any node --
+	// reuses the published chain rather than converting again. Best effort: the
+	// sandbox is already running, and a failed write only costs the next create a
+	// conversion.
+	if conv := resp.GetConversion(); conv != nil && s.images != nil && req.ImageRef != "" {
+		if err := s.images.MarkReady(req.ImageRef, conv.GetOverlaybdRef(),
+			conv.GetSizeBytes(), conv.GetLayerDigests(), conv.GetOciDigest(),
+			protoImageConfig(conv.GetConfig())); err != nil {
+			slog.Warn("record converted template failed",
+				"imageRef", req.ImageRef, logging.KeyError, err)
+		}
+	}
 
 	outcome = "success"
 	writeJSON(w, http.StatusCreated, map[string]any{"sandbox": rec})

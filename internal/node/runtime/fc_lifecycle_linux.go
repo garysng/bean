@@ -18,6 +18,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
+	"github.com/garysng/bean/internal/node/image"
 	"github.com/garysng/bean/internal/obs"
 )
 
@@ -152,16 +153,16 @@ func (r *FCRuntime) killVMM(vm *fcVM) {
 // Pausing happens for both kinds. Without memory the pause is still what makes
 // the filesystem coherent: a guest writing while its device is read would put
 // a torn write into the checkpoint.
-func (r *FCRuntime) Checkpoint(ctx context.Context, id string, w io.Writer, opts CheckpointOptions) error {
+func (r *FCRuntime) Checkpoint(ctx context.Context, id string, w io.Writer, opts CheckpointOptions) (CheckpointResult, error) {
 	vm, err := r.get(id)
 	if err != nil {
-		return err
+		return CheckpointResult{}, err
 	}
 
 	wasPaused := vm.paused
 	if !wasPaused {
 		if err := r.Pause(ctx, id); err != nil {
-			return fmt.Errorf("fc: pause for snapshot: %w", err)
+			return CheckpointResult{}, fmt.Errorf("fc: pause for snapshot: %w", err)
 		}
 		defer func() {
 			// Resume on the way out regardless of the snapshot's outcome: a
@@ -175,21 +176,41 @@ func (r *FCRuntime) Checkpoint(ctx context.Context, id string, w io.Writer, opts
 		}()
 	}
 
+	// The filesystem is sealed into the shared overlaybd layer store while the guest is
+	// paused, so it captures exactly the bytes the memory state (if any) refers to. Only
+	// its manifest identity travels back; the bytes stay in the store, shared with the base
+	// image's layers. A provider that cannot seal (local tier, or overlaybd with no store)
+	// returns an empty digest, and this snapshot then has no shared filesystem -- which the
+	// control plane treats as a failure to record, the same as any other capture that could
+	// not store what it captured.
+	sealer, ok := r.Images.(image.SnapshotFSSealer)
+	if !ok {
+		return CheckpointResult{}, fmt.Errorf("fc: sandbox %s runtime cannot seal a snapshot filesystem", id)
+	}
+	// The base is named by whichever identity the sandbox started from: an OCI
+	// reference on a cold start, or the filesystem manifest digest for a sandbox
+	// created from a template or restored from a snapshot (which has no reference).
+	base := vm.imageRef
+	if base == "" {
+		base = vm.baseFSDigest
+	}
+	fsDigest, fsLayers, fsSize, err := sealer.SealSnapshotFS(ctx, id, base)
+	if err != nil {
+		return CheckpointResult{}, fmt.Errorf("fc: seal snapshot filesystem: %w", err)
+	}
+	result := CheckpointResult{FSManifestDigest: fsDigest, FSLayerDigests: fsLayers, FSSizeBytes: fsSize}
+
 	if !opts.IncludeMemory {
-		// Only the filesystem. Restore boots a fresh guest from it, so nothing
-		// ties the result to this host's CPU — which is the entire reason to
-		// choose this over a full snapshot.
-		//
-		// The bundle carries just the rootfs member, and restore dispatches on
-		// which members are present. That keeps the two kinds distinguishable
-		// from the bundle alone, so a checkpoint stays self-describing rather
-		// than depending on a database row that could disagree with it.
-		return writeSnapshotBundle(w, "", "", vm.rootfs.Writable, false)
+		// Only the filesystem. Restore boots a fresh guest from the sealed layer chain, so
+		// nothing ties the result to this host's CPU -- which is the entire reason to choose
+		// this over a full snapshot. No bundle is written: with the filesystem in the store,
+		// a memoryless checkpoint has nothing left to stream.
+		return result, nil
 	}
 
 	snapDir := filepath.Join(vm.dir, "snapshot")
 	if err := os.MkdirAll(snapDir, 0o700); err != nil {
-		return fmt.Errorf("fc: create snapshot dir: %w", err)
+		return CheckpointResult{}, fmt.Errorf("fc: create snapshot dir: %w", err)
 	}
 	defer os.RemoveAll(snapDir)
 
@@ -200,7 +221,7 @@ func (r *FCRuntime) Checkpoint(ctx context.Context, id string, w io.Writer, opts
 	snapType := "Full"
 	if opts.Diff {
 		if !vm.dirtyPages {
-			return fmt.Errorf("fc: sandbox %s cannot produce a diff checkpoint: "+
+			return CheckpointResult{}, fmt.Errorf("fc: sandbox %s cannot produce a diff checkpoint: "+
 				"it booted without dirty-page tracking, which cannot be enabled after the fact", id)
 		}
 		snapType = "Diff"
@@ -211,20 +232,22 @@ func (r *FCRuntime) Checkpoint(ctx context.Context, id string, w io.Writer, opts
 	if err := vm.client.put(ctx, "/snapshot/create", fcSnapshotCreate{
 		SnapshotType: snapType, SnapshotPath: statePath, MemFilePath: memPath,
 	}); err != nil {
-		return err
+		return CheckpointResult{}, err
 	}
 
-	// The rootfs travels with the snapshot: memory state referring to a
-	// filesystem that has moved on since would restore into corruption.
-	return writeSnapshotBundle(w, statePath, memPath, vm.rootfs.Writable, opts.Diff)
+	// The bundle now carries only memory and device state; the filesystem it refers to is
+	// the sealed layer chain, captured above at the same paused instant so the two agree.
+	if err := writeSnapshotBundle(w, statePath, memPath, opts.Diff); err != nil {
+		return CheckpointResult{}, err
+	}
+	return result, nil
 }
 
 // Snapshot bundle member names. Restore looks them up by name, so a bundle
 // written by one version is readable by another as long as these hold.
 const (
-	snapshotStateFile  = "vmstate"
-	snapshotMemFile    = "memory"
-	snapshotRootfsFile = "rootfs"
+	snapshotStateFile = "vmstate"
+	snapshotMemFile   = "memory"
 	// snapshotMemDiffFile carries memory the guest dirtied since its base, as an
 	// extent list. It is a distinct member rather than a flag beside "memory"
 	// because the two must never be confused: layering a full image would erase
@@ -242,19 +265,19 @@ const (
 // different sizes and a reader must be able to find one without buffering the
 // others.
 //
-// Two things keep the result small. The writable layer goes in as an extent
-// list, so its cost follows what the sandbox wrote rather than what it was
-// provisioned. Guest memory is compressed, since most of a fresh VM's pages are
-// zero. Together these took a snapshot of a small sandbox from 1280 MiB to
-// around 20 MiB, which is the difference between snapshots being usable and not.
-func writeSnapshotBundle(w io.Writer, statePath, memPath, rootfsPath string, diff bool) error {
+// Guest memory is compressed, since most of a fresh VM's pages are zero. That
+// took the memory member of a small sandbox's snapshot from 512 MiB to a few
+// tens of MiB, which is the difference between snapshots being usable and not.
+// The filesystem is no longer here at all -- it is sealed into the shared layer
+// store -- so the bundle carries only memory and device state.
+func writeSnapshotBundle(w io.Writer, statePath, memPath string, diff bool) error {
 	// Speed over ratio: the remaining bulk is zeroed memory pages, which even
 	// the fastest setting removes, and the sandbox is paused throughout.
 	zw, err := gzip.NewWriterLevel(w, gzip.BestSpeed)
 	if err != nil {
 		return err
 	}
-	if err := writeBundleEntries(zw, statePath, memPath, rootfsPath, diff); err != nil {
+	if err := writeBundleEntries(zw, statePath, memPath, diff); err != nil {
 		return err
 	}
 	return zw.Close()
@@ -271,7 +294,7 @@ func writeSnapshotBundle(w io.Writer, statePath, memPath, rootfsPath string, dif
 //
 // Measured on a 512 MiB guest: inflating the whole stream is 489ms of a 940ms
 // restore, and a cache hit was paying all of it (hack/restore-phase-probe.go).
-func writeBundleEntries(w io.Writer, statePath, memPath, rootfsPath string, diff bool) error {
+func writeBundleEntries(w io.Writer, statePath, memPath string, diff bool) error {
 	tw := tar.NewWriter(w)
 
 	// An empty state path omits the member, which is how a filesystem-only
@@ -280,15 +303,6 @@ func writeBundleEntries(w io.Writer, statePath, memPath, rootfsPath string, diff
 	if statePath != "" {
 		if err := writeTarFile(tw, snapshotStateFile, statePath); err != nil {
 			return fmt.Errorf("fc: bundle %s: %w", snapshotStateFile, err)
-		}
-	}
-
-	// The writable layer is provisioned large and used lightly, so it goes in as
-	// an extent list. Emitting its full length as zeroes for the compressor to
-	// remove measured at 15s of paused-sandbox time on a 20 GiB store.
-	if rootfsPath != "" {
-		if err := writeSparseTarFile(tw, snapshotRootfsFile, rootfsPath); err != nil {
-			return fmt.Errorf("fc: bundle %s: %w", snapshotRootfsFile, err)
 		}
 	}
 
@@ -562,10 +576,12 @@ func (r *FCRuntime) loadSnapshot(ctx context.Context, vm *fcVM, spec *Spec, stag
 
 // snapshotState produces the machine state and memory image to restore from,
 // merging the chain only if this node has not already done so for this snapshot.
-// The writable layer is always extracted, to rootfsDest, because it cannot be
-// shared: two sandboxes restored from one checkpoint diverge as soon as either
-// writes.
-func (r *FCRuntime) snapshotState(rootfsDest string, spec *Spec, layers []SnapshotLayer) (snapEntry, error) {
+//
+// The chain here is guest memory alone: the filesystem is resolved separately from
+// the snapshot's sealed overlaybd layers, so nothing in these bundles describes a
+// writable device. A memoryless checkpoint therefore has no bundle at all, and
+// this is not reached for one.
+func (r *FCRuntime) snapshotState(dir string, spec *Spec, layers []SnapshotLayer) (snapEntry, error) {
 	id := ""
 	if spec != nil {
 		id = spec.SnapshotID
@@ -578,27 +594,20 @@ func (r *FCRuntime) snapshotState(rootfsDest string, spec *Spec, layers []Snapsh
 			// a stale timestamp costs a re-unpack, while failing the restore over it
 			// would trade a cheap loss for an expensive one.
 			_ = r.snapshots.Touch(id)
-			// The merged image is already on disk, so the layers are read only for
-			// the leaf's filesystem. This is what makes a fan-out cheap: a chain is
-			// merged once per node and every later restore of the same leaf skips
-			// it, which matters more the longer the chain is.
-			//
-			// Every layer is still drained. The sender streams the whole chain
-			// without knowing what this node has cached, so an unread layer would
-			// leave it blocked.
-			for i, layer := range layers {
-				dest := ""
-				if i == len(layers)-1 {
-					dest = rootfsDest
-				}
-				if _, err := readSnapshotBundle(layer.Data, "", dest); err != nil {
+			// The merged image is already on disk, so nothing needs extracting -- but
+			// every layer is still drained. The sender streams the whole chain without
+			// knowing what this node has cached, so an unread layer would leave it
+			// blocked. This is what makes a fan-out cheap: a chain is merged once per
+			// node and every later restore of the same leaf skips the merge.
+			for _, layer := range layers {
+				if _, err := readSnapshotBundle(layer.Data, ""); err != nil {
 					return snapEntry{}, fmt.Errorf("fc: read layer %s: %w", layer.ID, err)
 				}
 			}
 			return entry, nil
 		}
 		entry, err := r.snapshots.Fill(id, func(dir string) (snapEntry, error) {
-			return mergeChain(layers, dir, rootfsDest)
+			return mergeChain(layers, dir)
 		})
 		if err != nil {
 			return snapEntry{}, err
@@ -611,8 +620,8 @@ func (r *FCRuntime) snapshotState(rootfsDest string, spec *Spec, layers []Snapsh
 	}
 
 	// Without an id there is nothing to key a cache on, so the merged image is
-	// written beside the writable layer and discarded with it.
-	return mergeChain(layers, filepath.Dir(rootfsDest), rootfsDest)
+	// written into the staging dir and discarded with the sandbox.
+	return mergeChain(layers, dir)
 }
 
 // sweepSnapshotCache reclaims cold cache entries if the cache is over its
@@ -632,17 +641,17 @@ func (r *FCRuntime) sweepSnapshotCache() {
 	}
 }
 
-// readSnapshotBundle extracts a bundle to files, writing the writable layer's
-// extent stream to rootfsDest. It does not touch any block device: the layer is
-// applied to one later, while the provider is assembling it.
+// readSnapshotBundle extracts a bundle's machine state and memory image to files
+// under dir. The filesystem is not here -- it is resolved from the snapshot's
+// sealed layer chain -- so a bundle carries only vmstate and memory.
 //
-// An empty dir skips the machine state and memory image, which is what a restore
-// wants when the node already holds them unpacked. An empty rootfsDest likewise
-// skips the filesystem.
+// An empty dir skips extraction entirely, which is what a restore wants when the
+// node already holds the merged image unpacked: the layer still has to be drained
+// off the wire, but nothing is written.
 //
 // Skipping a member means not decompressing it either. Guest memory is emitted
 // last precisely so a restore that already holds it can stop inflating once it has
-// the writable layer, which measured at 489ms of a 940ms restore — paid on every
+// the machine state, which measured at 489ms of a 940ms restore -- paid on every
 // cache hit, for nothing.
 //
 // Stopping the inflation is not the same as stopping the read. The sender streams
@@ -650,17 +659,16 @@ func (r *FCRuntime) sweepSnapshotCache() {
 // bytes still have to be consumed or the sender blocks on a stream nobody is
 // reading and the restore fails with EOF. They are drained compressed: reading
 // 16 MiB off the wire costs almost nothing next to inflating the 512 MiB inside.
-func readSnapshotBundle(src io.Reader, dir, rootfsDest string) (map[string]string, error) {
+func readSnapshotBundle(src io.Reader, dir string) (map[string]string, error) {
 	zr, err := gzip.NewReader(src)
 	if err != nil {
 		return nil, fmt.Errorf("fc: open snapshot bundle: %w", err)
 	}
 	defer zr.Close()
 
-	// What this caller is here for. A restore with a cache hit wants only the
-	// writable layer; one without wants the machine state and memory too.
+	// Nothing to extract when the node already holds the merged image; the stream is
+	// still drained below so the sender does not block.
 	wantState := dir != ""
-	wantRootfs := rootfsDest != ""
 
 	// Whatever happens, the stream is consumed to its end. Deferred rather than
 	// written at each exit because there are several, and one that forgot would
@@ -673,7 +681,7 @@ func readSnapshotBundle(src io.Reader, dir, rootfsDest string) (map[string]strin
 		// Everything asked for has been extracted, so there is no reason to inflate
 		// what remains. A filesystem-only checkpoint has no memory member at all,
 		// which is why this is checked before reading rather than after.
-		if !wantState && !wantRootfs {
+		if !wantState {
 			return paths, nil
 		}
 		hdr, err := tr.Next()
@@ -687,9 +695,6 @@ func readSnapshotBundle(src io.Reader, dir, rootfsDest string) (map[string]strin
 		var dest string
 		switch hdr.Name {
 		case snapshotStateFile, snapshotMemFile, snapshotMemDiffFile:
-			if dir == "" {
-				continue
-			}
 			dest = filepath.Join(dir, hdr.Name)
 			// Memory is the last thing written and the largest, so seeing it means
 			// the machine state came earlier and nothing further is wanted from the
@@ -697,12 +702,6 @@ func readSnapshotBundle(src io.Reader, dir, rootfsDest string) (map[string]strin
 			if hdr.Name != snapshotStateFile {
 				wantState = false
 			}
-		case snapshotRootfsFile:
-			if rootfsDest == "" {
-				continue
-			}
-			dest = rootfsDest
-			wantRootfs = false
 		default:
 			// An unknown member is skipped rather than rejected, so a bundle
 			// gaining parts stays loadable by an older node.

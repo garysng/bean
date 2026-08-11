@@ -29,12 +29,12 @@ func TestResolveRegistersOnce(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if img.Ref != "python:3.12" {
-		t.Errorf("ref = %q", img.Ref)
+	if img.Name != "python:3.12" {
+		t.Errorf("name = %q", img.Name)
 	}
 	// A new reference starts PENDING: nothing has been converted yet, but
 	// the standard pull path can still run it.
-	if img.State != store.ImagePending {
+	if img.State != store.TemplatePending {
 		t.Errorf("state = %s, want PENDING", img.State)
 	}
 	if img.CreatedAt.IsZero() {
@@ -83,34 +83,46 @@ func TestConversionStateTransitions(t *testing.T) {
 		t.Fatal(err)
 	}
 	img, _ := svc.Get("app:1")
-	if img.State != store.ImageConverting {
+	if img.State != store.TemplateConverting {
 		t.Fatalf("state = %s", img.State)
 	}
 
-	if err := svc.MarkReady("app:1", "app:1-obd", 12345); err != nil {
+	cfg := &store.Config{Env: []string{"PATH=/usr/bin"}, Entrypoint: []string{"/bin/sh"}}
+	if err := svc.MarkReady("app:1", "app:1-obd", 12345, []string{"sha256:aaa"}, "sha256:oci", cfg); err != nil {
 		t.Fatal(err)
 	}
 	img, _ = svc.Get("app:1")
-	if img.State != store.ImageReady {
+	if img.State != store.TemplateReady {
 		t.Errorf("state = %s, want READY", img.State)
 	}
-	if img.OverlaybdRef != "app:1-obd" || img.SizeBytes != 12345 {
+	if img.FS.Digest != "app:1-obd" || img.FS.SizeBytes != 12345 {
 		t.Errorf("artifact not recorded: %+v", img)
+	}
+	if len(img.FS.LayerDigests) != 1 || img.FS.LayerDigests[0] != "sha256:aaa" {
+		t.Errorf("layer digests not recorded: %+v", img.FS.LayerDigests)
+	}
+	// The OCI content digest completes the conversion-cache key.
+	if img.OCISource == nil || img.OCISource.Digest != "sha256:oci" {
+		t.Errorf("oci source not recorded: %+v", img.OCISource)
+	}
+	// The recovered image config is recorded on the template.
+	if img.FS.Config == nil || len(img.FS.Config.Env) != 1 || img.FS.Config.Env[0] != "PATH=/usr/bin" {
+		t.Errorf("config not recorded: %+v", img.FS.Config)
 	}
 
 	if err := svc.MarkFailed("app:1", "converter crashed"); err != nil {
 		t.Fatal(err)
 	}
 	img, _ = svc.Get("app:1")
-	if img.State != store.ImageFailed || img.Reason != "converter crashed" {
+	if img.State != store.TemplateFailed || img.Reason != "converter crashed" {
 		t.Errorf("failure not recorded: %+v", img)
 	}
 }
 
 func TestTransitionUnknownImage(t *testing.T) {
 	svc, _ := newSvc(t, nil)
-	if err := svc.MarkReady("nope:1", "x", 1); err == nil {
-		t.Error("expected error for unregistered image")
+	if err := svc.MarkReady("nope:1", "x", 1, nil, "", nil); err == nil {
+		t.Error("expected error for unregistered template")
 	}
 }
 
@@ -189,10 +201,10 @@ func TestResolveForRecordsOwnerAndSource(t *testing.T) {
 	if img.Owner != "user-a" {
 		t.Errorf("owner = %q, want user-a", img.Owner)
 	}
-	// A caller-supplied ref is an import, and saying so is what makes the
+	// A caller-supplied ref is a conversion, and saying so is what makes the
 	// distinction answerable later.
-	if img.Source != store.ImageImported {
-		t.Errorf("source = %q, want imported", img.Source)
+	if img.Source != store.TemplateConverted {
+		t.Errorf("source = %q, want converted", img.Source)
 	}
 }
 
@@ -245,6 +257,46 @@ func TestListForScopesToCaller(t *testing.T) {
 	}
 }
 
+func TestDeleteForScopesToOwner(t *testing.T) {
+	svc, _ := newSvc(t, nil)
+	svc.ResolveFor("a:1", "user-a")
+	svc.ResolveFor("b:1", "user-b")
+	svc.Resolve("shared:1")
+
+	// Another identity's image is refused, and refused as not-found so its
+	// existence does not leak.
+	if err := svc.DeleteFor("b:1", "user-a"); !errors.Is(err, ErrForbidden) {
+		t.Errorf("deleting another owner's image = %v, want ErrForbidden", err)
+	}
+	if img, _ := svc.Get("b:1"); img == nil {
+		t.Error("a forbidden delete removed the image anyway")
+	}
+
+	// An owner deletes its own, and anyone deletes an unowned one.
+	if err := svc.DeleteFor("a:1", "user-a"); err != nil {
+		t.Errorf("deleting own image: %v", err)
+	}
+	if img, _ := svc.Get("a:1"); img != nil {
+		t.Error("own image survived delete")
+	}
+	if err := svc.DeleteFor("shared:1", "user-a"); err != nil {
+		t.Errorf("deleting unowned image: %v", err)
+	}
+
+	// An unknown ref is reported as not-found.
+	if err := svc.DeleteFor("missing:1", "user-a"); !errors.Is(err, ErrNotFound) {
+		t.Errorf("deleting a missing image = %v, want ErrNotFound", err)
+	}
+
+	// The operator (empty owner) may delete anything.
+	if err := svc.Delete("b:1"); err != nil {
+		t.Errorf("operator delete: %v", err)
+	}
+	if img, _ := svc.Get("b:1"); img != nil {
+		t.Error("operator delete did not remove the image")
+	}
+}
+
 func TestServicePolicyRefusesDeniedRef(t *testing.T) {
 	st, err := store.Open(filepath.Join(t.TempDir(), "img.db"))
 	if err != nil {
@@ -252,7 +304,7 @@ func TestServicePolicyRefusesDeniedRef(t *testing.T) {
 	}
 	t.Cleanup(func() { st.Close() })
 	svc := NewWithPolicy(st, nil, Policy{
-		AllowedSources: []store.ImageSource{store.ImageBuilt},
+		AllowedSources: []store.TemplateSource{store.TemplateBuilt},
 	})
 
 	if _, err := svc.ResolveFor("python:3.12", "user-a"); !errors.Is(err, ErrPolicyDenied) {

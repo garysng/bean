@@ -7,6 +7,8 @@ import (
 	"io"
 	"net/http"
 	"strings"
+
+	"github.com/garysng/bean/internal/control/s3"
 )
 
 // Lazy pull needs sealed layers to live somewhere the overlaybd daemon can read over
@@ -62,30 +64,25 @@ type BlobStore interface {
 	CheckReadable(ctx context.Context) error
 }
 
-// s3BlobStore publishes layers to an S3-compatible bucket.
+// s3BlobStore publishes layers to a bucket, over the unified s3.ObjectStore.
 //
 // It exists rather than a registry client because bean already has a hand-written
 // SigV4 client and already keeps snapshots in a bucket, and because overlaybd turned
 // out not to need registry semantics. A registry would mean a push protocol, token
 // auth and manifests for the sake of a GET this already satisfies.
+//
+// The byte operations go through the shared ObjectStore (the same contract snapshots
+// use); bucket and publicURL are kept only to build BlobURL, which is overlaybd's
+// anonymous-read prefix and has no meaning to the shared core -- see docs/s3-storage.md
+// section 8.2.
 type s3BlobStore struct {
-	client    blobPutter
+	store     s3.ObjectStore
 	bucket    string
 	prefix    string
 	publicURL string
 }
 
-// blobPutter is the part of the S3 client this needs, named locally so the image
-// package does not depend on the whole control-plane client surface -- and so a test
-// can substitute one without a bucket.
-type blobPutter interface {
-	HeadObject(ctx context.Context, bucket, key string) (int64, error)
-	PutObject(ctx context.Context, bucket, key string, body []byte) error
-	GetObject(ctx context.Context, bucket, key string) (io.ReadCloser, error)
-	EnsureBucket(ctx context.Context, bucket string) error
-}
-
-// NewS3BlobStore publishes to bucket under prefix, and reports publicURL as the
+// NewS3BlobStore publishes to store under prefix, and reports publicURL/bucket as the
 // prefix overlaybd should read from.
 //
 // publicURL is separate from the client's endpoint on purpose: the daemon resolves
@@ -93,9 +90,12 @@ type blobPutter interface {
 // through an internal endpoint while the daemon reads through one the guest network
 // can reach. Getting this wrong produces a device whose reads fail with the reason
 // only in overlaybd's log, so it is required rather than derived.
-func NewS3BlobStore(client blobPutter, bucket, prefix, publicURL string) (BlobStore, error) {
-	if client == nil {
-		return nil, errors.New("image: blob store needs an s3 client")
+//
+// bucket is passed alongside the store because the store hides it, yet the read URL
+// overlaybd is handed must name it: BlobURL is publicURL/bucket/prefix.
+func NewS3BlobStore(store s3.ObjectStore, bucket, prefix, publicURL string) (BlobStore, error) {
+	if store == nil {
+		return nil, errors.New("image: blob store needs an object store")
 	}
 	if bucket == "" {
 		return nil, errors.New("image: blob store needs a bucket")
@@ -107,7 +107,7 @@ func NewS3BlobStore(client blobPutter, bucket, prefix, publicURL string) (BlobSt
 		prefix = "blobs"
 	}
 	return &s3BlobStore{
-		client:    client,
+		store:     store,
 		bucket:    bucket,
 		prefix:    strings.Trim(prefix, "/"),
 		publicURL: strings.TrimRight(publicURL, "/"),
@@ -125,8 +125,11 @@ func (s *s3BlobStore) key(digest string) string {
 }
 
 func (s *s3BlobStore) Stat(ctx context.Context, digest string) (int64, bool, error) {
-	size, err := s.client.HeadObject(ctx, s.bucket, s.key(digest))
+	size, err := s.store.Head(ctx, s.key(digest))
 	if err != nil {
+		// Absent and unreachable are both "not published": the caller's next move is
+		// to convert locally either way, and republishing under a digest-derived key
+		// is harmless.
 		return 0, false, nil
 	}
 	if size <= 0 {
@@ -139,25 +142,29 @@ func (s *s3BlobStore) Stat(ctx context.Context, digest string) (int64, bool, err
 }
 
 func (s *s3BlobStore) Put(ctx context.Context, digest string, size int64, r io.Reader) error {
-	if err := s.client.EnsureBucket(ctx, s.bucket); err != nil {
-		return fmt.Errorf("image: ensure blob bucket: %w", err)
-	}
-	// Read whole rather than streamed because a sealed layer is the compressed form
-	// of one OCI layer -- tens of MiB for the images this is for -- and the S3
-	// client's streaming path is a multipart uploader whose part bookkeeping is not
-	// worth it at that size. A layer large enough to matter should switch to
-	// NewUploader rather than raising this limit.
-	body, err := io.ReadAll(r)
+	// Streamed through the object store's writer rather than buffered whole: the
+	// shared contract's Writer is the streaming primitive, so a large layer never
+	// sits in memory. The writer publishes nothing at the key until Close, so a
+	// short-read abort below leaves no truncated blob.
+	key := s.key(digest)
+	w, err := s.store.Writer(ctx, key)
 	if err != nil {
+		return fmt.Errorf("image: open layer writer: %w", err)
+	}
+	n, err := io.Copy(w, r)
+	if err != nil {
+		s3.AbortWriter(ctx, s.store, key, w)
 		return fmt.Errorf("image: read sealed layer: %w", err)
 	}
-	if size > 0 && int64(len(body)) != size {
+	if size > 0 && n != size {
 		// Checked because a short read publishes a truncated blob under a digest
 		// that claims otherwise, and overlaybd would then fail to open it with an
-		// error naming zfile structure rather than the upload.
-		return fmt.Errorf("image: sealed layer is %d bytes, expected %d", len(body), size)
+		// error naming zfile structure rather than the upload. Aborted so nothing
+		// lands at the key.
+		s3.AbortWriter(ctx, s.store, key, w)
+		return fmt.Errorf("image: sealed layer is %d bytes, expected %d", n, size)
 	}
-	if err := s.client.PutObject(ctx, s.bucket, s.key(digest), body); err != nil {
+	if err := w.Close(); err != nil {
 		return fmt.Errorf("image: publish layer %s: %w", digest, err)
 	}
 	return nil

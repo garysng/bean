@@ -195,10 +195,10 @@ serialises on one netlink socket. That is a property of the transport, not of th
 so ublk became the intended replacement rather than an optimisation ([status.md](status.md)).
 
 overlaybd also changes the layer story: the dm-snapshot path flattens the image into a
-single ext4 and loses the layer structure, so `commit` reads out a full image rather than
-sealing an incremental layer. With overlaybd, `overlaybd-commit` seals the LSMT writable
-layer and the promise of zero conversion becomes literal — though `CommitSandbox` on this
-backend is implemented and still unexercised.
+single ext4 and loses the layer structure, so sealing a sandbox's filesystem reads out a
+full image rather than an incremental layer. With overlaybd, `overlaybd-commit` seals the
+LSMT writable layer as a shared filesystem chain and the promise of zero conversion becomes
+literal.
 
 **Nydus was rejected for the same reason overlayfs was**: it is file-level, its
 filesystem semantics cannot get into a microVM, and the fc tier would need
@@ -885,9 +885,10 @@ conclusion.
 What the platform keeps is the output shape: BuildKit can export a **flat rootfs
 tar**, which is exactly what a base image needs, so there is no layer assembly, no
 registry round trip, and the result goes through the same writer as a pulled
-image. `commit` is the reverse path — reading a full ext4 back off the composed
-device — and it produces a full image rather than an incremental layer, because a
-dm-snapshot CoW layer is not an OCI layer format.
+image. Promoting a filesystem snapshot into the image namespace is the reverse path
+— reading a full ext4 back off the composed device — and it produces a full image
+rather than an incremental layer, because a dm-snapshot CoW layer is not an OCI
+layer format.
 
 ⚠️ Build logs report no progress and a build cannot be cancelled. 📐 Build output
 stays on the node that built it (GitHub #22), which in a multi-node cluster is

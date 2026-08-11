@@ -24,7 +24,7 @@ internal/node/
 │                       and local (process-level, dev only)
 │                       including UFFD page supply, snapshot bundles, CPU templates, diff merge
 ├── image/           ✅ image.Provider: DevMapperProvider (shared base + CoW),
-│                       FileProvider, PullingProvider; OCI pull-and-convert, commit, build
+│                       FileProvider, PullingProvider; OCI pull-and-convert, build
 ├── vsock/           ✅ AF_VSOCK dialling
 ├── agentmgr/        📐 empty directory
 └── lifecycle/       📐 empty directory
@@ -138,11 +138,10 @@ design turned out to be wrong during implementation:
 
 There are also three **optional** interfaces that a runtime implements according
 to its capabilities and callers type-assert on: `ImageWarmer` (prewarm),
-`ImageLister` (cache inventory), `ImageBuilder` (build) and `SandboxCommitter`
-(sealing a sandbox into an image). The reason they are separate rather than
-stuffed into `Runtime`: the local tier runs host processes and has no concept of
-a "cached image", so making it stub out four methods conveys less information
-than making callers check for the capability.
+`ImageLister` (cache inventory) and `ImageBuilder` (build). The reason they are
+separate rather than stuffed into `Runtime`: the local tier runs host processes
+and has no concept of a "cached image", so making it stub out these methods
+conveys less information than making callers check for the capability.
 
 | Implementation | Status | Underlying | Responsibility boundary |
 |---|---|---|---|

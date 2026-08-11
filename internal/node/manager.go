@@ -306,7 +306,15 @@ func (m *Manager) resolveProcess(spec *nodev1.SandboxSpec) (image.Process, error
 	if !ok {
 		return image.MergeConfig(nil, spec.Cmd, spec.Env, ""), nil
 	}
-	cfg, err := reader.ImageConfig(spec.GetImage())
+	// The base is named by an OCI reference on a cold start, or by a filesystem
+	// manifest digest for a sandbox created from a template or restored from a
+	// snapshot. Both carry the same recorded config; passing whichever is set lets
+	// a template-created sandbox inherit its ENV/ENTRYPOINT rather than booting bare.
+	base := spec.GetImage()
+	if base == "" {
+		base = spec.GetFsManifestDigest()
+	}
+	cfg, err := reader.ImageConfig(base)
 	if err != nil {
 		return image.Process{}, err
 	}
@@ -572,18 +580,18 @@ func (m *Manager) Pause(ctx context.Context, id string) error {
 // opts decides whether guest memory travels with it, which is the difference
 // between resuming the guest and rebooting onto its filesystem.
 func (m *Manager) Snapshot(ctx context.Context, id string, w io.Writer,
-	opts runtime.CheckpointOptions) error {
+	opts runtime.CheckpointOptions) (runtime.CheckpointResult, error) {
 	// Claim the transition under lock, remembering where to go back to.
 	m.mu.Lock()
 	sb, ok := m.sandboxes[id]
 	if !ok {
 		m.mu.Unlock()
-		return fmt.Errorf("%w: %s", ErrSandboxNotFound, id)
+		return runtime.CheckpointResult{}, fmt.Errorf("%w: %s", ErrSandboxNotFound, id)
 	}
 	prev := sb.State
 	if prev != runtime.StateRunning && prev != runtime.StatePaused {
 		m.mu.Unlock()
-		return fmt.Errorf("sandbox %s is %s; snapshot needs RUNNING or PAUSED", id, prev)
+		return runtime.CheckpointResult{}, fmt.Errorf("sandbox %s is %s; snapshot needs RUNNING or PAUSED", id, prev)
 	}
 	sb.State = runtime.StateSnapshotting
 	m.mu.Unlock()
@@ -605,8 +613,6 @@ func (m *Manager) Snapshot(ctx context.Context, id string, w io.Writer,
 	// the memory image and the guest flushes them after it resumes. Without
 	// memory they are simply lost: measured as a snapshot whose rootfs extents
 	// were empty and a restore that could not find a file written seconds before.
-	//
-	// This is the same reason CommitSandbox syncs, and for the same tier.
 	if !opts.IncludeMemory && prev == runtime.StateRunning {
 		// Not syncGuest: that goes through AgentConn, which refuses a sandbox
 		// whose state is no longer RUNNING — and by this point the state is
@@ -628,12 +634,12 @@ func (m *Manager) Snapshot(ctx context.Context, id string, w io.Writer,
 	if prev == runtime.StateRunning {
 		if err := m.rt.Pause(ctx, id); err != nil {
 			restore()
-			return fmt.Errorf("freeze for snapshot: %w", err)
+			return runtime.CheckpointResult{}, fmt.Errorf("freeze for snapshot: %w", err)
 		}
 	}
 
 	start := time.Now()
-	err := m.rt.Checkpoint(ctx, id, w, opts)
+	res, err := m.rt.Checkpoint(ctx, id, w, opts)
 	m.observePhase(ctx, "checkpoint", time.Since(start))
 	m.metrics.IncCounter("bean_node_snapshots_total",
 		"Snapshots taken on this node.",
@@ -666,83 +672,9 @@ func (m *Manager) Snapshot(ctx context.Context, id string, w io.Writer,
 
 	restore()
 	if err != nil {
-		return fmt.Errorf("checkpoint: %w", err)
+		return runtime.CheckpointResult{}, fmt.Errorf("checkpoint: %w", err)
 	}
-	return nil
-}
-
-// CommitSandbox turns a sandbox's filesystem into a base image.
-//
-// The sandbox is frozen for the read and returned to its prior state
-// afterwards, the same discipline Snapshot uses: a filesystem read while
-// processes are writing to it would capture a torn state that fails to mount.
-func (m *Manager) CommitSandbox(ctx context.Context, id, tag string) error {
-	committer, ok := m.rt.(runtime.SandboxCommitter)
-	if !ok {
-		return fmt.Errorf("runtime %s cannot commit sandboxes", m.rt.Name())
-	}
-
-	// The guest has to flush before its filesystem is read from the host.
-	// Pausing stops the vCPUs but leaves the guest's page cache dirty, and a
-	// commit reads the block device — so without this the image silently lacks
-	// whatever the sandbox wrote most recently, which is exactly the work the
-	// user is trying to keep. (A snapshot needs no such step: Firecracker
-	// captures guest memory, so the dirty pages travel with it.)
-	//
-	// This runs before the state transition is claimed, because flushing goes
-	// through the agent and the data plane only serves runnable sandboxes.
-	if m.StateOf(id) == runtime.StateRunning {
-		if err := m.syncGuest(ctx, id); err != nil {
-			return fmt.Errorf("flush guest filesystem: %w", err)
-		}
-	}
-
-	m.mu.Lock()
-	sb, ok := m.sandboxes[id]
-	if !ok {
-		m.mu.Unlock()
-		return fmt.Errorf("%w: %s", ErrSandboxNotFound, id)
-	}
-	prev := sb.State
-	if prev != runtime.StateRunning && prev != runtime.StatePaused {
-		m.mu.Unlock()
-		return fmt.Errorf("sandbox %s is %s; commit needs RUNNING or PAUSED", id, prev)
-	}
-	sb.State = runtime.StateSnapshotting
-	m.mu.Unlock()
-
-	restore := func() {
-		m.mu.Lock()
-		if cur, ok := m.sandboxes[id]; ok && cur.State == runtime.StateSnapshotting {
-			cur.State = prev
-		}
-		m.mu.Unlock()
-	}
-
-	if prev == runtime.StateRunning {
-		if err := m.rt.Pause(ctx, id); err != nil {
-			restore()
-			return fmt.Errorf("freeze for commit: %w", err)
-		}
-	}
-
-	start := time.Now()
-	err := committer.CommitSandbox(ctx, id, tag)
-	m.observePhase(ctx, "commit", time.Since(start))
-	m.metrics.IncCounter("bean_node_commits_total",
-		"Sandbox commits on this node.",
-		map[string]string{"outcome": boolOutcome(err == nil), "runtime": m.rt.Name()}, 1)
-
-	if prev == runtime.StateRunning {
-		if rerr := m.rt.Resume(ctx, id); rerr != nil {
-			slog.Error("resume after commit failed", logging.KeySandbox, id, logging.KeyError, rerr)
-		}
-	}
-	restore()
-	if err != nil {
-		return fmt.Errorf("commit: %w", err)
-	}
-	return nil
+	return res, nil
 }
 
 // syncGuest asks the agent to flush the guest's filesystem, so what the host
@@ -830,18 +762,18 @@ func (m *Manager) syncViaAgent(ctx context.Context, id string) error {
 // distinguishes a cancelled build from a failed one — a rate of builds someone
 // stopped on purpose says nothing about whether this node's BuildKit is healthy,
 // and counting the two together is how a broken builder hides.
-func (m *Manager) BuildImage(ctx context.Context, req runtime.BuildRequest) (string, error) {
+func (m *Manager) BuildImage(ctx context.Context, req runtime.BuildRequest) (runtime.BuildResult, error) {
 	builder, ok := m.rt.(runtime.ImageBuilder)
 	if !ok {
-		return "", fmt.Errorf("runtime %s cannot build images", m.rt.Name())
+		return runtime.BuildResult{}, fmt.Errorf("runtime %s cannot build images", m.rt.Name())
 	}
 	start := time.Now()
-	ref, err := builder.BuildImage(ctx, req)
+	res, err := builder.BuildImage(ctx, req)
 	m.observePhase(ctx, "image_build", time.Since(start))
 	m.metrics.IncCounter("bean_node_image_builds_total",
 		"Image builds on this node.",
 		map[string]string{"outcome": buildOutcome(ctx, err), "runtime": m.rt.Name()}, 1)
-	return ref, err
+	return res, err
 }
 
 // buildOutcome labels how a build ended. The context is consulted rather than
@@ -1355,15 +1287,17 @@ const guestSyncTimeout = 2 * time.Second
 // specToRuntime projects the proto spec onto the runtime's view.
 func specToRuntime(spec *nodev1.SandboxSpec) *runtime.Spec {
 	return &runtime.Spec{
-		SandboxID:    spec.SandboxId,
-		SnapshotID:   spec.SnapshotId,
-		Image:        spec.Image,
-		CPU:          spec.Cpu,
-		MemoryMiB:    spec.MemoryMib,
-		DiskMiB:      spec.DiskMib,
-		Env:          spec.Env,
-		Cmd:          spec.Cmd,
-		AutoStartCmd: spec.AutoStartCmd,
+		SandboxID:         spec.SandboxId,
+		SnapshotID:        spec.SnapshotId,
+		FSManifestDigest:  spec.FsManifestDigest,
+		Image:             spec.Image,
+		PublishConversion: spec.PublishConversion,
+		CPU:               spec.Cpu,
+		MemoryMiB:         spec.MemoryMib,
+		DiskMiB:           spec.DiskMib,
+		Env:               spec.Env,
+		Cmd:               spec.Cmd,
+		AutoStartCmd:      spec.AutoStartCmd,
 	}
 }
 

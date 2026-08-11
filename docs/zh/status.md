@@ -40,7 +40,6 @@
 | `image.Provider` | ✅ | `DevMapperProvider`（**共享只读基础镜像 + 每 sandbox CoW,一个 sandbox 只占 44 KiB**）、`FileProvider`（全量拷贝,兜底）、`PullingProvider`（首次使用时拉取转换,并发去重） |
 | OCI 镜像拉取与转换 | ✅ | 节点直接说 distribution API（不依赖 docker/containerd）:manifest / 多平台 index / token 挑战 / **layer 断点续传**;whiteout 语义、路径逃逸防护;转换产物带元数据文件记录 ref |
 | prewarm | ✅ | 控制面后台调 `PrewarmImage`,节点拉取转换;节点心跳上报 `cachedImages`,**镜像亲和打分与 prewarm 进度因此才真正生效**（之前从未被填充） |
-| commit | ✅ | 把 sandbox 文件系统封成 base image（`CommitSandbox` RPC）。**先 sync guest 再 pause**——只 pause 的话 guest page cache 还是脏的,读块设备会丢掉刚写的东西 |
 | build image（Dockerfile） | ✅ | `bean build --tag REF .`,BuildKit 在节点上执行。**导出 `type=tar` 扁平 rootfs**,不组装层也不过 registry,和拉取路径共用同一个 image writer |
 | `OCITier`（容器档） | ✅ | `--runtime runc` / `--runtime runsc`:noded 直驱 OCI runtime(`NewOCITier`),**无 containerd** —— 两者同一套 bundle 与子命令,共用 fc 档的 rootfs providers。这是继 `fc`、`local` 之后的第三个已实装 runtime 档 |
 | `LocalRuntime` | ✅ | 进程级 sandbox（dev/CI，含 darwin），跑真 beand 二进制,验证与 fc 档相同的 agent gRPC 面 |
@@ -49,9 +48,7 @@
 
 Python SDK（create/exec/files/pause/resume/kill、snapshot、images、events 订阅、
 context manager、错误分层）、Go CLI（run [--image|--snapshot]/ls/exec/cp/logs/kill/
-pause/resume/events -f/snapshot/**commit**/image）。
-
-Python SDK 也有 `sandbox.commit(tag)`。
+pause/resume/events -f/snapshot/image）。
 
 ### 可观测
 
@@ -303,7 +300,7 @@ loop device 全部归零 —— loop 泄漏的修复(#16)在并发下成立。
 | 项 | 状态 |
 |---|---|
 | build image：声明式 steps（Modal 风格链式 API） | ⛔ 未开始;Dockerfile 路径已通,steps 只是另一个前端编译到同一个 plan（`docs/image-build.md` §3.2、§5） |
-| overlaybd | ⚠️ **已接入并在真机端到端验证**(PR #49)。`OverlaybdProvider` 走 TCMU,`--fc-overlaybd` 开启,**dm-snapshot 仍是默认**。实测:sandbox 从 overlaybd 设备启动、guest 从自己的 rootfs 读到 `PRETTY_NAME="Alpine Linux v3.20"`、写落在可写层、`bean kill` 后无 backstore 无 multipath 残留(`hack/overlaybd-e2e.sh`)。同机对比 dm-snapshot(`hack/overlaybd-bench.sh`):三个共享 base 的镜像 **392 MiB → 118 MiB**,转换 CPU 从每镜像平均 2.2 s 降到 1.37 / 0.49 / 0.44 s。**冷启动延迟没有改善** —— 这条路径依然先下载再转换每一层才能组设备,首次使用比拍平做的功还多,收益在第二个镜像和磁盘上。128 核机器 256 并发 create 是它真正发挥的地方:`fc_rootfs` 3.809 s → 0.908 s,吞吐 47.5 → 88.0 creates/s,零失败零泄漏 —— 原因是子进程数,dm-snapshot 每 sandbox fork 两次 `losetup` 一次 `dmsetup`(每次约 26 ms),而 `attachTCMU` 全是 configfs 写、完全不 fork。**未测**:这个后端上的 `commit` |
+| overlaybd | ⚠️ **已接入并在真机端到端验证**(PR #49)。`OverlaybdProvider` 走 TCMU,`--fc-overlaybd` 开启,**dm-snapshot 仍是默认**。实测:sandbox 从 overlaybd 设备启动、guest 从自己的 rootfs 读到 `PRETTY_NAME="Alpine Linux v3.20"`、写落在可写层、`bean kill` 后无 backstore 无 multipath 残留(`hack/overlaybd-e2e.sh`)。同机对比 dm-snapshot(`hack/overlaybd-bench.sh`):三个共享 base 的镜像 **392 MiB → 118 MiB**,转换 CPU 从每镜像平均 2.2 s 降到 1.37 / 0.49 / 0.44 s。**冷启动延迟没有改善** —— 这条路径依然先下载再转换每一层才能组设备,首次使用比拍平做的功还多,收益在第二个镜像和磁盘上。128 核机器 256 并发 create 是它真正发挥的地方:`fc_rootfs` 3.809 s → 0.908 s,吞吐 47.5 → 88.0 creates/s,零失败零泄漏 —— 原因是子进程数,dm-snapshot 每 sandbox fork 两次 `losetup` 一次 `dmsetup`(每次约 26 ms),而 `attachTCMU` 全是 configfs 写、完全不 fork。 |
 | overlaybd lazy-pull | ⚠️ **已实现,未对真 registry 验证过**。`--fc-overlaybd-lazy-pull`。挂载 7ms、只传 19.6% 的层字节就能挂载并读文件、8 个 HTTP 206 —— 这些数字来自 `docs/decisions.md` §3.1 的手工验证,针对的是**已经封好的 overlaybd 层**,不是来自这份代码。普通 OCI 层是 gzip tar,没有可 seek 的块索引,所以指名这种镜像的 create 会被**拒绝**而不是悄悄建一个打不开的 config。产出封好的层是 `Prewarm` 的活:它转换镜像并把每一层按 OCI digest 发布到 bean 自己的对象存储(`--fc-overlaybd-s3-endpoint`),之后任何读同一个存储的节点直接远端读、不再转换。**create 从不发布** —— 几十 MiB 的 S3 上传不该压在 sandbox 的延迟路径上。所以真正冷的 create 仍然是一次转换,但那是**每机群每镜像一次**而不是每节点一次,前提是有人 prewarm |
 | diff snapshot（增量） | ✅ `--base SNAP` 只存自 base 以来改动的 guest 内存。实测 base 15.5 MB → diff 298 KB(52×);深度 2 的链 restore 后文件全在且 `uptime 57`(载入内存态而非重新开机 —— 新 sandbox 接着被采集那个 guest 的 uptime 走)。合并在 restore 时物化成平坦镜像,**UFFD 缺页路径零改动**;链深超 8 自动转 full;删 base 有子代时返回 409。需 `--track-dirty-pages`(默认关,boot 前生效) |
 | 端口暴露与数据面 | ✅ 一个机制而非两个:Host 里的 `{port}-{sandbox}` 直达该 guest 的该端口,用户的服务器和 agent 走同一条路。无需注册调用、无需宿主端口池 —— noded 进入 namespace 后直连。缺的是按端口的访问控制 |

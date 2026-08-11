@@ -21,14 +21,13 @@ template build。但完全没有构建能力留下两个真实缺口：
 | Source | 来源 | 转换 | 状态流转 |
 |---|---|---|---|
 | `imported` | 用户给的 OCI ref | tar.gz layer → ext4 镜像/块设备，需 convertor | `PENDING → CONVERTING → READY` |
-| `built` | 平台构建 | 见下 | `BUILDING → CONVERTING → READY`（commit 路径跳过 CONVERTING） |
+| `built` | 平台构建 | 见下 | `BUILDING → CONVERTING → READY` |
 
-**关于「built 是否零转换」——取决于构建路径**，这点必须说清，否则会误判成本：
+**关于「built 是否零转换」——并非如此,BuildKit 路径始终需要一次转换**,这点必须说清,否则会误判成本：
 
 | 构建路径 | 产物格式 | 转换 |
 |---|---|---|
 | **BuildKit**（Dockerfile / steps） | 标准 OCI layer | **仍需一次转换** |
-| **commit**（提取运行中 sandbox 的可写层） | ⚠️ 当前是 **dm-snapshot 的 CoW 层**,不是 overlaybd LSMT | 把 `/dev/mapper` 上的合成设备读成一个新的 base ext4 镜像。overlaybd 接入后可改成 `overlaybd-commit` seal,届时才是真正的零转换 |
 
 即便 BuildKit 路径要转换，相对 e2b 仍是改进：转换发生在 **build 时**（一次、
 可缓存、不在用户等待路径上），而 e2b 是 build 完再花 5–15 分钟转 VM rootfs。
@@ -67,18 +66,13 @@ img = (client.images.build("myteam/eval-base:v1")
 
 SDK 把链式调用编译成 §5 的 build plan；服务端不区分它来自 Dockerfile 还是 steps。
 
-### 3.3 commit（快照当前 sandbox 为镜像）✅
-
-「先交互式装环境，再固化成镜像」——探索性工作流的最短路径，且零转换：
-
-```
-bean commit sbx_abc -t myteam/explored:v1
-```
+> 「先交互式装环境，再固化」——那个探索性工作流由**文件系统 snapshot**（§4）承担,
+> 它可以被提升进镜像命名空间,而不是由 build 承担。
 
 ## 4. build image 与 snapshot 的区别 ✅
 
-两者共用「提取 sandbox 可写层」的机制，但**不是同一种东西**，混淆会让数据模型
-和用户心智都乱掉：
+snapshot 同样会捕获 sandbox 的文件系统,但它与 built image **不是同一种东西**,
+混淆会让数据模型和用户心智都乱掉：
 
 | | snapshot | built image |
 |---|---|---|
@@ -90,8 +84,8 @@ bean commit sbx_abc -t myteam/explored:v1
 
 ## 5. Build Plan：统一中间表示 ⚠️
 
-> `store.BuildPlan` / `BuildStep` 类型已定义 ✅,但只有 `dockerfile` 与 `commit`
-> 两种 kind 走通;`steps` kind 的编译器未实现。per-step cacheKey 字段存在但
+> `store.BuildPlan` / `BuildStep` 类型已定义 ✅,但只有 `dockerfile`
+> 一种 kind 走通;`steps` kind 的编译器未实现。per-step cacheKey 字段存在但
 > 未被使用。
 
 
@@ -121,25 +115,26 @@ type BuildStep struct {
 }
 ```
 
-## 6. API ⚠️
+## 6. API
 
-> 构建的**日志流与取消**未实现 —— 这是当前最明显的缺口:一个跑了几分钟的构建
-> 既看不到进度也停不下来。
+> 构建的**日志流与取消**已实现:日志端点(`build.go:289`)与取消(`build.go:358`)
+> 走 noded 的长活 `BuildImage` 流(`grpc.go:143`)。仅剩一个注意点 —— 日志缓冲是
+> 每副本进程内内存(`buildlog.go`),所以多副本 bean-api 下,logs/cancel 请求必须打到
+> 发起该 build 的那个副本;见 [build-service.md §3.5](build-service.md)。
 
 
 ```
-POST /v1/images/build      Dockerfile 或 steps → 202 { buildId }
+POST /v1/templates/build   Dockerfile 或 steps → 202 { buildId }
      { "tag": "...", "from": "...", "steps": [...],
        "dockerfile": "...", "contextRef": "..." }
-POST /v1/images/build/{id}/context   上传 build context（tar）
-GET  /v1/images/build/{id}           状态、日志位置、产出 digest
-GET  /v1/images/build?label=          列表
-POST /v1/images/build/{id}/cancel
-POST /v1/sandboxes/{id}/commit  { "tag": "..." } → 202 { imageRef }
+POST /v1/templates/build/{id}/context   上传 build context（tar）
+GET  /v1/templates/build/{id}           状态、日志位置、产出 digest
+GET  /v1/templates/build?label=          列表
+POST /v1/templates/build/{id}/cancel
 ```
 
-Build 状态机：`PENDING → RUNNING → CONVERTING → READY | FAILED | CANCELLED`
-（commit 路径跳过 CONVERTING）。日志按 build 落存储，可流式查看。
+Build 状态机：`PENDING → RUNNING → CONVERTING → READY | FAILED | CANCELLED`。
+日志按 build 落存储，可流式查看。
 
 ## 7. 执行位置 ⚠️
 
@@ -206,7 +201,6 @@ buildctl --addr <buildkitd> build
 | e2b | Dockerfile | BuildKit → 转 VM rootfs | template（5–15 分钟/个） |
 | Daytona | Dockerfile / Declarative Builder | BuildKit | snapshot |
 | Modal | Python 链式调用 | 自研构建器（要求镜像内有 Python） | 内容寻址层 |
-| **bean** | Dockerfile ✅ / 声明式 steps 📐 / commit ✅ | BuildKit（平台侧）✅ / dm-snapshot CoW 读出 ⚠️ | ⚠️ 当前落节点本地 ext4;overlaybd layer on S3 是目标 |
+| **bean** | Dockerfile ✅ / 声明式 steps 📐 | BuildKit（平台侧）✅ | ⚠️ 当前落节点本地 ext4;overlaybd layer on S3 是目标 |
 
-bean 的差异：三种形式统一到一个 plan;commit 路径零转换;产物直接是 fc 档可用的
-块设备格式，不需要再转一次。
+bean 的差异：构建形式统一到一个 plan;产物直接是 fc 档可用的块设备格式，不需要再转一次。

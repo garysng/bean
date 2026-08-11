@@ -12,6 +12,8 @@ import (
 	"time"
 
 	nodev1 "github.com/garysng/bean/internal/gen/bean/node/v1"
+	"github.com/garysng/bean/internal/node/runtime"
+	"github.com/garysng/bean/internal/sbxtoken"
 )
 
 func TestParseSandboxHost(t *testing.T) {
@@ -334,5 +336,58 @@ func TestWebSocketUpgradeSurvivesTheNodeHop(t *testing.T) {
 	if strings.TrimSpace(echoed) != "ECHO:ping" {
 		t.Fatalf("after the upgrade got %q, want ECHO:ping -- the 101 arrived but the "+
 			"tunnel carries no bytes", strings.TrimSpace(echoed))
+	}
+}
+
+// The agent's port is the one place the forwarder injects the per-sandbox token,
+// so a client dialling through the proxy never handles it. These two tests pin the
+// boundary from both sides: the agent port carries the credential, and no other
+// port does -- a user's process must never be handed the secret that lets its
+// holder impersonate noded to the agent.
+
+func TestTargetForCarriesTheAgentTokenOnTheAgentPort(t *testing.T) {
+	m, _ := newNetworkedManager(t)
+	if _, err := m.Create(context.Background(), &nodev1.SandboxSpec{
+		SandboxId: "sbx_tok", Image: "scratch",
+	}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	target, err := m.TargetFor("sbx_tok", runtime.AgentGuestPort)
+	if err != nil {
+		t.Fatalf("TargetFor: %v", err)
+	}
+	if target.AgentToken == "" {
+		t.Fatal("the agent port resolved without a token; a client dialling through " +
+			"the proxy would then reach a fail-closed agent and be denied")
+	}
+	// The token the forwarder injects must be the plaintext the agent's hash was
+	// derived from, or the agent rejects it. Verify against the hash the guest holds.
+	m.mu.Lock()
+	sb := m.sandboxes["sbx_tok"]
+	hash := sbxtoken.Hash(sb.agentToken)
+	m.mu.Unlock()
+	if !sbxtoken.Verify(hash, target.AgentToken) {
+		t.Fatal("the injected token does not verify against the sandbox's hash, so " +
+			"the agent would reject the proxied call")
+	}
+}
+
+func TestTargetForWithholdsTheAgentTokenFromAUserPort(t *testing.T) {
+	m, _ := newNetworkedManager(t)
+	if _, err := m.Create(context.Background(), &nodev1.SandboxSpec{
+		SandboxId: "sbx_userport", Image: "scratch",
+	}); err != nil {
+		t.Fatalf("create: %v", err)
+	}
+
+	target, err := m.TargetFor("sbx_userport", 8000)
+	if err != nil {
+		t.Fatalf("TargetFor: %v", err)
+	}
+	if target.AgentToken != "" {
+		t.Fatal("a user port carries the agent token; the process listening there " +
+			"runs code the sandbox controls, and would receive the secret that keeps " +
+			"it from dialling the agent as noded")
 	}
 }

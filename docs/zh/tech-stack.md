@@ -144,7 +144,7 @@ dm-snapshot 仍是默认。验证中撞到的两个陷阱都在那份代码里,
 
 tcmu 后端功能完整,所以**不需要先升级宿主内核**;ublk(≥ 6.0)只是更快。
 接入 overlaybd 还会改变层的故事:今天转换会把镜像压平成单个 ext4、丢掉层结构,
-所以 `commit` 是读出一个全量镜像而不是 seal 一个增量层。有了 overlaybd,
+所以封装 sandbox 的文件系统是读出一个全量镜像而不是 seal 一个增量层。有了 overlaybd,
 `overlaybd-commit` 直接 seal LSMT 可写层,「零转换」这个承诺才变成字面意义上的真。
 
 **Nydus 被否掉的理由和 overlayfs 一样**:它是文件级的,文件系统语义进不了 microVM,
@@ -715,7 +715,7 @@ COPY 和 ADD 语义、多阶段构建、ARG 插值、构建缓存、`.dockerigno
 
 平台保留的是**输出形态**:BuildKit 能导出**扁平 rootfs tar**,
 而这恰好就是 base 镜像需要的 —— 所以没有层组装、没有 registry 往返,
-产物走的是和拉取镜像同一个 writer。`commit` 是反向路径 ——
+产物走的是和拉取镜像同一个 writer。把文件系统 snapshot 提升进 image 命名空间是反向路径 ——
 从合成设备上读出完整 ext4 —— 而它产出的是全量镜像而非增量层,
 因为 dm-snapshot 的 CoW 层不是 OCI 层格式。
 

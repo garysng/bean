@@ -213,7 +213,7 @@ func TestEnvAlwaysCarriesAPath(t *testing.T) {
 // error: the first means place the work elsewhere, the second means retry.
 func TestCheckpointReportsUnsupportedDistinctly(t *testing.T) {
 	r := NewOCIRuntime("runsc", "/bin/true", t.TempDir(), nil)
-	err := r.Checkpoint(nil, "sbx", os.Stdout, CheckpointOptions{})
+	_, err := r.Checkpoint(nil, "sbx", os.Stdout, CheckpointOptions{})
 	if err == nil {
 		t.Fatal("Checkpoint claimed to succeed")
 	}

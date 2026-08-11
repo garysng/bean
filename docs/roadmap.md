@@ -11,7 +11,7 @@ is more accurate than reading by Phase — the authoritative record is `docs/sta
 points:
 
 - ✅ **Beyond P0/P1 already**: fc direct boot (952ms), multi-node scheduling with committed
-  quantities persisted, S3 snapshot blobs, OCI pull and conversion, commit, BuildKit builds,
+  quantities persisted, S3 snapshot blobs, OCI pull and conversion, BuildKit builds,
   end-to-end OTel trace
 - ✅ **The snapshot part of P3/P4 is already done, ahead of schedule**: pause/resume, three
   snapshot variants (full / `--no-memory` / `--base` incremental), UFFD on-demand page serving,

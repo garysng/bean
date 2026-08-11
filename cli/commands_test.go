@@ -25,11 +25,12 @@ func stubAPI(t *testing.T) (*httptest.Server, *[]string) {
 		seen = append(seen, "create")
 		var body map[string]any
 		json.NewDecoder(r.Body).Decode(&body)
-		img, _ := body["image"].(string)
+		imgRef, _ := body["imageRef"].(string)
+		tpl, _ := body["template"].(string)
 		snap, _ := body["snapshot"].(string)
 		// A create must name exactly one source; "reject-me" simulates a
 		// server-side rejection.
-		if (img == "" && snap == "") || img == "reject-me" {
+		if (imgRef == "" && tpl == "" && snap == "") || imgRef == "reject-me" {
 			w.WriteHeader(400)
 			json.NewEncoder(w).Encode(map[string]any{
 				"error": map[string]string{"code": "IMAGE_REF_INVALID", "message": "image rejected"}})
@@ -38,7 +39,7 @@ func stubAPI(t *testing.T) (*httptest.Server, *[]string) {
 		w.WriteHeader(201)
 		json.NewEncoder(w).Encode(map[string]any{
 			"sandbox": map[string]any{"id": "sbx_cli1", "state": "RUNNING",
-				"image": body["image"], "labels": body["labels"], "createdAt": "2026-08-01T00:00:00Z"}})
+				"image": imgRef, "labels": body["labels"], "createdAt": "2026-08-01T00:00:00Z"}})
 	})
 	mux.HandleFunc("GET /v1/sandboxes", func(w http.ResponseWriter, r *http.Request) {
 		seen = append(seen, "list:"+r.URL.Query().Get("label"))
@@ -130,27 +131,27 @@ func stubAPI(t *testing.T) (*httptest.Server, *[]string) {
 		seen = append(seen, "snapshot-rm")
 		w.WriteHeader(204)
 	})
-	mux.HandleFunc("GET /v1/images", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("GET /v1/templates", func(w http.ResponseWriter, r *http.Request) {
 		// The source filter has to reach the server as a query param; the CLI
-		// deciding locally would list images the caller cannot see.
+		// deciding locally would list templates the caller cannot see.
 		if source := r.URL.Query().Get("source"); source != "" {
-			seen = append(seen, "images:source="+source)
+			seen = append(seen, "templates:source="+source)
 		} else {
-			seen = append(seen, "images")
+			seen = append(seen, "templates")
 		}
-		json.NewEncoder(w).Encode(map[string]any{"images": []map[string]any{{
-			"ref": "busybox:1.36", "state": "PENDING", "source": "imported",
-			"cachedNodes": 0, "sizeBytes": 0,
+		json.NewEncoder(w).Encode(map[string]any{"templates": []map[string]any{{
+			"id": "tpl_cli1", "name": "busybox:1.36", "state": "PENDING",
+			"source": "converted", "cachedNodes": 0, "sizeBytes": 0,
 		}}})
 	})
-	mux.HandleFunc("GET /v1/images/status", func(w http.ResponseWriter, r *http.Request) {
-		seen = append(seen, "image-status:"+r.URL.Query().Get("ref"))
+	mux.HandleFunc("GET /v1/templates/status", func(w http.ResponseWriter, r *http.Request) {
+		seen = append(seen, "template-status:"+r.URL.Query().Get("name"))
 		json.NewEncoder(w).Encode(map[string]any{
-			"ref": r.URL.Query().Get("ref"), "state": "PENDING", "format": "oci",
-			"cachedNodes": 0, "sizeBytes": 0,
+			"id": "tpl_cli1", "name": "busybox:1.36", "state": "PENDING",
+			"format": "oci", "cachedNodes": 0, "sizeBytes": 0,
 		})
 	})
-	mux.HandleFunc("POST /v1/images/prewarm", func(w http.ResponseWriter, r *http.Request) {
+	mux.HandleFunc("POST /v1/templates/prewarm", func(w http.ResponseWriter, r *http.Request) {
 		var body map[string]any
 		json.NewDecoder(r.Body).Decode(&body)
 		seen = append(seen, fmt.Sprintf("prewarm:nodes=%v", body["targetNodes"]))
@@ -177,7 +178,7 @@ func runCLI(t *testing.T, ts *httptest.Server, args ...string) (string, string, 
 
 func TestCmdRun(t *testing.T) {
 	ts, seen := stubAPI(t)
-	out, errStr, code := runCLI(t, ts, "run", "--image", "busybox", "--label", "k=v",
+	out, errStr, code := runCLI(t, ts, "run", "--image-ref", "busybox", "--label", "k=v",
 		"--idle-timeout", "300s", "--on-idle", "kill")
 	if code != 0 {
 		t.Fatalf("code=%d err=%q", code, errStr)
@@ -194,7 +195,7 @@ func TestCmdRunAPIError(t *testing.T) {
 	ts, _ := stubAPI(t)
 	// Server rejects this image; the CLI must surface the API error code
 	// rather than a generic HTTP failure.
-	_, errStr, code := runCLI(t, ts, "run", "--image", "reject-me")
+	_, errStr, code := runCLI(t, ts, "run", "--image-ref", "reject-me")
 	if code == 0 {
 		t.Fatal("expected failure")
 	}
@@ -207,7 +208,7 @@ func TestCmdRunRequiresImageLocally(t *testing.T) {
 	ts, seen := stubAPI(t)
 	// Missing --image is caught client-side; no request should be sent.
 	_, errStr, code := runCLI(t, ts, "run")
-	if code != 125 || !strings.Contains(errStr, "--image or --snapshot") {
+	if code != 125 || !strings.Contains(errStr, "--image-ref, --template or --snapshot") {
 		t.Errorf("code=%d stderr=%q", code, errStr)
 	}
 	if len(*seen) != 0 {
@@ -447,7 +448,7 @@ func TestCmdRunFromSnapshot(t *testing.T) {
 
 func TestCmdRunRejectsBothSources(t *testing.T) {
 	ts, seen := stubAPI(t)
-	_, errStr, code := runCLI(t, ts, "run", "--image", "x", "--snapshot", "s")
+	_, errStr, code := runCLI(t, ts, "run", "--image-ref", "x", "--snapshot", "s")
 	if code != 125 || !strings.Contains(errStr, "exactly one") {
 		t.Errorf("code=%d stderr=%q", code, errStr)
 	}
@@ -515,28 +516,28 @@ func TestCmdSnapshotUsage(t *testing.T) {
 	}
 }
 
-func TestCmdImage(t *testing.T) {
+func TestCmdTemplate(t *testing.T) {
 	ts, seen := stubAPI(t)
 
-	out, _, code := runCLI(t, ts, "image", "ls")
+	out, _, code := runCLI(t, ts, "template", "ls")
 	if code != 0 || !strings.Contains(out, "busybox:1.36") {
 		t.Errorf("ls: code=%d out=%q", code, out)
 	}
 	// Provenance is shown, because "is this ours or pulled from outside" is the
-	// question someone looking at an unfamiliar ref has.
-	if !strings.Contains(out, "imported") {
+	// question someone looking at an unfamiliar template has.
+	if !strings.Contains(out, "converted") {
 		t.Errorf("ls does not report source: %q", out)
 	}
 
-	out, _, code = runCLI(t, ts, "image", "ls", "--source", "built")
+	out, _, code = runCLI(t, ts, "template", "ls", "--source", "built")
 	if code != 0 {
 		t.Fatalf("ls --source code = %d out=%q", code, out)
 	}
-	if !slices.Contains(*seen, "images:source=built") {
+	if !slices.Contains(*seen, "templates:source=built") {
 		t.Errorf("--source not passed to the server: %v", *seen)
 	}
 
-	out, _, code = runCLI(t, ts, "image", "status", "busybox:1.36")
+	out, _, code = runCLI(t, ts, "template", "status", "busybox:1.36")
 	if code != 0 {
 		t.Fatalf("status code = %d", code)
 	}
@@ -545,7 +546,7 @@ func TestCmdImage(t *testing.T) {
 		t.Errorf("status out = %q", out)
 	}
 
-	out, _, code = runCLI(t, ts, "image", "prewarm", "busybox:1.36", "--replicas", "2")
+	out, _, code = runCLI(t, ts, "template", "prewarm", "busybox:1.36", "--replicas", "2")
 	if code != 0 {
 		t.Fatalf("prewarm code = %d", code)
 	}
@@ -565,11 +566,11 @@ func TestCmdImage(t *testing.T) {
 	}
 }
 
-func TestCmdImagePrewarmRejectsANonNumericReplicaCount(t *testing.T) {
+func TestCmdTemplatePrewarmRejectsANonNumericReplicaCount(t *testing.T) {
 	ts, _ := stubAPI(t)
 	// Silently ignoring the value would warm one copy while the caller believed
 	// they had asked for many.
-	_, errStr, code := runCLI(t, ts, "image", "prewarm", "busybox:1.36", "--replicas", "lots")
+	_, errStr, code := runCLI(t, ts, "template", "prewarm", "busybox:1.36", "--replicas", "lots")
 	if code == 0 {
 		t.Error("accepted a non-numeric replica count")
 	}
@@ -578,9 +579,9 @@ func TestCmdImagePrewarmRejectsANonNumericReplicaCount(t *testing.T) {
 	}
 }
 
-func TestCmdImageUsage(t *testing.T) {
+func TestCmdTemplateUsage(t *testing.T) {
 	ts, _ := stubAPI(t)
-	for _, args := range [][]string{{"image"}, {"image", "status"}, {"image", "prewarm"}, {"image", "bogus"}} {
+	for _, args := range [][]string{{"template"}, {"template", "status"}, {"template", "prewarm"}, {"template", "bogus"}} {
 		if _, errStr, code := runCLI(t, ts, args...); code == 0 {
 			t.Errorf("args %v: expected failure, stderr=%q", args, errStr)
 		}

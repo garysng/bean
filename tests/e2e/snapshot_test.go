@@ -15,8 +15,8 @@ import (
 func TestE2ESnapshotRestore(t *testing.T) {
 	// 1. Create and populate a sandbox.
 	code, out := api(t, "POST", "/v1/sandboxes", map[string]any{
-		"image":  "python:3.12",
-		"labels": map[string]string{"suite": "snapshot"},
+		"imageRef": "python:3.12",
+		"labels":   map[string]string{"suite": "snapshot"},
 	})
 	if code != http.StatusCreated {
 		t.Fatalf("create: %d %v", code, out)
@@ -75,22 +75,27 @@ func TestE2ESnapshotRestore(t *testing.T) {
 	api(t, "DELETE", "/v1/sandboxes/"+dstID, nil)
 }
 
-// TestE2EImageAndRegistry covers the image metadata surface end to end.
-func TestE2EImageAndRegistry(t *testing.T) {
-	// Creating a sandbox registers its image.
-	code, out := api(t, "POST", "/v1/sandboxes", map[string]any{"image": "busybox:1.36"})
+// TestE2ETemplateAndRegistry covers the template metadata surface end to end.
+func TestE2ETemplateAndRegistry(t *testing.T) {
+	// Creating a sandbox from an OCI ref registers a template under that name,
+	// so it is queryable even before any conversion has run.
+	code, out := api(t, "POST", "/v1/sandboxes", map[string]any{"imageRef": "busybox:1.36"})
 	if code != http.StatusCreated {
 		t.Fatalf("create: %d %v", code, out)
 	}
 	id := out["sandbox"].(map[string]any)["id"].(string)
 	defer api(t, "DELETE", "/v1/sandboxes/"+id, nil)
 
-	code, out = api(t, "GET", "/v1/images/status?ref=busybox%3A1.36", nil)
+	code, out = api(t, "GET", "/v1/templates/status?name=busybox%3A1.36", nil)
 	if code != http.StatusOK {
-		t.Fatalf("image status: %d %v", code, out)
+		t.Fatalf("template status: %d %v", code, out)
 	}
-	if out["ref"] != "busybox:1.36" {
-		t.Errorf("ref = %v", out["ref"])
+	if out["name"] != "busybox:1.36" {
+		t.Errorf("name = %v", out["name"])
+	}
+	// The template came from an OCI ref, so its provenance is recorded.
+	if src, ok := out["ociSource"].(map[string]any); !ok || src["ref"] != "busybox:1.36" {
+		t.Errorf("ociSource = %v", out["ociSource"])
 	}
 	// Nothing has been converted, so only the standard pull path applies.
 	if out["format"] != "oci" {
@@ -98,14 +103,14 @@ func TestE2EImageAndRegistry(t *testing.T) {
 	}
 
 	// Prewarm accepts a batch and reports a job.
-	code, out = api(t, "POST", "/v1/images/prewarm", map[string]any{
+	code, out = api(t, "POST", "/v1/templates/prewarm", map[string]any{
 		"refs": []string{"busybox:1.36", "alpine:3.20"}, "targetNodes": 1,
 	})
 	if code != http.StatusAccepted {
 		t.Fatalf("prewarm: %d %v", code, out)
 	}
 	jobID := out["jobId"].(string)
-	code, out = api(t, "GET", "/v1/images/prewarm/"+jobID, nil)
+	code, out = api(t, "GET", "/v1/templates/prewarm/"+jobID, nil)
 	if code != http.StatusOK {
 		t.Fatalf("prewarm status: %d %v", code, out)
 	}

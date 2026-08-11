@@ -49,14 +49,26 @@ type Spec struct {
 	SandboxID string
 	// SnapshotID identifies the checkpoint a restore comes from, so a node can
 	// reuse state it has already unpacked. Empty for a cold start.
-	SnapshotID   string
-	Image        string
-	CPU          float64
-	MemoryMiB    int64
-	DiskMiB      int64
-	Env          map[string]string
-	Cmd          []string
-	AutoStartCmd bool
+	SnapshotID string
+	// FSManifestDigest names a restore's filesystem as an overlaybd layer chain in
+	// the shared store, resolved the same way an image tag is. Empty for a cold
+	// start, and empty for a local-tier restore whose filesystem rides in the
+	// bundle -- both of which take their filesystem from elsewhere (the image, or
+	// the streamed extents) rather than from a sealed snapshot chain.
+	FSManifestDigest string
+	Image            string
+	// PublishConversion asks a cold start from an OCI reference to publish what it
+	// converts to the shared store and report the coordinates back, so the control
+	// plane records a reusable template. Empty for a restore, a warm-snapshot
+	// create, or a create from an already-converted template -- none of which
+	// convert an OCI reference. See SandboxSpec.publish_conversion.
+	PublishConversion bool
+	CPU               float64
+	MemoryMiB         int64
+	DiskMiB           int64
+	Env               map[string]string
+	Cmd               []string
+	AutoStartCmd      bool
 
 	// Network is the addressing this sandbox was assigned, or nil on a node with
 	// no networking configured.
@@ -90,6 +102,13 @@ type Handle struct {
 	StartedAt  time.Time
 	PID        int // primary host process (fc process or local agent), 0 if n/a
 	RuntimeTag string
+
+	// Conversion reports what a cold start from an OCI reference converted and
+	// published to the shared store, so the control plane can record a reusable
+	// template. Nil unless the create asked to publish (spec.PublishConversion)
+	// and the provider actually converted and published a chain -- a restore, a
+	// warm-snapshot create, or a provider with no store all leave it nil.
+	Conversion *image.ConversionResult
 }
 
 // Runtime creates and manages sandbox instances. Implementations are
@@ -103,10 +122,13 @@ type Runtime interface {
 	Pause(ctx context.Context, id string) error
 	Resume(ctx context.Context, id string) error
 
-	// Checkpoint writes a restorable representation of the sandbox to w.
-	// The format is runtime-specific and not interchangeable between
-	// tiers, which is why a snapshot records the runtime that produced it.
-	Checkpoint(ctx context.Context, id string, w io.Writer, opts CheckpointOptions) error
+	// Checkpoint writes a restorable representation of the sandbox to w and
+	// reports where its filesystem was stored. The memory and device state (if
+	// any) stream to w; the filesystem, on the overlaybd tier, is sealed into the
+	// shared layer store and only its manifest identity comes back in the result.
+	// The format is runtime-specific and not interchangeable between tiers, which
+	// is why a snapshot records the runtime that produced it.
+	Checkpoint(ctx context.Context, id string, w io.Writer, opts CheckpointOptions) (CheckpointResult, error)
 
 	// Fork creates a sandbox from checkpoints previously written by the same
 	// runtime. The spec supplies identity and resources; the checkpoints supply
@@ -160,6 +182,25 @@ type SnapshotLayer struct {
 	ID string
 	// Data is the layer's bundle. Layers are consumed in order, exactly once.
 	Data io.Reader
+}
+
+// CheckpointResult reports where a checkpoint's filesystem was stored.
+//
+// On the overlaybd tier the filesystem is sealed into the shared layer store rather than
+// bundled into the stream, so these coordinates -- not the bytes -- are what a restore needs
+// to reassemble it. They are empty for a checkpoint whose filesystem is not a shared layer
+// chain (the local tier, or an overlaybd node with no store), where the bundle still carries
+// the filesystem.
+type CheckpointResult struct {
+	// FSManifestDigest keys the snapshot filesystem's overlaybd manifest in the shared
+	// store. A restore resolves the layer chain from it the way a create resolves an image.
+	FSManifestDigest string
+	// FSLayerDigests is the filesystem's layer chain, base first, for provenance and layer
+	// accounting. It shares the base image's layer digests.
+	FSLayerDigests []string
+	// FSSizeBytes is the sealed size of the snapshot's own top layer, not the whole chain:
+	// the shared base layers are already accounted to the image.
+	FSSizeBytes int64
 }
 
 // CheckpointOptions selects what a checkpoint captures.
@@ -296,8 +337,29 @@ type ImageConfigReader interface {
 // Building is optional per node: it needs BuildKit, and a cluster may well want
 // dedicated builder nodes rather than every sandbox host carrying the dependency.
 type ImageBuilder interface {
-	// BuildImage builds a base image and returns its reference.
-	BuildImage(ctx context.Context, req BuildRequest) (string, error)
+	// BuildImage builds a base image and returns its reference and, when the node
+	// published it to a shared store, where the artifact lives.
+	BuildImage(ctx context.Context, req BuildRequest) (BuildResult, error)
+}
+
+// BuildResult is what a build produced, at the runtime boundary. It mirrors the
+// node's image.BuildResult without importing it, so the runtime interface stays free
+// of the image package's internals.
+type BuildResult struct {
+	// ImageRef is the built image's reference, always set on success.
+	ImageRef string
+	// OverlaybdRef names the published shared artifact, empty when the build stayed
+	// node-local (no store configured, or the upload was declined).
+	OverlaybdRef string
+	// SizeBytes is the published layer's sealed length, zero when nothing was
+	// published.
+	SizeBytes int64
+	// LayerDigests is the published layer chain, base first.
+	LayerDigests []string
+	// Config is the image configuration recovered from the build's OCI export, so
+	// the control plane records the Dockerfile's ENV/ENTRYPOINT/CMD/WORKDIR on the
+	// template. Nil when the build declared none.
+	Config *image.Config
 }
 
 // BuildRequest describes a build at the runtime boundary. It mirrors the node's
@@ -317,15 +379,4 @@ type BuildRequest struct {
 	// builder's goroutine, so an implementation that blocks here slows the
 	// build down.
 	Logs io.Writer
-}
-
-// SandboxCommitter is implemented by runtimes that can turn a sandbox's
-// filesystem into a base image.
-//
-// This is not a snapshot: the result has no memory state and is not bound to the
-// runtime that produced it, so other sandboxes — on any tier — can start from
-// it. The sandbox must be paused for the read to be consistent, which the caller
-// arranges since only it knows whether the sandbox should keep running.
-type SandboxCommitter interface {
-	CommitSandbox(ctx context.Context, id, tag string) error
 }

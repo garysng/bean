@@ -16,7 +16,7 @@ import (
 // ErrBlobNotFound — is behaviour of the server, not of this wrapper.
 //
 // Set BEAN_S3_ENDPOINT to enable; otherwise these skip.
-func testS3Blobs(t *testing.T) *S3Blobs {
+func testS3Blobs(t *testing.T) Blobs {
 	t.Helper()
 	endpoint := os.Getenv("BEAN_S3_ENDPOINT")
 	if endpoint == "" {

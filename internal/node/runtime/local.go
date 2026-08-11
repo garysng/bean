@@ -72,12 +72,19 @@ func (r *LocalRuntime) Create(ctx context.Context, spec *Spec) (*Handle, error) 
 // either way. So a restore here always starts the process fresh, which is what
 // IncludeMemory=false means on the microVM tier — the difference the option
 // describes does not exist here rather than being unimplemented.
-func (r *LocalRuntime) Checkpoint(ctx context.Context, id string, w io.Writer, _ CheckpointOptions) error {
+// The empty CheckpointResult reports no shared filesystem: this tier bundles its
+// whole filesystem into the stream rather than sealing it into the layer store,
+// so a restore reads the bytes back from the bundle. The layer-chain fs format is
+// overlaybd/microVM-only, guarded on the provider exactly as publishing is.
+func (r *LocalRuntime) Checkpoint(ctx context.Context, id string, w io.Writer, _ CheckpointOptions) (CheckpointResult, error) {
 	sb, err := r.get(id)
 	if err != nil {
-		return err
+		return CheckpointResult{}, err
 	}
-	return tarDirectory(sb.root, w)
+	if err := tarDirectory(sb.root, w); err != nil {
+		return CheckpointResult{}, err
+	}
+	return CheckpointResult{}, nil
 }
 
 // Fork creates a sandbox and unpacks a checkpoint over its rootfs.
