@@ -345,9 +345,28 @@ nothing" for a sandbox whose filesystem was on disk, which reads as a lost write
 bookkeeping. `OwnedExtents` now asks the file first, via `SEEK_DATA`/`SEEK_HOLE`, because the
 filesystem's record of which regions are allocated survives a reattach and the bitmap does not.
 
-**Restore still fails**, and on a gate that has nothing to do with sealing: `remoteLayer` returns
-nothing unless `LazyPull` is on, so a restore cannot fetch its own sealed layer from the store even
-though publication is unconditional. That is the next thing to fix, and it is one condition.
+**The whole cycle works now**, verified on hardware without lazy pull: write a marker, snapshot
+with `--no-memory`, create from the snapshot, and the restored guest reads the marker back.
+
+Getting there needed one distinction the code was missing. A layer with no local file is remote for
+two different reasons, and they are not interchangeable. A cold create's image layer is remote *by
+choice* -- it could be converted from the registry -- so refusing to read it remotely respects the
+deployment decision lazy pull exists to offer. A snapshot's chain is remote *by necessity*:
+`snapshotFSLowers` returns a remote reference only after finding no local file, and a sealed
+snapshot layer has no registry blob behind it. Refusing that does not fall back to owning it
+locally; it makes the restore impossible, which is what it did -- publication is unconditional, so
+a checkpoint published its layer and the restore then declined to fetch it, reporting "in neither
+the node nor the store" about a digest that was in the store.
+
+So `requiredRemoteLayer` reads a store-only layer regardless of lazy pull, and `layerSources`
+carries a `storeOnly` flag saying which kind of chain it is resolving. The image walk is untouched
+and still gated.
+
+**One operational note that is not a bug in bean.** A guest's `sync` does not put its writes on the
+block device, so a snapshot taken immediately after a small write captures nothing -- the sealer
+refuses it rather than sealing an empty layer, which is correct but surprising. Dropping the guest's
+caches (`echo 3 > /proc/sys/vm/drop_caches`) does flush it. The checkpoint's own flush is not
+enough, and that applies to the tcmu route equally since both read the same device.
 
 ### the worker split did not cost the other paths ✅
 

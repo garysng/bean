@@ -63,7 +63,7 @@ func TestLayerSourcesRefusesARemoteOnlyLayerWithoutLazyPull(t *testing.T) {
 		{File: filepath.Join(t.TempDir(), "local.lsmt"), Digest: "sha256:aaa"},
 		{Digest: "sha256:bbb"},
 	}
-	_, err := p.layerSources(context.Background(), lowers, "alpine:3.20")
+	_, err := p.layerSources(context.Background(), lowers, "alpine:3.20", layerSourceOpts{})
 	if err == nil {
 		t.Fatal("a chain with a remote-only layer was accepted with lazy pull off, so the " +
 			"create would fail later inside the layer reader with no mention of which layer")
@@ -86,7 +86,7 @@ func TestLayerSourcesReadsRemoteLayersWhenLazyPullIsOn(t *testing.T) {
 		{File: "/a/base.lsmt", Digest: "sha256:local"},
 		{Digest: "sha256:remote", Size: 4096, RepoBlobURL: "reg.example/test/img:latest"},
 	}
-	srcs, err := p.layerSources(context.Background(), lowers, "reg.example/test/img:latest")
+	srcs, err := p.layerSources(context.Background(), lowers, "reg.example/test/img:latest", layerSourceOpts{})
 	if err != nil {
 		t.Fatalf("resolve a mixed chain with lazy pull on: %v", err)
 	}
@@ -114,7 +114,7 @@ func TestLayerSourcesKeepsChainOrder(t *testing.T) {
 		{File: "/a/base.lsmt", Digest: "sha256:1"},
 		{File: "/a/top.lsmt", Digest: "sha256:2"},
 	}
-	srcs, err := p.layerSources(context.Background(), local, "alpine:3.20")
+	srcs, err := p.layerSources(context.Background(), local, "alpine:3.20", layerSourceOpts{})
 	if err != nil {
 		t.Fatalf("a fully local chain was refused: %v", err)
 	}
@@ -125,5 +125,41 @@ func TestLayerSourcesKeepsChainOrder(t *testing.T) {
 	if paths[0] != "/a/base.lsmt" || paths[1] != "/a/top.lsmt" {
 		t.Errorf("paths = %v, want the chain in its original order: the merge treats the "+
 			"last as the newest layer", paths)
+	}
+}
+
+// A chain resolved from a snapshot reads its remote layers without lazy pull; a cold create's
+// does not.
+//
+// The two look identical at this point -- a layer with no File -- and treating them the same is
+// what broke restore. A cold create's image layer is remote by choice, because it could be
+// converted from the registry, so refusing it respects the deployment decision lazy pull exists
+// to offer. A restore's chain is remote by necessity: snapshotFSLowers only returns a remote
+// reference after finding no local file, and a sealed snapshot layer has no registry blob behind
+// it. Refusing that does not fall back to anything -- it just fails the restore.
+func TestLayerSourcesHonoursAStoreOnlyChain(t *testing.T) {
+	p := NewOverlaybdProvider(t.TempDir(), t.TempDir(), t.TempDir(), NewRegistry(nil), nil, 2048)
+	p.LazyPull = false
+
+	remoteOnly := []obdLayer{
+		{Digest: "sha256:sealed", Size: 4096, RepoBlobURL: "http://store.example/bucket/blobs"},
+	}
+
+	// As a restore resolves it: no local file, and nowhere else to come from.
+	srcs, err := p.layerSources(context.Background(), remoteOnly, "irrelevant",
+		layerSourceOpts{storeOnly: true})
+	if err != nil {
+		t.Fatalf("a snapshot chain was refused with lazy pull off: %v -- a restore cannot then "+
+			"read the layer its own checkpoint published", err)
+	}
+	if len(srcs) != 1 || srcs[0].Remote == nil {
+		t.Errorf("the store-only layer did not become a range reader: %+v", srcs)
+	}
+
+	// As a cold create resolves it: still refused, so the deployment choice stands.
+	_, err = p.layerSources(context.Background(), remoteOnly, "alpine:3.20", layerSourceOpts{})
+	if err == nil {
+		t.Error("a cold create's remote-only layer was accepted with lazy pull off, which " +
+			"removes the choice lazy pull exists to offer")
 	}
 }

@@ -55,7 +55,19 @@ say "== 1. create a sandbox and write a marker =="
 SBX=$("$BIN/bean" run --image-ref "$IMAGE" --disk-mib 2048 2>&1 | awk '/^sbx_/ {print $1}')
 [ -n "$SBX" ] || { say "create failed"; exit 1; }
 say "sandbox: $SBX"
-"$BIN/bean" exec "$SBX" -- sh -c "echo $MARKER > /root/marker.txt; sync; cat /root/marker.txt" 2>&1 | head -2
+"$BIN/bean" exec "$SBX" -- sh -c "echo $MARKER > /root/marker.txt; cat /root/marker.txt" 2>&1 | head -2
+
+# Three separate execs, and drop_caches as well as sync.
+#
+# `sync` inside the guest does not put its writes on the block device: measured, the overlay had 0
+# bytes allocated after sync and 81920 after dropping the guest's caches. And chaining
+# "sync; echo 3 > drop_caches" into one command runs the drop before the sync has finished, which
+# is how an earlier version of this script reported an empty filesystem for a sandbox that had
+# written one.
+"$BIN/bean" exec "$SBX" -- sh -c "sync" >/dev/null 2>&1
+"$BIN/bean" exec "$SBX" -- sh -c "echo 3 > /proc/sys/vm/drop_caches" >/dev/null 2>&1
+sleep 1
+say "overlay allocated: $(du -B1 "/var/lib/bean/sandboxes/$SBX/overlay.img" 2>/dev/null | cut -f1) bytes"
 
 say ""
 say "== 2. take a filesystem-only snapshot =="

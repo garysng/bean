@@ -471,7 +471,11 @@ func (p *OverlaybdProvider) snapshotFSLowers(ctx context.Context, fsManifestDige
 		// Level 2: the store has it, read on demand. This is the common case on a node
 		// that did not take the snapshot -- the whole point of keying the filesystem by
 		// digest is that such a node reassembles it without the bytes ever streaming.
-		if remote, ok := p.remoteLayer(ctx, layer.Digest); ok {
+		//
+		// Not gated on lazy pull, unlike an image layer: a sealed snapshot layer has no
+		// registry blob behind it, so refusing to read it remotely does not fall back to
+		// owning it locally -- it makes the restore impossible.
+		if remote, ok := p.requiredRemoteLayer(ctx, layer.Digest); ok {
 			lowers = append(lowers, remote)
 			continue
 		}
@@ -1358,9 +1362,12 @@ func (p *OverlaybdProvider) layerCacheDir(digest string) string {
 // remoteLayer reports a layer the store already holds, as a reference the daemon
 // range-reads.
 //
-// Only under lazy pull: without it a node is expected to own its layers, and reading
-// them over HTTP would make every block read depend on the store being reachable --
-// the trade LazyPull's comment describes as a deployment decision.
+// Only under lazy pull, and only for an *image* layer: without it a node is expected to own its
+// layers, and reading them over HTTP would make every block read depend on the store being
+// reachable -- the trade LazyPull's comment describes as a deployment decision. An image layer
+// always has that alternative, because it can be converted from the registry.
+//
+// A snapshot's sealed layer does not: see requiredRemoteLayer.
 //
 // The size comes from the store rather than the manifest, because the published blob
 // is the sealed layer and the manifest describes the original OCI one.
@@ -1368,6 +1375,34 @@ func (p *OverlaybdProvider) remoteLayer(ctx context.Context, digest string) (obd
 	if !p.LazyPull || p.Blobs == nil {
 		return obdLayer{}, false
 	}
+	return p.storeLayer(ctx, digest)
+}
+
+// requiredRemoteLayer reports a layer that can only come from the store, regardless of lazy pull.
+//
+// A snapshot's sealed layer is the case. Unlike an image layer there is no registry blob behind
+// it and nothing to convert from -- the sealed layer *is* the only form the filesystem exists in
+// -- so declining to read it remotely does not fall back to owning it locally, it just makes the
+// restore impossible.
+//
+// That is what it did: publication is unconditional, so a checkpoint published its layer and the
+// restore then refused to fetch it, failing with "in neither the node nor the store" about a
+// digest sitting in the store. Measured on hardware, and the message pointed at the store rather
+// than at the condition that would not read it.
+//
+// The reachability trade lazy pull exists to let an operator make does not apply here either. A
+// node restoring a snapshot it did not take has no local copy by definition, so it depends on the
+// store whether or not this returns -- the only question is whether it depends on it and works, or
+// depends on it and fails.
+func (p *OverlaybdProvider) requiredRemoteLayer(ctx context.Context, digest string) (obdLayer, bool) {
+	if p.Blobs == nil {
+		return obdLayer{}, false
+	}
+	return p.storeLayer(ctx, digest)
+}
+
+// storeLayer builds the reference for a layer the store holds, or reports it absent.
+func (p *OverlaybdProvider) storeLayer(ctx context.Context, digest string) (obdLayer, bool) {
 	size, ok, err := p.Blobs.Stat(ctx, digest)
 	if err != nil || !ok {
 		// Unknown is treated as absent: converting locally always works, and failing a

@@ -93,7 +93,10 @@ func (p *OverlaybdProvider) prepareUblk(ctx context.Context, sandboxID, imageRef
 		}
 	}
 
-	sources, err := p.layerSources(ctx, lowers, imageRef)
+	// A restore's chain came from a snapshot manifest, so a layer without a local file has
+	// nowhere else to come from; a cold create's did not.
+	sources, err := p.layerSources(ctx, lowers, imageRef,
+		layerSourceOpts{storeOnly: opts.FSManifestDigest != ""})
 	if err != nil {
 		return nil, err
 	}
@@ -216,14 +219,37 @@ func (p *OverlaybdProvider) prepareUblk(ctx context.Context, sandboxID, imageRef
 // Without lazy pull a remote-only layer is still refused, and refused by name -- an
 // operator's next step is to prewarm that image here, and neither an index nor a bare digest
 // says which image to prewarm.
-func (p *OverlaybdProvider) layerSources(ctx context.Context, lowers []obdLayer, imageRef string) ([]layerSource, error) {
+// layerSourceOpts says how a chain was resolved, which decides whether a remote-only layer is a
+// choice or a necessity.
+type layerSourceOpts struct {
+	// storeOnly marks a chain resolved from a snapshot's manifest, where a layer without a
+	// local file has no other source and must be read remotely.
+	storeOnly bool
+}
+
+func (p *OverlaybdProvider) layerSources(ctx context.Context, lowers []obdLayer, imageRef string, opts layerSourceOpts) ([]layerSource, error) {
 	srcs := make([]layerSource, 0, len(lowers))
 	for i, l := range lowers {
 		if l.File != "" {
 			srcs = append(srcs, layerSource{Path: l.File, Label: l.Digest})
 			continue
 		}
-		if !p.LazyPull {
+		// A layer the resolver already decided must come from the store is read from it,
+		// lazy pull or not.
+		//
+		// The two cases look identical here -- a layer with no File -- but they are not. A
+		// cold create's image layer is remote *by choice*: it could be converted locally, so
+		// refusing it respects the deployment decision lazy pull exists to offer. A restore's
+		// chain is remote *by necessity*: snapshotFSLowers only returns a remote reference
+		// after finding no local file, and a sealed snapshot layer has no registry blob to
+		// convert from. Refusing that does not fall back to anything.
+		//
+		// Measured: with this check applying to both, a restore failed on its own base layer
+		// -- a digest sitting in the store, with the local file being a *different* digest,
+		// because the snapshot's chain was published by a node that had converted it
+		// separately. The error blamed the missing flag rather than saying the layer had
+		// nowhere else to come from.
+		if !p.LazyPull && !opts.storeOnly {
 			return nil, fmt.Errorf("image: layer %d of %s (%s) is only available remotely, "+
 				"and this node is not configured for lazy pull: prewarm this image on this "+
 				"node, or start it with --fc-overlaybd-lazy-pull", i, imageRef, l.Digest)
