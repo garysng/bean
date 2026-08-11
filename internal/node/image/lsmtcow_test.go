@@ -210,3 +210,78 @@ func TestNewLSMTBackendRefusesAnExistingOverlay(t *testing.T) {
 			"sandbox's writes")
 	}
 }
+
+// The ownership bitmap converts to the extents a seal needs, coalescing adjacent blocks.
+//
+// This is what replaces the overlaybd daemon's index on this route. One extent per 4 KiB block
+// would make an index larger than the data it describes, so adjacent blocks have to merge -- and
+// a sandbox writes files, which is exactly the adjacent case.
+func TestOwnedExtentsCoalescesAdjacentBlocks(t *testing.T) {
+	b, _ := newTestLSMTBackend(t, 4096)
+
+	// Nothing written yet: nothing to seal.
+	if got := b.OwnedExtents(); len(got) != 0 {
+		t.Errorf("a backend with no writes reports %d extents, want none", len(got))
+	}
+
+	// Three consecutive blocks, then a gap, then one more.
+	bs := b.blockSize
+	for _, off := range []int64{0, bs, 2 * bs, 10 * bs} {
+		if _, err := b.WriteAt(bytes.Repeat([]byte{'w'}, int(bs)), off); err != nil {
+			t.Fatalf("write at %d: %v", off, err)
+		}
+	}
+
+	got := b.OwnedExtents()
+	if len(got) != 2 {
+		t.Fatalf("got %d extents, want 2 (three adjacent blocks merged, plus one apart): %+v",
+			len(got), got)
+	}
+	spb := uint32(bs / lsmtAlignment)
+	if got[0].offset != 0 || got[0].length != 3*spb {
+		t.Errorf("first extent is %+v, want offset 0 length %d", got[0], 3*spb)
+	}
+	if want := uint64(10 * bs / lsmtAlignment); got[1].offset != want || got[1].length != spb {
+		t.Errorf("second extent is %+v, want offset %d length %d", got[1], want, spb)
+	}
+}
+
+// What the bitmap reports is what the sealed layer contains.
+//
+// The two halves of this route's snapshot -- the bitmap and the writer -- are only useful
+// together, and a mismatch between them would seal the wrong regions while both halves passed
+// their own tests.
+func TestOwnedExtentsSealIntoAReadableLayer(t *testing.T) {
+	dir := t.TempDir()
+	base := writeCountedExtentLayer(t, dir, "base.lsmt", 4096, 8)
+	b, err := newLSMTBackend([]string{base}, filepath.Join(dir, "o.img"), 4096*lsmtAlignment)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer b.Close()
+
+	// A recognisable write, one block in from the start so a wrong offset is visible.
+	marker := bytes.Repeat([]byte("SEALME00"), int(b.blockSize)/8)
+	if _, err := b.WriteAt(marker, b.blockSize); err != nil {
+		t.Fatal(err)
+	}
+
+	sealed := filepath.Join(dir, "snap.lsmt")
+	if err := sealFileTo(sealed, uint64(4096*lsmtAlignment), b.OwnedExtents(), b.ReadAt); err != nil {
+		t.Fatalf("seal from the bitmap: %v", err)
+	}
+
+	stack, closeStack, err := openLSMTStack([]string{sealed})
+	if err != nil {
+		t.Fatalf("open the sealed snapshot: %v", err)
+	}
+	defer closeStack()
+
+	got := make([]byte, len(marker))
+	if _, err := stack.ReadAt(got, b.blockSize); err != nil {
+		t.Fatalf("read the marker back: %v", err)
+	}
+	if !bytes.Equal(got, marker) {
+		t.Error("the sealed layer does not contain what the sandbox wrote at that offset")
+	}
+}

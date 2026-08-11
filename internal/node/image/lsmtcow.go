@@ -262,6 +262,48 @@ func (b *lsmtBackend) WriteAt(p []byte, off int64) (int, error) {
 	return done, nil
 }
 
+// OwnedExtents returns the runs of the virtual disk this sandbox has written, in sectors.
+//
+// This is what makes a snapshot possible on this route without the overlaybd daemon: the bitmap
+// already records exactly which blocks the sandbox owns, so there is no index to flush and
+// nothing to ask a daemon for. Adjacent owned blocks are coalesced into one run, because a
+// sandbox writes files rather than isolated blocks and one extent per 4 KiB block would make an
+// index far larger than the data it describes.
+//
+// Taken under the lock and returned as a copy: a checkpoint runs while the guest is paused, so
+// the map is not expected to change, but "not expected to" is what the copy-on-write bitmap's
+// missing mutex also relied on before workers made it a race.
+func (b *lsmtBackend) OwnedExtents() []sealedExtent {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	sectorsPerBlock := b.blockSize / lsmtAlignment
+	if sectorsPerBlock <= 0 {
+		return nil
+	}
+	blocks := int64(len(b.owned)) * 64
+
+	var out []sealedExtent
+	for block := int64(0); block < blocks; block++ {
+		if !b.isOwned(block) {
+			continue
+		}
+		// Extend the previous run when this block continues it.
+		if n := len(out); n > 0 {
+			prev := &out[n-1]
+			if prev.offset+uint64(prev.length) == uint64(block*sectorsPerBlock) {
+				prev.length += uint32(sectorsPerBlock)
+				continue
+			}
+		}
+		out = append(out, sealedExtent{
+			offset: uint64(block * sectorsPerBlock),
+			length: uint32(sectorsPerBlock),
+		})
+	}
+	return out
+}
+
 // MayBlock reports whether a read of this backend can take milliseconds rather than
 // microseconds.
 //
