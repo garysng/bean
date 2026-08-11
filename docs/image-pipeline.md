@@ -395,10 +395,20 @@ meaningful:
   teardown cost is in the transport, so the only way past it is to change the transport
   while keeping the layers
 
-The trap worth naming: **neither of them makes a cold create faster.** overlaybd still
+The trap worth naming: **on their own, neither makes a cold create faster.** overlaybd still
 converts every layer before assembling a device, and ublk only changes how the assembled
-device is presented. The thing that would remove the cold path is lazy pull, and that
-needs layers already sealed in overlaybd form.
+device is presented.
+
+What removes the cold path is **lazy pull**, which is a third axis rather than a property of
+either: it changes whether the bytes are on this node at all. It works over both transports and
+is measured on both, but through different machinery -- over TCMU the overlaybd daemon issues
+the range requests, over ublk noded does (`blobreader.go`, `blobfetch.go`). Over ublk a guest
+boots in 358 ms from a layer absent from local disk, reading at most 60% of a 5.1 MiB layer.
+
+Its precondition is the one thing worth remembering: **the layer has to already be a sealed
+overlaybd layer**, because a standard OCI layer is a gzipped tar with no block index to seek
+into. So lazy pull follows publication rather than replacing conversion -- one conversion per
+fleet per image, and every node after that reads instead of converting.
 
 ### Measured, both backends, same host ✅
 
