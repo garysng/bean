@@ -11,7 +11,7 @@
 ![每沙箱 44 KiB 磁盘](https://img.shields.io/badge/disk-44%20KiB%20%2F%20sandbox-3FB950?style=flat-square)
 ![无 Kubernetes、无 containerd](https://img.shields.io/badge/hot%20path-no%20k8s%20%C2%B7%20no%20containerd-6E7781?style=flat-square)
 
-[English](README.md) · [已经可用的部分](#已经可用的部分) · [架构](#架构) · [文档](#文档)
+[English](README.md) · [已经可用的部分](#已经可用的部分) · [快速开始](#快速开始) · [架构](#架构) · [文档](#文档) · [贡献](CONTRIBUTING.md)
 
 </div>
 
@@ -38,21 +38,6 @@
 > 都是实测而非推算。容器档(gVisor/runc)也能跑,直接驱动 OCI 运行时、不经 containerd,不过
 > microVM 档是目前测得更充分的路径;VMM 还没被 jailer 收进 chroot。
 > 在此之上做规划前请先读 [已经可用的部分](#已经可用的部分)。
-
----
-
-## 为什么不用 e2b / Modal / 裸容器
-
-| 方案 | 做法 | 规模化时的代价 |
-|---|---|---|
-| e2b | Firecracker + 每镜像一次模板构建 | 每个镜像一次模板构建,每次数分钟 —— 成千上万镜像下不可用 |
-| Modal | 自研容器运行时 + 懒加载文件系统 | 不可自托管 |
-| K8s + Pod | 每任务一个容器 | 不可信代码没有 VM 边界;调度与网络栈都重 |
-| **bean** | Firecracker + 共享基础镜像 + 每沙箱 CoW | **每沙箱 44 KiB 磁盘**,952 ms 到 agent 可达 |
-
-关键转折是:沙箱**不会**拿到镜像的自有副本。每节点一份只读基础镜像 loop 挂载后共享,
-每个沙箱通过 device-mapper 在其上获得一个稀疏的写时复制层。一次拉起一百个 agent 沙箱 ——
-或把一个 eval 镜像克隆成一百份 —— 代价就是一百个稀疏文件。
 
 ---
 
@@ -177,32 +162,36 @@ bean run --snapshot snap_...
 
 ## 快速开始
 
-需要一台有 `/dev/kvm`、root 权限、以及 `dmsetup` / `losetup` 的 Linux 宿主。
+需要一台有 `/dev/kvm`、root 权限、以及 `dmsetup` / `losetup` 的 Linux 宿主,Go 1.26。
 
 ```bash
-make build
-sudo hack/build-assets.sh          # guest 内核 + agent 磁盘
-sudo hack/build-assets.sh kernel   # Firecracker CI 的 vmlinux-6.1.102
+make bin                           # 五个二进制产出到 ./bin
+sudo hack/build-assets.sh          # 内核 + agent 磁盘 + 基础镜像,装到 /var/lib/bean
 
-sudo hack/dev-fc-stack.sh start    # gateway 在 :18080,一个节点
+# BIN 就是启动脚本去找二进制的位置
+sudo BIN=$PWD/bin hack/dev-fc-stack.sh start   # gateway 在 :18080,一个节点
 
+export PATH=$PWD/bin:$PATH
 export BEAN_BASE_URL=http://127.0.0.1:18080 BEAN_API_KEY=devkey
 SBX=$(bean run --image alpine:3.20 --quiet)
 bean exec $SBX -- sh -c 'echo hello'
 bean kill $SBX
+
+sudo BIN=$PWD/bin hack/dev-fc-stack.sh stop
 ```
 
 要用增量快照,脏页跟踪必须在 guest 启动**之前**就打开 —— 已经在跑的沙箱无法再启用:
 
 ```bash
-NODED_FLAGS="--track-dirty-pages" sudo hack/dev-fc-stack.sh start
+NODED_FLAGS="--track-dirty-pages" sudo BIN=$PWD/bin hack/dev-fc-stack.sh start
 ```
 
-要让沙箱有网络,启动时给出 guest 子网与上行网卡:
+沙箱网络默认关闭,因为打开它要往宿主自己的表里写 iptables 规则。启动时给出 guest 子网与
+上行网卡才会开:
 
 ```bash
 NODED_FLAGS="--guest-subnet 172.31.0.0/30 --uplink eth0 --guest-dns 223.5.5.5" \
-  sudo hack/dev-fc-stack.sh start
+  sudo BIN=$PWD/bin hack/dev-fc-stack.sh start
 ```
 
 不设 `--guest-subnet` 的节点会把沙箱启动成没有任何网卡的样子,并在日志里说明这一点 ——
@@ -222,9 +211,9 @@ NODED_FLAGS="--guest-subnet 172.31.0.0/30 --uplink eth0 --guest-dns 223.5.5.5" \
                          S3(快照 blob)
 ```
 
-四个二进制:`bean`(CLI)、`bean-api`(gateway,调度器在同进程内,这样放置与承诺发生在
-同一个事务里)、`noded`(每宿主一个)、`beand`(每个沙箱内的 PID 1,装在自己的只读磁盘上,
-所以用户镜像不需要任何改动)。
+五个二进制:`bean`(CLI)、`bean-api`(gateway,调度器在同进程内,这样放置与承诺发生在
+同一个事务里)、`noded`(每宿主一个)、`bean-proxy`(数据面端口路由)、`beand`(每个沙箱内的
+PID 1,装在自己的只读磁盘上,所以用户镜像不需要任何改动)。
 
 同一套栈画成四条带 —— 客户端、控制面、节点、沙箱 —— `bean-proxy` 在端口流量的数据面路径上,
 S3 支撑节点:
@@ -240,7 +229,7 @@ config:
 flowchart TB
   subgraph CLIENTS["clients"]
     direction LR
-    SDK["SDK<br>py · ts"]
+    SDK["SDK<br>python"]
     CLI["CLI"]
   end
 
@@ -334,6 +323,7 @@ flowchart TB
 | [status.md](docs/zh/status.md) | **实际构建了什么**,带实测数据 |
 | [decisions.md](docs/zh/decisions.md) | 每个选择**为什么**这么做 —— 实测数据、竞品对比,以及只在真机上才现形的陷阱 |
 | [architecture.md](docs/zh/architecture.md) | 组件、设计决策、状态机 |
+| [tech-stack.md](docs/zh/tech-stack.md) | 每一个依赖:在这里做什么,以及替代了什么 |
 | [vm-assembly.md](docs/zh/vm-assembly.md) | microVM 如何组装,以及两个不能改的顺序 |
 | [image-pipeline.md](docs/zh/image-pipeline.md) | OCI 引用 → 可挂载块设备 |
 | [s3-storage.md](docs/zh/s3-storage.md) | 手写 SigV4、分片上传、`Blobs` 契约 |
@@ -345,6 +335,8 @@ flowchart TB
 | [security-and-startup.md](docs/zh/security-and-startup.md) | 威胁模型、加固、冷启动预算 |
 | [sdk-cli-design.md](docs/zh/sdk-cli-design.md) | SDK 与 CLI |
 | [network.md](docs/zh/network.md) | ✅ 每沙箱一个 netns、两个过滤作用域,以及恢复的快照为何保留原地址 |
+| [exec-via-proxy.md](docs/zh/exec-via-proxy.md) | exec 与文件传输如何 node-direct 直达 agent,以及塑造了这个设计的凭证死结 |
+| [jailer.md](docs/zh/jailer.md) | 📐 jailer chroot 的代价、会破坏什么,以及为何它不是下一步 |
 | [warm-snapshots.md](docs/zh/warm-snapshots.md) | 📐 每镜像 boot 一次,而非每沙箱 boot 一次 |
 | [competitive-analysis.md](docs/zh/competitive-analysis.md) | e2b / Modal / Daytona / Morph / AgentENV,含各家的网络做法 |
 | [roadmap.md](docs/zh/roadmap.md) | 阶段划分,标注实际进度 |
@@ -357,23 +349,13 @@ flowchart TB
 ## 开发
 
 ```bash
-make build          # 编译全部
+make bin            # 五个二进制产出到 ./bin
 make test           # 单元测试,带 race 检测
 make test-e2e       # 端到端,local 档
-make lint vet       # gofmt、go vet,以及下面那个 ASCII 检查
+make lint vet       # gofmt、go vet,以及 ASCII 检查
+make preflight      # 与 CI 完全相同的检查,顺序也相同
 make proto          # 从 proto/ 重新生成
 ```
-
-### 只有文档可以有中文
-
-代码、注释、测试名、脚本、配置、commit message 和分支名一律 ASCII。理由很实际:
-读不了中文的人应该能在除文档以外的每个文件上工作,而 `git log` 应该对所有人保持可读 ——
-一旦一半的历史需要翻译,它就不再可读了。
-
-`hack/check-ascii.sh` 强制执行这条,并作为 `make lint` 的一部分运行。它只拒绝 CJK,
-不是拒绝所有非 ASCII 字符:破折号、箭头和制表符在注释与图里是有意使用的。加上 `--commits`
-还会检查尚未推送的 commit 的 message —— 界线划在这里,是因为为了改一条 message 而重写
-已发布的历史,代价大于那条 message 的价值。
 
 大部分有意思的行为都需要 KVM 宿主、root 和 device-mapper,所以那些测试在开发机上是
 **skip** 而不是 fail —— `go test ./...` 会保持绿色,但也没证明多少东西。任何触及 microVM
@@ -384,16 +366,9 @@ GOOS=linux GOARCH=amd64 go test -c -o /tmp/img.test ./internal/node/image/
 scp /tmp/img.test root@host:/tmp/ && ssh root@host /tmp/img.test
 ```
 
-### 两条值得写下来的测试规则
-
-**要穿透到真实的持久层去验证。** 当状态同时存在于内存和磁盘上时,读内存的测试什么都
-证明不了。上面那个静默的文件系统损坏 bug 通过了三层测试:单元测试检查了 tar 的往返
-(没错 —— 数据**确实**写了)、端到端测试从 guest 内部读了那个文件(命中 page cache)、
-`dmsetup status` 查的是错的设备。没有一个读了恢复出来的块设备。快照断言必须先
-`drop_caches`。
-
-**然后把修复改回坏的,确认测试会失败。** 对那个 bug,所有文件级断言在坏实现下都是绿的,
-所以这是唯一能知道新测试有没有价值的办法。loop 设备泄漏和 merge 顺序测试也一样。
+其余内容见 [CONTRIBUTING.md](CONTRIBUTING.md):ASCII 规则及其理由、两条从"全绿套件也没
+抓到 bug"里长出来的测试规则,以及文档状态标记怎么保持诚实。安全策略与两个已知的边界缺口
+在 [SECURITY.md](SECURITY.md)。
 
 ---
 

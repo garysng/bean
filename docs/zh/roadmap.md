@@ -25,8 +25,7 @@
 
 ## P0 — 单节点端到端骨架（fc 直启,无 containerd）
 
-参考实现：本地 /Users/mac/project/agentenv（AgentENV 源码——uvm-ublk 直驱
-overlaybd、envd、jailer/FC 管理的完整实证,逐模块对照）。
+参考实现：AgentENV——uvm-ublk 直驱 overlaybd、envd、jailer/FC 管理的完整实证,逐模块对照。
 
 **范围**
 

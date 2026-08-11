@@ -1,6 +1,10 @@
-# Phase 3 design notes (working) — fs layers unified on overlaybd, dedup by digest
+# Phase 3 design notes — fs layers unified on overlaybd, dedup by digest
 
-Status: DRAFT for review. Not yet implemented. Phase 2 committed (fd70ed4).
+> Status: 📐 **design, not implemented.** A snapshot's filesystem is still
+> captured as a sparse extent stream inside the one opaque bundle described
+> below, so nothing here has landed. The status-marker convention is defined in
+> [architecture.md](architecture.md) §0.
+> **Authority order: code > [status.md](status.md) > [decisions.md](decisions.md) > design docs.**
 
 ## Goal (docs/s3-storage.md 8.5)
 An image's fs and a snapshot's fs both become overlaybd layer chains keyed by content
@@ -66,9 +70,9 @@ member presence (`readSnapshotBundle` already skips unknown members).
    than branching legacy restore. The bundle becomes memory + vmstate only; fs is always the
    sealed layer chain. This simplifies capture, storage, and restore (no dual-path dispatch).
 
-## e2e (real .75 host, per binding rule)
+## e2e (needs a real KVM host)
 Take a snapshot from a built/pulled image, confirm the snapshot fs layer lands in
 `blobs/<digest>` and SHARES the base image's layer digests (one copy in S3); restore on a
 cache-cleared node and confirm the fs comes from the shared lowers; memory snapshot restores
-guest state. Reuse the Phase 2 harness (/tmp/p2-e2e.sh shape) + the .75 host quirks
+guest state.
 (buildctl on PATH, docker.m.daocloud.io mirror, vhost_vsock).
