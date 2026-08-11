@@ -32,6 +32,19 @@ STEPS=${STEPS:-"4 16 60"}
 DISK_MIB=${DISK_MIB:-2048}
 METRICS_URL=${METRICS_URL:-http://127.0.0.1:17444/metrics}
 
+# The node has to advertise capacity for the widest step, or the scheduler refuses the
+# excess with NO_CAPACITY and the run reports a throughput measured on whatever fraction
+# fit. The dev stack defaults to 8 vCPU, which silently caps a 60-way step at 8 -- the
+# first run of this script reported "18.65 creates/s" from 8 successes and 52 refusals.
+#
+# A sandbox reserves 1 vCPU and 512 MiB nominally while costing far less, so these are
+# ledger figures rather than a claim about the hardware.
+MAX_STEP=0
+for n in $STEPS; do [ "$n" -gt "$MAX_STEP" ] && MAX_STEP=$n; done
+export NODE_CPU=${NODE_CPU:-$((MAX_STEP * 2))}
+export NODE_MEM_MIB=${NODE_MEM_MIB:-$((MAX_STEP * 1024))}
+export NODE_DISK_MIB=${NODE_DISK_MIB:-$((MAX_STEP * DISK_MIB * 2))}
+
 export BEAN_BASE_URL=${BEAN_BASE_URL:-http://127.0.0.1:18080}
 export BEAN_API_KEY=${BEAN_API_KEY:-devkey}
 
@@ -70,11 +83,15 @@ trap cleanup EXIT
 # already decomposed -- timing the same things from outside would measure the CLI too.
 phase() {
 	local name=$1
+	# The series is bean_node_create_phase_seconds_{sum,count} with phase *and* runtime
+	# labels, so it is matched by substring rather than by an exact key. Constructing the
+	# exact label set is what made the first version print n/a for every phase while the
+	# metrics were there all along.
 	curl -s "$METRICS_URL" 2>/dev/null |
-		awk -v n="$name" '
-			$1 == "bean_node_phase_seconds_sum{phase=\"" n "\"}" {s=$2}
-			$1 == "bean_node_phase_seconds_count{phase=\"" n "\"}" {c=$2}
-			END { if (c > 0) printf "%.3f", s/c; else print "n/a" }'
+		awk -v n="phase=\"$name\"" '
+			index($1, "bean_node_create_phase_seconds_sum")   && index($1, n) { s = $2 }
+			index($1, "bean_node_create_phase_seconds_count") && index($1, n) { c = $2 }
+			END { if (c > 0) printf "%.3fs over %d", s / c, c; else print "n/a" }'
 }
 
 run_transport() {
@@ -115,15 +132,28 @@ run_transport() {
 		before_tcmu=$(leaked_tcmu)
 
 		local t0 t1
-		t0=$(date +%s.%N)
+		t0=$(date +%s)
 		COUNT=$n DISK_MIB=$DISK_MIB IMAGE=$IMAGE bash "$STRESS" --count "$n" --image "$IMAGE" \
 			>"/tmp/stress-$label-$n.log" 2>&1
 		local rc=$?
-		t1=$(date +%s.%N)
+		t1=$(date +%s)
 
 		if [ $rc -ne 0 ]; then
 			say "run FAILED (rc=$rc); last lines:"
 			tail -25 "/tmp/stress-$label-$n.log"
+		fi
+
+		# A step with any refusal is reported as void rather than as a number. The
+		# throughput of the fraction that fit is not the throughput of the step, and
+		# printing it next to a failure count invites reading it as one -- which is what
+		# happened on this script's first run.
+		local failed
+		failed=$(grep -oE "^ *failed +[0-9]+" "/tmp/stress-$label-$n.log" | awk '{print $2}' | tail -1)
+		failed=${failed:-0}
+		if [ "$failed" -gt 0 ]; then
+			say "    VOID: $failed of $n creates were refused, so this step measures nothing."
+			say "    reason: $(grep -oE "HTTP [0-9]+|NO_CAPACITY|no capacity[^\"]{0,80}" \
+				"/tmp/stress-$label-$n.log" | sort -u | head -2 | tr '\n' ' ')"
 		fi
 
 		# The stress script prints its own p50/throughput; surface the lines that matter
@@ -131,7 +161,8 @@ run_transport() {
 		grep -iE "p50|p95|throughput|created|failed|leftover|leaked" "/tmp/stress-$label-$n.log" |
 			sed 's/^/    /' | head -12
 
-		say "    wall:            $(echo "$t1 - $t0" | bc)s"
+		# Seconds from date rather than a float from bc, which is not installed here.
+		say "    wall:            $((t1 - t0))s"
 		say "    fc_rootfs mean:  $(phase fc_rootfs)"
 		say "    runtime_create:  $(phase runtime_create)"
 		say "    destroy mean:    $(phase destroy)"

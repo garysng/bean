@@ -51,18 +51,46 @@ func (p *OverlaybdProvider) prepareUblk(ctx context.Context, sandboxID, imageRef
 	// all this route needs -- the sandbox's writes go to its own overlay rather than
 	// into a layer.
 	//
-	// Publish is not honoured here. Publishing is an S3 upload of converted layers, and
-	// a create that has no object store configured cannot do it; the flag is documented
-	// as a no-op on such backends, and this route is one until the reader can read
-	// published layers remotely.
+	// The conversion has to be reported back the same way the tcmu route reports it, or
+	// the template the control plane created for this reference never leaves PENDING.
+	//
+	// Found on hardware: this route returned a nil Conversion, so a first create worked
+	// and the template stayed PENDING with an empty FS digest forever. That is worse than
+	// it sounds -- a template stuck in PENDING is one nothing can be created from, so the
+	// reference was effectively single-use.
+	//
+	// Publish is passed through rather than forced false. Publishing is an S3 upload and a
+	// node with no object store cannot do it, but that is the blob store's decision to
+	// refuse, not this route's to pre-empt: hardcoding false here made the two transports
+	// disagree about what a create means, which is exactly what a shared code path is for.
 	var lowers []obdLayer
+	var manifest *Manifest
+	var published bool
 	if opts.FSManifestDigest != "" {
 		lowers, err = p.snapshotFSLowers(ctx, opts.FSManifestDigest)
 	} else {
-		lowers, _, _, err = p.lowersFor(ctx, imageRef, false)
+		lowers, manifest, published, err = p.lowersFor(ctx, imageRef, opts.Publish)
 	}
 	if err != nil {
 		return nil, err
+	}
+
+	var conversion *ConversionResult
+	if published && manifest != nil && manifest.Digest != "" {
+		conversion = &ConversionResult{
+			ManifestDigest: manifest.Digest,
+			OCIDigest:      manifest.Digest,
+			SizeBytes:      chainSize(lowers),
+			LayerDigests:   layerDigestsOf(lowers),
+		}
+		// The image's config rides along so the template records it, as a build reports
+		// the config it recovered. Failing to resolve it is not fatal to the create --
+		// the sandbox still boots from the chain -- so the template just records none.
+		if ref, perr := ParseReference(imageRef); perr == nil {
+			if cfg, cerr := p.imageConfig(ctx, ref, imageRef, manifest); cerr == nil {
+				conversion.Config = cfg
+			}
+		}
 	}
 
 	paths, err := localLayerPaths(lowers, imageRef)
@@ -142,7 +170,8 @@ func (p *OverlaybdProvider) prepareUblk(ctx context.Context, sandboxID, imageRef
 		Device: link,
 		// The overlay is what a checkpoint captures: it holds everything this sandbox
 		// changed, and the layers are reproducible from their digests.
-		Writable: overlayPath,
+		Writable:   overlayPath,
+		Conversion: conversion,
 		release: func() error {
 			p.mu.Lock()
 			delete(p.ublkAttached, sandboxID)
