@@ -5,13 +5,15 @@
 **A sandbox platform for AI agents** — run untrusted code in hardware isolation:
 create it, exec into it, snapshot it, fan it out. Any OCI image, no template build step.
 
+*Built from zero to one, iterated and re-verified on real hardware at every step.*
+
 ![runtime: Firecracker microVM](https://img.shields.io/badge/runtime-Firecracker%20microVM-E24329?style=flat-square)
 ![runtime: gVisor](https://img.shields.io/badge/runtime-gVisor%20%2F%20OCI-4285F4?style=flat-square)
 ![952 ms to a reachable agent](https://img.shields.io/badge/boot-952%20ms%20to%20agent-3FB950?style=flat-square)
 ![44 KiB disk per sandbox](https://img.shields.io/badge/disk-44%20KiB%20%2F%20sandbox-3FB950?style=flat-square)
 ![no Kubernetes, no containerd](https://img.shields.io/badge/hot%20path-no%20k8s%20%C2%B7%20no%20containerd-6E7781?style=flat-square)
 
-[中文版](README.zh.md) · [What works](#what-works) · [Quick start](#quick-start) · [Architecture](#architecture) · [Docs](#documentation) · [Contributing](CONTRIBUTING.md)
+[中文版](README.zh.md) · [Zero to one](#built-from-zero-to-one) · [What works](#what-works) · [Quick start](#quick-start) · [Architecture](#architecture) · [Docs](#documentation)
 
 </div>
 
@@ -41,6 +43,45 @@ isolation, with **no Kubernetes and no containerd on the hot path**.
 > runtime directly with no containerd, though the microVM tier is the more
 > heavily tested path; the VMM is not yet confined by a jailer. Read
 > [What works](#what-works) before planning around it.
+
+---
+
+## Built from zero to one
+
+This started with nothing — no orchestrator to lean on, no template service, no
+containerd. Every layer was written, measured on real hardware, and rewritten
+when the measurement disagreed with the design. The numbers moved a long way in
+the process:
+
+```
+create    2200 ms  →  952 ms
+restore   1500 ms  →  950 ms
+destroy   5.25  s  →  214 ms
+```
+
+None of that came from the layer we expected. Guest kernel boot was 90 ms of the
+cold-start win; a gRPC reconnect backoff and a synchronous serial console were
+1293 ms of it — 96%, both in our own code. The full attribution is in
+[decisions.md §5](docs/decisions.md).
+
+Re-verification is the part that does the work, because in a system with a block
+layer, a page-fault handler and five ordering constraints, *a step that looks
+done from every vantage point except the one that matters* is the normal failure —
+not the exception:
+
+- A snapshot restore silently returned zeroes. `ls` reported the right size,
+  `dmesg` said nothing, and three layers of tests passed: the tar round-trip was
+  correct, the guest read hit page cache, and `dmsetup status` inspected the
+  wrong device. None read the restored block device.
+- The network stack had five correct layers and no address inside the guest, and
+  every assertion passed.
+
+So the rule the project runs on: verify through the real persistence layer, then
+break the fix and confirm the test fails. Both bugs above were green against the
+broken implementation, so that second step was the only thing that proved the new
+tests were worth anything. Docs carry per-section status markers
+(✅ / ⚠️ / 📐) for the same reason — writing intent and reality the same way is
+what made networking and jailer look shipped when they were not.
 
 ---
 
@@ -326,9 +367,8 @@ hard way:
   The failure is *silent*: `ls` reports the right size, `cat` returns zeroes,
   `dmesg` says nothing. [decisions §3.0](docs/decisions.md).
 
-The last one is the shape to internalise: each of these is a step that *looks*
-done from every vantage point except the one that matters. The network stack had
-five correct layers and no address in the guest, and every assertion passed.
+Every one of these is the shape described in [zero to one](#built-from-zero-to-one):
+a step that looks done from every vantage point except the one that matters.
 
 ---
 

@@ -5,13 +5,15 @@
 **面向 AI agent 的 sandbox 平台** —— 在硬件隔离里跑不可信代码:创建、exec 进去、打快照、成批克隆。
 任意 OCI 镜像,不需要模板构建步骤。
 
+*从零到一构建,每一步都在真机上迭代与重新验证。*
+
 ![runtime: Firecracker microVM](https://img.shields.io/badge/runtime-Firecracker%20microVM-E24329?style=flat-square)
 ![runtime: gVisor](https://img.shields.io/badge/runtime-gVisor%20%2F%20OCI-4285F4?style=flat-square)
 ![952 ms 到 agent 可达](https://img.shields.io/badge/boot-952%20ms%20to%20agent-3FB950?style=flat-square)
 ![每沙箱 44 KiB 磁盘](https://img.shields.io/badge/disk-44%20KiB%20%2F%20sandbox-3FB950?style=flat-square)
 ![无 Kubernetes、无 containerd](https://img.shields.io/badge/hot%20path-no%20k8s%20%C2%B7%20no%20containerd-6E7781?style=flat-square)
 
-[English](README.md) · [已经可用的部分](#已经可用的部分) · [快速开始](#快速开始) · [架构](#架构) · [文档](#文档) · [贡献](CONTRIBUTING.md)
+[English](README.md) · [从零到一](#从零到一) · [已经可用的部分](#已经可用的部分) · [快速开始](#快速开始) · [架构](#架构) · [文档](#文档)
 
 </div>
 
@@ -38,6 +40,36 @@
 > 都是实测而非推算。容器档(gVisor/runc)也能跑,直接驱动 OCI 运行时、不经 containerd,不过
 > microVM 档是目前测得更充分的路径;VMM 还没被 jailer 收进 chroot。
 > 在此之上做规划前请先读 [已经可用的部分](#已经可用的部分)。
+
+---
+
+## 从零到一
+
+起点是什么都没有 —— 没有可以倚靠的编排器,没有模板服务,没有 containerd。每一层都是写出来、
+在真机上测出来,然后在实测与设计不符时重写的。这个过程里数字走了很远:
+
+```
+create    2200 ms  →  952 ms
+restore   1500 ms  →  950 ms
+destroy   5.25  s  →  214 ms
+```
+
+而这些收益都不来自我们以为的那一层。guest 内核启动在冷启动优化里只占 90 ms;一个 gRPC
+重连 backoff 加一个同步的串口控制台占了 1293 ms —— 96%,两个都在我们自己的代码里。完整归因
+见 [decisions.md §5](docs/zh/decisions.md)。
+
+真正起作用的是"重新验证"这一步。因为在一个有块设备层、有缺页处理、有五处顺序约束的系统里,
+**从除了要紧的那个视角以外、每个视角看都像是做完了的步骤**,是常态而不是例外:
+
+- 快照恢复静默返回全零。`ls` 报的大小是对的,`dmesg` 什么都不说,三层测试全绿:tar 往返
+  是正确的、guest 里读到的是 page cache、`dmsetup status` 查的是错的设备。没有一个真的去读
+  恢复出来的块设备。
+- 网络栈有五层都是对的,而 guest 里没有地址,并且每条断言都通过了。
+
+所以这个项目跑的规则是:穿透到真实持久层去验证,然后把修复改回坏的、确认测试会失败。上面两个
+bug 在坏实现下都是绿的,所以第二步是唯一能证明新测试有价值的东西。文档按小节标状态标记
+(✅ / ⚠️ / 📐)是同一个理由 —— 把意图和现实写成一样,正是当初让网络和 jailer 看起来已经交付
+的原因。
 
 ---
 
@@ -304,8 +336,8 @@ flowchart TB
   `ls` 报告正确的大小,`cat` 返回全零,`dmesg` 什么都不说。见
   [decisions §3.0](docs/zh/decisions.md)。
 
-最后一条是真正该内化的形状:上面每一步都是"从除了真正要紧的那个视角以外,处处看起来都做完了"
-的步骤。网络栈曾经有五层都正确、guest 里却没有地址,而所有断言都是绿的。
+上面每一条都是 [从零到一](#从零到一) 里说的那个形状:从除了真正要紧的那个视角以外,处处
+看起来都已经做完的步骤。
 
 ---
 
