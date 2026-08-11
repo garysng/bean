@@ -76,10 +76,39 @@ type OverlaybdProvider struct {
 	// of them form an image, so every create still resolves against the registry.
 	Index ImageIndex
 
+	// Ublk serves the layer chain from a ublk device read by this process instead of
+	// from a tcmu device read by the overlaybd daemon.
+	//
+	// The layers, their sharing and their conversion are identical either way -- what
+	// changes is the transport. tcmu needs a SCSI fabric per sandbox and its daemon
+	// serialises teardown through one netlink socket that upstream warns against using
+	// concurrently: 4.0 s for 128 devices, the same on kernel 5.15 and 6.8. That cost is
+	// in the transport, so it does not improve with a newer kernel and the only way past
+	// it is a different one.
+	//
+	// The cost of this route is that a layer must be a local file: the reader here has
+	// no HTTP range-read, so LazyPull cannot be served. A create is refused rather than
+	// silently converting, because a node asked for lazy pull and quietly given local
+	// conversion differs from the cluster's expectation in exactly the dimension that
+	// was asked for.
+	Ublk bool
+
+	// ublkCtrl is the shared handle on /dev/ublk-control, opened once per node for the
+	// same reason UblkProvider opens one: the control device is a singleton and a
+	// handle plus a ring per sandbox would be an fd and a mapping each for commands
+	// that happen twice in a sandbox's life.
+	ublkCtrlOnce sync.Once
+	ublkCtrl     *ublkControl
+	ublkCtrlErr  error
+
 	mu sync.Mutex
 	// attached tracks live devices so teardown can find them, and so a leaked
 	// configfs object is attributable.
 	attached map[string]*tcmuDevice
+	// ublkAttached tracks live ublk devices, for the same reason and separately: the
+	// two transports leak different kinds of object, and one map of two types would
+	// make a leak's kind something a reader has to infer.
+	ublkAttached map[string]*ublkDevice
 
 	// layers collapses concurrent conversions of the same layer digest. Keyed by
 	// digest to match sealedLayerPath, so one flight corresponds to one output
@@ -98,6 +127,7 @@ func NewOverlaybdProvider(baseDir, layerDir, imageDir string, reg *Registry, bui
 		Builder:        builder,
 		DefaultSizeMiB: defaultSizeMiB,
 		attached:       map[string]*tcmuDevice{},
+		ublkAttached:   map[string]*ublkDevice{},
 	}
 }
 
@@ -106,9 +136,19 @@ func (p *OverlaybdProvider) Name() string { return "overlaybd" }
 // Available reports whether this host can run the provider, so a node fails to
 // start rather than accepting placements it cannot honour.
 func (p *OverlaybdProvider) Available() error {
-	if err := tcmuAvailable(); err != nil {
+	// The transport check differs by route: the ublk one never touches tcmu, so
+	// requiring the SCSI modules there would refuse a node that can serve every create
+	// asked of it.
+	if p.Ublk {
+		if err := ublkAvailable(); err != nil {
+			return err
+		}
+	} else if err := tcmuAvailable(); err != nil {
 		return err
 	}
+	// The builder is needed either way: a layer that is not on this node yet has to be
+	// converted, and `overlaybd-commit` is what seals one. Reading a sealed layer is
+	// this process's job; producing one is not.
 	if p.Builder == nil {
 		return errors.New("image: overlaybd builder not configured")
 	}
@@ -127,6 +167,10 @@ func (p *OverlaybdProvider) Prepare(ctx context.Context, sandboxID, imageRef str
 	}
 	if sizeMiB <= 0 {
 		sizeMiB = 2048
+	}
+
+	if p.Ublk {
+		return p.prepareUblk(ctx, sandboxID, imageRef, sizeMiB, opts)
 	}
 
 	// A restore from a sealed snapshot resolves its whole filesystem -- base image

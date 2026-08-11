@@ -247,6 +247,15 @@ func selectProvider(cfg FCTierConfig) (image.Provider, error) {
 		p.LazyPull = cfg.OverlaybdLazyPull
 		p.Blobs = cfg.OverlaybdBlobs
 		p.Index = cfg.OverlaybdIndex
+		// Both flags together means overlaybd's layers over ublk's transport: the layers
+		// are resolved, shared and converted identically, and what changes is that this
+		// process reads them and creates the device with io_uring rather than handing a
+		// config to the overlaybd daemon and assembling a SCSI fabric per sandbox.
+		//
+		// The combination is what removes tcmu's teardown cost, which is 4.0 s for 128
+		// devices and the same on kernel 5.15 and 6.8 because the daemon serialises
+		// through one netlink socket. A transport limit does not improve with a kernel.
+		p.Ublk = cfg.Ublk
 		// Reported as a startup failure rather than a fallback. A node asked for
 		// overlaybd and given device-mapper instead would differ from the cluster's
 		// expectation in storage cost and in whether layers are shared, and nothing
@@ -262,6 +271,10 @@ func selectProvider(cfg FCTierConfig) (image.Provider, error) {
 			blobs = cfg.OverlaybdBlobs.BlobURL()
 		}
 		slog.Info("rootfs via overlaybd", "lazyPull", cfg.OverlaybdLazyPull,
+			// Logged because the two transports differ in teardown cost and in which
+			// kernel objects a leak leaves behind, neither of which is visible from a
+			// create that succeeded.
+			"transport", map[bool]string{true: "ublk", false: "tcmu"}[cfg.Ublk],
 			"layerDir", layerDir, "blobStore", blobs,
 			// Logged because it is the difference between the store being a source an
 			// image can be resolved from and being a bare layer cache that still needs

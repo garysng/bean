@@ -77,15 +77,25 @@ func (p *UblkProvider) Name() string { return "ublk" }
 // Available reports whether this host can run the provider, so a node refuses placements
 // it cannot honour rather than failing every create.
 func (p *UblkProvider) Available() error {
+	return ublkAvailable()
+}
+
+// ublkAvailable reports whether this host can serve a ublk device.
+//
+// Shared by both providers that can use the transport rather than duplicated, because a
+// second copy of the USER_COPY check is a second place to forget it -- and forgetting it
+// yields a device whose reads return garbage rather than an error.
+func ublkAvailable() error {
 	if _, err := os.Stat("/dev/ublk-control"); err != nil {
 		return fmt.Errorf("image: ublk unavailable: /dev/ublk-control is absent, which "+
 			"means either a kernel older than 6.0 or ublk_drv not loaded "+
 			"(modprobe ublk_drv): %w", err)
 	}
-	c, err := p.control()
+	c, err := openUblkControl()
 	if err != nil {
 		return err
 	}
+	defer c.Close()
 	features, err := c.Features()
 	if err != nil {
 		return fmt.Errorf("image: ublk control device present but unusable: %w", err)
@@ -183,15 +193,6 @@ func (p *UblkProvider) Prepare(ctx context.Context, sandboxID, imageRef string, 
 		return nil, err
 	}
 	cleanup = append(cleanup, func() { _ = backend.Close() })
-
-	// A restore's contents go in before the device is assembled. The same ordering
-	// dm-snapshot needs (decisions.md 3.0): bytes written after the device exists are
-	// not in the state it read, and on a full snapshot that failure is silent.
-	if opts.SeedWritable != nil {
-		if err := opts.SeedWritable(overlayPath); err != nil {
-			return nil, fmt.Errorf("image: seed writable layer: %w", err)
-		}
-	}
 
 	dev, err := attachUblk(ctrl, backend, size)
 	if err != nil {

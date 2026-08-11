@@ -38,8 +38,6 @@ type fileBackend struct {
 	owned []uint64
 }
 
-const fileBackendBlockSize = 4 << 10
-
 // newFileBackend opens a base image and creates a sandbox's overlay.
 //
 // The overlay is created sparse and never preallocated: a sandbox that writes nothing
