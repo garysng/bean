@@ -5,7 +5,6 @@ package image
 import (
 	"errors"
 	"fmt"
-	"io"
 	"os"
 
 	"golang.org/x/sys/unix"
@@ -207,10 +206,5 @@ func (b *fileBackend) Flush() error {
 	return b.overlay.Sync()
 }
 
-// isEOF reports a read that stopped because the file ended.
-//
-// Compared against io.EOF rather than by message text: os.File.ReadAt returns exactly
-// that sentinel, and a string comparison would break the moment the wrapping changes.
-func isEOF(err error) bool {
-	return errors.Is(err, io.EOF) || errors.Is(err, io.ErrUnexpectedEOF)
-}
+// isEOF lives in lsmt.go, which is portable: the LSMT reader needs it too, and that
+// file compiles on every platform where the format can be parsed.
