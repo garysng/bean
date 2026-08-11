@@ -279,6 +279,24 @@ plus a reflection-based guard that fails when a method is missing from it — th
 hand-written call list would otherwise decay exactly as the interfaces did. The
 guard caught three snapshot methods left out of its own first draft.
 
+### the worker split did not cost the other paths ✅
+
+The worker goroutines and the copy-on-write mutex went in to make lazy pull work, but they sit
+on the path *every* ublk create takes. A change that fixes one route and breaks another is the
+risk, and the only way to see it is to exercise the routes that were already passing.
+
+`hack/rootfs-paths-regress.sh` runs all four configurations -- dm-snapshot with no flags, ublk
+alone, overlaybd over tcmu, overlaybd over ublk -- and for each one requires the *guest* to
+answer, not merely the sandbox to reach RUNNING. That distinction is the point: an unreachable
+agent is exactly what this round's bugs looked like from outside, and it reads as success to
+anything that only checks state. Each configuration also writes a file and reads it back, since
+the mutex is on the write path.
+
+All four pass, both checks each, with no ublk device and no dm mapping left behind. The
+concurrency figures are unchanged too: at 60-way the ublk route still does 101.7 creates/s with
+`fc_rootfs` at 0.022 s, against 101.5 and 0.027 s measured before the split -- so the handoff
+costs nothing at the concurrency it was added for.
+
 ### lazy pull over ublk: three bugs behind one symptom
 
 All three produced the same thing: a sandbox in RUNNING whose guest logged
