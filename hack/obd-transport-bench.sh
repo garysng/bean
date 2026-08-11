@@ -182,8 +182,18 @@ say "image:     $IMAGE"
 say "steps:     $STEPS"
 say "disk req:  ${DISK_MIB}MiB"
 
-run_transport tcmu "--fc-overlaybd"
-run_transport ublk "--fc-overlaybd --fc-ublk"
+# The blob store is passed to noded explicitly. The dev stack exports BEAN_S3_* for
+# bean-api only, so noded reads no endpoint from the environment and comes up with
+# blobStore=none -- and then a create that resolves a published template fails with
+# "snapshot filesystem needs an object store", which reads like a broken node rather than
+# a store that was never configured.
+S3=${S3_ENDPOINT:-http://127.0.0.1:9000}
+S3_ARGS="--s3-endpoint $S3 --s3-bucket ${S3_BUCKET:-bean-obd-layers}"
+export BEAN_S3_ACCESS_KEY=${BEAN_S3_ACCESS_KEY:-beanadmin}
+export BEAN_S3_SECRET_KEY=${BEAN_S3_SECRET_KEY:-beansecret123}
+
+run_transport tcmu "--fc-overlaybd $S3_ARGS"
+run_transport ublk "--fc-overlaybd --fc-ublk $S3_ARGS"
 
 say ""
 say "== done =="
