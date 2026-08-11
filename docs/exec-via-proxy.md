@@ -1,9 +1,18 @@
 # exec / file transfer via the data plane, not the gateway
 
-> Status: 📐 **design.** This proposes moving `exec` and file transfer off the
-> bean-api control-plane relay and onto the bean-proxy data plane, so they reach
-> the agent node-direct — matching what the README already claims. Authority
-> order holds: code > `status.md` > `decisions.md` > design docs > this page.
+> Status: ✅ **implemented.** `exec` and file transfer no longer relay through
+> bean-api when a proxy is configured: they reach the agent node-direct over the
+> bean-proxy data plane. All six stages in §5 landed — token injection
+> (`internal/node/portforward.go`), the domain on the create response
+> (`internal/control/api/server.go`), the CLI client (`cli/dataplane.go`), the
+> real-host probe (`hack/exec-via-proxy-probe.sh`) and the Python SDK client
+> (`sdk/python/bean/_dataplane.py`). §5 is kept as the record of the order the
+> work was done in. Authority order holds: code > `status.md` > `decisions.md` >
+> design docs > this page.
+>
+> The path is opt-in, not the default: with `BEAN_PROXY_URL` unset the client
+> stays on the gateway relay, which is what a single-node stack without a proxy
+> needs.
 
 > 中文版:[zh/exec-via-proxy.md](zh/exec-via-proxy.md)
 

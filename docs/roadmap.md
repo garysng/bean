@@ -34,9 +34,8 @@ volumes.**
 
 ## P0 — Single-node end-to-end skeleton (fc direct boot, no containerd)
 
-Reference implementation: local /Users/mac/project/agentenv (the AgentENV source — a complete
-demonstration of uvm-ublk driving overlaybd directly, envd, and jailer/FC management, compared
-module by module).
+Reference implementation: AgentENV — a complete demonstration of uvm-ublk driving overlaybd
+directly, envd, and jailer/FC management, compared module by module.
 
 **Scope**
 

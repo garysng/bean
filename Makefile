@@ -6,7 +6,12 @@ PROTOC_GEN_GO_VERSION         := v1.36.11
 PROTOC_GEN_GO_GRPC_VERSION    := v1.6.2
 PROTOC_GEN_CONNECT_GO_VERSION := v1.20.0
 
-.PHONY: all build proto proto-tools test test-e2e lint vet cover clean
+# Where `make bin` writes the binaries. The hack/ stack scripts take the same
+# variable, so `make bin && sudo BIN=$(PWD)/bin hack/dev-fc-stack.sh start` runs
+# the stack from what was just built.
+BIN ?= bin
+
+.PHONY: all build bin proto proto-tools test test-e2e lint vet cover clean
 
 proto-tools:
 	go install google.golang.org/protobuf/cmd/protoc-gen-go@$(PROTOC_GEN_GO_VERSION)
@@ -17,6 +22,12 @@ all: build
 
 build:
 	go build ./...
+
+# `build` only type-checks: `go build ./...` leaves nothing behind. Running the
+# stack needs the five binaries on disk, so that is a separate target -- the
+# quick start in the README uses this one.
+bin:
+	go build -o $(BIN)/ ./cmd/...
 
 # The connect stubs sit beside the go-grpc ones: same messages, an extra client
 # and handler that speak the Connect protocol (gRPC + gRPC-Web + HTTP/JSON) from
@@ -66,4 +77,5 @@ preflight: build
 
 clean:
 	rm -f coverage.out
+	rm -rf $(BIN)
 	go clean ./...

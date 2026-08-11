@@ -11,6 +11,9 @@ bean.db
 /bean-proxy
 /bean
 
+# `make bin` output
+/bin/
+
 # Personal permission overrides, not team-wide
 .claude/settings.local.json
 

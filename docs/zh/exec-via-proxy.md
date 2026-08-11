@@ -1,8 +1,14 @@
 # exec / 文件传输走数据面,不走网关
 
-> 状态:📐 **设计。** 提议把 `exec` 和文件传输从 bean-api 控制面中转移到 bean-proxy 数据面,
-> 让它们 node-direct 直达 agent —— 与 README 已有的声称对齐。权威顺序成立:代码 > `status.md`
-> > `decisions.md` > 设计文档 > 本页。
+> 状态:✅ **已实现。** 配了 proxy 时,`exec` 与文件传输不再经 bean-api 中转,而是走 bean-proxy
+> 数据面 node-direct 直达 agent。§5 的六个阶段都已落地:token 注入
+> (`internal/node/portforward.go`)、create 响应带回 domain
+> (`internal/control/api/server.go`)、CLI 客户端(`cli/dataplane.go`)、真机探针
+> (`hack/exec-via-proxy-probe.sh`)、Python SDK 客户端(`sdk/python/bean/_dataplane.py`)。
+> §5 保留为施工顺序的记录。权威顺序成立:代码 > `status.md` > `decisions.md` > 设计文档 > 本页。
+>
+> 这条路径是 opt-in,不是默认:不设 `BEAN_PROXY_URL` 时客户端仍走网关中转 —— 没有 proxy 的
+> 单节点栈需要的正是这个回退。
 
 > English: [../exec-via-proxy.md](../exec-via-proxy.md)
 

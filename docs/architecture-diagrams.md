@@ -23,7 +23,7 @@ config:
 flowchart TB
   subgraph CLIENTS["clients"]
     direction LR
-    SDK["SDK<br>py · ts"]
+    SDK["SDK<br>python"]
     CLI["CLI"]
   end
 

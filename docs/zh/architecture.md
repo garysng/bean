@@ -133,8 +133,7 @@ microVM（见 D9）——两种形态共享同一条镜像链路，用户无感�
 > overlaybd **已接入 `image.Provider`**,即 `--fc-overlaybd` 后面的 `OverlaybdProvider`
 > (PR #49)—— 但走 TCMU,不是本节描述的 ublk 直驱。见 [status.md](status.md)。
 
-fc 主路径**不引入 containerd**（AgentENV 同款,其源码已在本地 /Users/mac/project/agentenv
-可参考）：noded 直接驱动 overlaybd（经 TCMU）组装块设备（S3 backing + 本地
+fc 主路径**不引入 containerd**（AgentENV 同款）：noded 直接驱动 overlaybd（经 TCMU）组装块设备（S3 backing + 本地
 缓存）→ virtio-blk 挂 microVM。containerd 的三项职责在本设计中均有更直接的替代：
 
 | containerd 职责 | 本设计 |

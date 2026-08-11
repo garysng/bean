@@ -150,8 +150,7 @@ one image path, and the user never notices the difference.
 > (PR #49) — but over TCMU, not the ublk direct drive this section describes.
 > See [status.md](status.md).
 
-The fc main path **does not bring in containerd** (same as AgentENV, whose
-source is available locally at /Users/mac/project/agentenv for reference):
+The fc main path **does not bring in containerd** (same as AgentENV):
 noded drives overlaybd directly (over TCMU) to assemble the block device
 (S3 backing + local cache) → virtio-blk attached to the microVM. All three of
 containerd's responsibilities have a more direct replacement in this design:
