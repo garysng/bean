@@ -3,6 +3,17 @@ package image
 // lz4RealVectors are blocks produced by the lz4 CLI, an implementation this code
 // shares nothing with. Hand-built blocks only prove the decoder agrees with the
 // test's own idea of the format; these prove it agrees with LZ4.
+//
+// Generated, not written by hand. Each entry is one LZ4 *block* lifted out of a frame
+// the `lz4` CLI produced: compress with `lz4 -1 -c --no-frame-crc`, skip the frame
+// header (4-byte magic, FLG, BD, then 8 bytes of content size if FLG bit 3 is set and 4
+// bytes of dict id if bit 0 is, then a 1-byte header checksum), read the 4-byte block
+// size -- whose top bit means "stored uncompressed", which excludes that block from use
+// here -- and take that many bytes.
+//
+// The shapes cover the decoder's branches: repeated text, a long run (which is what
+// exercises the overlapping match), and a mixture. Incompressible input is deliberately
+// absent because the CLI stores it raw, so there is no block to decode.
 var lz4RealVectors = []struct {
 	name         string
 	plain, block []byte
