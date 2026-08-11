@@ -5,7 +5,7 @@
 **A sandbox platform for AI agents** — run untrusted code in hardware isolation:
 create it, exec into it, snapshot it, fan it out. Any OCI image, no template build step.
 
-*Built from zero to one, iterated and re-verified on real hardware at every step.*
+*Built from zero to one, under continuous iteration and optimisation.*
 
 ![runtime: Firecracker microVM](https://img.shields.io/badge/runtime-Firecracker%20microVM-E24329?style=flat-square)
 ![runtime: gVisor](https://img.shields.io/badge/runtime-gVisor%20%2F%20OCI-4285F4?style=flat-square)
