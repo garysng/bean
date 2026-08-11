@@ -9,25 +9,26 @@ import (
 	"testing"
 )
 
-// Lazy pull over ublk is refused, and the refusal says why.
+// Lazy pull over ublk is no longer refused: the route reads a remote layer itself.
 //
-// The two are incompatible for a structural reason, not a missing feature: lazy pull
-// means the layer is a URL the daemon range-reads, and the reader in this process needs
-// a file it can seek. A node started with both would accept placements and then fail
-// every create against an image whose layers live only in the store. Refused before any
-// layer work so the failure names the configuration rather than the image.
-func TestPrepareUblkRefusesLazyPull(t *testing.T) {
-	p := NewOverlaybdProvider(t.TempDir(), t.TempDir(), t.TempDir(), nil, nil, 2048)
+// This test used to assert the opposite, on the reasoning that a lazily read layer is a URL
+// while the reader needed a file. That was a missing backend, not an incompatibility -- every
+// reader below the transport already took io.ReaderAt -- and it is implemented now, verified on
+// hardware. Kept as the inverse assertion so the combination cannot be re-refused by accident.
+//
+// The failure a provider with no ublk device gives is about the kernel, which is what a
+// machine without /dev/ublk-control should say; what must not appear is a refusal of the flag
+// combination itself.
+func TestPrepareUblkAcceptsLazyPull(t *testing.T) {
+	p := NewOverlaybdProvider(t.TempDir(), t.TempDir(), t.TempDir(), NewRegistry(nil), nil, 2048)
 	p.Ublk = true
 	p.LazyPull = true
 
 	_, err := p.prepareUblk(context.Background(), "sbx-1", "alpine:3.20", 2048, PrepareOptions{})
-	if err == nil {
-		t.Fatal("lazy pull with ublk was accepted, so every create against a remotely " +
-			"stored image would fail later with no mention of the configuration")
-	}
-	if !strings.Contains(err.Error(), "lazy-pull") {
-		t.Errorf("the refusal does not name the flag an operator has to change: %v", err)
+	// On a host with no ublk this fails for that reason, and on one with ublk it fails later
+	// for want of a real image. Either is fine; what is not is a refusal naming the flag.
+	if err != nil && strings.Contains(err.Error(), "lazy-pull cannot be served") {
+		t.Errorf("lazy pull over ublk is refused, but it is implemented and verified: %v", err)
 	}
 }
 
