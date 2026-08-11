@@ -3,7 +3,6 @@
 package image
 
 import (
-	"io"
 	"os"
 	"testing"
 )
@@ -26,40 +25,26 @@ func TestOpenRealSealedLayer(t *testing.T) {
 			"(hack/obd-seal-a-layer.sh produces one)")
 	}
 
-	f, err := os.Open(path)
+	// Through openLSMTStack, which is the function a create calls -- not through the
+	// unwrapping helpers one at a time.
+	//
+	// The first version of this test called openSealedLayerPayload, openZFile and
+	// openLSMTLayer itself, and it passed while a real create still failed: production
+	// opened the layer file directly and never unwrapped the tar. A test that assembles
+	// the pipeline itself verifies the pieces and not the wiring, which is the more likely
+	// thing to be wrong.
+	stack, closeStack, err := openLSMTStack([]string{path})
 	if err != nil {
-		t.Fatalf("open the sealed layer: %v", err)
+		t.Fatalf("open a real sealed layer through the production path: %v", err)
 	}
-	defer f.Close()
-	st, err := f.Stat()
-	if err != nil {
-		t.Fatal(err)
-	}
+	defer closeStack()
 
-	// A layer bean produced is `overlaybd-commit -z -t`: zfile-compressed and wrapped in
-	// a tar so it is a valid OCI blob. So the outer container is a tar, and the reader has
-	// to find the payload inside it rather than assuming offset 0.
-	src, size, err := openSealedLayerPayload(f, st.Size())
-	if err != nil {
-		t.Fatalf("locate the payload inside the sealed layer: %v", err)
-	}
-
-	z, zerr := openZFile(src, size)
-	if zerr != nil {
-		t.Fatalf("open the zfile inside a real sealed layer: %v", zerr)
-	}
-	t.Logf("zfile opened: %d bytes uncompressed, block size %d, algo %d",
-		z.size(), z.header.blockSize, z.header.algo)
-
-	l, lerr := openLSMTLayer(z, z.size())
-	if lerr != nil {
-		t.Fatalf("open the lsmt index inside a real sealed layer: %v", lerr)
-	}
-	t.Logf("lsmt opened: virtual size %d, %d mappings", l.virtualSize, len(l.mappings))
-	if l.virtualSize == 0 {
+	t.Logf("stack opened: virtual size %d, %d merged extents",
+		stack.virtualSize, len(stack.mappings))
+	if stack.virtualSize == 0 {
 		t.Error("the layer reports a zero virtual size, so nothing could be served from it")
 	}
-	if len(l.mappings) == 0 {
+	if len(stack.mappings) == 0 {
 		t.Fatal("the layer has no extents, so the fixture holds no content: seal one with " +
 			"overlaybd-apply rather than by writing into the data file, which is an extent " +
 			"store and does not register bytes poked into it")
@@ -67,20 +52,11 @@ func TestOpenRealSealedLayer(t *testing.T) {
 
 	// Opening the index is not the same claim as reading the right bytes through it. A
 	// wrong extent offset still opens, and still returns data -- just data from the wrong
-	// place, which is the failure mode this whole format is easiest to get wrong in.
+	// place, which is the failure mode this format is easiest to get wrong in.
 	//
 	// The layer holds an ext4 filesystem (overlaybd-create --mkfs), so its superblock is a
 	// fixed, known quantity: magic 0xef53 at byte 56 of the superblock, which lives at
-	// offset 1024. Anything other than that means the extents are being resolved to the
-	// wrong physical bytes.
-	// Read through a one-layer stack rather than the layer directly, because the stack is
-	// what actually serves a device: it owns the merge and the sector-to-byte conversion,
-	// and reading the layer's index without them would test less than production does.
-	stack := &lsmtStack{
-		mappings:    mergeLSMTLayers([]*lsmtLayer{l}),
-		layers:      []io.ReaderAt{z},
-		virtualSize: int64(l.virtualSize),
-	}
+	// offset 1024. Anything else means the extents resolve to the wrong physical bytes.
 	sb := make([]byte, 1024)
 	if _, err := readFullAt(stack, sb, 1024); err != nil {
 		t.Fatalf("read the superblock through the layer: %v", err)

@@ -75,14 +75,20 @@ func openLSMTStack(paths []string) (*lsmtStack, func() error, error) {
 			return nil, nil, fmt.Errorf("image: stat layer %s: %w", path, err)
 		}
 
-		// A layer sealed with `overlaybd-commit -z` is an LSMT file whose data blocks
-		// are a ZFile, so the compression sits under the index rather than over it: the
-		// index addresses uncompressed positions and the reader beneath expands blocks
-		// to serve them. Wrapping in that order is what lets the index code stay
-		// unaware of compression.
-		var src io.ReaderAt = f
-		size := st.Size()
-		if z, zerr := openZFile(f, st.Size()); zerr == nil {
+		// Three containers, outermost first. bean seals with `overlaybd-commit -z -t`, so
+		// a layer on disk is: a tar (from -t, which makes it a valid OCI blob), holding a
+		// ZFile (from -z, block-compressed so any one block can be expanded alone),
+		// holding the LSMT index and its extents.
+		//
+		// Unwrapping in that order is what lets each reader stay unaware of the one
+		// outside it: the index addresses uncompressed positions, and the ZFile beneath
+		// turns those into block reads.
+		src, size, err := openSealedLayerPayload(f, st.Size())
+		if err != nil {
+			_ = closeAll()
+			return nil, nil, fmt.Errorf("image: open layer %s: %w", path, err)
+		}
+		if z, zerr := openZFile(src, size); zerr == nil {
 			src = z
 			size = z.size()
 		}
