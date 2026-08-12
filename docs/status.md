@@ -332,11 +332,17 @@ digests.
 
 Two things surfaced while getting there, and both are upstream of the sealer.
 
-**A guest's `sync` does not put its writes on the device.** Measured directly: after `sync` the
-overlay had **0 bytes allocated**; after `echo 3 > /proc/sys/vm/drop_caches` inside the guest it
-had 81920. So the checkpoint's flush -- which does exist, and does run for a memory-less snapshot
--- is not sufficient for ext4 in the guest, and a snapshot taken right after a small write
-captures an empty filesystem. This is not specific to ublk; the tcmu route reads the same device.
+**A guest's `sync` did not put its writes on the device, and that was bean's bug.** It is fixed;
+the paragraph is kept because the wrong diagnosis is instructive. What was measured -- 0 bytes
+allocated after `sync`, 81920 after `echo 3 > /proc/sys/vm/drop_caches` -- was real, but the
+conclusion drawn from it was not: `drop_caches` only reclaims clean pages and does not write dirty
+ones back, so it cannot be what flushed anything. The extra seconds those separate execs took were
+doing the work.
+
+The actual cause was that the guest had no flush to send. `SET_PARAMS` never set `Basic.Attrs` and
+the Firecracker drive carried no `cache_type`, which defaults to `Unsafe` and does not advertise
+`VIRTIO_BLK_F_FLUSH`. The guest saw `write through`, its ext4 never emitted `UBLK_IO_OP_FLUSH`, and
+`backend.Flush` had never run in production at all. See the durability section below.
 
 **The extents cannot come from the in-process bitmap alone.** The bitmap is built by `WriteAt`, so
 it knows only writes this process saw -- and a sandbox restored from a snapshot reattaches with a
@@ -362,11 +368,41 @@ So `requiredRemoteLayer` reads a store-only layer regardless of lazy pull, and `
 carries a `storeOnly` flag saying which kind of chain it is resolving. The image walk is untouched
 and still gated.
 
-**One operational note that is not a bug in bean.** A guest's `sync` does not put its writes on the
-block device, so a snapshot taken immediately after a small write captures nothing -- the sealer
-refuses it rather than sealing an empty layer, which is correct but surprising. Dropping the guest's
-caches (`echo 3 > /proc/sys/vm/drop_caches`) does flush it. The checkpoint's own flush is not
-enough, and that applies to the tcmu route equally since both read the same device.
+### the guest's flush now reaches the overlay ⚠️
+
+A snapshot taken right after a write used to capture a filesystem missing it: either the sealer
+refused with "has written nothing", or the restore came back with the file's name and size intact
+and its data block all zeros. Two defects, both bean's, and neither was the guest's fault.
+
+**The guest had no flush to send.** `SET_PARAMS` never set `Basic.Attrs`, and `fcDrive` carried no
+`cache_type` -- Firecracker defaults to `Unsafe`, which does not advertise `VIRTIO_BLK_F_FLUSH`. So
+the guest reported `write through` on both disks, its ext4 never emitted `UBLK_IO_OP_FLUSH`, and
+`backend.Flush` -- present and correct on both backends -- had never once executed in production.
+A guest's `sync` returned as soon as its writes reached the queue, not when they were on the
+overlay. Measured: a marker was absent from the host file 500 ms after `sync` returned and present
+within the next 500 ms. That also means a host crash silently lost a sandbox's filesystem, which is
+the more serious half and was invisible.
+
+`UBLK_ATTR_VOLATILE_CACHE` is `1 << 2`, taken from the kernel's own header. A first attempt used
+`1 << 1`, which is `UBLK_ATTR_ROTATIONAL`: it told the kernel this was a spinning disk, said nothing
+about the cache, and the host device still reported `write through`. Reading the constant beat
+counting the bits.
+
+**The seal read allocation without flushing.** `OwnedExtents` asks the filesystem via `SEEK_DATA`,
+which is right for surviving a reattach and wrong for a write this process has not pushed down --
+host ext4 delays allocation until writeback, so it reports a hole for bytes the file already holds.
+The flush belongs on the seal path, because a caller cannot see the queue's in-flight state.
+
+With both fixed, host and guest both report `write back` and the marker lands on the host file the
+instant `sync` returns. Verified on hardware: write, snapshot `--no-memory`, restore, read back, no
+manual sync and no `drop_caches`.
+
+**Not fully fixed.** 9 of 10 consecutive cycles pass. The tenth fails with a sharp signature: the
+failing seals capture **12** extents where passing ones capture **13**, and the missing one is the
+extent at the high offset ext4 chose for the file (`1883242496` on a 2 GiB disk, ~1.75 GiB in). The
+data is on the host overlay either way, so this is the seal missing an extent rather than a write
+being lost. A unit test sealing that exact offset passes, so the reproduction is not yet narrow
+enough to name the cause.
 
 ### the worker split did not cost the other paths ✅
 
