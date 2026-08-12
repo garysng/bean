@@ -59,6 +59,23 @@ type ublkParams struct {
 const (
 	ublkParamTypeBasic = 1 << 0
 
+	// ublkAttrVolatileCache tells the kernel this device has a write-back cache, which makes
+	// the block layer issue a flush when a filesystem asks for one (UBLK_ATTR_VOLATILE_CACHE).
+	//
+	// Without it the queue never receives UBLK_IO_OP_FLUSH, so backend.Flush is unreachable and
+	// a guest's `sync` returns as soon as its writes reach the queue rather than when they are
+	// on the overlay. Measured: a marker was absent from the host file 500 ms after the guest's
+	// sync returned, and present within the next 500 ms.
+	//
+	// It describes the device honestly. The overlay is a host file whose pages are not durable
+	// until fsync, which is exactly what a volatile cache is, and the guest is the only party
+	// that knows which writes it needs ordered.
+	//
+	// The value is from the kernel's own header rather than counted off: 1 << 1 is
+	// UBLK_ATTR_ROTATIONAL, so an off-by-one bit here would tell the kernel this is a spinning
+	// disk and say nothing about the cache.
+	ublkAttrVolatileCache = 1 << 2
+
 	// ublkDevIDAny asks the kernel to allocate a device id.
 	//
 	// Chosen over picking one because two concurrent creates racing for the same id is
@@ -223,6 +240,12 @@ func (c *ublkControl) setParams(devID uint32, sizeBytes int64) error {
 		Len:   uint32(unsafe.Sizeof(ublkParams{})),
 		Types: ublkParamTypeBasic,
 	}
+	// Declared as having a volatile write cache so the guest's flushes reach the queue. The
+	// overlay is a host file, so a write is not durable until the backend fsyncs it, and that
+	// is what this attribute says. Left unset, the guest sees "write through", never sends a
+	// flush, and its `sync` is not a durability point at all.
+	p.Basic.Attrs = ublkAttrVolatileCache
+
 	// 512-byte logical blocks with 4 KiB physical, which is what a virtio-blk guest
 	// expects and what the ext4 in bean's images is formatted for.
 	p.Basic.LogicalBSShift = 9

@@ -844,9 +844,20 @@ func (r *FCRuntime) configureAndBoot(ctx context.Context, vm *fcVM, spec *Spec) 
 		return err
 	}
 
+	// Writeback on the writable drive, so the guest's flushes reach the host. The agent disk
+	// above is read-only and has nothing to flush, so it keeps the default.
+	//
+	// Without this the guest is told the device has no cache to flush, so its ext4 never sends
+	// one and `sync` stops being a durability point -- measured as a snapshot that captured a
+	// filesystem missing a write made a second earlier.
+	rootfsCache := ""
+	if !vm.rootfs.ReadOnly {
+		rootfsCache = "Writeback"
+	}
 	if err := vm.client.put(ctx, "/drives/rootfs", fcDrive{
 		DriveID: "rootfs", PathOnHost: filepath.Base(vm.rootfs.Device),
 		IsRootDevice: false, IsReadOnly: vm.rootfs.ReadOnly,
+		CacheType: rootfsCache,
 	}); err != nil {
 		return err
 	}

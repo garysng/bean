@@ -900,14 +900,31 @@ func (p *OverlaybdProvider) publishSealedSnapshot(ctx context.Context, sealedPat
 
 // sealFromBitmap captures a ublk-route sandbox's filesystem without the overlaybd daemon.
 //
-// The ownership bitmap is the index: this process already knows which blocks the sandbox wrote,
-// so there is nothing to flush and nobody to ask. That is the whole reason snapshots work on this
-// route and hit a wall on the tcmu one.
+// The overlay itself is the index: the allocated regions of the file say which blocks the sandbox
+// wrote, so there is no daemon holding an index in memory to ask. That is the whole reason
+// snapshots work on this route and hit a wall on the tcmu one.
 //
 // A sandbox that has written nothing is refused rather than sealed as an empty layer. It is a
 // real state -- boot alone dirties very little, and a caller can snapshot immediately -- and the
 // honest answer is that there is no filesystem to capture, not a layer that claims one.
 func (p *OverlaybdProvider) sealFromBitmap(ctx context.Context, sandboxID, base string, backend *lsmtBackend) (string, []string, int64, error) {
+	// Flushed before the extents are read, because the extents come from the filesystem and the
+	// filesystem does not know about a write still sitting in this process's page cache.
+	//
+	// Two things make that gap reachable rather than theoretical, and both were measured on
+	// hardware. The device advertises no volatile write cache, so a guest's `sync` has no FLUSH
+	// to send and returns as soon as its writes are handed to the queue -- while the WriteAt
+	// into the overlay is still in flight. And host ext4 delays allocation until writeback, so
+	// SEEK_DATA reports a hole for data the file already holds. Measured: a marker was absent
+	// 500 ms after the guest's sync returned and present within the next 500 ms, which is
+	// exactly the window a checkpoint runs in.
+	//
+	// Without this, a snapshot taken right after a write reported "written nothing" for a
+	// sandbox whose file was on disk, and a restore came back missing it.
+	if err := backend.Flush(); err != nil {
+		return "", nil, 0, fmt.Errorf("image: flush sandbox %s before sealing: %w", sandboxID, err)
+	}
+
 	extents := backend.OwnedExtents()
 	if len(extents) == 0 {
 		return "", nil, 0, fmt.Errorf("image: sandbox %s has written nothing, so there is no "+
