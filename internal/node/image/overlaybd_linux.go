@@ -482,6 +482,15 @@ func (p *OverlaybdProvider) snapshotFSLowers(ctx context.Context, fsManifestDige
 		return nil, fmt.Errorf("image: snapshot filesystem layer %d/%d (%s) is in neither the node "+
 			"nor the store", i+1, len(manifest.Layers), layer.Digest)
 	}
+	// Logged at debug: a restore that resolves the wrong chain and one that resolves the right
+	// chain but reads it wrong look identical from outside, and they have different fixes. This
+	// is what distinguished them -- the chain was always correct, so the bug was in the guest's
+	// view of it.
+	for i, l := range lowers {
+		logging.From(ctx).Debug("snapshot lower resolved",
+			"index", i, "of", len(lowers), "digest", l.Digest,
+			"file", l.File, "remote", l.File == "", "size", l.Size)
+	}
 	return lowers, nil
 }
 
@@ -926,6 +935,17 @@ func (p *OverlaybdProvider) sealFromBitmap(ctx context.Context, sandboxID, base 
 	}
 
 	extents := backend.OwnedExtents()
+	// Logged at debug because it is what distinguished a seal that missed data from one that
+	// captured it: on a failing restore this showed the marker's own extent present and the
+	// device serving it correctly, which moved the search off the seal entirely.
+	{
+		var total uint64
+		for _, e := range extents {
+			total += uint64(e.length) * lsmtAlignment
+		}
+		logging.From(ctx).Debug("seal extents captured",
+			"sandbox", sandboxID, "count", len(extents), "bytes", total)
+	}
 	if len(extents) == 0 {
 		return "", nil, 0, fmt.Errorf("image: sandbox %s has written nothing, so there is no "+
 			"filesystem to seal", sandboxID)

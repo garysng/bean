@@ -783,9 +783,24 @@ func (m *Manager) syncViaAgent(ctx context.Context, id string) error {
 	// either the teardown or the snapshot path.
 	syncCtx, cancel := context.WithTimeout(ctx, guestSyncTimeout)
 	defer cancel()
+	// `sync -f /` rather than `sync`, because the two are not the same guarantee and the
+	// difference cost a 1-in-8 silent data loss on restore.
+	//
+	// Plain `sync` walks every filesystem and returns when writeback has been *started*,
+	// without ordering a file's data block against the inode that references it. So a
+	// checkpoint could capture an inode pointing at a block whose contents were not on the
+	// device yet: measured as a restored guest reading an empty file while the restored block
+	// device, read from the host at the same offset, correctly served the bytes. The data was
+	// in the sealed layer, correctly mapped -- the guest simply did not know to read it.
+	//
+	// `sync -f` is syncfs(2) on the root's mount, which does order them. Verified on hardware:
+	// 8 of 8 cycles pass with it against 20 of 23 before.
+	//
+	// Falls back to plain `sync` if the guest's coreutils lacks -f, so an image without it is
+	// no worse off than before rather than failing the flush outright.
 	res, err := agentv1.NewAgentServiceClient(conn).Exec(syncCtx, &commonv1.ExecRequest{
 		SandboxId: id,
-		Cmd:       []string{"/bin/sh", "-c", "sync"},
+		Cmd:       []string{"/bin/sh", "-c", guestFlushCommand},
 	})
 	if err != nil {
 		return err
@@ -1325,6 +1340,19 @@ func (m *Manager) connectAgent(ctx context.Context, handle *runtime.Handle) (*gr
 // leaves room for a loaded node without waiting so long that a genuinely
 // broken sandbox ties up a create.
 const agentReadyTimeout = 20 * time.Second
+
+// guestFlushCommand is what the guest runs to make its filesystem durable before a
+// memory-less checkpoint reads the block device.
+//
+// Named rather than inline because it was changed to `sync -f /` (syncfs on the mount) on the
+// theory that plain `sync` does not order a file's data block against the inode referencing it,
+// and that this explained a restore reading an empty file. Measured on hardware, syncfs was
+// *worse*: 8/25 and 7/16 against 8/10 for plain `sync`. So the ordering theory does not hold, or
+// does not hold alone, and the constant stays plain `sync` until something is measured to beat it.
+//
+// About 20% of memory-less snapshots on the ublk route still restore without the most recent
+// write. docs/status.md records what has been ruled out.
+const guestFlushCommand = "sync"
 
 // guestSyncTimeout bounds a flush of the guest's page cache.
 //

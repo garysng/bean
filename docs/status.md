@@ -397,12 +397,41 @@ With both fixed, host and guest both report `write back` and the marker lands on
 instant `sync` returns. Verified on hardware: write, snapshot `--no-memory`, restore, read back, no
 manual sync and no `drop_caches`.
 
-**Not fully fixed.** 9 of 10 consecutive cycles pass. The tenth fails with a sharp signature: the
-failing seals capture **12** extents where passing ones capture **13**, and the missing one is the
-extent at the high offset ext4 chose for the file (`1883242496` on a 2 GiB disk, ~1.75 GiB in). The
-data is on the host overlay either way, so this is the seal missing an extent rather than a write
-being lost. A unit test sealing that exact offset passes, so the reproduction is not yet narrow
-enough to name the cause.
+**The third defect: `sync` is not `syncfs`.** The two fixes above left 3 failures in 23 cycles, and
+every structural theory about them was wrong. Ruled out by measurement, in order: the failing seals
+did contain the marker (`grep` found it in the blob every time); the failing and passing layers had
+**byte-identical indexes**, same extent count and same mappings; the layer mapped the marker's
+virtual offset to the right physical offset and the bytes were there; the restore resolved the
+correct 2-layer chain with the correct digest and size every time; `fsfreeze` before the snapshot
+did not help; and layer size (82112 vs 86224) tracked nothing, since one 82112-byte layer passed.
+
+What isolated it was reading the restored block device from the *host* at the marker's offset while
+the guest read the same file. On a failing restore the device correctly served `R1` and the guest
+read empty. So everything from the write through the seal to the restored device was right, and the
+loss was in the guest's own view: `sync` returns once writeback has been *started* and does not
+order a file's data block against the inode that references it, so the checkpoint sealed an inode
+pointing at a block whose contents were not on the device yet.
+
+**Still open, and four proposed causes are now ruled out by measurement.** The failure rate is
+about 20% (8/10 and 20/23, two independent runs agreeing). What has been eliminated:
+
+- *`sync` is not `syncfs`.* Changing the checkpoint's flush to `sync -f /` made it **worse** --
+  8/25 and 7/16 -- and was reverted. The 8/8 run that motivated it used `sync -f <file>`, not
+  `sync -f /`, which is a different operation.
+- *The seal misses an extent.* Instrumented on a failing run: the seal captured 12 extents
+  including `virtBytes=1883242496`, the marker's own block.
+- *The layer or its index is wrong.* A passing and a failing layer had byte-identical indexes,
+  and the failing layer mapped the marker's virtual offset to a physical offset holding the
+  bytes. Layer size tracked nothing -- an 82112-byte layer passed and another failed.
+- *The filesystem has no journal, so data cannot be ordered against metadata.* A controlled
+  host experiment says the opposite: no-journal passed 20/20 while journalled failed 20/20 (the
+  copy needs recovery, which a read-only mount cannot do). `-O ^has_journal` is correct here.
+
+What is established: on a failing restore the block device, read from the *host* at the marker's
+offset, serves the right bytes while the guest reads zeros. So the write, the seal, the layer, the
+chain resolution and the device are all correct, and the loss is in the guest's own view of its
+filesystem. The next step is comparing the guest's block mapping for the file before and after
+restore, which is where an inode pointing at the wrong block would show up.
 
 ### the worker split did not cost the other paths ✅
 
