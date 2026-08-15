@@ -295,6 +295,74 @@ loop device 全部归零 —— loop 泄漏的修复(#16)在并发下成立。
 所以现在有一个把每个方法各调一次的 smoke test,加一个基于反射的漂移守卫 ——
 手写的调用清单否则会跟接口一样腐烂。守卫立刻抓出它自己初稿漏掉的三个 snapshot 方法。
 
+## 归因笔记:create 与 destroy 关键路径的实测
+
+以下数字全部来自同一台 128 核机器(AMD EPYC,Ubuntu 22.04,503 GB),除注明外均为
+256 并发 create。记下来是因为每一条都推翻了一个此前未经实测就成立的说法。
+
+### create 的时间去哪了
+
+`runtime_create` 以前是一个覆盖了几乎整个 create 的不透明数字,所以归因只能停在
+「在这里面某处」。现在拆成六个子阶段:
+
+| 阶段 | dm-snapshot | overlaybd |
+|---|---|---|
+| `fc_rootfs` | 3.809s | 0.908s |
+| `fc_boot` | 0.133s | 0.050s |
+| `fc_vmm_spawn` | 0.066s | 0.025s |
+| `fc_api_ready` | 0.000s | 0.002s |
+| `fc_cgroup` | 0.000s | 0.000s |
+| `agent_ready` | 0.316s | 0.306s |
+| **总计** | **4.512s** | **1.299s** |
+
+`fc_rootfs` 是天花板,而且只有它随负载增长:n=16 时 0.863s,n=256 时 3.809s,
+boot 和 spawn 基本不变。
+
+成本是 subprocess 开销 —— 这是在宿主上把其他可能逐个排除掉得出的,不是推理出来的。
+裸 dm-snapshot 创建能并行(串行 10/s,并发 65/s);`losetup --find` 不随设备数退化
+(已有 0 / 100 / 200 个设备时每次调用都是 26ms)。所以是每个 sandbox 两次
+`losetup` 加一次 `dmsetup` 的 `fork`/`exec`,每次约 26ms。`attachTCMU` 写 configfs、
+完全不 fork,这就是 overlaybd 在这个阶段快 4.2 倍的原因。
+
+### `cores / cpu-per-create` 那个说法是错的
+
+README、本文和 `--create-wait` 的帮助文本都写着上限约 `cores / 5` —— 那是在一台
+16 核机器上、当时每个 create 都要 boot 时量的。实测成本是**每个 create 0.31–0.44
+CPU-秒**,小一个数量级;而实测吞吐只有该成本预测值的 0.16–0.28。也就是说在测过的
+任何并发下,宿主 CPU 都不是约束。
+
+在归因清楚之前有两个东西被错怪过,一并记下免得有人重走。**manager 的 mutex**:
+create 只短暂持锁,而我为抓 2N+1 访问模式写的测试在坏代码上照样通过,所以那个测试
+被删掉而不是留着。**SQLite 写争用**:300 个并发写入者下 `TouchNode` 从 119µs 涨到
+25ms —— 214 倍,但离产生影响还差三个数量级。之后同一轮实测 Postgres 吞吐只有
+SQLite 的**一半**(47.7 对 89.4 creates/s),这就彻底否掉了「单写连接在限制吞吐」
+的想法。Postgres 的价值是多副本共享一份状态,不是让单节点更快。
+
+### destroy 有一个永远不可能起作用的 2 秒地板
+
+`killVMM` 先发 `SIGTERM`、最多等 2 秒、再发 `SIGKILL`。而 Firecracker 装了
+`SIGTERM` 处理器且不会因它退出:活体 VMM 上实测 `SigCgt: 0000000441801449`,发信号
+3 秒后仍然存活,`SIGKILL` 则 59ms 死亡。去掉这个无用等待后,单次 destroy
+从 2184ms 降到约 200ms。
+
+这是这条路径上**第二个**完全同形状的等待 —— 之前那个 ACPI poweroff 等待占了
+5335ms destroy 中的 5001ms,同样不可能成功,因为 guest 内核没有编
+`CONFIG_ACPI_BUTTON`。两次被藏住的原因也一样:destroy 只有一个数字,固定地板看起来
+就像「拆设备本来就要这么久」。现在 `destroy_flush` 和 `destroy_network` 是独立阶段,
+分别是 0.418s 和 0.000s。
+
+**仍未解决**:高并发下 destroy 是串行的。wall 时间与数量成线性(31 → 1968ms、
+64 → 3445ms、128 → 7372ms),每个恒定约 57ms,而 57ms × 128 正好是那 7372ms。
+不是内核 —— 10 次串行 backstore `rmdir` 总共 15ms;`Destroy` 也在拆除之前就释放了
+runtime 锁。所以串行点在 configfs 之上的某处,尚未定位。
+
+### 一个健康的节点被判定为 LOST
+
+对账跑在心跳流打开**之前**,而它的耗时无界:每个残留的 device-mapper 映射,
+`dmsetup remove --retry` 要 4.806 秒才放弃,且严格串行。109 个残留就是 8.7 分钟才
+发出第一次心跳,而 lease 是 45 秒。按时间顺序读日志时它是明的 ——
+20:19:54 注册成功,20:20:44 lease 过期,中间一次心跳都没有。
+
 ## 2. 与设计的差距
 
 | 项 | 状态 |
@@ -302,6 +370,8 @@ loop device 全部归零 —— loop 泄漏的修复(#16)在并发下成立。
 | build image：声明式 steps（Modal 风格链式 API） | ⛔ 未开始;Dockerfile 路径已通,steps 只是另一个前端编译到同一个 plan（`docs/image-build.md` §3.2、§5） |
 | overlaybd | ⚠️ **已接入并在真机端到端验证**(PR #49)。`OverlaybdProvider` 走 TCMU,`--fc-overlaybd` 开启,**dm-snapshot 仍是默认**。实测:sandbox 从 overlaybd 设备启动、guest 从自己的 rootfs 读到 `PRETTY_NAME="Alpine Linux v3.20"`、写落在可写层、`bean kill` 后无 backstore 无 multipath 残留(`hack/overlaybd-e2e.sh`)。同机对比 dm-snapshot(`hack/overlaybd-bench.sh`):三个共享 base 的镜像 **392 MiB → 118 MiB**,转换 CPU 从每镜像平均 2.2 s 降到 1.37 / 0.49 / 0.44 s。**冷启动延迟没有改善** —— 这条路径依然先下载再转换每一层才能组设备,首次使用比拍平做的功还多,收益在第二个镜像和磁盘上。128 核机器 256 并发 create 是它真正发挥的地方:`fc_rootfs` 3.809 s → 0.908 s,吞吐 47.5 → 88.0 creates/s,零失败零泄漏 —— 原因是子进程数,dm-snapshot 每 sandbox fork 两次 `losetup` 一次 `dmsetup`(每次约 26 ms),而 `attachTCMU` 全是 configfs 写、完全不 fork。 |
 | overlaybd lazy-pull | ⚠️ **已实现,未对真 registry 验证过**。`--fc-overlaybd-lazy-pull`。挂载 7ms、只传 19.6% 的层字节就能挂载并读文件、8 个 HTTP 206 —— 这些数字来自 `docs/decisions.md` §3.1 的手工验证,针对的是**已经封好的 overlaybd 层**,不是来自这份代码。普通 OCI 层是 gzip tar,没有可 seek 的块索引,所以指名这种镜像的 create 会被**拒绝**而不是悄悄建一个打不开的 config。产出封好的层是 `Prewarm` 的活:它转换镜像并把每一层按 OCI digest 发布到 bean 自己的对象存储(`--fc-overlaybd-s3-endpoint`),之后任何读同一个存储的节点直接远端读、不再转换。**create 从不发布** —— 几十 MiB 的 S3 上传不该压在 sandbox 的延迟路径上。所以真正冷的 create 仍然是一次转换,但那是**每机群每镜像一次**而不是每节点一次,前提是有人 prewarm |
+| overlaybd over ublk | ⚠️ **已接线并在真机实测**。`--fc-overlaybd` 加 `--fc-ublk`:层的解析、按 digest 共享、缺层时转换全都和 TCMU 路线一模一样,变的只是由本进程读层并用 io_uring 建设备,不再把 config 交给 overlaybd 守护进程、也不再每 sandbox 组一套 SCSI fabric。这意味着层格式是用 Go 读的:`lsmt.go` 解 trailer 和位打包的索引,`zfile.go` 解块压缩数据,`lz4block.go` 解块本身(约 100 行;它在每次 guest 读的路径上,所以不引依赖),`lsmtstack.go` 按「新层胜出」合并整条链,`lsmtcow.go` 在上面盖一层稀疏 overlay。**做这件事的理由是 teardown**:拆 128 个 TCMU 设备要 4.0 s,而且 5.15 和 6.8 上都是 4.0 s —— 守护进程卡在一条上游明确警告不要并发使用的 netlink socket 上,而不随内核版本变化的开销就是传输层的开销。**已在真机对照 TCMU 实测**(`hack/obd-transport-bench.sh`,同机同镜像同档次一轮跑完,两边零失败零泄漏):p50 4 并发 461→334ms、16 并发 512→361ms、60 并发 642→420ms;60 并发吞吐 70.1→101.5 creates/s;`fc_rootfs` 0.227s→0.027s(**这才是这次改动真正拿到的 8 倍**),`runtime_create` 0.258s→0.057s。teardown 的主张在它被提出的地方成立:60 并发下 TCMU 的 `obd_detach` 平均 0.704s/sandbox,而 ublk 路径**根本没有这个阶段** —— 没有 fabric 要拆。guest 从本进程自己解码的层链启动:ext4 superblock 经 tar → zfile → lsmt extent → stack 合并读出 0xef53。**这轮真机抓到 5 个单元测试全绿时一个都没暴露的 bug**,详见英文版 status 的「overlaybd over ublk: what only hardware found」。**lazy pull 现在也走得通,并已在真机验证**。只存在于对象存储里的层可以直接背书一个 ublk 设备:`openLSMTStackFrom` 收本地/远端混合的层源,远端的那条走 range 请求读(`blobreader.go` 负责分块和缓存,`blobfetch.go` 对接 registry 或对象存储 URL)。格式代码一行没改 —— 因为传输层以下的每个 reader 本来就收 `io.ReaderAt`,这也正是本行早先把这个缺口写成「结构性限制」为什么是错的:那种说法会让下一个人不去做。**实测**:层在 create 前后都不在本地磁盘,guest **358ms** 起来,最多读了 **5.1 MiB 层的 60%**(这是上界 —— 那个数把所有 loopback 流量都算进去了,不只是 fetch),并正确读出 `/etc/alpine-release`、`uname -m` 和 `/bin/busybox`。为此修了三个 bug,三个都表现成同一个没信息量的症状,详见英文版「lazy pull over ublk: three bugs behind one symptom」。有两件真实存储会做的事被**拒绝**而不是绕过:**对 Range 请求回 200** 意味着 range 被忽略、整个 blob 从 0 字节开始发,那么读层中段会拿到层开头;**响应被截断**算错误而不是部分成功。另外对象存储必须允许匿名 GET —— overlaybd 自己的守护进程就是这么读的;不允许的话节点会在启动时报出来,否则它会静默地把每一层都转换而不是远端读。另外,只按 digest 指名某层的链会被拒绝,并把层和镜像都报出来,因为运维的下一步是在这台机器上 prewarm 那个镜像。`commit` 这个动词已经不存在了 —— 本行早先把它列为「两条路线都未测」,而 PR #61 已把它整条链路移除:文件系统快照和 commit 出来的镜像底层是同一批内容寻址的 overlaybd 层,所以「保存这个环境去分享」就是把快照提升进 template 命名空间。**给一个已删除的功能留注意事项比不留更糟** —— 它会让读者去找一个不存在的东西测。LZ4 解码器是拿 `lz4` CLI 产出的块校验的,不是只拿测试自己造的块 —— 手工造的向量抓不出编解码双方共享同一个误读 |
+| 四条 rootfs 路径回归 | ✅ | worker 拆分和 CoW 互斥锁是为 lazy pull 加的,但它们在**每一次** ublk create 的路径上。修好一条路、弄坏另一条才是真风险,而唯一能看见的办法是把本来就通的那几条再跑一遍。`hack/rootfs-paths-regress.sh` 跑全部四种配置(不带 flag 的 dm-snapshot、只开 ublk、overlaybd 走 tcmu、overlaybd 走 ublk),每一种都要求**guest 回话**,而不只是 sandbox 到 RUNNING —— 这个区分就是重点:agent 不可达正是这轮 bug 从外面看的样子,而只查状态的东西会把它当成成功。每种配置还要写一个文件再读回来,因为互斥锁在写路径上。四条全过、每条两项检查都过,零 ublk 设备、零 dm 映射残留。并发数也没变:60 并发下 ublk 仍是 101.7 creates/s、`fc_rootfs` 0.022s,对比拆分前的 101.5 和 0.027s —— 所以这个交接在它被加进来的那个并发档上不花钱 |
 | diff snapshot（增量） | ✅ `--base SNAP` 只存自 base 以来改动的 guest 内存。实测 base 15.5 MB → diff 298 KB(52×);深度 2 的链 restore 后文件全在且 `uptime 57`(载入内存态而非重新开机 —— 新 sandbox 接着被采集那个 guest 的 uptime 走)。合并在 restore 时物化成平坦镜像,**UFFD 缺页路径零改动**;链深超 8 自动转 full;删 base 有子代时返回 409。需 `--track-dirty-pages`(默认关,boot 前生效) |
 | 端口暴露与数据面 | ✅ 一个机制而非两个:Host 里的 `{port}-{sandbox}` 直达该 guest 的该端口,用户的服务器和 agent 走同一条路。无需注册调用、无需宿主端口池 —— noded 进入 namespace 后直连。缺的是按端口的访问控制 |
 | shared-fs 卷 | ⛔ P3–P4 范围,未开始 |
@@ -327,8 +397,14 @@ fc 档需要：
 overlaybd 需要 ublk（内核 ≥ 6.0)或 tcmu 后端。已接入的那个后端是 **tcmu**
 （`target_core_user` + `tcm_loop` 模块）—— 当时验证机是 Ubuntu 20.04 + 内核 5.15,
 没有 `/dev/ublk-control`。**tcmu 已实测功能完备**。验证机现在已升到 6.8,
-但「ublk 只是性能更好」这句话要修正:tcmu 拆 128 个设备的 4.0 s 在两个内核上完全一样,
-那是传输层的限制而不是内核的,所以 ublk 是目标传输层而不是可选优化(见上表)。
+`/dev/ublk-control` 可用;overlaybd 加 `--fc-ublk` 现在可以走 ublk(层格式由本进程
+用 Go 读),但那条路**还没上真机**,默认仍是 tcmu —— 见上表
+「overlaybd over ublk」行。
+
+**「ublk 只是性能更好」这句已被实测推翻。** tcmu 拆 128 个设备要 4.0 s,
+而且在 5.15 和 6.8 上完全一样:daemon 卡在一条上游明确警告不要并发使用的
+netlink socket 上。那是传输层的限制不是内核版本的问题,换内核修不掉,
+所以 ublk 是目标传输层而不是可选优化(见上表)。
 
 tcmu 路径另需注意宿主上的 `multipathd`:TCMU 设备默认无唯一序列号,
 multipathd 会把多个 overlaybd 设备合并成一条 multipath,
@@ -336,13 +412,15 @@ multipathd 会把多个 overlaybd 设备合并成一条 multipath,
 
 ## 4. 下一步
 
-1. **ublk 接进 `image.Provider`**:overlaybd 本身已经接完了(PR #49,TCMU 后端),
-   所以这一条剩下的是换传输层 —— io_uring / ABI / 控制面 / 队列都在 6.8 上验证过。
+1. **在真机上量 overlaybd over ublk**:接线已经做完(层格式用 Go 读、`--fc-overlaybd`
+   加 `--fc-ublk` 走这条路),但**只有单元测试和交叉编译,没上过硬件**。
    做它的**全部理由**是 TCMU 拆 128 个设备的 4.0 s,而那个数换内核修不掉
-   (5.15 和 6.8 一样慢),所以接完之后必须复测它,没量出来就等于收益未证实。
+   (5.15 和 6.8 一样慢),所以现在缺的就是那个对照数 —— 没量出来就等于收益未证实。
+   ublk 单独作为 dm-snapshot 的替代已经量过了:60 并发下 `fc_rootfs`
+   2.461 s → 0.034 s、吞吐 18.3 → 101.7 creates/s,零失败零泄漏。
    顺带纠正一个早先写错的价值排序:overlaybd 的收益是**转换 CPU 和磁盘**,
    不是「首次使用一个大镜像的等待时间」—— 冷路径没有变快,
-   真正能砍掉它的是 lazy pull,而那需要已经封好的层。
+   真正能砍掉它的是 lazy pull,而那需要已经封好的层(且 lazy pull 与 ublk 互斥)。
 2. **build 的构建日志与取消**：现在 build 是「起了就等」,失败只能从 image state
    看到 FAILED。日志落存储 + 可流式查看 + `cancel` 才算完整（`docs/image-build.md` §6）。
 3. **guest 内日志的出口**:beand 已把 trace id 写进日志,但默认关串口

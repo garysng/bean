@@ -247,6 +247,15 @@ func selectProvider(cfg FCTierConfig) (image.Provider, error) {
 		p.LazyPull = cfg.OverlaybdLazyPull
 		p.Blobs = cfg.OverlaybdBlobs
 		p.Index = cfg.OverlaybdIndex
+		// Both flags together means overlaybd's layers over ublk's transport: the layers
+		// are resolved, shared and converted identically, and what changes is that this
+		// process reads them and creates the device with io_uring rather than handing a
+		// config to the overlaybd daemon and assembling a SCSI fabric per sandbox.
+		//
+		// The combination is what removes tcmu's teardown cost, which is 4.0 s for 128
+		// devices and the same on kernel 5.15 and 6.8 because the daemon serialises
+		// through one netlink socket. A transport limit does not improve with a kernel.
+		p.Ublk = cfg.Ublk
 		// Reported as a startup failure rather than a fallback. A node asked for
 		// overlaybd and given device-mapper instead would differ from the cluster's
 		// expectation in storage cost and in whether layers are shared, and nothing
@@ -262,6 +271,10 @@ func selectProvider(cfg FCTierConfig) (image.Provider, error) {
 			blobs = cfg.OverlaybdBlobs.BlobURL()
 		}
 		slog.Info("rootfs via overlaybd", "lazyPull", cfg.OverlaybdLazyPull,
+			// Logged because the two transports differ in teardown cost and in which
+			// kernel objects a leak leaves behind, neither of which is visible from a
+			// create that succeeded.
+			"transport", map[bool]string{true: "ublk", false: "tcmu"}[cfg.Ublk],
 			"layerDir", layerDir, "blobStore", blobs,
 			// Logged because it is the difference between the store being a source an
 			// image can be resolved from and being a bare layer cache that still needs
@@ -276,8 +289,34 @@ func selectProvider(cfg FCTierConfig) (image.Provider, error) {
 	}
 
 	var assembler image.Provider
+
+	// ublk, when asked for, replaces the copy-on-write assembly and nothing else. It
+	// uses the same converted ext4 in the same directory as device-mapper, so it sits
+	// under the same pulling wrapper below -- unlike overlaybd, which resolves layers
+	// itself and therefore replaces the whole chain.
+	//
+	// What it changes is the transport. device-mapper reaches a device by forking
+	// losetup twice and dmsetup once per sandbox, measured at ~26 ms a call and 3.8 s of
+	// a 4.5 s create at 256-way concurrency; ublk writes io_uring commands and forks
+	// nothing.
+	if cfg.Ublk {
+		u := image.NewUblkProvider(cfg.BaseDir, cfg.ImageDir, cfg.DefaultDiskMiB)
+		// A startup failure rather than a fallback, for the same reason overlaybd is: a
+		// node asked for ublk and silently given device-mapper would differ from the
+		// cluster's expectation in create latency, and nothing downstream can see that.
+		if err := u.Available(); err != nil {
+			return nil, fmt.Errorf("fc tier: ublk requested but %w", err)
+		}
+		slog.Info("rootfs via ublk copy-on-write", "imageDir", cfg.ImageDir)
+		assembler = u
+	} else {
+		assembler = nil
+	}
+
 	dm := image.NewDevMapperProvider(cfg.BaseDir, cfg.ImageDir, cfg.DefaultDiskMiB)
-	if err := dm.Available(); err != nil {
+	if assembler != nil {
+		// ublk was selected above; device-mapper is not consulted at all.
+	} else if err := dm.Available(); err != nil {
 		slog.Warn("device-mapper unavailable, copying base images instead", logging.KeyError, err)
 		assembler = &image.FileProvider{
 			BaseDir:        cfg.BaseDir,

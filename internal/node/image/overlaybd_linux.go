@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/garysng/bean/internal/logging"
 )
@@ -75,10 +76,54 @@ type OverlaybdProvider struct {
 	// of them form an image, so every create still resolves against the registry.
 	Index ImageIndex
 
+	// Ublk serves the layer chain from a ublk device read by this process instead of
+	// from a tcmu device read by the overlaybd daemon.
+	//
+	// The layers, their sharing and their conversion are identical either way -- what
+	// changes is the transport. tcmu needs a SCSI fabric per sandbox and its daemon
+	// serialises teardown through one netlink socket that upstream warns against using
+	// concurrently: 4.0 s for 128 devices, the same on kernel 5.15 and 6.8. That cost is
+	// in the transport, so it does not improve with a newer kernel and the only way past
+	// it is a different one.
+	//
+	// The cost of this route is that a layer must be a local file: the reader here has
+	// no HTTP range-read, so LazyPull cannot be served. A create is refused rather than
+	// silently converting, because a node asked for lazy pull and quietly given local
+	// conversion differs from the cluster's expectation in exactly the dimension that
+	// was asked for.
+	Ublk bool
+
+	// ublkCtrl is the shared handle on /dev/ublk-control, opened once per node for the
+	// same reason UblkProvider opens one: the control device is a singleton and a
+	// handle plus a ring per sandbox would be an fd and a mapping each for commands
+	// that happen twice in a sandbox's life.
+	ublkCtrlOnce sync.Once
+	ublkCtrl     *ublkControl
+	ublkCtrlErr  error
+
+	// ChunkCacheBytes bounds the cache of layer chunks fetched for lazily read layers.
+	// Zero takes the default. It is a node-level budget because the cache is shared: many
+	// sandboxes from one image read the same chunks, which is the whole reason it exists.
+	ChunkCacheBytes int64
+	chunkOnce       sync.Once
+	chunkCache      *chunkCache
+
 	mu sync.Mutex
 	// attached tracks live devices so teardown can find them, and so a leaked
 	// configfs object is attributable.
 	attached map[string]*tcmuDevice
+	// ublkAttached tracks live ublk devices, for the same reason and separately: the
+	// two transports leak different kinds of object, and one map of two types would
+	// make a leak's kind something a reader has to infer.
+	ublkAttached map[string]*ublkDevice
+	// sealableUblk holds the backend behind each live ublk device, which is what a
+	// checkpoint seals from.
+	//
+	// Separate from ublkAttached because the two answer different questions: teardown needs
+	// the device, a snapshot needs the ownership bitmap. Held as the concrete type rather than
+	// an interface because "which blocks did this sandbox write" has exactly one
+	// implementation, and inventing an interface for it would hide that.
+	sealableUblk map[string]*lsmtBackend
 
 	// layers collapses concurrent conversions of the same layer digest. Keyed by
 	// digest to match sealedLayerPath, so one flight corresponds to one output
@@ -97,6 +142,8 @@ func NewOverlaybdProvider(baseDir, layerDir, imageDir string, reg *Registry, bui
 		Builder:        builder,
 		DefaultSizeMiB: defaultSizeMiB,
 		attached:       map[string]*tcmuDevice{},
+		ublkAttached:   map[string]*ublkDevice{},
+		sealableUblk:   map[string]*lsmtBackend{},
 	}
 }
 
@@ -105,9 +152,19 @@ func (p *OverlaybdProvider) Name() string { return "overlaybd" }
 // Available reports whether this host can run the provider, so a node fails to
 // start rather than accepting placements it cannot honour.
 func (p *OverlaybdProvider) Available() error {
-	if err := tcmuAvailable(); err != nil {
+	// The transport check differs by route: the ublk one never touches tcmu, so
+	// requiring the SCSI modules there would refuse a node that can serve every create
+	// asked of it.
+	if p.Ublk {
+		if err := ublkAvailable(); err != nil {
+			return err
+		}
+	} else if err := tcmuAvailable(); err != nil {
 		return err
 	}
+	// The builder is needed either way: a layer that is not on this node yet has to be
+	// converted, and `overlaybd-commit` is what seals one. Reading a sealed layer is
+	// this process's job; producing one is not.
 	if p.Builder == nil {
 		return errors.New("image: overlaybd builder not configured")
 	}
@@ -126,6 +183,10 @@ func (p *OverlaybdProvider) Prepare(ctx context.Context, sandboxID, imageRef str
 	}
 	if sizeMiB <= 0 {
 		sizeMiB = 2048
+	}
+
+	if p.Ublk {
+		return p.prepareUblk(ctx, sandboxID, imageRef, sizeMiB, opts)
 	}
 
 	// A restore from a sealed snapshot resolves its whole filesystem -- base image
@@ -188,6 +249,25 @@ func (p *OverlaybdProvider) Prepare(ctx context.Context, sandboxID, imageRef str
 	// up means a request for less than a gigabyte still gets a usable layer rather
 	// than a zero-sized one.
 	vsizeGB := (sizeMiB + 1023) / 1024
+
+	// Never smaller than the lower layer's own virtual size. The stack is one device:
+	// the writable layer sits over a base whose ext4 was formatted to vsizeForImage's
+	// figure, so a device sized under that presents a filesystem larger than itself.
+	//
+	// Measured, because the failure is remote from the cause: a create with
+	// diskMiB=512 produced a 1 GB device over a 2 GB base, and the guest kernel said
+	// "EXT4-fs (vdb): bad geometry: block count 524288 exceeds size of device
+	// (262144 blocks)". The agent's mount then failed with EINVAL, init exited 1, and
+	// the caller saw a 20-second agent-health timeout naming none of it.
+	//
+	// Raised rather than refused: the caller asked for a writable layer of a given
+	// size, and the base's size is an implementation detail of how the image was
+	// sealed. Refusing would make a 512 MiB sandbox impossible on an image whose
+	// floor happens to be 2 GB, and the extra is sparse -- it costs nothing until
+	// written.
+	if lowerGB := p.lowerVsizeGB(lowers); vsizeGB < lowerGB {
+		vsizeGB = lowerGB
+	}
 	data, index, err := p.Builder.createWritable(ctx, dir, vsizeGB)
 	if err != nil {
 		return nil, err
@@ -273,12 +353,22 @@ func (p *OverlaybdProvider) Prepare(ctx context.Context, sandboxID, imageRef str
 			p.mu.Unlock()
 
 			var errs []error
+			// Timed because Release was measured at 4.414s of a 4.761s destroy under
+			// 128-way concurrency while every part of it is fast in isolation: the
+			// four configfs removals cost 92ms serially and 15ms each when 41 run
+			// concurrently, and the sandbox directory holds one sparse file whose
+			// removal takes 2ms. One of these two must be absorbing it.
+			detachStart := time.Now()
 			if err := dev.detach(); err != nil {
 				errs = append(errs, err)
 			}
+			obsPhase(ctx, "obd_detach", time.Since(detachStart))
+
+			rmStart := time.Now()
 			if err := os.RemoveAll(dir); err != nil {
 				errs = append(errs, fmt.Errorf("remove sandbox dir: %w", err))
 			}
+			obsPhase(ctx, "obd_remove_dir", time.Since(rmStart))
 			return errors.Join(errs...)
 		},
 	}, nil
@@ -381,12 +471,25 @@ func (p *OverlaybdProvider) snapshotFSLowers(ctx context.Context, fsManifestDige
 		// Level 2: the store has it, read on demand. This is the common case on a node
 		// that did not take the snapshot -- the whole point of keying the filesystem by
 		// digest is that such a node reassembles it without the bytes ever streaming.
-		if remote, ok := p.remoteLayer(ctx, layer.Digest); ok {
+		//
+		// Not gated on lazy pull, unlike an image layer: a sealed snapshot layer has no
+		// registry blob behind it, so refusing to read it remotely does not fall back to
+		// owning it locally -- it makes the restore impossible.
+		if remote, ok := p.requiredRemoteLayer(ctx, layer.Digest); ok {
 			lowers = append(lowers, remote)
 			continue
 		}
 		return nil, fmt.Errorf("image: snapshot filesystem layer %d/%d (%s) is in neither the node "+
 			"nor the store", i+1, len(manifest.Layers), layer.Digest)
+	}
+	// Logged at debug: a restore that resolves the wrong chain and one that resolves the right
+	// chain but reads it wrong look identical from outside, and they have different fixes. This
+	// is what distinguished them -- the chain was always correct, so the bug was in the guest's
+	// view of it.
+	for i, l := range lowers {
+		logging.From(ctx).Debug("snapshot lower resolved",
+			"index", i, "of", len(lowers), "digest", l.Digest,
+			"file", l.File, "remote", l.File == "", "size", l.Size)
 	}
 	return lowers, nil
 }
@@ -685,11 +788,55 @@ func (p *OverlaybdProvider) SealSnapshotFS(ctx context.Context, sandboxID, base 
 	if p.Blobs == nil || p.Index == nil {
 		return "", nil, 0, nil
 	}
+	// The two routes are attached differently and sealed differently, so which one holds this
+	// sandbox decides both questions.
+	//
+	// The ublk route seals from its own ownership bitmap, which is why it works at all: there
+	// is no daemon holding an index in memory and nothing to flush, so a checkpoint captures
+	// what the sandbox actually wrote. The tcmu route has to go through overlaybd-commit, and
+	// runs into the empty-index gap the guard below explains.
 	p.mu.Lock()
 	_, attached := p.attached[sandboxID]
+	ublkBackend, ublkAttached := p.sealableUblk[sandboxID]
 	p.mu.Unlock()
+
+	if ublkAttached {
+		return p.sealFromBitmap(ctx, sandboxID, base, ublkBackend)
+	}
 	if !attached {
-		return "", nil, 0, fmt.Errorf("image: sandbox %s is not attached", sandboxID)
+		return "", nil, 0, fmt.Errorf("image: sandbox %s is not attached to either transport",
+			sandboxID)
+	}
+
+	dir := filepath.Join(p.BaseDir, sandboxID)
+	writableData := filepath.Join(dir, "writable.data")
+	writableIndex := filepath.Join(dir, "writable.index")
+
+	// Refused when the index is still empty, because sealing it would succeed and produce
+	// nothing.
+	//
+	// The daemon keeps a writable layer's index in memory while the device is attached and
+	// writes it on close, so during a checkpoint -- the device is still attached, the guest
+	// is merely paused -- the on-disk index is zero bytes while the data file already holds
+	// every write. `overlaybd-commit` reads the index, so it seals a layer of pure metadata:
+	// measured at 36 KiB for a sandbox that had written a marker file.
+	//
+	// Everything downstream then looks correct. The snapshot records an FS digest, the
+	// manifest lists the base plus the sealed layer, both blobs reach the store, and a
+	// restore boots -- on the base image alone, without the sandbox's filesystem. The only
+	// way to notice is to read back a file written before the snapshot, which is why this
+	// went unseen: it is a silent loss of exactly the thing a snapshot exists to keep.
+	//
+	// Detaching first would make the daemon flush, but Firecracker holds the block device
+	// open for the life of the sandbox, so pulling it out from under a running VMM trades
+	// this bug for a worse one. Until the writable layer can be made durable without
+	// detaching, refusing is the honest answer: a checkpoint that fails is recoverable, and
+	// one that reports success over an empty layer is not.
+	if st, serr := os.Stat(writableIndex); serr == nil && st.Size() == 0 {
+		return "", nil, 0, fmt.Errorf("image: sandbox %s has an empty writable index (%s), "+
+			"so sealing it would capture no filesystem: the overlaybd daemon holds the index "+
+			"in memory until the device is closed, and the device is still attached. This is a "+
+			"known gap in snapshot-on-overlaybd, not a transient error", sandboxID, writableIndex)
 	}
 
 	// The base's resolved chain, which the snapshot shares and whose config it
@@ -704,21 +851,28 @@ func (p *OverlaybdProvider) SealSnapshotFS(ctx context.Context, sandboxID, base 
 
 	// Seal the sandbox's writable layer into a read-only layer, then key it by the sha256
 	// of the sealed bytes -- the same content-addressing the build and pull paths use.
-	dir := filepath.Join(p.BaseDir, sandboxID)
 	sealedPath := filepath.Join(dir, "snapshot-fs.obd")
-	if err := p.Builder.sealWritable(ctx,
-		filepath.Join(dir, "writable.data"),
-		filepath.Join(dir, "writable.index"),
+	if err := p.Builder.sealWritable(ctx, writableData, writableIndex,
 		sealedPath); err != nil {
 		return "", nil, 0, fmt.Errorf("image: seal snapshot writable layer: %w", err)
 	}
 	defer os.Remove(sealedPath)
 
+	return p.publishSealedSnapshot(ctx, sealedPath, baseLowers, baseCfg)
+}
+
+// publishSealedSnapshot digests a sealed layer, publishes it, and records the chain's manifest.
+//
+// Shared by both routes because none of it depends on how the layer was produced -- only that it
+// exists. Keeping one copy is what stops the two transports from drifting into different ideas of
+// what a snapshot is, which is the failure the ublk route already had once when it skipped
+// reporting its conversion.
+func (p *OverlaybdProvider) publishSealedSnapshot(ctx context.Context, sealedPath string, baseLowers []obdLayer, baseCfg *Config) (string, []string, int64, error) {
 	layerDigest, err := sha256OfFile(sealedPath)
 	if err != nil {
 		return "", nil, 0, fmt.Errorf("image: digest snapshot layer: %w", err)
 	}
-	sealed = sealedSize(sealedPath)
+	sealed := sealedSize(sealedPath)
 
 	if ok, perr := p.publish(ctx, sealedPath, layerDigest); perr != nil {
 		return "", nil, 0, fmt.Errorf("image: publish snapshot layer: %w", perr)
@@ -751,6 +905,70 @@ func (p *OverlaybdProvider) SealSnapshotFS(ctx context.Context, sandboxID, base 
 	p.recordInStore(ctx, Reference{Digest: manifestDigest}, manifest, chain, baseCfg)
 
 	return manifestDigest, digests, sealed, nil
+}
+
+// sealFromBitmap captures a ublk-route sandbox's filesystem without the overlaybd daemon.
+//
+// The overlay itself is the index: the allocated regions of the file say which blocks the sandbox
+// wrote, so there is no daemon holding an index in memory to ask. That is the whole reason
+// snapshots work on this route and hit a wall on the tcmu one.
+//
+// A sandbox that has written nothing is refused rather than sealed as an empty layer. It is a
+// real state -- boot alone dirties very little, and a caller can snapshot immediately -- and the
+// honest answer is that there is no filesystem to capture, not a layer that claims one.
+func (p *OverlaybdProvider) sealFromBitmap(ctx context.Context, sandboxID, base string, backend *lsmtBackend) (string, []string, int64, error) {
+	// Flushed before the extents are read, because the extents come from the filesystem and the
+	// filesystem does not know about a write still sitting in this process's page cache.
+	//
+	// Two things make that gap reachable rather than theoretical, and both were measured on
+	// hardware. The device advertises no volatile write cache, so a guest's `sync` has no FLUSH
+	// to send and returns as soon as its writes are handed to the queue -- while the WriteAt
+	// into the overlay is still in flight. And host ext4 delays allocation until writeback, so
+	// SEEK_DATA reports a hole for data the file already holds. Measured: a marker was absent
+	// 500 ms after the guest's sync returned and present within the next 500 ms, which is
+	// exactly the window a checkpoint runs in.
+	//
+	// Without this, a snapshot taken right after a write reported "written nothing" for a
+	// sandbox whose file was on disk, and a restore came back missing it.
+	if err := backend.Flush(); err != nil {
+		return "", nil, 0, fmt.Errorf("image: flush sandbox %s before sealing: %w", sandboxID, err)
+	}
+
+	extents := backend.OwnedExtents()
+	// Logged at debug because it is what distinguished a seal that missed data from one that
+	// captured it: on a failing restore this showed the marker's own extent present and the
+	// device serving it correctly, which moved the search off the seal entirely.
+	{
+		var total uint64
+		for _, e := range extents {
+			total += uint64(e.length) * lsmtAlignment
+		}
+		logging.From(ctx).Debug("seal extents captured",
+			"sandbox", sandboxID, "count", len(extents), "bytes", total)
+	}
+	if len(extents) == 0 {
+		return "", nil, 0, fmt.Errorf("image: sandbox %s has written nothing, so there is no "+
+			"filesystem to seal", sandboxID)
+	}
+
+	baseLowers, baseCfg, err := p.snapshotBase(ctx, base)
+	if err != nil {
+		return "", nil, 0, err
+	}
+
+	dir := filepath.Join(p.BaseDir, sandboxID)
+	sealedPath := filepath.Join(dir, "snapshot-fs.obd")
+	// Removed if it survived a previous attempt: sealFileTo is O_EXCL so that a concurrent
+	// seal cannot overwrite a layer being published, but a crashed earlier attempt should not
+	// block this one forever.
+	_ = os.Remove(sealedPath)
+
+	if err := sealFileTo(sealedPath, uint64(backend.size), extents, backend.ReadAt); err != nil {
+		return "", nil, 0, err
+	}
+	defer os.Remove(sealedPath)
+
+	return p.publishSealedSnapshot(ctx, sealedPath, baseLowers, baseCfg)
 }
 
 // digestOfChain content-addresses a layer chain by the sha256 of its layer digests joined
@@ -933,6 +1151,7 @@ func (p *OverlaybdProvider) walk(ctx context.Context, imageRef string, opts reso
 				Size:        layer.Size,
 				RepoBlobURL: repoBlobURL(ref),
 				Dir:         p.layerCacheDir(layer.Digest),
+				VsizeGB:     vsizeGB,
 			})
 			continue
 		}
@@ -955,7 +1174,8 @@ func (p *OverlaybdProvider) walk(ctx context.Context, imageRef string, opts reso
 			// 48859648 against a declared 29780765). Wrong here, a local layer still
 			// works because overlaybd reads the file, but a remote one is range-read
 			// against the declared length and either stops short or reads past the end.
-			lowers = append(lowers, obdLayer{File: path, Digest: layer.Digest, Size: sealedSize(path)})
+			lowers = append(lowers, obdLayer{File: path, Digest: layer.Digest,
+				Size: sealedSize(path), VsizeGB: vsizeGB})
 			continue
 		}
 
@@ -1179,9 +1399,12 @@ func (p *OverlaybdProvider) layerCacheDir(digest string) string {
 // remoteLayer reports a layer the store already holds, as a reference the daemon
 // range-reads.
 //
-// Only under lazy pull: without it a node is expected to own its layers, and reading
-// them over HTTP would make every block read depend on the store being reachable --
-// the trade LazyPull's comment describes as a deployment decision.
+// Only under lazy pull, and only for an *image* layer: without it a node is expected to own its
+// layers, and reading them over HTTP would make every block read depend on the store being
+// reachable -- the trade LazyPull's comment describes as a deployment decision. An image layer
+// always has that alternative, because it can be converted from the registry.
+//
+// A snapshot's sealed layer does not: see requiredRemoteLayer.
 //
 // The size comes from the store rather than the manifest, because the published blob
 // is the sealed layer and the manifest describes the original OCI one.
@@ -1189,6 +1412,34 @@ func (p *OverlaybdProvider) remoteLayer(ctx context.Context, digest string) (obd
 	if !p.LazyPull || p.Blobs == nil {
 		return obdLayer{}, false
 	}
+	return p.storeLayer(ctx, digest)
+}
+
+// requiredRemoteLayer reports a layer that can only come from the store, regardless of lazy pull.
+//
+// A snapshot's sealed layer is the case. Unlike an image layer there is no registry blob behind
+// it and nothing to convert from -- the sealed layer *is* the only form the filesystem exists in
+// -- so declining to read it remotely does not fall back to owning it locally, it just makes the
+// restore impossible.
+//
+// That is what it did: publication is unconditional, so a checkpoint published its layer and the
+// restore then refused to fetch it, failing with "in neither the node nor the store" about a
+// digest sitting in the store. Measured on hardware, and the message pointed at the store rather
+// than at the condition that would not read it.
+//
+// The reachability trade lazy pull exists to let an operator make does not apply here either. A
+// node restoring a snapshot it did not take has no local copy by definition, so it depends on the
+// store whether or not this returns -- the only question is whether it depends on it and works, or
+// depends on it and fails.
+func (p *OverlaybdProvider) requiredRemoteLayer(ctx context.Context, digest string) (obdLayer, bool) {
+	if p.Blobs == nil {
+		return obdLayer{}, false
+	}
+	return p.storeLayer(ctx, digest)
+}
+
+// storeLayer builds the reference for a layer the store holds, or reports it absent.
+func (p *OverlaybdProvider) storeLayer(ctx context.Context, digest string) (obdLayer, bool) {
 	size, ok, err := p.Blobs.Stat(ctx, digest)
 	if err != nil || !ok {
 		// Unknown is treated as absent: converting locally always works, and failing a
@@ -1349,4 +1600,18 @@ func (p *OverlaybdProvider) Config(base string) (*Config, error) {
 func exists(path string) bool {
 	_, err := os.Stat(path)
 	return err == nil
+}
+
+// lowerVsizeGB is the virtual size the image's filesystem was formatted to, or 0 when
+// the chain does not say.
+//
+// Only the first layer carries a filesystem, so only its figure matters; the rest are
+// changes over it and are created at 1 GB regardless. Zero is returned rather than a
+// guess, and the caller treats it as no constraint -- inventing a floor here would
+// silently enlarge every device on a chain that simply did not record its size.
+func (p *OverlaybdProvider) lowerVsizeGB(lowers []obdLayer) int64 {
+	if len(lowers) == 0 {
+		return 0
+	}
+	return lowers[0].VsizeGB
 }

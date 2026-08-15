@@ -61,8 +61,11 @@ func main() {
 			"being refused; 0 refuses immediately. An evaluation batch arrives as a "+
 			"burst by construction and a rejected caller retries as another burst, so "+
 			"waiting turns a retry storm into a predictable queue. It does not raise "+
-			"throughput — that is bounded by boot cost, roughly cores/5 creates per "+
-			"second. Only create concurrency is waited on: CPU, memory and disk are "+
+			"throughput. What bounds throughput is the rootfs setup, not host CPU: measured "+
+			"at 0.31-0.44 CPU-seconds per create on a 128-core host, where observed "+
+			"throughput was 0.16-0.28 of what that cost predicts. An earlier version of "+
+			"this text said cores/5, from a 16-core host when every create booted. "+
+			"Only create concurrency is waited on: CPU, memory and disk are "+
 			"held for a sandbox's lifetime and will not free themselves")
 	secretKey := flag.String("secret-key", os.Getenv("BEAN_SECRET_KEY"),
 		"master key encrypting persisted credentials (empty disables registry credentials)")

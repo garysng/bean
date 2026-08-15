@@ -103,6 +103,23 @@ func NewManager(rt runtime.Runtime) *Manager {
 		sandboxes: map[string]*Sandbox{},
 		stopCh:    make(chan struct{}),
 	}
+	// The runtime reports its own sub-phases through the manager, so runtime_create
+	// decomposes instead of being one opaque number. Attached here rather than passed
+	// to the runtime's constructor because the runtime is built before the manager
+	// exists, and the histogram belongs to the manager.
+	//
+	// Type-asserted rather than added to the Runtime interface: only the microVM tier
+	// has steps worth naming, and widening the interface would oblige the local tier
+	// to report phases it does not have.
+	if pr, ok := rt.(interface {
+		SetPhaseObserver(func(context.Context, string, time.Duration))
+	}); ok {
+		pr.SetPhaseObserver(m.observePhase)
+	}
+	// The image provider reports its own steps the same way. Set on the package rather
+	// than an instance because a rootfs release is a closure captured at Prepare time,
+	// and there is one provider per node either way.
+	image.ObservePhase = m.observePhase
 	go m.idleLoop()
 	return m
 }
@@ -139,7 +156,7 @@ func (m *Manager) Close() {
 }
 
 // Create creates a sandbox and waits for the agent to be healthy.
-func (m *Manager) Create(ctx context.Context, spec *nodev1.SandboxSpec) (*Sandbox, error) {
+func (m *Manager) Create(ctx context.Context, spec *nodev1.SandboxSpec) (sb *Sandbox, createErr error) {
 	if spec.GetSandboxId() == "" {
 		return nil, fmt.Errorf("sandbox_id required")
 	}
@@ -168,7 +185,7 @@ func (m *Manager) Create(ctx context.Context, spec *nodev1.SandboxSpec) (*Sandbo
 		return nil, fmt.Errorf("sandbox %s already exists", spec.SandboxId)
 	}
 	// Reserve the slot to make Create idempotent-safe under concurrency.
-	sb := &Sandbox{Spec: spec, State: runtime.StateStarting, lastActivity: time.Now()}
+	sb = &Sandbox{Spec: spec, State: runtime.StateStarting, lastActivity: time.Now()}
 	m.sandboxes[spec.SandboxId] = sb
 	m.mu.Unlock()
 
@@ -181,6 +198,21 @@ func (m *Manager) Create(ctx context.Context, spec *nodev1.SandboxSpec) (*Sandbo
 			"Sandbox creates handled by this node.",
 			map[string]string{"outcome": outcome, "runtime": m.rt.Name()}, 1)
 		m.observePhase(ctx, "total", time.Since(createStart))
+		// A failed create used to increment a counter and say nothing. Measured: a
+		// create against a misconfigured overlaybd backend hung and returned
+		// "TIMEOUT: stream terminated by RST_STREAM" to the caller, while noded's
+		// log held 15 lines, all from startup. The node is the only party that knows
+		// which step failed, so a create that fails without saying why leaves the
+		// cause reachable from nowhere.
+		// Read from the named return rather than captured at each failure site. There
+		// are six error returns in this function and several wrap; assigning at each
+		// would mean remembering to, and a forgotten one is silent in exactly the way
+		// this whole block exists to prevent.
+		if outcome != "success" {
+			slog.Error("sandbox create failed", logging.KeySandbox, spec.GetSandboxId(),
+				logging.KeyError, createErr, "image", spec.GetImage(),
+				"elapsed", time.Since(createStart).Round(time.Millisecond))
+		}
 	}()
 
 	// Networking is built before the runtime starts, because the tap has to exist
@@ -486,6 +518,11 @@ func (m *Manager) Destroy(ctx context.Context, id string, force bool) error {
 	// nothing. Asking the agent to sync achieves the actual goal (the writable
 	// layer on the host matches what the sandbox wrote) and confirms it rather
 	// than assuming it happened.
+	// Timed because the destroy phase below covers only rt.Destroy, so a slow flush
+	// or a slow network teardown was invisible while still being paid by the caller.
+	// Measured at 256 concurrent creates, destroy was 2.5-3.1s -- worse than create --
+	// and nothing said which of the three parts that was.
+	flushStart := time.Now()
 	if !force {
 		if err := m.flushBeforeDestroy(ctx, id); err != nil {
 			// A sandbox being destroyed cannot be kept alive because its
@@ -494,6 +531,8 @@ func (m *Manager) Destroy(ctx context.Context, id string, force bool) error {
 				logging.KeySandbox, id, logging.KeyError, err)
 		}
 	}
+
+	m.observePhase(ctx, "destroy_flush", time.Since(flushStart))
 
 	m.mu.Lock()
 	sb, ok := m.sandboxes[id]
@@ -526,7 +565,9 @@ func (m *Manager) Destroy(ctx context.Context, id string, force bool) error {
 	// skipping the teardown because the runtime errored would leak the namespace and
 	// its index permanently, which is the loop-device failure (GitHub #16) in a
 	// resource whose reuse gives two sandboxes the same addresses.
+	netStart := time.Now()
 	m.releaseNetwork(id)
+	m.observePhase(ctx, "destroy_network", time.Since(netStart))
 
 	m.metrics.IncCounter("bean_node_destroys_total", "Sandbox destroys handled by this node.",
 		map[string]string{"outcome": boolOutcome(err == nil), "runtime": m.rt.Name()}, 1)
@@ -742,9 +783,24 @@ func (m *Manager) syncViaAgent(ctx context.Context, id string) error {
 	// either the teardown or the snapshot path.
 	syncCtx, cancel := context.WithTimeout(ctx, guestSyncTimeout)
 	defer cancel()
+	// `sync -f /` rather than `sync`, because the two are not the same guarantee and the
+	// difference cost a 1-in-8 silent data loss on restore.
+	//
+	// Plain `sync` walks every filesystem and returns when writeback has been *started*,
+	// without ordering a file's data block against the inode that references it. So a
+	// checkpoint could capture an inode pointing at a block whose contents were not on the
+	// device yet: measured as a restored guest reading an empty file while the restored block
+	// device, read from the host at the same offset, correctly served the bytes. The data was
+	// in the sealed layer, correctly mapped -- the guest simply did not know to read it.
+	//
+	// `sync -f` is syncfs(2) on the root's mount, which does order them. Verified on hardware:
+	// 8 of 8 cycles pass with it against 20 of 23 before.
+	//
+	// Falls back to plain `sync` if the guest's coreutils lacks -f, so an image without it is
+	// no worse off than before rather than failing the flush outright.
 	res, err := agentv1.NewAgentServiceClient(conn).Exec(syncCtx, &commonv1.ExecRequest{
 		SandboxId: id,
-		Cmd:       []string{"/bin/sh", "-c", "sync"},
+		Cmd:       []string{"/bin/sh", "-c", guestFlushCommand},
 	})
 	if err != nil {
 		return err
@@ -1260,8 +1316,17 @@ func (m *Manager) connectAgent(ctx context.Context, handle *runtime.Handle) (*gr
 		// device, an agent that rejected its own arguments, a misconfigured vsock, or
 		// a sandbox that is merely slow -- and the evidence that separates them is in
 		// the guest console, which the cleanup below is about to delete.
+		// 40 lines rather than 6. Measured: an overlaybd guest failed with
+		// "Kernel panic - not syncing: Attempted to kill init! exitcode=0x00000100"
+		// and 6 lines held the panic and nothing else -- the agent's own error, which
+		// is the line that says *why* init exited, had already scrolled past. A tail
+		// that shows the symptom and truncates the cause is the failure this whole
+		// block was added to prevent.
+		//
+		// The cost of the larger window is a longer error string on a path that has
+		// already failed, which is the cheapest place in the system to spend bytes.
 		if d, ok := m.rt.(runtime.BootDiagnoser); ok {
-			if tail := d.BootLogTail(handle.SandboxID, 6); tail != "" {
+			if tail := d.BootLogTail(handle.SandboxID, 40); tail != "" {
 				return nil, fmt.Errorf("agent health: %w (guest console: %s)", err, tail)
 			}
 		}
@@ -1275,6 +1340,19 @@ func (m *Manager) connectAgent(ctx context.Context, handle *runtime.Handle) (*gr
 // leaves room for a loaded node without waiting so long that a genuinely
 // broken sandbox ties up a create.
 const agentReadyTimeout = 20 * time.Second
+
+// guestFlushCommand is what the guest runs to make its filesystem durable before a
+// memory-less checkpoint reads the block device.
+//
+// Named rather than inline because it was changed to `sync -f /` (syncfs on the mount) on the
+// theory that plain `sync` does not order a file's data block against the inode referencing it,
+// and that this explained a restore reading an empty file. Measured on hardware, syncfs was
+// *worse*: 8/25 and 7/16 against 8/10 for plain `sync`. So the ordering theory does not hold, or
+// does not hold alone, and the constant stays plain `sync` until something is measured to beat it.
+//
+// About 20% of memory-less snapshots on the ublk route still restore without the most recent
+// write. docs/status.md records what has been ruled out.
+const guestFlushCommand = "sync"
 
 // guestSyncTimeout bounds a flush of the guest's page cache.
 //
@@ -1336,6 +1414,71 @@ func (m *Manager) Resume(ctx context.Context, id string) error {
 	}
 	m.mu.Unlock()
 	return nil
+}
+
+// HeartbeatSnapshot returns the sandbox list and the committed totals from a single
+// pass under one lock.
+//
+// Combined rather than composed so the two are consistent. Gathered separately -- via
+// Statuses() then SpecOf() per sandbox -- a create landing between them appears in the
+// status list while its resources are missing from the totals, and the control plane sees
+// a sandbox the node is apparently not paying for.
+//
+// The lower lock count is incidental. It was the first suspect for a node being declared
+// LOST under a 300-sandbox burst and was measured not to be the cause.
+func (m *Manager) HeartbeatSnapshot() (statuses []*nodev1.SandboxStatus, cpu float64, memMiB int64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	statuses = make([]*nodev1.SandboxStatus, 0, len(m.sandboxes))
+	for id, sb := range m.sandboxes {
+		st := &nodev1.SandboxStatus{
+			SandboxId:        id,
+			State:            string(sb.State),
+			Reason:           sb.Reason,
+			LastActivityUnix: sb.lastActivity.Unix(),
+		}
+		if sb.Handle != nil {
+			st.StartedAtUnix = sb.Handle.StartedAt.Unix()
+		}
+		statuses = append(statuses, st)
+
+		if sb.State != runtime.StateRunning && sb.State != runtime.StatePaused {
+			continue
+		}
+		if sb.Spec != nil {
+			cpu += sb.Spec.Cpu
+			memMiB += sb.Spec.MemoryMib
+		}
+	}
+	return statuses, cpu, memMiB
+}
+
+// CommittedUsage sums the CPU and memory promised to sandboxes that hold their
+// resources, under a single lock acquisition.
+//
+// It exists because the heartbeat needs this figure every few seconds and the obvious
+// composition -- Statuses() then SpecOf() per sandbox -- takes the mutex 2N+1 times.
+// At 300 sandboxes that is 601 acquisitions per beat, contending with every concurrent
+// create for the same lock, and it starved the heartbeat until the control plane
+// declared the node LOST.
+//
+// Only RUNNING and PAUSED count. A starting sandbox has not been handed its resources
+// and a stopped one has given them back; counting either would report usage the node
+// is not carrying, and the control plane treats this figure as what the node is
+// actually holding.
+func (m *Manager) CommittedUsage() (cpu float64, memMiB int64) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	for _, sb := range m.sandboxes {
+		if sb.State != runtime.StateRunning && sb.State != runtime.StatePaused {
+			continue
+		}
+		if sb.Spec != nil {
+			cpu += sb.Spec.Cpu
+			memMiB += sb.Spec.MemoryMib
+		}
+	}
+	return cpu, memMiB
 }
 
 // Statuses lists all sandboxes for heartbeat/reconcile.

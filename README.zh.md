@@ -130,8 +130,9 @@ bean run --snapshot snap_...
 
 - **镜像** —— OCI 拉取与转换、私有 registry(凭据静态 AES-256-GCM 加密)、
   带镜像亲和调度的 prewarm
-- **构建** —— 通过 BuildKit 构建 Dockerfile,日志流式输出且可取消;`commit` 可把运行中
-  沙箱的文件系统冻结成可复用的基础镜像
+- **构建** —— 通过 BuildKit 构建 Dockerfile,日志流式输出且可取消。想冻结一个运行中的
+  沙箱,改用文件系统快照再从它创建:快照和构建出的镜像底层是同一批内容寻址的层,
+  所以没有单独的 `commit` 动词
 - **容器档(gVisor/runc)** —— `--runtime runsc` 或 `--runtime runc` 直接驱动 OCI
   运行时,不经 containerd,与 microVM 档共用同一套 rootfs provider;服务 benchmark 负载的
   那一档,和 `fc`、开发用 `local` 并列。microVM 档是目前测得更充分的路径

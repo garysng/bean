@@ -99,6 +99,17 @@ type fcDrive struct {
 	PathOnHost   string `json:"path_on_host"`
 	IsRootDevice bool   `json:"is_root_device"`
 	IsReadOnly   bool   `json:"is_read_only"`
+	// CacheType is "Unsafe" or "Writeback". Firecracker defaults to Unsafe, which does not
+	// advertise VIRTIO_BLK_F_FLUSH -- so the guest sees "write through", never emits a flush,
+	// and its `sync` returns without anything having been made durable on the host.
+	//
+	// That is what made a snapshot taken right after a write capture an empty filesystem: the
+	// checkpoint's guest sync completed in 1 ms and the write was still not on the host file.
+	// "Writeback" passes the guest's flushes through to the host, which is the only way the
+	// guest can express the ordering its filesystem depends on.
+	//
+	// Omitted when empty so a read-only drive's request is unchanged.
+	CacheType string `json:"cache_type,omitempty"`
 }
 
 type fcMachineConfig struct {

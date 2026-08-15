@@ -80,15 +80,23 @@ func (r *FCRuntime) Destroy(ctx context.Context, id string, force bool) error {
 	// nothing receives the event, and the agent is PID 1 with no signal handler.
 	// Flushing is done by the manager over the agent connection before it gets
 	// here, which confirms the write-out instead of waiting on a guess.
+	// Timed as phases as well as spans. The spans show one destroy; the phases
+	// aggregate, which is what was needed to see that destroys serialise: wall time
+	// is linear in count at a flat ~57 ms each, and a per-destroy trace cannot
+	// distinguish "each step is fast" from "the steps are fast but never overlap".
+	killStart := time.Now()
 	_, kSpan := tracer.Start(ctx, "fc.killVMM")
 	r.killVMM(vm)
 	kSpan.End()
+	r.phase(ctx, "destroy_kill_vmm", killStart)
 
 	var errs []error
+	releaseStart := time.Now()
 	rCtx, rSpan := tracer.Start(ctx, "fc.releaseRootfs")
 	if err := vm.rootfs.Release(); err != nil {
 		errs = append(errs, fmt.Errorf("release rootfs: %w", err))
 	}
+	r.phase(ctx, "destroy_release_rootfs", releaseStart)
 	obs.Fail(rCtx, errors.Join(errs...))
 	rSpan.End()
 
@@ -127,15 +135,29 @@ func (r *FCRuntime) killVMM(vm *fcVM) {
 		return
 	}
 	pid := vm.cmd.Process.Pid
-	// Negative pid signals the group: Firecracker is its own group leader, so
-	// this reaches anything it spawned.
-	_ = syscall.Kill(-pid, syscall.SIGTERM)
-	select {
-	case <-vm.done:
-		return
-	case <-time.After(2 * time.Second):
-	}
+	// SIGKILL directly, with no SIGTERM first.
+	//
+	// This used to send SIGTERM and wait up to two seconds for a graceful exit. That
+	// wait could never succeed: Firecracker installs a handler for SIGTERM and
+	// deliberately does not exit on it. Measured on a live VMM --
+	// "SigCgt: 0000000441801449" has the SIGTERM bit set, the process was still alive
+	// three seconds after the signal, and SIGKILL then took 59 ms. So every destroy
+	// paid the full two seconds to accomplish nothing, which is the same shape as the
+	// ACPI poweroff wait removed from this path earlier (see Destroy above).
+	//
+	// Nothing is lost by skipping it. A microVM has no state to flush at this point:
+	// the guest's filesystem was already synced by flushBeforeDestroy while the agent
+	// was still reachable, and guest memory is discarded either way. The VMM's own
+	// exit path releases nothing that its death does not -- the mapping and the
+	// userfault fd are closed above, before either signal.
+	//
+	// Negative pid signals the group: Firecracker is its own group leader, so this
+	// reaches anything it spawned.
 	_ = syscall.Kill(-pid, syscall.SIGKILL)
+	// Still waited for, because the caller releases the rootfs next and a device
+	// cannot be torn down under a process that still has it open. Two seconds is a
+	// backstop against a process stuck in the kernel, not an expected duration --
+	// measured at 59 ms.
 	select {
 	case <-vm.done:
 	case <-time.After(2 * time.Second):

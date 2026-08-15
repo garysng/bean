@@ -174,6 +174,20 @@ func main() {
 			"bound that, or a node with many prewarmed images will fill its disk. A "+
 			"miss always boots, so enabling this cannot make a create fail that "+
 			"would otherwise have worked")
+	fcUblk := flag.Bool("fc-ublk", false,
+		"serve each sandbox's rootfs from a ublk block device. Alone this replaces the "+
+			"device-mapper snapshot: the same copy-on-write over the same converted "+
+			"ext4, except that creating the device writes io_uring commands rather than "+
+			"forking losetup twice and dmsetup once per sandbox -- measured at ~26ms per "+
+			"call, 3.8s of a 4.5s create at 256-way concurrency, and 2.461s -> 0.034s of "+
+			"fc_rootfs at 60. Combined with --fc-overlaybd it instead replaces tcmu as "+
+			"the transport for overlaybd's layers, keeping the layer sharing and adding "+
+			"the teardown that tcmu cannot give: tcmu takes 4.0s to remove 128 devices, "+
+			"identically on kernel 5.15 and 6.8, because its daemon serialises through "+
+			"one netlink socket. Needs kernel 6.0 or later with ublk_drv loaded, and a "+
+			"node started with this on a kernel without it refuses to start rather than "+
+			"falling back, because a silent fallback would differ from the cluster's "+
+			"expectation in create latency with nothing downstream able to see it")
 	fcOverlaybd := flag.Bool("fc-overlaybd", false,
 		"assemble rootfs devices from overlaybd layers instead of flattening each "+
 			"image into its own ext4 (fc runtime). Layers are shared by digest, so a "+
@@ -195,7 +209,12 @@ func main() {
 			"from a registry cannot be read this way and a create naming one is "+
 			"refused. Producing such images needs a conversion-and-push step this "+
 			"node does not do. The other cost is that every block read then depends "+
-			"on the registry still being reachable and still serving that digest")
+			"on the registry still being reachable and still serving that digest. "+
+			"Works with --fc-ublk as well as with the TCMU transport: over TCMU the "+
+			"overlaybd daemon issues the range requests, over ublk noded does, and a "+
+			"registry that ignores a Range header is refused rather than worked "+
+			"around -- it answers with the whole blob from byte zero, which would "+
+			"serve the start of a layer for a read of its middle")
 	fcOverlaybdBinDir := flag.String("fc-overlaybd-bin-dir", "/opt/overlaybd/bin",
 		"directory holding the overlaybd binaries (overlaybd-create, -apply, "+
 			"-commit). Empty resolves them on PATH")
@@ -373,6 +392,12 @@ func main() {
 			"on demand when it downloads each one in full")
 	}
 
+	// --fc-overlaybd-lazy-pull with --fc-ublk used to be rejected here, because the ublk
+	// route read layers from files and a lazily read layer is a URL. It is supported now:
+	// the route reads a remote layer through range requests, which works because every
+	// reader below the transport takes io.ReaderAt, so a range-reading base substitutes
+	// for a file without the format code knowing.
+
 	tmpl, err := runtime.ParseCPUTemplate(*cpuTemplate)
 	if err != nil {
 		log.Fatalf("--cpu-template: %v", err)
@@ -485,6 +510,7 @@ func main() {
 			VMMUid:            *fcVMMUid,
 			VMMGid:            *fcVMMGid,
 
+			Ublk:              *fcUblk,
 			Overlaybd:         *fcOverlaybd,
 			OverlaybdLazyPull: *fcOverlaybdLazyPull,
 			OverlaybdBinDir:   *fcOverlaybdBinDir,

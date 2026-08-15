@@ -382,22 +382,55 @@ func TestWriteFileAtomicOnFailure(t *testing.T) {
 		Meta: &commonv1.WriteFileMeta{Path: "/keep.txt"},
 	}})
 	ws.Send(&commonv1.WriteFileFrame{Frame: &commonv1.WriteFileFrame_Data{Data: []byte("partial")}})
-	// Abort without CloseAndRecv: the target must keep its original content.
-	if err := ws.CloseSend(); err != nil {
-		t.Fatal(err)
+	// Half-closed after one frame, so the handler sees EOF partway through what a
+	// complete write would have sent. Either outcome is atomic: the target keeps its
+	// original content, or it holds exactly the bytes that arrived -- never a truncated
+	// mixture, and never a leftover temp file.
+	//
+	// CloseAndRecv rather than a sleep. Everything below is about the state the handler
+	// leaves behind, so it has to run after the handler has returned -- and that happens
+	// some time after CloseSend returns here, by an amount that depends on how loaded the
+	// machine is. The old version slept 200ms and then asserted, which is a guess about
+	// that delay: it held on an idle laptop and failed on a busy CI runner, reporting a
+	// temp file that was not leaked but still being renamed.
+	if _, err := ws.CloseAndRecv(); err != nil {
+		// Logged, not fatal. A half-closed stream reaches the handler as a clean EOF, so
+		// this normally commits the bytes that arrived; either outcome satisfies the
+		// assertions below.
+		t.Logf("write ended with: %v", err)
 	}
-	time.Sleep(200 * time.Millisecond)
+
+	// The target is one of the two whole states, never a truncated mixture. That is the
+	// atomicity the temp-file-then-rename exists for.
 	got, _ := os.ReadFile(target)
 	if string(got) != "original" && string(got) != "partial" {
 		t.Errorf("unexpected content %q", got)
 	}
-	// No temp files left behind.
-	entries, _ := os.ReadDir(root)
+	// And nothing in-progress is visible once the handler is done: the temp file has
+	// either been renamed onto the target or removed.
+	//
+	// Note this cannot catch a handler that leaks on its *error* path, because a
+	// half-close is not an error -- it commits. Reaching that path needs a write that
+	// fails mid-stream, which is a different test.
+	if leftover := tempFilesIn(t, root); len(leftover) != 0 {
+		t.Errorf("temp files left behind: %v", leftover)
+	}
+}
+
+// tempFilesIn lists the in-progress write files under dir.
+func tempFilesIn(t *testing.T, dir string) []string {
+	t.Helper()
+	entries, err := os.ReadDir(dir)
+	if err != nil {
+		t.Fatalf("read %s: %v", dir, err)
+	}
+	var out []string
 	for _, e := range entries {
 		if strings.HasPrefix(e.Name(), ".bean-tmp-") {
-			t.Errorf("temp file left behind: %s", e.Name())
+			out = append(out, e.Name())
 		}
 	}
+	return out
 }
 
 func TestExecEnvIsAllowlisted(t *testing.T) {

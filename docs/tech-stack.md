@@ -1051,7 +1051,7 @@ choose the technology.
 | Container tiers | runc / gVisor | ✅ noded drives the OCI runtime directly, no containerd |
 | Dev/CI tier | `local` process tree, no isolation | ✅ |
 | Rootfs | device-mapper snapshot, shared base + CoW | ✅ 44 KiB/sandbox |
-| Rootfs lazy-pull | overlaybd | ⚠️ wired in behind `--fc-overlaybd` over TCMU; lazy pull itself untested against a registry |
+| Rootfs lazy-pull | overlaybd | ✅ over both transports, verified on hardware. Over TCMU the overlaybd daemon issues the range requests; over ublk (`--fc-ublk`) noded does, reading the layer format itself. Measured on the ublk path: a guest boots in 358 ms from a layer absent from local disk, reading at most 60% of a 5.1 MiB layer. Requires the layer to be a sealed overlaybd layer already -- a standard OCI layer has no block index -- and a blob store that allows anonymous GET |
 | Memory restore | Firecracker UFFD backend | ✅ 7 ms load |
 | Diff snapshots | Firecracker diff + merge at restore | ✅ 298 KB, depth capped at 8 |
 | `--track-dirty-pages` | | ⚠️ implemented, off by default, overhead unmeasured |

@@ -52,7 +52,9 @@ for 128 devices on both.
 | Volumes | 📐 | |
 | Host resource reconciliation | 📐 | A crashed noded leaves dm mappings and sandbox directories behind |
 | Build logs and cancellation | ⚠️ | A build reports no progress and cannot be stopped |
+| ublk rootfs | ⚠️ | `UblkProvider` is implemented against a hand-written io_uring and ublk ABI -- there is no usable Go binding and `CGO_ENABLED=0` rules out wrapping liburing. **Verified single-sandbox on a 6.8 kernel**: a guest boots from a ublk device (`x86_64`, `3.20.10`, exit 0), copy-on-write holds with the base file byte-identical afterwards, and teardown leaks nothing. It serves the same converted ext4 from the same `ImageDir` as dm-snapshot, so an image prewarmed for either backend serves both; what differs is that creating the device writes io_uring commands instead of forking `losetup` twice and `dmsetup` once per sandbox, measured at ~26 ms a call. **Concurrency is now measured against dm-snapshot** on the same host, same image, same run, stepped 4 -> 16 -> 60 with a leak check at each step (60 is the ceiling `ublks_max=64` allows): `fc_rootfs` 2.461 s -> 0.034 s (72x), `runtime_create` 2.589 s -> 0.064 s, total 2.898 s -> 0.350 s, p50 3170 ms -> 440 ms, throughput 18.3 -> 101.7 creates/s, CPU per create 1.198 s -> 0.258 s, zero failures and zero devices left on either side. **That 72x on `fc_rootfs` settles the attribution**: the cost was never copying -- the layers are sparse and occupy tens of KB -- it was three `fork+exec` per sandbox, and ublk does none. The first attempt at this measurement went straight to 256 and did real damage; see "ublk: what 256 concurrent creates cost" below. Four defects were fixed as a result, including the one that mattered: nothing enforced `ublks_max`, so devices accumulated past the kernel's ceiling and could not be removed. The provider now reads that limit and refuses past it. **Operational constraint**: `ublks_max` defaults to 64, so a node cannot hold more than 64 ublk sandboxes without `modprobe ublk_drv ublks_max=N`. Opt-in with `--fc-ublk`; needs kernel 6.0 or later, and a node started with it on an older kernel refuses to start rather than falling back |
 | overlaybd | ⚠️ | `OverlaybdProvider` is implemented and **verified end to end on hardware**: a sandbox boots from an overlaybd device, the guest reads `PRETTY_NAME="Alpine Linux v3.20"` from its own rootfs, writes land in the writable layer, and teardown leaks nothing (`hack/overlaybd-e2e.sh`, with `overlaybd_hw_linux_test.go` at the provider level and `hack/overlaybd-probe.sh` covering the negative cases). Measured against dm-snapshot on the same host (`hack/overlaybd-bench.sh`): **392 MiB → 118 MiB** of allocated disk for three images sharing a base, and conversion CPU dropping from a flat 2.2 s per image to 1.37 s / 0.49 s / 0.44 s as the shared layer is reused. **Cold-start latency is unchanged** — this path still downloads and converts every layer before assembling the device, so it does strictly more work than flattening on a first use and wins only on the second image and on disk. Lazy pull, the part that would cut the cold path, requires blobs that are already sealed overlaybd layers; a standard OCI layer has no block index to range-read, so a create naming one is now refused rather than silently building an unopenable config. Producing such blobs is `Prewarm`'s job, not a central pipeline's: it converts an image and publishes each sealed layer under its OCI digest to bean's own object store (`--fc-overlaybd-s3-endpoint`, `obdblobstore.go` / `obdindex.go`), and any node reading that store resolves those layers remotely instead of converting them. A create never publishes — an S3 upload of tens of MiB does not belong on a sandbox's latency path. So a genuinely cold create is still a conversion, but it is one per **fleet** per image rather than one per node, provided something prewarms. The lazy-pull read path itself (`--fc-overlaybd-lazy-pull`) is **implemented and not yet exercised against a registry**: the 7 ms mount and 19.6%-of-layer-bytes figures come from the manual verification in [decisions.md](decisions.md) §3.1, against a blob that had been sealed first, not from this code. Opt-in with `--fc-overlaybd`; dm-snapshot is still the default. **Concurrent fan-out now measured** on a 128-core host at 256 simultaneous creates, and it is where this backend earns its keep: `fc_rootfs` 3.809 s -> 0.908 s, `runtime_create` 4.169 s -> 0.992 s, total 4.512 s -> 1.299 s, throughput 47.5 -> 88.0 creates/s, zero failures and no leaks on either backend. The cause is subprocess count: dm-snapshot forks `losetup` twice and `dmsetup` once per sandbox at ~26 ms a call, while `attachTCMU` is configfs writes with no fork at all. Two defects had to be fixed first -- the device was sized independently of the filesystem on it, so any request under 2 GiB built a device smaller than its own ext4 and the guest refused to boot; see "Attribution notes" below. See [image-pipeline.md](image-pipeline.md) §7 |
+| overlaybd over ublk | ⚠️ | `--fc-overlaybd` with `--fc-ublk` resolves layers exactly as the tcmu route does -- shared by digest, converted when absent, same directory -- and serves them from a ublk device this process reads. That means the layer format is read in Go: `lsmt.go` parses the trailer and its bit-packed index, `zfile.go` the block-compressed data, `lz4block.go` the blocks themselves (~100 lines, and it is on every guest read, which is why it is not a dependency), `lsmtstack.go` merges a chain newest-wins, `lsmtcow.go` puts a sparse overlay over it. **The reason is teardown**: removing 128 tcmu devices takes 4.0 s and it is 4.0 s on both kernel 5.15 and 6.8, because the daemon serialises through one netlink socket its own upstream warns against using concurrently -- a cost that does not move with the kernel is a cost in the transport. **Verified on hardware and measured against tcmu** in one run, same host, same image, same steps (`hack/obd-transport-bench.sh`), zero failures and zero leaks on both sides: p50 461 -> 334 ms at 4, 512 -> 361 ms at 16, 642 -> 420 ms at 60; throughput 70.1 -> 101.5 creates/s at 60; `fc_rootfs` 0.227 s -> 0.027 s, which is the 8x this change is actually about, and `runtime_create` 0.258 s -> 0.057 s. The teardown claim holds where it was made: `obd_detach` averages 0.704 s per sandbox on tcmu at 60-way and the ublk path has no equivalent phase at all, because there is no fabric to unwind. A guest boots from a chain this process decoded itself -- the ext4 superblock reads back as 0xef53 through tar -> zfile -> lsmt extents -> stack merge. Five defects were found by doing this rather than by the unit tests, which were green throughout; see "overlaybd over ublk: what only hardware found" below. **Lazy pull works over this route too, and is verified on hardware.** A layer available only in the object store backs a ublk device: `openLSMTStackFrom` takes mixed local and remote sources, and a remote one is read through range requests (`blobreader.go` chunks and caches, `blobfetch.go` speaks to a registry or a blob-store URL). The format needed no change, because every reader below the transport already took `io.ReaderAt` -- which is why an earlier version of this row calling the gap "structural" was wrong, and would have told the next reader not to try. Measured: a guest boots in **358 ms** from a layer absent from local disk before and after the create, reading at most **60% of the 5.1 MiB layer** (an upper bound -- that figure counts all loopback traffic, not just the fetches), and reads `/etc/alpine-release`, `uname -m` and `/bin/busybox` correctly. Three bugs had to be fixed to get there, all with the same useless symptom -- see "lazy pull over ublk: three bugs behind one symptom" below. Two things a real store does are refused rather than worked around: a **200 answer to a Range request** means the range was ignored and the whole blob is coming from byte zero, so a read of the middle of a layer would return its beginning, and a **short body** is an error rather than a partial success. The blob store must allow anonymous GET, since that is how overlaybd's own daemon reads it; a store that refuses is reported at startup, because otherwise the node silently converts every layer instead of reading it. Separately, without lazy pull a chain naming a layer only by digest is refused with the layer and image named. An earlier version of this row listed `commit` as untested on both routes. That verb no longer exists: PR #61 removed it end to end, because a filesystem-only snapshot and a committed image are the same content-addressed overlaybd layers underneath, so "save this environment to share" is a snapshot promoted into the template namespace. A caveat about a deleted feature is worse than no caveat -- it sends a reader looking for something to test. The LZ4 decoder is checked against blocks from the `lz4` CLI rather than only against blocks the tests build, since hand-built vectors cannot catch the encoder and decoder sharing a misreading |
 
 ## Measured latency
 
@@ -276,6 +278,373 @@ Postgres by any test.** So there is now a smoke test calling every method once,
 plus a reflection-based guard that fails when a method is missing from it — the
 hand-written call list would otherwise decay exactly as the interfaces did. The
 guard caught three snapshot methods left out of its own first draft.
+
+### snapshot and restore on the overlaybd routes: two separate gaps ⚠️
+
+Found by testing restore, which resolves layers through `snapshotFSLowers` rather than
+`lowersFor` -- a second route under the same `layerSources`, and the one that had not been
+exercised. `hack/obd-ublk-restore-probe.sh` reproduces both.
+
+**On the ublk route, snapshot fails outright.** `SealSnapshotFS` looks the sandbox up in
+`p.attached`, which only the tcmu route populates; the ublk route tracks devices in
+`p.ublkAttached`, so a checkpoint returns "sandbox is not attached". Behind that check the
+mismatch is real rather than cosmetic: sealing runs `overlaybd-commit` over a `writable.data` +
+`writable.index` pair, and the ublk route's writable layer is a sparse `overlay.img` with an
+in-process ownership bitmap. There is nothing for `overlaybd-commit` to read. Making snapshots
+work here needs either an overlaybd writable layer on this route or a sealer that can read the
+sparse-file form -- not a lookup fix.
+
+**On the tcmu route, snapshot succeeds and loses the data.** Measured: write a marker, snapshot
+with `--no-memory`, create from that snapshot, and the restored guest does not have the file.
+Everything downstream looks correct -- the snapshot record carries the FS digest and both layer
+digests, the manifest lists base + sealed layer, both blobs are in the store -- but the sealed
+layer is 36 KiB of metadata with no data in it. The cause is upstream of all of that:
+`writable.data` does contain the guest's writes (verified by grepping a 1 MB pattern out of it),
+while `writable.index` is **0 bytes**, because the overlaybd daemon holds the index in memory
+while the device is attached. `SealSnapshotFS` neither detaches the device nor flushes it, and
+`tcmuDevice` has no flush at all -- so `overlaybd-commit` reads an empty index and seals nothing.
+
+This is on main rather than in this branch's work: nothing here touches sealing. It is recorded
+because "snapshot on overlaybd" reads as delivered and is not.
+
+**The silence is fixed even though the gap is not.** Sealing now refuses an empty index instead
+of producing a 36 KiB layer that promises a filesystem it does not hold, and the refusal names
+the cause, the file, and the fact that this is a known gap rather than a transient error --
+verified on hardware. A checkpoint that fails is recoverable; one that reports success over an
+empty layer is not, and the difference only shows up much later, in a restored sandbox missing
+the work someone snapshotted.
+
+Making it actually work needs a way to flush the writable layer without detaching. Detaching
+first would make the daemon write its index, but Firecracker holds the block device open for the
+sandbox's life, so pulling it out from under a running VMM trades this bug for a worse one. There
+is no flush among the backstore's configfs actions (`block_dev`, `free_kept_buf`, `reset_ring`),
+so it needs either an upstream mechanism or the ublk route to grow its own sealer -- which is the
+same decision the ublk gap above requires.
+
+### snapshot on the ublk route works, and found two things upstream of it ⚠️
+
+The ublk route can now seal a snapshot without the overlaybd daemon: `lsmtwrite.go` writes a
+sealed LSMT layer, and the extents come from the overlay itself. That removes the dependency that
+made snapshots impossible here -- there is no daemon holding an index in memory and nothing to
+flush, so what the sandbox wrote is what gets captured. Verified on hardware: a checkpoint that
+failed outright two rounds ago now produces a snapshot record with an FS digest and both layer
+digests.
+
+Two things surfaced while getting there, and both are upstream of the sealer.
+
+**A guest's `sync` did not put its writes on the device, and that was bean's bug.** It is fixed;
+the paragraph is kept because the wrong diagnosis is instructive. What was measured -- 0 bytes
+allocated after `sync`, 81920 after `echo 3 > /proc/sys/vm/drop_caches` -- was real, but the
+conclusion drawn from it was not: `drop_caches` only reclaims clean pages and does not write dirty
+ones back, so it cannot be what flushed anything. The extra seconds those separate execs took were
+doing the work.
+
+The actual cause was that the guest had no flush to send. `SET_PARAMS` never set `Basic.Attrs` and
+the Firecracker drive carried no `cache_type`, which defaults to `Unsafe` and does not advertise
+`VIRTIO_BLK_F_FLUSH`. The guest saw `write through`, its ext4 never emitted `UBLK_IO_OP_FLUSH`, and
+`backend.Flush` had never run in production at all. See the durability section below.
+
+**The extents cannot come from the in-process bitmap alone.** The bitmap is built by `WriteAt`, so
+it knows only writes this process saw -- and a sandbox restored from a snapshot reattaches with a
+fresh backend over an overlay that already holds bytes. Sealing from the bitmap reported "written
+nothing" for a sandbox whose filesystem was on disk, which reads as a lost write rather than lost
+bookkeeping. `OwnedExtents` now asks the file first, via `SEEK_DATA`/`SEEK_HOLE`, because the
+filesystem's record of which regions are allocated survives a reattach and the bitmap does not.
+
+**The whole cycle works now**, verified on hardware without lazy pull: write a marker, snapshot
+with `--no-memory`, create from the snapshot, and the restored guest reads the marker back.
+
+Getting there needed one distinction the code was missing. A layer with no local file is remote for
+two different reasons, and they are not interchangeable. A cold create's image layer is remote *by
+choice* -- it could be converted from the registry -- so refusing to read it remotely respects the
+deployment decision lazy pull exists to offer. A snapshot's chain is remote *by necessity*:
+`snapshotFSLowers` returns a remote reference only after finding no local file, and a sealed
+snapshot layer has no registry blob behind it. Refusing that does not fall back to owning it
+locally; it makes the restore impossible, which is what it did -- publication is unconditional, so
+a checkpoint published its layer and the restore then declined to fetch it, reporting "in neither
+the node nor the store" about a digest that was in the store.
+
+So `requiredRemoteLayer` reads a store-only layer regardless of lazy pull, and `layerSources`
+carries a `storeOnly` flag saying which kind of chain it is resolving. The image walk is untouched
+and still gated.
+
+### the guest's flush now reaches the overlay ⚠️
+
+A snapshot taken right after a write used to capture a filesystem missing it: either the sealer
+refused with "has written nothing", or the restore came back with the file's name and size intact
+and its data block all zeros. Two defects, both bean's, and neither was the guest's fault.
+
+**The guest had no flush to send.** `SET_PARAMS` never set `Basic.Attrs`, and `fcDrive` carried no
+`cache_type` -- Firecracker defaults to `Unsafe`, which does not advertise `VIRTIO_BLK_F_FLUSH`. So
+the guest reported `write through` on both disks, its ext4 never emitted `UBLK_IO_OP_FLUSH`, and
+`backend.Flush` -- present and correct on both backends -- had never once executed in production.
+A guest's `sync` returned as soon as its writes reached the queue, not when they were on the
+overlay. Measured: a marker was absent from the host file 500 ms after `sync` returned and present
+within the next 500 ms. That also means a host crash silently lost a sandbox's filesystem, which is
+the more serious half and was invisible.
+
+`UBLK_ATTR_VOLATILE_CACHE` is `1 << 2`, taken from the kernel's own header. A first attempt used
+`1 << 1`, which is `UBLK_ATTR_ROTATIONAL`: it told the kernel this was a spinning disk, said nothing
+about the cache, and the host device still reported `write through`. Reading the constant beat
+counting the bits.
+
+**The seal read allocation without flushing.** `OwnedExtents` asks the filesystem via `SEEK_DATA`,
+which is right for surviving a reattach and wrong for a write this process has not pushed down --
+host ext4 delays allocation until writeback, so it reports a hole for bytes the file already holds.
+The flush belongs on the seal path, because a caller cannot see the queue's in-flight state.
+
+With both fixed, host and guest both report `write back` and the marker lands on the host file the
+instant `sync` returns. Verified on hardware: write, snapshot `--no-memory`, restore, read back, no
+manual sync and no `drop_caches`.
+
+**The third defect: `sync` is not `syncfs`.** The two fixes above left 3 failures in 23 cycles, and
+every structural theory about them was wrong. Ruled out by measurement, in order: the failing seals
+did contain the marker (`grep` found it in the blob every time); the failing and passing layers had
+**byte-identical indexes**, same extent count and same mappings; the layer mapped the marker's
+virtual offset to the right physical offset and the bytes were there; the restore resolved the
+correct 2-layer chain with the correct digest and size every time; `fsfreeze` before the snapshot
+did not help; and layer size (82112 vs 86224) tracked nothing, since one 82112-byte layer passed.
+
+What isolated it was reading the restored block device from the *host* at the marker's offset while
+the guest read the same file. On a failing restore the device correctly served `R1` and the guest
+read empty. So everything from the write through the seal to the restored device was right, and the
+loss was in the guest's own view: `sync` returns once writeback has been *started* and does not
+order a file's data block against the inode that references it, so the checkpoint sealed an inode
+pointing at a block whose contents were not on the device yet.
+
+**Still open, and four proposed causes are now ruled out by measurement.** The failure rate is
+about 20% (8/10 and 20/23, two independent runs agreeing). What has been eliminated:
+
+- *`sync` is not `syncfs`.* Changing the checkpoint's flush to `sync -f /` made it **worse** --
+  8/25 and 7/16 -- and was reverted. The 8/8 run that motivated it used `sync -f <file>`, not
+  `sync -f /`, which is a different operation.
+- *The seal misses an extent.* Instrumented on a failing run: the seal captured 12 extents
+  including `virtBytes=1883242496`, the marker's own block.
+- *The layer or its index is wrong.* A passing and a failing layer had byte-identical indexes,
+  and the failing layer mapped the marker's virtual offset to a physical offset holding the
+  bytes. Layer size tracked nothing -- an 82112-byte layer passed and another failed.
+- *The filesystem has no journal, so data cannot be ordered against metadata.* A controlled
+  host experiment says the opposite: no-journal passed 20/20 while journalled failed 20/20 (the
+  copy needs recovery, which a read-only mount cannot do). `-O ^has_journal` is correct here.
+
+What is established: on a failing restore the block device, read from the *host* at the marker's
+offset, serves the right bytes while the guest reads zeros. So the write, the seal, the layer, the
+chain resolution and the device are all correct, and the loss is in the guest's own view of its
+filesystem. The next step is comparing the guest's block mapping for the file before and after
+restore, which is where an inode pointing at the wrong block would show up.
+
+### the worker split did not cost the other paths ✅
+
+The worker goroutines and the copy-on-write mutex went in to make lazy pull work, but they sit
+on the path *every* ublk create takes. A change that fixes one route and breaks another is the
+risk, and the only way to see it is to exercise the routes that were already passing.
+
+`hack/rootfs-paths-regress.sh` runs all four configurations -- dm-snapshot with no flags, ublk
+alone, overlaybd over tcmu, overlaybd over ublk -- and for each one requires the *guest* to
+answer, not merely the sandbox to reach RUNNING. That distinction is the point: an unreachable
+agent is exactly what this round's bugs looked like from outside, and it reads as success to
+anything that only checks state. Each configuration also writes a file and reads it back, since
+the mutex is on the write path.
+
+All four pass, both checks each, with no ublk device and no dm mapping left behind. The
+concurrency figures are unchanged too: at 60-way the ublk route still does 101.7 creates/s with
+`fc_rootfs` at 0.022 s, against 101.5 and 0.027 s measured before the split -- so the handoff
+costs nothing at the concurrency it was added for.
+
+### lazy pull over ublk: three bugs behind one symptom
+
+All three produced the same thing: a sandbox in RUNNING whose guest logged
+`EXT4-fs error: __ext4_find_entry:1683: reading directory lblock 0`, whose virtio device
+reported `I/O error`, and whose `exec` returned nothing at all. None of them was a format bug --
+a unit test reading the same real sealed layer through the remote path returned byte-identical
+data to the local path, including the ext4 superblock magic. That is what ruled out the whole
+class and left the concurrency and lifetime questions.
+
+1. **The queue served every request inline on its one pinned thread.** Correct for a local file,
+   where a pread is microseconds; fatal for a read over HTTP. The guest's first root read
+   blocked the thread, all 32 slots queued behind it, and the device stopped answering. A
+   backend that reports `MayBlock()` now gets a worker per request, and the result is funnelled
+   back to the queue thread, which stays the only submitter because the kernel requires it
+   (`ubq_daemon == current`).
+2. **The copy-on-write bitmap had no lock.** It never needed one while the queue was serial;
+   with workers the race detector finds it immediately. The consequence is not a crash: two
+   writers to different halves of one unowned block both fill it from the base and the second
+   erases the first, and a torn bitmap serves a block from the wrong source. `fileBackend` is
+   left unlocked on purpose -- it never reports `MayBlock()`, so it stays serial -- and now says
+   so, along with what would break if that changed.
+3. **The reader held the create'"'"'s context.** The device serves IO for the sandbox'"'"'s whole life,
+   so every read after the create returned failed with `context canceled`. Reads *during* the
+   create succeeded, which made this look like a corrupt region of the layer rather than a
+   lifetime mistake. Finding it needed an error log on the read path: the queue turned the
+   failure into EIO and nothing upstream said why. A queue that dies mid-boot now logs it when
+   it happens rather than at teardown, which cost a whole round on a device that accepted
+   requests and answered none.
+
+### overlaybd over ublk: what only hardware found
+
+The Go layer reader passed every test in its package and could not read a single layer bean
+produces. Five defects, none of which any unit test could have caught, because the tests
+built their own input -- so the test's idea of the format and the reader's idea of it were
+wrong together and agreed with each other.
+
+1. **The payload is not at offset 0.** bean seals with `overlaybd-commit -z -t`, and `-t`
+   wraps the result in a tar so it is a valid OCI blob. A real layer opens with a pax
+   header named `overlaybd.pax`; the ZFile magic is at 1536. The reader saw a tar header
+   where a magic number belongs and refused a good file.
+2. **The index CRC is not standard crc32c.** It is CRC-32C over the raw register, seeded at
+   zero with no final complement. Over one layer's 8 index bytes the standard form gives
+   `0x4dd1aae4` where the file stores `0xc1f9186e`. `crc32.Update(0, ...)` is not the fix
+   either: it treats its argument as an already-complemented CRC, so "seed 0" actually
+   seeds `0xffffffff` and gives a third wrong answer.
+3. **The per-block CRC seeds with the salt itself, not its complement.** Upstream describes
+   its helper as seeding the running state with the salt prime, which reads both ways.
+   Measured: seeding `100007` gives the stored `0xad348fb1`, seeding `^100007` gives
+   `0xd66cdfda`.
+4. **The fix was not in the path a create takes.** After the first three were fixed and
+   verified, a real create still failed with `not an lsmt layer: magic0
+   0x6279616c7265766f` -- "overlayb", the tar header again. The test had assembled the
+   pipeline itself, so it verified the pieces while the wiring between them stayed wrong.
+   **A test that builds the pipeline tests the parts, not the assembly, and the assembly is
+   the more likely thing to be broken.**
+5. **The route reported no conversion, so its templates never left PENDING.** A first create
+   worked and left a template with an empty FS digest that nothing could be created from --
+   the reference was effectively single-use, and the failure appeared on the *second*
+   create. Found only because the two transports were run side by side: tcmu failed every
+   concurrent create while ublk passed, and that asymmetry was the symptom. A transport is
+   not supposed to change what a create means.
+
+The harness had three faults of the same kind, where a number looked like a number and was
+not: the dev stack advertises 8 vCPU, so a 60-way step silently became an 8-way one and
+reported "18.65 creates/s" from 8 successes and 52 refusals; the phase metric is
+`bean_node_create_phase_seconds` with a `runtime` label, so every phase read `n/a` while the
+data was there; and `stress-fc.sh` posted `{"image": ...}`, renamed to `imageRef` when
+templates landed, which is ignored rather than rejected. A step with any refusal now reports
+VOID instead of a rate.
+
+### ublk: what 256 concurrent creates cost
+
+The single-sandbox ublk path was verified end to end — guest boots, copy-on-write
+holds, nothing leaks — and **none of that predicted concurrency**. Going straight
+from 1 to 256 exposed four defects and left the host needing a reboot, at load 68
+with 141 undeletable kernel objects and 37 processes unkillable in D state.
+
+The four, in the order they surfaced:
+
+1. **The shared control ring had no lock.** Submitting means writing the SQE at the
+   tail then advancing it; reading a result means taking the one at the head. Two
+   callers doing that at once take each other's completions. 255 of 256 creates
+   failed with `this kernel's ublk lacks UBLK_F_USER_COPY (features=0x0)` — on a
+   kernel that had answered `0x1fe` seconds earlier. **The error accused the kernel
+   of a missing feature when the fault was entirely local**, which is the most
+   misleading shape a message can take.
+2. **`submitAndWait` treated the first `io_uring_enter` return as proof of a
+   completion.** It is not: a signal, or the kernel completing asynchronously, both
+   return without one. 195 of 256 failed with `enter returned with no completion`.
+3. **A failed create left its device allocated**, because teardown returned early
+   when `STOP_DEV` failed — and `STOP_DEV` waits on a queue that a failed create has
+   already lost.
+4. **Nothing enforced `ublks_max`.** This is the one that did the damage. The
+   kernel's ceiling defaults to 64; 141 devices accumulated past it and could not be
+   removed at all — `STOP_DEV` waits on a dead queue, and `DEL_DEV` blocks behind the
+   kernel retrying IO to a server that is gone (`Buffer I/O error on dev ublkb68`).
+
+**The lesson is about scaling a test, not about ublk.** A ublk device is a kernel
+object with no force-remove: unlike `dmsetup remove`, there is no way back from
+userspace once its server dies. The right sequence was 1, 4, 16, 64 with a leak
+check at each step — and `ublks_max=64` had already been read during setup without
+being allowed to bound the test. A limit you have seen and not encoded is a limit
+you will exceed.
+
+Run in that order afterwards, every step passed clean: 4/4, 16/16, 60/60, zero
+devices left at each. The numbers that came out of it are in the ublk row above.
+
+The provider now reads `ublks_max` from the kernel and refuses before allocating
+anything, because refusing a create is recoverable and leaking a kernel object on a
+shared host is not.
+
+**One test was deleted rather than kept.** It launched 4× the limit concurrently and
+checked that exactly `limit` were admitted — and it passed against a deliberately
+broken `admit` that released the lock between the check and the increment, because
+that window is a few instructions wide and the scheduler rarely lands inside it. A
+test that passes against the bug it names reads as coverage. It now asserts the
+invariant instead: `inFlight` never exceeds the limit, which broken arithmetic
+violates whether or not the interleaving is ever observed.
+
+## Attribution notes: the create and destroy paths, measured
+
+Every figure here is from one 128-core host (AMD EPYC, Ubuntu 22.04, 503 GB) at
+256 concurrent creates unless stated. They are recorded because each one overturned
+something that had been asserted without measurement.
+
+### Where a create's time goes
+
+`runtime_create` used to be one opaque number covering almost the whole create, so
+attribution stopped at "somewhere in here". It is now six sub-phases:
+
+| phase | dm-snapshot | overlaybd |
+|---|---|---|
+| `fc_rootfs` | 3.809 s | 0.908 s |
+| `fc_boot` | 0.133 s | 0.050 s |
+| `fc_vmm_spawn` | 0.066 s | 0.025 s |
+| `fc_api_ready` | 0.000 s | 0.002 s |
+| `fc_cgroup` | 0.000 s | 0.000 s |
+| `agent_ready` | 0.316 s | 0.306 s |
+| **total** | **4.512 s** | **1.299 s** |
+
+`fc_rootfs` is the ceiling, and only it scales with load: 0.863 s at n=16 against
+3.809 s at n=256, while boot and spawn stay flat.
+
+The cost is subprocess work, established by ruling the alternatives out on the host
+rather than by reasoning. Raw dm-snapshot creation parallelises (10/s serial, 65/s
+concurrent). `losetup --find` does not degrade as devices accumulate (26 ms per call
+at 0, 100 and 200 existing devices). So it is the per-sandbox `fork`/`exec` of
+`losetup` twice plus `dmsetup` once, at ~26 ms each. `attachTCMU` writes configfs
+and forks nothing, which is why overlaybd is 4.2x faster on this phase.
+
+### The `cores / cpu-per-create` claim was wrong
+
+README, this file and `--create-wait`'s help text quoted a ceiling of `cores / 5`,
+from a 16-core host when every create booted. Measured cost is **0.31-0.44 CPU-seconds
+per create**, an order of magnitude less, and observed throughput is 0.16-0.28 of
+what that cost predicts -- so host CPU is not the binding constraint at any
+concurrency tested.
+
+Two things were wrongly blamed for the gap before it was attributed, and both are
+recorded so nobody re-runs them. The manager's mutex: the create path holds it only
+briefly, and a test built to catch the 2N+1 access pattern passed against the broken
+shape, so the test was deleted rather than kept. SQLite write contention: `TouchNode`
+goes from 119 us to 25 ms under 300 concurrent writers -- 214x, and three orders of
+magnitude short of mattering. Postgres was then measured at **half** SQLite's
+throughput on the same run (47.7 vs 89.4 creates/s), which retires the idea that the
+single-writer connection was limiting anything. Postgres is for multiple replicas
+sharing one store, not for a faster single node.
+
+### Destroy had a two-second floor that could never do anything
+
+`killVMM` sent `SIGTERM`, waited up to 2 s for a graceful exit, then sent `SIGKILL`.
+Firecracker installs a `SIGTERM` handler and does not exit on it: measured
+`SigCgt: 0000000441801449` on a live VMM, still alive 3 s later, dead in 59 ms from
+`SIGKILL`. Single destroy went 2184 ms -> ~200 ms once the futile wait was removed.
+
+This is the second wait of exactly this shape on this path -- an ACPI poweroff wait
+cost 5001 ms of a 5335 ms destroy and could never succeed either, because the guest
+kernel has no `CONFIG_ACPI_BUTTON`. Both were invisible for the same reason: destroy
+was a single number, so a fixed floor looked like the cost of tearing down a device.
+`destroy_flush` and `destroy_network` are now separate, and are 0.418 s and 0.000 s.
+
+**Still open**: destroys serialise at high concurrency. Wall time is linear in count
+(31 -> 1968 ms, 64 -> 3445 ms, 128 -> 7372 ms) at a flat ~57 ms each, and 57 ms x 128
+is the 7372 ms wall. It is not the kernel -- 10 serial backstore `rmdir`s take 15 ms
+total -- and `Destroy` releases the runtime lock before tearing anything down, so the
+serialisation is somewhere above configfs and has not been located yet.
+
+### A node was declared LOST while healthy
+
+Reconciliation ran synchronously before the heartbeat stream opened, and its duration
+is unbounded: each orphaned device-mapper mapping costs `dmsetup remove --retry`
+4.806 s before giving up, strictly serially. 109 orphans is 8.7 minutes before the
+first heartbeat, against a 45-second lease. The log showed it plainly once read in
+order -- registered at 20:19:54, lease expired at 20:20:44, no heartbeat between.
 
 ## Open gaps worth naming
 

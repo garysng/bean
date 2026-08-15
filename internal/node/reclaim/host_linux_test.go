@@ -3,6 +3,7 @@
 package reclaim
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"testing"
@@ -118,5 +119,47 @@ func TestListSandboxDirsSkipsFiles(t *testing.T) {
 	}
 	if len(dirs) != 1 || dirs[0] != "sbx_a" {
 		t.Errorf("dirs = %v, want [sbx_a]", dirs)
+	}
+}
+
+// TestDMAlreadyGoneIsNotAFailure pins the distinction a 300-sandbox burst exposed.
+//
+// dmsetup exits 1 for every error, so the exit code cannot tell "already gone" from
+// "still busy" -- and the caller does opposite things with them. A failed removal is
+// read as "something still holds this open", which marks the mapping alive and then
+// blocks reclaiming the loop device and directory behind it. Measured: 109 mappings
+// reported as unreclaimable with "No such device or address", each leaking the two
+// resources behind it, on a node the control plane had just declared LOST.
+//
+// The busy cases must keep failing, because forcing a removal there would pull the
+// device out from under a guest that is still writing to it.
+func TestDMAlreadyGoneIsNotAFailure(t *testing.T) {
+	gone := []string{
+		// The exact wording measured on the 128-core host.
+		"dmsetup: device-mapper: remove ioctl on bean-sbx_x failed: No such device or address\nCommand failed.",
+		"dmsetup: device-mapper: remove ioctl on bean-sbx_y failed: No such device",
+		"dmsetup: device does not exist",
+	}
+	for _, msg := range gone {
+		if !dmAlreadyGone(errors.New(msg)) {
+			t.Errorf("treated an already-removed mapping as a failure: %q\n"+
+				"The caller then marks it alive and leaks the loop device and "+
+				"directory behind it", msg)
+		}
+	}
+
+	stillReal := []string{
+		"dmsetup: device-mapper: remove ioctl on bean-sbx_z failed: Device or resource busy",
+		"dmsetup: device-mapper: remove ioctl failed: Operation not permitted",
+		"exec: \"dmsetup\": executable file not found in $PATH",
+		// Not a device error at all; must not be swallowed.
+		"dmsetup: invalid argument",
+	}
+	for _, msg := range stillReal {
+		if dmAlreadyGone(errors.New(msg)) {
+			t.Errorf("swallowed a real failure as already-gone: %q\n"+
+				"A busy device that is silently reported as reclaimed would let the "+
+				"next pass delete the layer under a running guest", msg)
+		}
 	}
 }

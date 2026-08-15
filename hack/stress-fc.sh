@@ -132,9 +132,12 @@ hr
 # subprocess launch is tens of milliseconds and would blur a 952 ms figure.
 create_one() {
   local i="$1" out="$WORK/create.$1"
-  local body="{\"image\":\"$IMAGE\"}"
+  # imageRef, not image: the field was renamed when templates landed, and the old name is
+  # silently ignored rather than rejected -- every create then fails for want of an image
+  # reference, which reads like a broken node rather than a stale script.
+  local body="{\"imageRef\":\"$IMAGE\"}"
   if [[ -n "$DISK_MIB" ]]; then
-    body="{\"image\":\"$IMAGE\",\"resources\":{\"diskMiB\":$DISK_MIB}}"
+    body="{\"imageRef\":\"$IMAGE\",\"resources\":{\"diskMiB\":$DISK_MIB}}"
   fi
   local resp
   resp=$(curl -s -o "$WORK/body.$i" -w '%{time_total} %{http_code}' \

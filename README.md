@@ -139,8 +139,10 @@ checkpoint fan out to many sandboxes without collisions.
 
 - **Images** — OCI pull and conversion, private registries (credentials
   AES-256-GCM at rest), prewarm with image-affinity scheduling
-- **Builds** — Dockerfile through BuildKit with streaming logs and cancellation,
-  and `commit` to freeze a running sandbox's filesystem into a reusable base image
+- **Builds** — Dockerfile through BuildKit with streaming logs and cancellation. To
+  freeze a running sandbox instead, take a filesystem snapshot and create from it:
+  a snapshot and a built image are the same content-addressed layers underneath,
+  so there is no separate `commit` verb
 - **Container tier (gVisor/runc)** — `--runtime runsc` or `--runtime runc` drive
   the OCI runtime directly, no containerd, sharing the microVM tier's rootfs
   providers; the tier that serves the benchmark workload, alongside `fc` and the
