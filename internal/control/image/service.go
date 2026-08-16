@@ -238,6 +238,24 @@ func (s *Service) MarkFailed(ref, reason string) error {
 	return s.transition(ref, store.TemplateFailed, reason, func(tpl *store.Template) {})
 }
 
+// SetBuildNode records which node is running a template's build, without
+// changing its state. The build's log and cancellation are both reached through
+// this node, so a control-plane replica that did not start the build resolves it
+// from the record rather than from memory (docs/build-logs-s3.md §8).
+func (s *Service) SetBuildNode(ref, nodeID string) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	tpl, err := s.store.GetTemplateByName(ref)
+	if err != nil {
+		return err
+	}
+	if tpl == nil {
+		return fmt.Errorf("template %s not registered", ref)
+	}
+	tpl.NodeID = nodeID
+	return s.store.PutTemplate(tpl)
+}
+
 func (s *Service) transition(ref string, to store.TemplateState, reason string,
 	mutate func(*store.Template)) error {
 	s.mu.Lock()

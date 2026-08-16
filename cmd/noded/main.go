@@ -5,12 +5,14 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log"
 	"log/slog"
 	"net"
 	"net/http"
 	"os"
 	"os/signal"
+	"path/filepath"
 	runtime2 "runtime"
 	"strings"
 	"syscall"
@@ -230,6 +232,15 @@ func main() {
 			"does not appear in the process command line")
 	s3Bucket := flag.String("s3-bucket", "bean-obd-layers",
 		"bucket holding the node's published layers")
+	s3LogsBucket := flag.String("s3-logs-bucket",
+		envOr("BEAN_S3_LOGS_BUCKET", "bean-build-logs"),
+		"bucket the node uploads build logs to (or BEAN_S3_LOGS_BUCKET). It is "+
+			"separate from --s3-bucket because logs and layers have different "+
+			"lifetimes: logs expire under a bucket lifecycle rule, layers are "+
+			"content-addressed and kept. Reached through --s3-endpoint with the "+
+			"same BEAN_S3_ACCESS_KEY/BEAN_S3_SECRET_KEY. Empty, or no --s3-endpoint, "+
+			"leaves builds working with their logs written to a local directory "+
+			"(dev) and unreadable across nodes")
 	s3Region := flag.String("s3-region", "us-east-1",
 		"S3 region for the layer bucket")
 	s3PathStyle := flag.Bool("s3-path-style", true,
@@ -591,6 +602,19 @@ func main() {
 	if err != nil {
 		log.Fatalf("listen: %v", err)
 	}
+	// The build-log store the node uploads to. A configured --s3-endpoint puts
+	// logs in the dedicated logs bucket, reachable by every control-plane replica;
+	// without one, logs go to a local directory, which is the dev single-host case
+	// (the gateway reads the same path). A failure to open it is not fatal: builds
+	// still run, their logs are just unreadable, the same trade a node-local build
+	// makes for its artifact.
+	logsStore, err := buildLogsStore(*s3Endpoint, *s3LogsBucket, *s3Region, *s3PathStyle,
+		filepath.Join(*baseDir, "build-logs"))
+	if err != nil {
+		slog.Warn("build-log store unavailable; builds will run but their logs "+
+			"will not be readable", logging.KeyError, err)
+	}
+
 	unaryAuth, streamAuth := node.TokenAuth(*nodeToken)
 	// Trace extraction runs before auth so a rejected call still appears in the
 	// trace: "the node refused the token" is a diagnosis, and it is only
@@ -599,7 +623,7 @@ func main() {
 		grpc.ChainUnaryInterceptor(obs.UnaryServerTrace("noded"), unaryAuth),
 		grpc.ChainStreamInterceptor(obs.StreamServerTrace("noded"), streamAuth),
 	)
-	nodev1.RegisterSandboxServiceServer(srv, node.NewGRPCServer(mgr))
+	nodev1.RegisterSandboxServiceServer(srv, node.NewGRPCServer(mgr, logsStore))
 
 	go func() {
 		sig := make(chan os.Signal, 1)
@@ -786,6 +810,42 @@ func overlaybdBlobStore(endpoint, bucket, readURL, region string, pathStyle bool
 			"instead of read on demand", logging.KeyError, err)
 	}
 	return store, index, nil
+}
+
+// envOr returns the environment variable's value, or fallback when it is unset
+// or empty. Used for flag defaults that should track an env var without putting
+// the value on the command line when it is a secret (it is not here -- a bucket
+// name is not sensitive -- but the pattern is kept uniform).
+func envOr(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}
+
+// buildLogsStore opens the object store the node uploads build logs to. With an
+// endpoint it is a BucketStore over the dedicated logs bucket; without one it is
+// a local DirStore, which is the dev single-host case where the gateway reads
+// the same directory. Credentials come from the environment only, never a flag,
+// the same rule the layer store follows.
+func buildLogsStore(endpoint, bucket, region string, pathStyle bool, localDir string) (s3.ObjectStore, error) {
+	if endpoint == "" {
+		return s3.NewDirStore(localDir)
+	}
+	if bucket == "" {
+		return nil, fmt.Errorf("build logs: bucket required with an endpoint")
+	}
+	client, err := s3.New(s3.Config{
+		Endpoint:  endpoint,
+		Region:    region,
+		AccessKey: os.Getenv("BEAN_S3_ACCESS_KEY"),
+		SecretKey: os.Getenv("BEAN_S3_SECRET_KEY"),
+		PathStyle: pathStyle,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return s3.NewBucketStore(context.Background(), client, bucket)
 }
 
 func parseLabels(s string) map[string]string {

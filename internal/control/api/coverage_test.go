@@ -6,6 +6,7 @@ import (
 	"strings"
 	"testing"
 
+	"github.com/garysng/bean/internal/control/s3"
 	"github.com/garysng/bean/internal/control/store"
 	nodev1 "github.com/garysng/bean/internal/gen/bean/node/v1"
 )
@@ -60,13 +61,27 @@ func TestBuildLogsRequiresRef(t *testing.T) {
 	}
 }
 
-// TestBuildLogsStreamsRetained registers a build directly on the tracker so the
-// streaming reader has something to serve, then reads it back with follow=false.
+// TestBuildLogsStreamsRetained uploads a log to the shared store the way a node
+// would, records the template READY, then reads it back with follow=false -- the
+// stateless read path any replica serves.
 func TestBuildLogsStreamsRetained(t *testing.T) {
 	env := startEnv(t, envOpts{})
-	bl := env.API.builds.start("streamed:v1", func() {})
-	bl.Write([]byte("step 1\nstep 2\n"))
-	bl.finish(false, "")
+	w, err := s3.NewBuildLogWriter(env.BuildLogs, "streamed:v1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	w.Write([]byte("step 1\nstep 2\n"))
+	if err := w.Finish(false, ""); err != nil {
+		t.Fatal(err)
+	}
+	// The outcome trailer comes from the store record, so a READY template is what
+	// makes "build succeeded" appear.
+	if err := env.Store.PutTemplate(&store.Template{
+		ID: store.NewID(store.PrefixTemplate), Name: "streamed:v1",
+		Source: store.TemplateBuilt, State: store.TemplateReady,
+	}); err != nil {
+		t.Fatal(err)
+	}
 
 	resp, body := env.raw("GET", "/v1/templates/build/logs?ref=streamed:v1&follow=false", "")
 	if resp.StatusCode != http.StatusOK {
@@ -80,8 +95,9 @@ func TestBuildLogsStreamsRetained(t *testing.T) {
 	}
 }
 
-// TestBuildCancelGuards covers handleBuildCancel's missing-ref, unknown-build
-// and already-finished paths.
+// TestBuildCancelGuards covers handleBuildCancel's missing-ref, unknown-build,
+// not-placed and already-finished paths, plus the happy path that resolves the
+// build's node from the record and calls the node's CancelBuild.
 func TestBuildCancelGuards(t *testing.T) {
 	env := startEnv(t, envOpts{})
 	resp, _ := env.do("POST", "/v1/templates/build/cancel", nil)
@@ -93,19 +109,29 @@ func TestBuildCancelGuards(t *testing.T) {
 		t.Errorf("unknown = %d, want 404", resp.StatusCode)
 	}
 
-	// A live build cancels; a finished one is a conflict.
-	cancelled := false
-	bl := env.API.builds.start("live:v1", func() { cancelled = true })
+	// A BUILDING template with a node cancels: the handler resolves the node and
+	// calls its CancelBuild, which is a no-op here (no live build on the node) but
+	// still returns Accepted -- cancelling is idempotent.
+	if err := env.Store.PutTemplate(&store.Template{
+		ID: store.NewID(store.PrefixTemplate), Name: "live:v1",
+		Source: store.TemplateBuilt, State: store.TemplateBuilding,
+		NodeID: env.NodeIDs[0],
+	}); err != nil {
+		t.Fatal(err)
+	}
 	resp, out := env.do("POST", "/v1/templates/build/cancel?ref=live:v1", nil)
 	if resp.StatusCode != http.StatusAccepted {
 		t.Fatalf("cancel live = %d: %v", resp.StatusCode, out)
 	}
-	if !cancelled {
-		t.Error("cancel did not invoke the build's cancel func")
-	}
 
-	bl.finish(false, "")
-	resp, _ = env.do("POST", "/v1/templates/build/cancel?ref=live:v1", nil)
+	// A finished (READY/FAILED) template is a conflict: nothing to stop.
+	if err := env.Store.PutTemplate(&store.Template{
+		ID: store.NewID(store.PrefixTemplate), Name: "done:v1",
+		Source: store.TemplateBuilt, State: store.TemplateReady,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	resp, _ = env.do("POST", "/v1/templates/build/cancel?ref=done:v1", nil)
 	if resp.StatusCode != http.StatusConflict {
 		t.Errorf("cancel finished = %d, want 409", resp.StatusCode)
 	}

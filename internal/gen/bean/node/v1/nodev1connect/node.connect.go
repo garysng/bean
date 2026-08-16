@@ -72,9 +72,15 @@ const (
 	// SandboxServicePrewarmImageProcedure is the fully-qualified name of the SandboxService's
 	// PrewarmImage RPC.
 	SandboxServicePrewarmImageProcedure = "/bean.node.v1.SandboxService/PrewarmImage"
-	// SandboxServiceBuildImageProcedure is the fully-qualified name of the SandboxService's BuildImage
+	// SandboxServiceStartBuildProcedure is the fully-qualified name of the SandboxService's StartBuild
 	// RPC.
-	SandboxServiceBuildImageProcedure = "/bean.node.v1.SandboxService/BuildImage"
+	SandboxServiceStartBuildProcedure = "/bean.node.v1.SandboxService/StartBuild"
+	// SandboxServiceGetBuildStatusProcedure is the fully-qualified name of the SandboxService's
+	// GetBuildStatus RPC.
+	SandboxServiceGetBuildStatusProcedure = "/bean.node.v1.SandboxService/GetBuildStatus"
+	// SandboxServiceCancelBuildProcedure is the fully-qualified name of the SandboxService's
+	// CancelBuild RPC.
+	SandboxServiceCancelBuildProcedure = "/bean.node.v1.SandboxService/CancelBuild"
 	// SandboxServiceExecProcedure is the fully-qualified name of the SandboxService's Exec RPC.
 	SandboxServiceExecProcedure = "/bean.node.v1.SandboxService/Exec"
 	// SandboxServiceStreamExecProcedure is the fully-qualified name of the SandboxService's StreamExec
@@ -294,15 +300,34 @@ type SandboxServiceClient interface {
 	// A first pull can take minutes — longer than a create should block — so the
 	// control plane warms images before placing work that needs them.
 	PrewarmImage(context.Context, *connect.Request[v1.PrewarmImageRequest]) (*connect.Response[v1.PrewarmImageResponse], error)
-	// BuildImage builds a base image from a Dockerfile. The build runs on the
+	// StartBuild builds a base image from a Dockerfile. The build runs on the
 	// node, where BuildKit and the image cache already are.
 	//
-	// The reply streams BuildKit's progress as it happens and ends with the
-	// result. Streaming rather than a unary call buys two things: a build takes
-	// minutes and its output is the only way to see which layer is slow or
-	// broken, and cancelling the call is what stops the build -- the node runs
-	// buildctl under this call's context, so an aborted call kills it.
-	BuildImage(context.Context, *connect.Request[v1.BuildImageRequest]) (*connect.ServerStreamForClient[v1.BuildImageEvent], error)
+	// It returns as soon as the build is registered and running, not when it
+	// finishes: the build runs under a node-owned context (registered by tag),
+	// not under this call's context, so it survives the caller -- a control-plane
+	// replica may restart, or a follower may come and go, without killing the
+	// build. Progress is read from the shared log store (any replica), the
+	// outcome is polled via GetBuildStatus, and the build is stopped via
+	// CancelBuild. This replaced the old BuildImage server stream, whose context
+	// was the build's lifeline and so tied a build's life to one caller's.
+	StartBuild(context.Context, *connect.Request[v1.BuildImageRequest]) (*connect.Response[v1.StartBuildResponse], error)
+	// GetBuildStatus reports whether a build (addressed by tag) is still running,
+	// succeeded (with its result), or failed (with a reason). The control plane
+	// polls this after StartBuild until a terminal phase, then writes the
+	// authoritative template state. An unknown tag reports BUILD_UNKNOWN rather
+	// than an error, so a poll that races registration or a restart is harmless.
+	GetBuildStatus(context.Context, *connect.Request[v1.GetBuildStatusRequest]) (*connect.Response[v1.GetBuildStatusResponse], error)
+	// CancelBuild stops a build running on this node, addressed by its tag.
+	//
+	// It exists because a build no longer belongs to whoever holds the BuildImage
+	// stream: the node writes the log to shared storage itself, so any control-plane
+	// replica can follow a build, and any replica must therefore be able to stop one
+	// it did not start. The node keeps a registry of in-flight builds keyed by tag
+	// and cancels the matching one's context, which kills buildctl -- the same
+	// mechanism aborting the stream used to trigger. Cancelling an unknown or
+	// already-finished tag is not an error, so a racing double-cancel is harmless.
+	CancelBuild(context.Context, *connect.Request[v1.CancelBuildRequest]) (*connect.Response[v1.CancelBuildResponse], error)
 	// Data plane passthrough to AgentService.
 	Exec(context.Context, *connect.Request[v11.ExecRequest]) (*connect.Response[v11.ExecResponse], error)
 	StreamExec(context.Context) *connect.BidiStreamForClient[v11.StreamExecFrame, v11.StreamExecFrame]
@@ -378,10 +403,22 @@ func NewSandboxServiceClient(httpClient connect.HTTPClient, baseURL string, opts
 			connect.WithSchema(sandboxServiceMethods.ByName("PrewarmImage")),
 			connect.WithClientOptions(opts...),
 		),
-		buildImage: connect.NewClient[v1.BuildImageRequest, v1.BuildImageEvent](
+		startBuild: connect.NewClient[v1.BuildImageRequest, v1.StartBuildResponse](
 			httpClient,
-			baseURL+SandboxServiceBuildImageProcedure,
-			connect.WithSchema(sandboxServiceMethods.ByName("BuildImage")),
+			baseURL+SandboxServiceStartBuildProcedure,
+			connect.WithSchema(sandboxServiceMethods.ByName("StartBuild")),
+			connect.WithClientOptions(opts...),
+		),
+		getBuildStatus: connect.NewClient[v1.GetBuildStatusRequest, v1.GetBuildStatusResponse](
+			httpClient,
+			baseURL+SandboxServiceGetBuildStatusProcedure,
+			connect.WithSchema(sandboxServiceMethods.ByName("GetBuildStatus")),
+			connect.WithClientOptions(opts...),
+		),
+		cancelBuild: connect.NewClient[v1.CancelBuildRequest, v1.CancelBuildResponse](
+			httpClient,
+			baseURL+SandboxServiceCancelBuildProcedure,
+			connect.WithSchema(sandboxServiceMethods.ByName("CancelBuild")),
 			connect.WithClientOptions(opts...),
 		),
 		exec: connect.NewClient[v11.ExecRequest, v11.ExecResponse](
@@ -440,7 +477,9 @@ type sandboxServiceClient struct {
 	restoreSandbox   *connect.Client[v1.RestoreSandboxFrame, v1.RestoreSandboxResponse]
 	startUserProcess *connect.Client[v1.StartUserProcessNodeRequest, v1.StartUserProcessNodeResponse]
 	prewarmImage     *connect.Client[v1.PrewarmImageRequest, v1.PrewarmImageResponse]
-	buildImage       *connect.Client[v1.BuildImageRequest, v1.BuildImageEvent]
+	startBuild       *connect.Client[v1.BuildImageRequest, v1.StartBuildResponse]
+	getBuildStatus   *connect.Client[v1.GetBuildStatusRequest, v1.GetBuildStatusResponse]
+	cancelBuild      *connect.Client[v1.CancelBuildRequest, v1.CancelBuildResponse]
 	exec             *connect.Client[v11.ExecRequest, v11.ExecResponse]
 	streamExec       *connect.Client[v11.StreamExecFrame, v11.StreamExecFrame]
 	readFile         *connect.Client[v11.ReadFileRequest, v11.FileChunk]
@@ -495,9 +534,19 @@ func (c *sandboxServiceClient) PrewarmImage(ctx context.Context, req *connect.Re
 	return c.prewarmImage.CallUnary(ctx, req)
 }
 
-// BuildImage calls bean.node.v1.SandboxService.BuildImage.
-func (c *sandboxServiceClient) BuildImage(ctx context.Context, req *connect.Request[v1.BuildImageRequest]) (*connect.ServerStreamForClient[v1.BuildImageEvent], error) {
-	return c.buildImage.CallServerStream(ctx, req)
+// StartBuild calls bean.node.v1.SandboxService.StartBuild.
+func (c *sandboxServiceClient) StartBuild(ctx context.Context, req *connect.Request[v1.BuildImageRequest]) (*connect.Response[v1.StartBuildResponse], error) {
+	return c.startBuild.CallUnary(ctx, req)
+}
+
+// GetBuildStatus calls bean.node.v1.SandboxService.GetBuildStatus.
+func (c *sandboxServiceClient) GetBuildStatus(ctx context.Context, req *connect.Request[v1.GetBuildStatusRequest]) (*connect.Response[v1.GetBuildStatusResponse], error) {
+	return c.getBuildStatus.CallUnary(ctx, req)
+}
+
+// CancelBuild calls bean.node.v1.SandboxService.CancelBuild.
+func (c *sandboxServiceClient) CancelBuild(ctx context.Context, req *connect.Request[v1.CancelBuildRequest]) (*connect.Response[v1.CancelBuildResponse], error) {
+	return c.cancelBuild.CallUnary(ctx, req)
 }
 
 // Exec calls bean.node.v1.SandboxService.Exec.
@@ -555,15 +604,34 @@ type SandboxServiceHandler interface {
 	// A first pull can take minutes — longer than a create should block — so the
 	// control plane warms images before placing work that needs them.
 	PrewarmImage(context.Context, *connect.Request[v1.PrewarmImageRequest]) (*connect.Response[v1.PrewarmImageResponse], error)
-	// BuildImage builds a base image from a Dockerfile. The build runs on the
+	// StartBuild builds a base image from a Dockerfile. The build runs on the
 	// node, where BuildKit and the image cache already are.
 	//
-	// The reply streams BuildKit's progress as it happens and ends with the
-	// result. Streaming rather than a unary call buys two things: a build takes
-	// minutes and its output is the only way to see which layer is slow or
-	// broken, and cancelling the call is what stops the build -- the node runs
-	// buildctl under this call's context, so an aborted call kills it.
-	BuildImage(context.Context, *connect.Request[v1.BuildImageRequest], *connect.ServerStream[v1.BuildImageEvent]) error
+	// It returns as soon as the build is registered and running, not when it
+	// finishes: the build runs under a node-owned context (registered by tag),
+	// not under this call's context, so it survives the caller -- a control-plane
+	// replica may restart, or a follower may come and go, without killing the
+	// build. Progress is read from the shared log store (any replica), the
+	// outcome is polled via GetBuildStatus, and the build is stopped via
+	// CancelBuild. This replaced the old BuildImage server stream, whose context
+	// was the build's lifeline and so tied a build's life to one caller's.
+	StartBuild(context.Context, *connect.Request[v1.BuildImageRequest]) (*connect.Response[v1.StartBuildResponse], error)
+	// GetBuildStatus reports whether a build (addressed by tag) is still running,
+	// succeeded (with its result), or failed (with a reason). The control plane
+	// polls this after StartBuild until a terminal phase, then writes the
+	// authoritative template state. An unknown tag reports BUILD_UNKNOWN rather
+	// than an error, so a poll that races registration or a restart is harmless.
+	GetBuildStatus(context.Context, *connect.Request[v1.GetBuildStatusRequest]) (*connect.Response[v1.GetBuildStatusResponse], error)
+	// CancelBuild stops a build running on this node, addressed by its tag.
+	//
+	// It exists because a build no longer belongs to whoever holds the BuildImage
+	// stream: the node writes the log to shared storage itself, so any control-plane
+	// replica can follow a build, and any replica must therefore be able to stop one
+	// it did not start. The node keeps a registry of in-flight builds keyed by tag
+	// and cancels the matching one's context, which kills buildctl -- the same
+	// mechanism aborting the stream used to trigger. Cancelling an unknown or
+	// already-finished tag is not an error, so a racing double-cancel is harmless.
+	CancelBuild(context.Context, *connect.Request[v1.CancelBuildRequest]) (*connect.Response[v1.CancelBuildResponse], error)
 	// Data plane passthrough to AgentService.
 	Exec(context.Context, *connect.Request[v11.ExecRequest]) (*connect.Response[v11.ExecResponse], error)
 	StreamExec(context.Context, *connect.BidiStream[v11.StreamExecFrame, v11.StreamExecFrame]) error
@@ -635,10 +703,22 @@ func NewSandboxServiceHandler(svc SandboxServiceHandler, opts ...connect.Handler
 		connect.WithSchema(sandboxServiceMethods.ByName("PrewarmImage")),
 		connect.WithHandlerOptions(opts...),
 	)
-	sandboxServiceBuildImageHandler := connect.NewServerStreamHandler(
-		SandboxServiceBuildImageProcedure,
-		svc.BuildImage,
-		connect.WithSchema(sandboxServiceMethods.ByName("BuildImage")),
+	sandboxServiceStartBuildHandler := connect.NewUnaryHandler(
+		SandboxServiceStartBuildProcedure,
+		svc.StartBuild,
+		connect.WithSchema(sandboxServiceMethods.ByName("StartBuild")),
+		connect.WithHandlerOptions(opts...),
+	)
+	sandboxServiceGetBuildStatusHandler := connect.NewUnaryHandler(
+		SandboxServiceGetBuildStatusProcedure,
+		svc.GetBuildStatus,
+		connect.WithSchema(sandboxServiceMethods.ByName("GetBuildStatus")),
+		connect.WithHandlerOptions(opts...),
+	)
+	sandboxServiceCancelBuildHandler := connect.NewUnaryHandler(
+		SandboxServiceCancelBuildProcedure,
+		svc.CancelBuild,
+		connect.WithSchema(sandboxServiceMethods.ByName("CancelBuild")),
 		connect.WithHandlerOptions(opts...),
 	)
 	sandboxServiceExecHandler := connect.NewUnaryHandler(
@@ -703,8 +783,12 @@ func NewSandboxServiceHandler(svc SandboxServiceHandler, opts ...connect.Handler
 			sandboxServiceStartUserProcessHandler.ServeHTTP(w, r)
 		case SandboxServicePrewarmImageProcedure:
 			sandboxServicePrewarmImageHandler.ServeHTTP(w, r)
-		case SandboxServiceBuildImageProcedure:
-			sandboxServiceBuildImageHandler.ServeHTTP(w, r)
+		case SandboxServiceStartBuildProcedure:
+			sandboxServiceStartBuildHandler.ServeHTTP(w, r)
+		case SandboxServiceGetBuildStatusProcedure:
+			sandboxServiceGetBuildStatusHandler.ServeHTTP(w, r)
+		case SandboxServiceCancelBuildProcedure:
+			sandboxServiceCancelBuildHandler.ServeHTTP(w, r)
 		case SandboxServiceExecProcedure:
 			sandboxServiceExecHandler.ServeHTTP(w, r)
 		case SandboxServiceStreamExecProcedure:
@@ -764,8 +848,16 @@ func (UnimplementedSandboxServiceHandler) PrewarmImage(context.Context, *connect
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("bean.node.v1.SandboxService.PrewarmImage is not implemented"))
 }
 
-func (UnimplementedSandboxServiceHandler) BuildImage(context.Context, *connect.Request[v1.BuildImageRequest], *connect.ServerStream[v1.BuildImageEvent]) error {
-	return connect.NewError(connect.CodeUnimplemented, errors.New("bean.node.v1.SandboxService.BuildImage is not implemented"))
+func (UnimplementedSandboxServiceHandler) StartBuild(context.Context, *connect.Request[v1.BuildImageRequest]) (*connect.Response[v1.StartBuildResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("bean.node.v1.SandboxService.StartBuild is not implemented"))
+}
+
+func (UnimplementedSandboxServiceHandler) GetBuildStatus(context.Context, *connect.Request[v1.GetBuildStatusRequest]) (*connect.Response[v1.GetBuildStatusResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("bean.node.v1.SandboxService.GetBuildStatus is not implemented"))
+}
+
+func (UnimplementedSandboxServiceHandler) CancelBuild(context.Context, *connect.Request[v1.CancelBuildRequest]) (*connect.Response[v1.CancelBuildResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("bean.node.v1.SandboxService.CancelBuild is not implemented"))
 }
 
 func (UnimplementedSandboxServiceHandler) Exec(context.Context, *connect.Request[v11.ExecRequest]) (*connect.Response[v11.ExecResponse], error) {

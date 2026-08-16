@@ -128,12 +128,14 @@ type BuildStep struct {
 
 ## 6. API
 
-> **Log streaming and cancellation** for builds are implemented: the log endpoint
-> (`build.go:289`) and cancel (`build.go:358`) are served over noded's long-lived
-> `BuildImage` stream (`grpc.go:143`). One caveat remains — the log buffer is
-> per-replica in-memory (`buildlog.go`), so under multiple bean-api replicas a
-> logs/cancel request must reach the replica that started the build; see
-> [build-service.md §3.5](build-service.md).
+> **Log streaming and cancellation** for builds are implemented and
+> **replica-independent**: the node uploads a build's output to a dedicated S3
+> logs bucket, the log endpoint reads it back over byte offsets, and cancellation
+> resolves the build's node from the store record and calls the node's
+> `CancelBuild`. The gateway holds no per-build state, so a logs/cancel request is
+> served by any replica and survives a gateway restart. The old per-replica
+> in-memory buffer is gone. See [build-logs-s3.md](build-logs-s3.md) for the
+> design and the (still open) Step B that severs the result-carrying stream.
 
 
 ```

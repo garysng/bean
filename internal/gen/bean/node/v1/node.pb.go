@@ -22,6 +22,68 @@ const (
 	_ = protoimpl.EnforceVersion(protoimpl.MaxVersion - 20)
 )
 
+// BuildPhase is where a build is in its lifecycle, as the node's build registry
+// sees it. The control plane maps SUCCEEDED/FAILED onto the authoritative
+// template state; RUNNING and UNKNOWN mean "keep polling".
+type BuildPhase int32
+
+const (
+	// BUILD_UNKNOWN: no build with this tag is known to the node -- it never
+	// started here, already finished and aged out of the registry, or the poll
+	// raced registration. Not terminal: the caller keeps polling (a live build it
+	// just started will appear) until its own deadline.
+	BuildPhase_BUILD_UNKNOWN BuildPhase = 0
+	// BUILD_RUNNING: registered and building. result and reason are unset.
+	BuildPhase_BUILD_RUNNING BuildPhase = 1
+	// BUILD_SUCCEEDED: finished successfully; result carries the coordinates.
+	BuildPhase_BUILD_SUCCEEDED BuildPhase = 2
+	// BUILD_FAILED: finished with an error; reason carries a human-readable cause.
+	BuildPhase_BUILD_FAILED BuildPhase = 3
+)
+
+// Enum value maps for BuildPhase.
+var (
+	BuildPhase_name = map[int32]string{
+		0: "BUILD_UNKNOWN",
+		1: "BUILD_RUNNING",
+		2: "BUILD_SUCCEEDED",
+		3: "BUILD_FAILED",
+	}
+	BuildPhase_value = map[string]int32{
+		"BUILD_UNKNOWN":   0,
+		"BUILD_RUNNING":   1,
+		"BUILD_SUCCEEDED": 2,
+		"BUILD_FAILED":    3,
+	}
+)
+
+func (x BuildPhase) Enum() *BuildPhase {
+	p := new(BuildPhase)
+	*p = x
+	return p
+}
+
+func (x BuildPhase) String() string {
+	return protoimpl.X.EnumStringOf(x.Descriptor(), protoreflect.EnumNumber(x))
+}
+
+func (BuildPhase) Descriptor() protoreflect.EnumDescriptor {
+	return file_bean_node_v1_node_proto_enumTypes[0].Descriptor()
+}
+
+func (BuildPhase) Type() protoreflect.EnumType {
+	return &file_bean_node_v1_node_proto_enumTypes[0]
+}
+
+func (x BuildPhase) Number() protoreflect.EnumNumber {
+	return protoreflect.EnumNumber(x)
+}
+
+// Deprecated: Use BuildPhase.Descriptor instead.
+func (BuildPhase) EnumDescriptor() ([]byte, []int) {
+	return file_bean_node_v1_node_proto_rawDescGZIP(), []int{0}
+}
+
 type RegisterRequest struct {
 	state          protoimpl.MessageState `protogen:"open.v1"`
 	BootstrapToken string                 `protobuf:"bytes,1,opt,name=bootstrap_token,json=bootstrapToken,proto3" json:"bootstrap_token,omitempty"`
@@ -2549,36 +2611,31 @@ func (x *BuildImageResponse) GetConfig() *ImageConfig {
 	return nil
 }
 
-// BuildImageEvent is one frame of a build's progress. Log frames arrive as
-// BuildKit produces them; exactly one result frame ends a successful build.
-//
-// A failure is not a frame: it is the stream's error status, so a caller that
-// only checks Recv's error cannot mistake a failed build for a finished one.
-type BuildImageEvent struct {
-	state protoimpl.MessageState `protogen:"open.v1"`
-	// Types that are valid to be assigned to Event:
-	//
-	//	*BuildImageEvent_Log
-	//	*BuildImageEvent_Result
-	Event         isBuildImageEvent_Event `protobuf_oneof:"event"`
+// StartBuildResponse acknowledges that a build was registered and is running.
+// build_id echoes the tag the build runs under (builds are keyed by tag, so
+// there is no separate id); it is informational -- the caller already knows the
+// tag it sent, and follows the build by that tag via GetBuildStatus/CancelBuild.
+type StartBuildResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	BuildId       string                 `protobuf:"bytes,1,opt,name=build_id,json=buildId,proto3" json:"build_id,omitempty"`
 	unknownFields protoimpl.UnknownFields
 	sizeCache     protoimpl.SizeCache
 }
 
-func (x *BuildImageEvent) Reset() {
-	*x = BuildImageEvent{}
+func (x *StartBuildResponse) Reset() {
+	*x = StartBuildResponse{}
 	mi := &file_bean_node_v1_node_proto_msgTypes[39]
 	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
 	ms.StoreMessageInfo(mi)
 }
 
-func (x *BuildImageEvent) String() string {
+func (x *StartBuildResponse) String() string {
 	return protoimpl.X.MessageStringOf(x)
 }
 
-func (*BuildImageEvent) ProtoMessage() {}
+func (*StartBuildResponse) ProtoMessage() {}
 
-func (x *BuildImageEvent) ProtoReflect() protoreflect.Message {
+func (x *StartBuildResponse) ProtoReflect() protoreflect.Message {
 	mi := &file_bean_node_v1_node_proto_msgTypes[39]
 	if x != nil {
 		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
@@ -2590,55 +2647,222 @@ func (x *BuildImageEvent) ProtoReflect() protoreflect.Message {
 	return mi.MessageOf(x)
 }
 
-// Deprecated: Use BuildImageEvent.ProtoReflect.Descriptor instead.
-func (*BuildImageEvent) Descriptor() ([]byte, []int) {
+// Deprecated: Use StartBuildResponse.ProtoReflect.Descriptor instead.
+func (*StartBuildResponse) Descriptor() ([]byte, []int) {
 	return file_bean_node_v1_node_proto_rawDescGZIP(), []int{39}
 }
 
-func (x *BuildImageEvent) GetEvent() isBuildImageEvent_Event {
+func (x *StartBuildResponse) GetBuildId() string {
 	if x != nil {
-		return x.Event
+		return x.BuildId
 	}
-	return nil
+	return ""
 }
 
-func (x *BuildImageEvent) GetLog() []byte {
+// GetBuildStatusRequest names the build to report on by its tag, the same key
+// StartBuild registered it under.
+type GetBuildStatusRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Tag           string                 `protobuf:"bytes,1,opt,name=tag,proto3" json:"tag,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetBuildStatusRequest) Reset() {
+	*x = GetBuildStatusRequest{}
+	mi := &file_bean_node_v1_node_proto_msgTypes[40]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetBuildStatusRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetBuildStatusRequest) ProtoMessage() {}
+
+func (x *GetBuildStatusRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_bean_node_v1_node_proto_msgTypes[40]
 	if x != nil {
-		if x, ok := x.Event.(*BuildImageEvent_Log); ok {
-			return x.Log
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
 		}
+		return ms
 	}
-	return nil
+	return mi.MessageOf(x)
 }
 
-func (x *BuildImageEvent) GetResult() *BuildImageResponse {
+// Deprecated: Use GetBuildStatusRequest.ProtoReflect.Descriptor instead.
+func (*GetBuildStatusRequest) Descriptor() ([]byte, []int) {
+	return file_bean_node_v1_node_proto_rawDescGZIP(), []int{40}
+}
+
+func (x *GetBuildStatusRequest) GetTag() string {
 	if x != nil {
-		if x, ok := x.Event.(*BuildImageEvent_Result); ok {
-			return x.Result
+		return x.Tag
+	}
+	return ""
+}
+
+// GetBuildStatusResponse reports a build's current phase, plus the result on
+// success or a reason on failure. It reuses BuildImageResponse for the result
+// so the success coordinates are described in exactly one place.
+type GetBuildStatusResponse struct {
+	state protoimpl.MessageState `protogen:"open.v1"`
+	Phase BuildPhase             `protobuf:"varint,1,opt,name=phase,proto3,enum=bean.node.v1.BuildPhase" json:"phase,omitempty"`
+	// result is set only when phase == BUILD_SUCCEEDED.
+	Result *BuildImageResponse `protobuf:"bytes,2,opt,name=result,proto3" json:"result,omitempty"`
+	// reason is set only when phase == BUILD_FAILED: a human-readable cause,
+	// the same text the template's failure reason records.
+	Reason        string `protobuf:"bytes,3,opt,name=reason,proto3" json:"reason,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *GetBuildStatusResponse) Reset() {
+	*x = GetBuildStatusResponse{}
+	mi := &file_bean_node_v1_node_proto_msgTypes[41]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *GetBuildStatusResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*GetBuildStatusResponse) ProtoMessage() {}
+
+func (x *GetBuildStatusResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_bean_node_v1_node_proto_msgTypes[41]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
 		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use GetBuildStatusResponse.ProtoReflect.Descriptor instead.
+func (*GetBuildStatusResponse) Descriptor() ([]byte, []int) {
+	return file_bean_node_v1_node_proto_rawDescGZIP(), []int{41}
+}
+
+func (x *GetBuildStatusResponse) GetPhase() BuildPhase {
+	if x != nil {
+		return x.Phase
+	}
+	return BuildPhase_BUILD_UNKNOWN
+}
+
+func (x *GetBuildStatusResponse) GetResult() *BuildImageResponse {
+	if x != nil {
+		return x.Result
 	}
 	return nil
 }
 
-type isBuildImageEvent_Event interface {
-	isBuildImageEvent_Event()
+func (x *GetBuildStatusResponse) GetReason() string {
+	if x != nil {
+		return x.Reason
+	}
+	return ""
 }
 
-type BuildImageEvent_Log struct {
-	// log is raw BuildKit output, forwarded rather than parsed. BuildKit's
-	// progress format is its own and changes between versions; the bytes are
-	// what a person reads to find the failing step either way.
-	Log []byte `protobuf:"bytes,1,opt,name=log,proto3,oneof"`
+// CancelBuildRequest names the build to stop by its tag, the same key BuildImage
+// runs under.
+type CancelBuildRequest struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Tag           string                 `protobuf:"bytes,1,opt,name=tag,proto3" json:"tag,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
 }
 
-type BuildImageEvent_Result struct {
-	// result closes a successful build.
-	Result *BuildImageResponse `protobuf:"bytes,2,opt,name=result,proto3,oneof"`
+func (x *CancelBuildRequest) Reset() {
+	*x = CancelBuildRequest{}
+	mi := &file_bean_node_v1_node_proto_msgTypes[42]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
 }
 
-func (*BuildImageEvent_Log) isBuildImageEvent_Event() {}
+func (x *CancelBuildRequest) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
 
-func (*BuildImageEvent_Result) isBuildImageEvent_Event() {}
+func (*CancelBuildRequest) ProtoMessage() {}
+
+func (x *CancelBuildRequest) ProtoReflect() protoreflect.Message {
+	mi := &file_bean_node_v1_node_proto_msgTypes[42]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CancelBuildRequest.ProtoReflect.Descriptor instead.
+func (*CancelBuildRequest) Descriptor() ([]byte, []int) {
+	return file_bean_node_v1_node_proto_rawDescGZIP(), []int{42}
+}
+
+func (x *CancelBuildRequest) GetTag() string {
+	if x != nil {
+		return x.Tag
+	}
+	return ""
+}
+
+// CancelBuildResponse reports whether a matching build was found and cancelled.
+// A false found is not an error: the build already finished, or ran on a
+// different node, and the caller wanted it stopped either way.
+type CancelBuildResponse struct {
+	state         protoimpl.MessageState `protogen:"open.v1"`
+	Found         bool                   `protobuf:"varint,1,opt,name=found,proto3" json:"found,omitempty"`
+	unknownFields protoimpl.UnknownFields
+	sizeCache     protoimpl.SizeCache
+}
+
+func (x *CancelBuildResponse) Reset() {
+	*x = CancelBuildResponse{}
+	mi := &file_bean_node_v1_node_proto_msgTypes[43]
+	ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+	ms.StoreMessageInfo(mi)
+}
+
+func (x *CancelBuildResponse) String() string {
+	return protoimpl.X.MessageStringOf(x)
+}
+
+func (*CancelBuildResponse) ProtoMessage() {}
+
+func (x *CancelBuildResponse) ProtoReflect() protoreflect.Message {
+	mi := &file_bean_node_v1_node_proto_msgTypes[43]
+	if x != nil {
+		ms := protoimpl.X.MessageStateOf(protoimpl.Pointer(x))
+		if ms.LoadMessageInfo() == nil {
+			ms.StoreMessageInfo(mi)
+		}
+		return ms
+	}
+	return mi.MessageOf(x)
+}
+
+// Deprecated: Use CancelBuildResponse.ProtoReflect.Descriptor instead.
+func (*CancelBuildResponse) Descriptor() ([]byte, []int) {
+	return file_bean_node_v1_node_proto_rawDescGZIP(), []int{43}
+}
+
+func (x *CancelBuildResponse) GetFound() bool {
+	if x != nil {
+		return x.Found
+	}
+	return false
+}
 
 var File_bean_node_v1_node_proto protoreflect.FileDescriptor
 
@@ -2844,16 +3068,30 @@ const file_bean_node_v1_node_proto_rawDesc = "" +
 	"\n" +
 	"size_bytes\x18\x03 \x01(\x03R\tsizeBytes\x12#\n" +
 	"\rlayer_digests\x18\x04 \x03(\tR\flayerDigests\x121\n" +
-	"\x06config\x18\x05 \x01(\v2\x19.bean.node.v1.ImageConfigR\x06config\"j\n" +
-	"\x0fBuildImageEvent\x12\x12\n" +
-	"\x03log\x18\x01 \x01(\fH\x00R\x03log\x12:\n" +
-	"\x06result\x18\x02 \x01(\v2 .bean.node.v1.BuildImageResponseH\x00R\x06resultB\a\n" +
-	"\x05event2\xdb\x02\n" +
+	"\x06config\x18\x05 \x01(\v2\x19.bean.node.v1.ImageConfigR\x06config\"/\n" +
+	"\x12StartBuildResponse\x12\x19\n" +
+	"\bbuild_id\x18\x01 \x01(\tR\abuildId\")\n" +
+	"\x15GetBuildStatusRequest\x12\x10\n" +
+	"\x03tag\x18\x01 \x01(\tR\x03tag\"\x9a\x01\n" +
+	"\x16GetBuildStatusResponse\x12.\n" +
+	"\x05phase\x18\x01 \x01(\x0e2\x18.bean.node.v1.BuildPhaseR\x05phase\x128\n" +
+	"\x06result\x18\x02 \x01(\v2 .bean.node.v1.BuildImageResponseR\x06result\x12\x16\n" +
+	"\x06reason\x18\x03 \x01(\tR\x06reason\"&\n" +
+	"\x12CancelBuildRequest\x12\x10\n" +
+	"\x03tag\x18\x01 \x01(\tR\x03tag\"+\n" +
+	"\x13CancelBuildResponse\x12\x14\n" +
+	"\x05found\x18\x01 \x01(\bR\x05found*Y\n" +
+	"\n" +
+	"BuildPhase\x12\x11\n" +
+	"\rBUILD_UNKNOWN\x10\x00\x12\x11\n" +
+	"\rBUILD_RUNNING\x10\x01\x12\x13\n" +
+	"\x0fBUILD_SUCCEEDED\x10\x02\x12\x10\n" +
+	"\fBUILD_FAILED\x10\x032\xdb\x02\n" +
 	"\vNodeService\x12I\n" +
 	"\bRegister\x12\x1d.bean.node.v1.RegisterRequest\x1a\x1e.bean.node.v1.RegisterResponse\x12P\n" +
 	"\tHeartbeat\x12\x1e.bean.node.v1.HeartbeatRequest\x1a\x1f.bean.node.v1.HeartbeatResponse(\x010\x01\x12L\n" +
 	"\tSyncState\x12\x1e.bean.node.v1.SyncStateRequest\x1a\x1f.bean.node.v1.SyncStateResponse\x12a\n" +
-	"\x10UpdateNodeStatus\x12%.bean.node.v1.UpdateNodeStatusRequest\x1a&.bean.node.v1.UpdateNodeStatusResponse2\xab\v\n" +
+	"\x10UpdateNodeStatus\x12%.bean.node.v1.UpdateNodeStatusRequest\x1a&.bean.node.v1.UpdateNodeStatusResponse2\xdd\f\n" +
 	"\x0eSandboxService\x12X\n" +
 	"\rCreateSandbox\x12\".bean.node.v1.CreateSandboxRequest\x1a#.bean.node.v1.CreateSandboxResponse\x12[\n" +
 	"\x0eDestroySandbox\x12#.bean.node.v1.DestroySandboxRequest\x1a$.bean.node.v1.DestroySandboxResponse\x12U\n" +
@@ -2864,9 +3102,11 @@ const file_bean_node_v1_node_proto_rawDesc = "" +
 	"\x0fSnapshotSandbox\x12$.bean.node.v1.SnapshotSandboxRequest\x1a\x1b.bean.node.v1.SnapshotChunk0\x01\x12[\n" +
 	"\x0eRestoreSandbox\x12!.bean.node.v1.RestoreSandboxFrame\x1a$.bean.node.v1.RestoreSandboxResponse(\x01\x12i\n" +
 	"\x10StartUserProcess\x12).bean.node.v1.StartUserProcessNodeRequest\x1a*.bean.node.v1.StartUserProcessNodeResponse\x12U\n" +
-	"\fPrewarmImage\x12!.bean.node.v1.PrewarmImageRequest\x1a\".bean.node.v1.PrewarmImageResponse\x12N\n" +
+	"\fPrewarmImage\x12!.bean.node.v1.PrewarmImageRequest\x1a\".bean.node.v1.PrewarmImageResponse\x12O\n" +
 	"\n" +
-	"BuildImage\x12\x1f.bean.node.v1.BuildImageRequest\x1a\x1d.bean.node.v1.BuildImageEvent0\x01\x12A\n" +
+	"StartBuild\x12\x1f.bean.node.v1.BuildImageRequest\x1a .bean.node.v1.StartBuildResponse\x12[\n" +
+	"\x0eGetBuildStatus\x12#.bean.node.v1.GetBuildStatusRequest\x1a$.bean.node.v1.GetBuildStatusResponse\x12R\n" +
+	"\vCancelBuild\x12 .bean.node.v1.CancelBuildRequest\x1a!.bean.node.v1.CancelBuildResponse\x12A\n" +
 	"\x04Exec\x12\x1b.bean.common.v1.ExecRequest\x1a\x1c.bean.common.v1.ExecResponse\x12R\n" +
 	"\n" +
 	"StreamExec\x12\x1f.bean.common.v1.StreamExecFrame\x1a\x1f.bean.common.v1.StreamExecFrame(\x010\x01\x12H\n" +
@@ -2889,140 +3129,151 @@ func file_bean_node_v1_node_proto_rawDescGZIP() []byte {
 	return file_bean_node_v1_node_proto_rawDescData
 }
 
-var file_bean_node_v1_node_proto_msgTypes = make([]protoimpl.MessageInfo, 46)
+var file_bean_node_v1_node_proto_enumTypes = make([]protoimpl.EnumInfo, 1)
+var file_bean_node_v1_node_proto_msgTypes = make([]protoimpl.MessageInfo, 50)
 var file_bean_node_v1_node_proto_goTypes = []any{
-	(*RegisterRequest)(nil),              // 0: bean.node.v1.RegisterRequest
-	(*RegisterResponse)(nil),             // 1: bean.node.v1.RegisterResponse
-	(*NodeCapabilities)(nil),             // 2: bean.node.v1.NodeCapabilities
-	(*NodeResources)(nil),                // 3: bean.node.v1.NodeResources
-	(*HeartbeatRequest)(nil),             // 4: bean.node.v1.HeartbeatRequest
-	(*CachedImage)(nil),                  // 5: bean.node.v1.CachedImage
-	(*ImageInventory)(nil),               // 6: bean.node.v1.ImageInventory
-	(*UpdateNodeStatusRequest)(nil),      // 7: bean.node.v1.UpdateNodeStatusRequest
-	(*UpdateNodeStatusResponse)(nil),     // 8: bean.node.v1.UpdateNodeStatusResponse
-	(*NodeUsage)(nil),                    // 9: bean.node.v1.NodeUsage
-	(*HeartbeatResponse)(nil),            // 10: bean.node.v1.HeartbeatResponse
-	(*SyncStateRequest)(nil),             // 11: bean.node.v1.SyncStateRequest
-	(*SyncStateResponse)(nil),            // 12: bean.node.v1.SyncStateResponse
-	(*SandboxSpec)(nil),                  // 13: bean.node.v1.SandboxSpec
-	(*Lifecycle)(nil),                    // 14: bean.node.v1.Lifecycle
-	(*SandboxStatus)(nil),                // 15: bean.node.v1.SandboxStatus
-	(*CreateSandboxRequest)(nil),         // 16: bean.node.v1.CreateSandboxRequest
-	(*CreateSandboxResponse)(nil),        // 17: bean.node.v1.CreateSandboxResponse
-	(*ImageConversion)(nil),              // 18: bean.node.v1.ImageConversion
-	(*DestroySandboxRequest)(nil),        // 19: bean.node.v1.DestroySandboxRequest
-	(*DestroySandboxResponse)(nil),       // 20: bean.node.v1.DestroySandboxResponse
-	(*PauseSandboxRequest)(nil),          // 21: bean.node.v1.PauseSandboxRequest
-	(*PauseSandboxResponse)(nil),         // 22: bean.node.v1.PauseSandboxResponse
-	(*ResumeSandboxRequest)(nil),         // 23: bean.node.v1.ResumeSandboxRequest
-	(*ResumeSandboxResponse)(nil),        // 24: bean.node.v1.ResumeSandboxResponse
-	(*GetSandboxRequest)(nil),            // 25: bean.node.v1.GetSandboxRequest
-	(*GetSandboxResponse)(nil),           // 26: bean.node.v1.GetSandboxResponse
-	(*SnapshotSandboxRequest)(nil),       // 27: bean.node.v1.SnapshotSandboxRequest
-	(*SnapshotChunk)(nil),                // 28: bean.node.v1.SnapshotChunk
-	(*SnapshotResult)(nil),               // 29: bean.node.v1.SnapshotResult
-	(*RestoreSandboxFrame)(nil),          // 30: bean.node.v1.RestoreSandboxFrame
-	(*RestoreSandboxResponse)(nil),       // 31: bean.node.v1.RestoreSandboxResponse
-	(*StartUserProcessNodeRequest)(nil),  // 32: bean.node.v1.StartUserProcessNodeRequest
-	(*StartUserProcessNodeResponse)(nil), // 33: bean.node.v1.StartUserProcessNodeResponse
-	(*PrewarmImageRequest)(nil),          // 34: bean.node.v1.PrewarmImageRequest
-	(*PrewarmImageResponse)(nil),         // 35: bean.node.v1.PrewarmImageResponse
-	(*BuildImageRequest)(nil),            // 36: bean.node.v1.BuildImageRequest
-	(*ImageConfig)(nil),                  // 37: bean.node.v1.ImageConfig
-	(*BuildImageResponse)(nil),           // 38: bean.node.v1.BuildImageResponse
-	(*BuildImageEvent)(nil),              // 39: bean.node.v1.BuildImageEvent
-	nil,                                  // 40: bean.node.v1.RegisterRequest.LabelsEntry
-	nil,                                  // 41: bean.node.v1.HeartbeatRequest.CachedImagesEntry
-	nil,                                  // 42: bean.node.v1.ImageInventory.ImagesEntry
-	nil,                                  // 43: bean.node.v1.SandboxSpec.EnvEntry
-	nil,                                  // 44: bean.node.v1.SandboxSpec.LabelsEntry
-	nil,                                  // 45: bean.node.v1.BuildImageRequest.BuildArgsEntry
-	(*v1.ExecRequest)(nil),               // 46: bean.common.v1.ExecRequest
-	(*v1.StreamExecFrame)(nil),           // 47: bean.common.v1.StreamExecFrame
-	(*v1.ReadFileRequest)(nil),           // 48: bean.common.v1.ReadFileRequest
-	(*v1.WriteFileFrame)(nil),            // 49: bean.common.v1.WriteFileFrame
-	(*v1.DeleteFileRequest)(nil),         // 50: bean.common.v1.DeleteFileRequest
-	(*v1.ListDirRequest)(nil),            // 51: bean.common.v1.ListDirRequest
-	(*v1.GetLogsRequest)(nil),            // 52: bean.common.v1.GetLogsRequest
-	(*v1.ExecResponse)(nil),              // 53: bean.common.v1.ExecResponse
-	(*v1.FileChunk)(nil),                 // 54: bean.common.v1.FileChunk
-	(*v1.WriteFileResponse)(nil),         // 55: bean.common.v1.WriteFileResponse
-	(*v1.DeleteFileResponse)(nil),        // 56: bean.common.v1.DeleteFileResponse
-	(*v1.ListDirResponse)(nil),           // 57: bean.common.v1.ListDirResponse
-	(*v1.LogChunk)(nil),                  // 58: bean.common.v1.LogChunk
+	(BuildPhase)(0),                      // 0: bean.node.v1.BuildPhase
+	(*RegisterRequest)(nil),              // 1: bean.node.v1.RegisterRequest
+	(*RegisterResponse)(nil),             // 2: bean.node.v1.RegisterResponse
+	(*NodeCapabilities)(nil),             // 3: bean.node.v1.NodeCapabilities
+	(*NodeResources)(nil),                // 4: bean.node.v1.NodeResources
+	(*HeartbeatRequest)(nil),             // 5: bean.node.v1.HeartbeatRequest
+	(*CachedImage)(nil),                  // 6: bean.node.v1.CachedImage
+	(*ImageInventory)(nil),               // 7: bean.node.v1.ImageInventory
+	(*UpdateNodeStatusRequest)(nil),      // 8: bean.node.v1.UpdateNodeStatusRequest
+	(*UpdateNodeStatusResponse)(nil),     // 9: bean.node.v1.UpdateNodeStatusResponse
+	(*NodeUsage)(nil),                    // 10: bean.node.v1.NodeUsage
+	(*HeartbeatResponse)(nil),            // 11: bean.node.v1.HeartbeatResponse
+	(*SyncStateRequest)(nil),             // 12: bean.node.v1.SyncStateRequest
+	(*SyncStateResponse)(nil),            // 13: bean.node.v1.SyncStateResponse
+	(*SandboxSpec)(nil),                  // 14: bean.node.v1.SandboxSpec
+	(*Lifecycle)(nil),                    // 15: bean.node.v1.Lifecycle
+	(*SandboxStatus)(nil),                // 16: bean.node.v1.SandboxStatus
+	(*CreateSandboxRequest)(nil),         // 17: bean.node.v1.CreateSandboxRequest
+	(*CreateSandboxResponse)(nil),        // 18: bean.node.v1.CreateSandboxResponse
+	(*ImageConversion)(nil),              // 19: bean.node.v1.ImageConversion
+	(*DestroySandboxRequest)(nil),        // 20: bean.node.v1.DestroySandboxRequest
+	(*DestroySandboxResponse)(nil),       // 21: bean.node.v1.DestroySandboxResponse
+	(*PauseSandboxRequest)(nil),          // 22: bean.node.v1.PauseSandboxRequest
+	(*PauseSandboxResponse)(nil),         // 23: bean.node.v1.PauseSandboxResponse
+	(*ResumeSandboxRequest)(nil),         // 24: bean.node.v1.ResumeSandboxRequest
+	(*ResumeSandboxResponse)(nil),        // 25: bean.node.v1.ResumeSandboxResponse
+	(*GetSandboxRequest)(nil),            // 26: bean.node.v1.GetSandboxRequest
+	(*GetSandboxResponse)(nil),           // 27: bean.node.v1.GetSandboxResponse
+	(*SnapshotSandboxRequest)(nil),       // 28: bean.node.v1.SnapshotSandboxRequest
+	(*SnapshotChunk)(nil),                // 29: bean.node.v1.SnapshotChunk
+	(*SnapshotResult)(nil),               // 30: bean.node.v1.SnapshotResult
+	(*RestoreSandboxFrame)(nil),          // 31: bean.node.v1.RestoreSandboxFrame
+	(*RestoreSandboxResponse)(nil),       // 32: bean.node.v1.RestoreSandboxResponse
+	(*StartUserProcessNodeRequest)(nil),  // 33: bean.node.v1.StartUserProcessNodeRequest
+	(*StartUserProcessNodeResponse)(nil), // 34: bean.node.v1.StartUserProcessNodeResponse
+	(*PrewarmImageRequest)(nil),          // 35: bean.node.v1.PrewarmImageRequest
+	(*PrewarmImageResponse)(nil),         // 36: bean.node.v1.PrewarmImageResponse
+	(*BuildImageRequest)(nil),            // 37: bean.node.v1.BuildImageRequest
+	(*ImageConfig)(nil),                  // 38: bean.node.v1.ImageConfig
+	(*BuildImageResponse)(nil),           // 39: bean.node.v1.BuildImageResponse
+	(*StartBuildResponse)(nil),           // 40: bean.node.v1.StartBuildResponse
+	(*GetBuildStatusRequest)(nil),        // 41: bean.node.v1.GetBuildStatusRequest
+	(*GetBuildStatusResponse)(nil),       // 42: bean.node.v1.GetBuildStatusResponse
+	(*CancelBuildRequest)(nil),           // 43: bean.node.v1.CancelBuildRequest
+	(*CancelBuildResponse)(nil),          // 44: bean.node.v1.CancelBuildResponse
+	nil,                                  // 45: bean.node.v1.RegisterRequest.LabelsEntry
+	nil,                                  // 46: bean.node.v1.HeartbeatRequest.CachedImagesEntry
+	nil,                                  // 47: bean.node.v1.ImageInventory.ImagesEntry
+	nil,                                  // 48: bean.node.v1.SandboxSpec.EnvEntry
+	nil,                                  // 49: bean.node.v1.SandboxSpec.LabelsEntry
+	nil,                                  // 50: bean.node.v1.BuildImageRequest.BuildArgsEntry
+	(*v1.ExecRequest)(nil),               // 51: bean.common.v1.ExecRequest
+	(*v1.StreamExecFrame)(nil),           // 52: bean.common.v1.StreamExecFrame
+	(*v1.ReadFileRequest)(nil),           // 53: bean.common.v1.ReadFileRequest
+	(*v1.WriteFileFrame)(nil),            // 54: bean.common.v1.WriteFileFrame
+	(*v1.DeleteFileRequest)(nil),         // 55: bean.common.v1.DeleteFileRequest
+	(*v1.ListDirRequest)(nil),            // 56: bean.common.v1.ListDirRequest
+	(*v1.GetLogsRequest)(nil),            // 57: bean.common.v1.GetLogsRequest
+	(*v1.ExecResponse)(nil),              // 58: bean.common.v1.ExecResponse
+	(*v1.FileChunk)(nil),                 // 59: bean.common.v1.FileChunk
+	(*v1.WriteFileResponse)(nil),         // 60: bean.common.v1.WriteFileResponse
+	(*v1.DeleteFileResponse)(nil),        // 61: bean.common.v1.DeleteFileResponse
+	(*v1.ListDirResponse)(nil),           // 62: bean.common.v1.ListDirResponse
+	(*v1.LogChunk)(nil),                  // 63: bean.common.v1.LogChunk
 }
 var file_bean_node_v1_node_proto_depIdxs = []int32{
-	40, // 0: bean.node.v1.RegisterRequest.labels:type_name -> bean.node.v1.RegisterRequest.LabelsEntry
-	2,  // 1: bean.node.v1.RegisterRequest.capabilities:type_name -> bean.node.v1.NodeCapabilities
-	3,  // 2: bean.node.v1.RegisterRequest.resources:type_name -> bean.node.v1.NodeResources
-	15, // 3: bean.node.v1.HeartbeatRequest.sandboxes:type_name -> bean.node.v1.SandboxStatus
-	9,  // 4: bean.node.v1.HeartbeatRequest.usage:type_name -> bean.node.v1.NodeUsage
-	41, // 5: bean.node.v1.HeartbeatRequest.cached_images:type_name -> bean.node.v1.HeartbeatRequest.CachedImagesEntry
-	42, // 6: bean.node.v1.ImageInventory.images:type_name -> bean.node.v1.ImageInventory.ImagesEntry
-	6,  // 7: bean.node.v1.UpdateNodeStatusRequest.images:type_name -> bean.node.v1.ImageInventory
-	13, // 8: bean.node.v1.SyncStateResponse.expected:type_name -> bean.node.v1.SandboxSpec
-	43, // 9: bean.node.v1.SandboxSpec.env:type_name -> bean.node.v1.SandboxSpec.EnvEntry
-	14, // 10: bean.node.v1.SandboxSpec.lifecycle:type_name -> bean.node.v1.Lifecycle
-	44, // 11: bean.node.v1.SandboxSpec.labels:type_name -> bean.node.v1.SandboxSpec.LabelsEntry
-	13, // 12: bean.node.v1.CreateSandboxRequest.spec:type_name -> bean.node.v1.SandboxSpec
-	15, // 13: bean.node.v1.CreateSandboxResponse.status:type_name -> bean.node.v1.SandboxStatus
-	18, // 14: bean.node.v1.CreateSandboxResponse.conversion:type_name -> bean.node.v1.ImageConversion
-	37, // 15: bean.node.v1.ImageConversion.config:type_name -> bean.node.v1.ImageConfig
-	15, // 16: bean.node.v1.GetSandboxResponse.status:type_name -> bean.node.v1.SandboxStatus
-	29, // 17: bean.node.v1.SnapshotChunk.result:type_name -> bean.node.v1.SnapshotResult
-	13, // 18: bean.node.v1.RestoreSandboxFrame.spec:type_name -> bean.node.v1.SandboxSpec
-	15, // 19: bean.node.v1.RestoreSandboxResponse.status:type_name -> bean.node.v1.SandboxStatus
-	45, // 20: bean.node.v1.BuildImageRequest.build_args:type_name -> bean.node.v1.BuildImageRequest.BuildArgsEntry
-	37, // 21: bean.node.v1.BuildImageResponse.config:type_name -> bean.node.v1.ImageConfig
-	38, // 22: bean.node.v1.BuildImageEvent.result:type_name -> bean.node.v1.BuildImageResponse
-	5,  // 23: bean.node.v1.ImageInventory.ImagesEntry.value:type_name -> bean.node.v1.CachedImage
-	0,  // 24: bean.node.v1.NodeService.Register:input_type -> bean.node.v1.RegisterRequest
-	4,  // 25: bean.node.v1.NodeService.Heartbeat:input_type -> bean.node.v1.HeartbeatRequest
-	11, // 26: bean.node.v1.NodeService.SyncState:input_type -> bean.node.v1.SyncStateRequest
-	7,  // 27: bean.node.v1.NodeService.UpdateNodeStatus:input_type -> bean.node.v1.UpdateNodeStatusRequest
-	16, // 28: bean.node.v1.SandboxService.CreateSandbox:input_type -> bean.node.v1.CreateSandboxRequest
-	19, // 29: bean.node.v1.SandboxService.DestroySandbox:input_type -> bean.node.v1.DestroySandboxRequest
-	21, // 30: bean.node.v1.SandboxService.PauseSandbox:input_type -> bean.node.v1.PauseSandboxRequest
-	23, // 31: bean.node.v1.SandboxService.ResumeSandbox:input_type -> bean.node.v1.ResumeSandboxRequest
-	25, // 32: bean.node.v1.SandboxService.GetSandbox:input_type -> bean.node.v1.GetSandboxRequest
-	27, // 33: bean.node.v1.SandboxService.SnapshotSandbox:input_type -> bean.node.v1.SnapshotSandboxRequest
-	30, // 34: bean.node.v1.SandboxService.RestoreSandbox:input_type -> bean.node.v1.RestoreSandboxFrame
-	32, // 35: bean.node.v1.SandboxService.StartUserProcess:input_type -> bean.node.v1.StartUserProcessNodeRequest
-	34, // 36: bean.node.v1.SandboxService.PrewarmImage:input_type -> bean.node.v1.PrewarmImageRequest
-	36, // 37: bean.node.v1.SandboxService.BuildImage:input_type -> bean.node.v1.BuildImageRequest
-	46, // 38: bean.node.v1.SandboxService.Exec:input_type -> bean.common.v1.ExecRequest
-	47, // 39: bean.node.v1.SandboxService.StreamExec:input_type -> bean.common.v1.StreamExecFrame
-	48, // 40: bean.node.v1.SandboxService.ReadFile:input_type -> bean.common.v1.ReadFileRequest
-	49, // 41: bean.node.v1.SandboxService.WriteFile:input_type -> bean.common.v1.WriteFileFrame
-	50, // 42: bean.node.v1.SandboxService.DeleteFile:input_type -> bean.common.v1.DeleteFileRequest
-	51, // 43: bean.node.v1.SandboxService.ListDir:input_type -> bean.common.v1.ListDirRequest
-	52, // 44: bean.node.v1.SandboxService.GetLogs:input_type -> bean.common.v1.GetLogsRequest
-	1,  // 45: bean.node.v1.NodeService.Register:output_type -> bean.node.v1.RegisterResponse
-	10, // 46: bean.node.v1.NodeService.Heartbeat:output_type -> bean.node.v1.HeartbeatResponse
-	12, // 47: bean.node.v1.NodeService.SyncState:output_type -> bean.node.v1.SyncStateResponse
-	8,  // 48: bean.node.v1.NodeService.UpdateNodeStatus:output_type -> bean.node.v1.UpdateNodeStatusResponse
-	17, // 49: bean.node.v1.SandboxService.CreateSandbox:output_type -> bean.node.v1.CreateSandboxResponse
-	20, // 50: bean.node.v1.SandboxService.DestroySandbox:output_type -> bean.node.v1.DestroySandboxResponse
-	22, // 51: bean.node.v1.SandboxService.PauseSandbox:output_type -> bean.node.v1.PauseSandboxResponse
-	24, // 52: bean.node.v1.SandboxService.ResumeSandbox:output_type -> bean.node.v1.ResumeSandboxResponse
-	26, // 53: bean.node.v1.SandboxService.GetSandbox:output_type -> bean.node.v1.GetSandboxResponse
-	28, // 54: bean.node.v1.SandboxService.SnapshotSandbox:output_type -> bean.node.v1.SnapshotChunk
-	31, // 55: bean.node.v1.SandboxService.RestoreSandbox:output_type -> bean.node.v1.RestoreSandboxResponse
-	33, // 56: bean.node.v1.SandboxService.StartUserProcess:output_type -> bean.node.v1.StartUserProcessNodeResponse
-	35, // 57: bean.node.v1.SandboxService.PrewarmImage:output_type -> bean.node.v1.PrewarmImageResponse
-	39, // 58: bean.node.v1.SandboxService.BuildImage:output_type -> bean.node.v1.BuildImageEvent
-	53, // 59: bean.node.v1.SandboxService.Exec:output_type -> bean.common.v1.ExecResponse
-	47, // 60: bean.node.v1.SandboxService.StreamExec:output_type -> bean.common.v1.StreamExecFrame
-	54, // 61: bean.node.v1.SandboxService.ReadFile:output_type -> bean.common.v1.FileChunk
-	55, // 62: bean.node.v1.SandboxService.WriteFile:output_type -> bean.common.v1.WriteFileResponse
-	56, // 63: bean.node.v1.SandboxService.DeleteFile:output_type -> bean.common.v1.DeleteFileResponse
-	57, // 64: bean.node.v1.SandboxService.ListDir:output_type -> bean.common.v1.ListDirResponse
-	58, // 65: bean.node.v1.SandboxService.GetLogs:output_type -> bean.common.v1.LogChunk
-	45, // [45:66] is the sub-list for method output_type
-	24, // [24:45] is the sub-list for method input_type
-	24, // [24:24] is the sub-list for extension type_name
-	24, // [24:24] is the sub-list for extension extendee
-	0,  // [0:24] is the sub-list for field type_name
+	45, // 0: bean.node.v1.RegisterRequest.labels:type_name -> bean.node.v1.RegisterRequest.LabelsEntry
+	3,  // 1: bean.node.v1.RegisterRequest.capabilities:type_name -> bean.node.v1.NodeCapabilities
+	4,  // 2: bean.node.v1.RegisterRequest.resources:type_name -> bean.node.v1.NodeResources
+	16, // 3: bean.node.v1.HeartbeatRequest.sandboxes:type_name -> bean.node.v1.SandboxStatus
+	10, // 4: bean.node.v1.HeartbeatRequest.usage:type_name -> bean.node.v1.NodeUsage
+	46, // 5: bean.node.v1.HeartbeatRequest.cached_images:type_name -> bean.node.v1.HeartbeatRequest.CachedImagesEntry
+	47, // 6: bean.node.v1.ImageInventory.images:type_name -> bean.node.v1.ImageInventory.ImagesEntry
+	7,  // 7: bean.node.v1.UpdateNodeStatusRequest.images:type_name -> bean.node.v1.ImageInventory
+	14, // 8: bean.node.v1.SyncStateResponse.expected:type_name -> bean.node.v1.SandboxSpec
+	48, // 9: bean.node.v1.SandboxSpec.env:type_name -> bean.node.v1.SandboxSpec.EnvEntry
+	15, // 10: bean.node.v1.SandboxSpec.lifecycle:type_name -> bean.node.v1.Lifecycle
+	49, // 11: bean.node.v1.SandboxSpec.labels:type_name -> bean.node.v1.SandboxSpec.LabelsEntry
+	14, // 12: bean.node.v1.CreateSandboxRequest.spec:type_name -> bean.node.v1.SandboxSpec
+	16, // 13: bean.node.v1.CreateSandboxResponse.status:type_name -> bean.node.v1.SandboxStatus
+	19, // 14: bean.node.v1.CreateSandboxResponse.conversion:type_name -> bean.node.v1.ImageConversion
+	38, // 15: bean.node.v1.ImageConversion.config:type_name -> bean.node.v1.ImageConfig
+	16, // 16: bean.node.v1.GetSandboxResponse.status:type_name -> bean.node.v1.SandboxStatus
+	30, // 17: bean.node.v1.SnapshotChunk.result:type_name -> bean.node.v1.SnapshotResult
+	14, // 18: bean.node.v1.RestoreSandboxFrame.spec:type_name -> bean.node.v1.SandboxSpec
+	16, // 19: bean.node.v1.RestoreSandboxResponse.status:type_name -> bean.node.v1.SandboxStatus
+	50, // 20: bean.node.v1.BuildImageRequest.build_args:type_name -> bean.node.v1.BuildImageRequest.BuildArgsEntry
+	38, // 21: bean.node.v1.BuildImageResponse.config:type_name -> bean.node.v1.ImageConfig
+	0,  // 22: bean.node.v1.GetBuildStatusResponse.phase:type_name -> bean.node.v1.BuildPhase
+	39, // 23: bean.node.v1.GetBuildStatusResponse.result:type_name -> bean.node.v1.BuildImageResponse
+	6,  // 24: bean.node.v1.ImageInventory.ImagesEntry.value:type_name -> bean.node.v1.CachedImage
+	1,  // 25: bean.node.v1.NodeService.Register:input_type -> bean.node.v1.RegisterRequest
+	5,  // 26: bean.node.v1.NodeService.Heartbeat:input_type -> bean.node.v1.HeartbeatRequest
+	12, // 27: bean.node.v1.NodeService.SyncState:input_type -> bean.node.v1.SyncStateRequest
+	8,  // 28: bean.node.v1.NodeService.UpdateNodeStatus:input_type -> bean.node.v1.UpdateNodeStatusRequest
+	17, // 29: bean.node.v1.SandboxService.CreateSandbox:input_type -> bean.node.v1.CreateSandboxRequest
+	20, // 30: bean.node.v1.SandboxService.DestroySandbox:input_type -> bean.node.v1.DestroySandboxRequest
+	22, // 31: bean.node.v1.SandboxService.PauseSandbox:input_type -> bean.node.v1.PauseSandboxRequest
+	24, // 32: bean.node.v1.SandboxService.ResumeSandbox:input_type -> bean.node.v1.ResumeSandboxRequest
+	26, // 33: bean.node.v1.SandboxService.GetSandbox:input_type -> bean.node.v1.GetSandboxRequest
+	28, // 34: bean.node.v1.SandboxService.SnapshotSandbox:input_type -> bean.node.v1.SnapshotSandboxRequest
+	31, // 35: bean.node.v1.SandboxService.RestoreSandbox:input_type -> bean.node.v1.RestoreSandboxFrame
+	33, // 36: bean.node.v1.SandboxService.StartUserProcess:input_type -> bean.node.v1.StartUserProcessNodeRequest
+	35, // 37: bean.node.v1.SandboxService.PrewarmImage:input_type -> bean.node.v1.PrewarmImageRequest
+	37, // 38: bean.node.v1.SandboxService.StartBuild:input_type -> bean.node.v1.BuildImageRequest
+	41, // 39: bean.node.v1.SandboxService.GetBuildStatus:input_type -> bean.node.v1.GetBuildStatusRequest
+	43, // 40: bean.node.v1.SandboxService.CancelBuild:input_type -> bean.node.v1.CancelBuildRequest
+	51, // 41: bean.node.v1.SandboxService.Exec:input_type -> bean.common.v1.ExecRequest
+	52, // 42: bean.node.v1.SandboxService.StreamExec:input_type -> bean.common.v1.StreamExecFrame
+	53, // 43: bean.node.v1.SandboxService.ReadFile:input_type -> bean.common.v1.ReadFileRequest
+	54, // 44: bean.node.v1.SandboxService.WriteFile:input_type -> bean.common.v1.WriteFileFrame
+	55, // 45: bean.node.v1.SandboxService.DeleteFile:input_type -> bean.common.v1.DeleteFileRequest
+	56, // 46: bean.node.v1.SandboxService.ListDir:input_type -> bean.common.v1.ListDirRequest
+	57, // 47: bean.node.v1.SandboxService.GetLogs:input_type -> bean.common.v1.GetLogsRequest
+	2,  // 48: bean.node.v1.NodeService.Register:output_type -> bean.node.v1.RegisterResponse
+	11, // 49: bean.node.v1.NodeService.Heartbeat:output_type -> bean.node.v1.HeartbeatResponse
+	13, // 50: bean.node.v1.NodeService.SyncState:output_type -> bean.node.v1.SyncStateResponse
+	9,  // 51: bean.node.v1.NodeService.UpdateNodeStatus:output_type -> bean.node.v1.UpdateNodeStatusResponse
+	18, // 52: bean.node.v1.SandboxService.CreateSandbox:output_type -> bean.node.v1.CreateSandboxResponse
+	21, // 53: bean.node.v1.SandboxService.DestroySandbox:output_type -> bean.node.v1.DestroySandboxResponse
+	23, // 54: bean.node.v1.SandboxService.PauseSandbox:output_type -> bean.node.v1.PauseSandboxResponse
+	25, // 55: bean.node.v1.SandboxService.ResumeSandbox:output_type -> bean.node.v1.ResumeSandboxResponse
+	27, // 56: bean.node.v1.SandboxService.GetSandbox:output_type -> bean.node.v1.GetSandboxResponse
+	29, // 57: bean.node.v1.SandboxService.SnapshotSandbox:output_type -> bean.node.v1.SnapshotChunk
+	32, // 58: bean.node.v1.SandboxService.RestoreSandbox:output_type -> bean.node.v1.RestoreSandboxResponse
+	34, // 59: bean.node.v1.SandboxService.StartUserProcess:output_type -> bean.node.v1.StartUserProcessNodeResponse
+	36, // 60: bean.node.v1.SandboxService.PrewarmImage:output_type -> bean.node.v1.PrewarmImageResponse
+	40, // 61: bean.node.v1.SandboxService.StartBuild:output_type -> bean.node.v1.StartBuildResponse
+	42, // 62: bean.node.v1.SandboxService.GetBuildStatus:output_type -> bean.node.v1.GetBuildStatusResponse
+	44, // 63: bean.node.v1.SandboxService.CancelBuild:output_type -> bean.node.v1.CancelBuildResponse
+	58, // 64: bean.node.v1.SandboxService.Exec:output_type -> bean.common.v1.ExecResponse
+	52, // 65: bean.node.v1.SandboxService.StreamExec:output_type -> bean.common.v1.StreamExecFrame
+	59, // 66: bean.node.v1.SandboxService.ReadFile:output_type -> bean.common.v1.FileChunk
+	60, // 67: bean.node.v1.SandboxService.WriteFile:output_type -> bean.common.v1.WriteFileResponse
+	61, // 68: bean.node.v1.SandboxService.DeleteFile:output_type -> bean.common.v1.DeleteFileResponse
+	62, // 69: bean.node.v1.SandboxService.ListDir:output_type -> bean.common.v1.ListDirResponse
+	63, // 70: bean.node.v1.SandboxService.GetLogs:output_type -> bean.common.v1.LogChunk
+	48, // [48:71] is the sub-list for method output_type
+	25, // [25:48] is the sub-list for method input_type
+	25, // [25:25] is the sub-list for extension type_name
+	25, // [25:25] is the sub-list for extension extendee
+	0,  // [0:25] is the sub-list for field type_name
 }
 
 func init() { file_bean_node_v1_node_proto_init() }
@@ -3040,22 +3291,19 @@ func file_bean_node_v1_node_proto_init() {
 		(*RestoreSandboxFrame_Data)(nil),
 		(*RestoreSandboxFrame_LayerEnd)(nil),
 	}
-	file_bean_node_v1_node_proto_msgTypes[39].OneofWrappers = []any{
-		(*BuildImageEvent_Log)(nil),
-		(*BuildImageEvent_Result)(nil),
-	}
 	type x struct{}
 	out := protoimpl.TypeBuilder{
 		File: protoimpl.DescBuilder{
 			GoPackagePath: reflect.TypeOf(x{}).PkgPath(),
 			RawDescriptor: unsafe.Slice(unsafe.StringData(file_bean_node_v1_node_proto_rawDesc), len(file_bean_node_v1_node_proto_rawDesc)),
-			NumEnums:      0,
-			NumMessages:   46,
+			NumEnums:      1,
+			NumMessages:   50,
 			NumExtensions: 0,
 			NumServices:   2,
 		},
 		GoTypes:           file_bean_node_v1_node_proto_goTypes,
 		DependencyIndexes: file_bean_node_v1_node_proto_depIdxs,
+		EnumInfos:         file_bean_node_v1_node_proto_enumTypes,
 		MessageInfos:      file_bean_node_v1_node_proto_msgTypes,
 	}.Build()
 	File_bean_node_v1_node_proto = out.File

@@ -25,7 +25,7 @@ func startAuthServer(t *testing.T, token string) nodev1.SandboxServiceClient {
 	}
 	unary, stream := TokenAuth(token)
 	srv := grpc.NewServer(grpc.UnaryInterceptor(unary), grpc.StreamInterceptor(stream))
-	nodev1.RegisterSandboxServiceServer(srv, NewGRPCServer(mgr))
+	nodev1.RegisterSandboxServiceServer(srv, NewGRPCServer(mgr, nil))
 	go srv.Serve(lis)
 	t.Cleanup(srv.Stop)
 
@@ -82,7 +82,7 @@ func TestTokenClientInterceptorsAttachToken(t *testing.T) {
 	}
 	unary, stream := TokenAuth("tok-123")
 	srv := grpc.NewServer(grpc.UnaryInterceptor(unary), grpc.StreamInterceptor(stream))
-	nodev1.RegisterSandboxServiceServer(srv, NewGRPCServer(mgr))
+	nodev1.RegisterSandboxServiceServer(srv, NewGRPCServer(mgr, nil))
 	go srv.Serve(lis)
 	t.Cleanup(srv.Stop)
 

@@ -10,6 +10,7 @@ package main
 import (
 	"context"
 	"flag"
+	"fmt"
 	"log"
 	"log/slog"
 	"net"
@@ -91,6 +92,12 @@ func main() {
 		"S3-compatible endpoint for snapshot blobs (or BEAN_S3_ENDPOINT); empty uses --snapshot-dir")
 	s3Bucket := flag.String("s3-snapshot-bucket", "bean-snapshots",
 		"bucket holding snapshot blobs")
+	s3LogsBucket := flag.String("s3-logs-bucket", envOr("BEAN_S3_LOGS_BUCKET", "bean-build-logs"),
+		"bucket build logs are read from (or BEAN_S3_LOGS_BUCKET), the same dedicated "+
+			"logs bucket the nodes upload to. Separate from --s3-snapshot-bucket "+
+			"because logs expire under a lifecycle rule while snapshots do not. With "+
+			"no --s3-endpoint the gateway reads logs from a local directory (dev "+
+			"single-host), matching the node's local fallback")
 	s3Region := flag.String("s3-region", "us-east-1", "S3 region")
 	s3PathStyle := flag.Bool("s3-path-style", true,
 		"address buckets as /bucket/key (required by MinIO and most self-hosted gateways)")
@@ -192,6 +199,16 @@ func main() {
 		slog.Info("snapshot blobs on local disk", "dir", blobDir)
 	}
 
+	// The build-log store is read here the same way the node writes it: a
+	// dedicated logs bucket over the shared object-store contract, or a local
+	// directory in the dev single-host case. It is separate from the snapshot
+	// blobs so the two can have different lifecycles.
+	buildLogs, err := buildLogsStore(*s3Endpoint, *s3LogsBucket, *s3Region, *s3PathStyle,
+		filepath.Join(filepath.Dir(*dbPath), "build-logs"))
+	if err != nil {
+		log.Fatalf("build log storage: %v", err)
+	}
+
 	sched := scheduler.New(st, scheduler.DefaultWeights())
 
 	imagePolicy, err := image.ParsePolicy(*allowedImageSources, *allowedRegistries)
@@ -243,8 +260,16 @@ func main() {
 		Region: *region, APIKey: *apiKey, RuntimeTier: *runtimeTier,
 		Domain: *sandboxDomain,
 		Images: images, Secrets: secrets, Snapshots: blobs,
+		BuildLogs:  buildLogs,
 		CreateWait: *createWait, Identity: identity,
 	})
+
+	// Re-attach to builds that were in flight when this replica last stopped. A
+	// build runs under its node's own context and survives a control-plane
+	// restart, but the poller that records its outcome does not, so on startup we
+	// resume polling each BUILDING template (docs/build-logs-s3.md §8). Runs in a
+	// goroutine so a slow node does not delay serving.
+	go srv.ReconcileBuilds(ctx)
 
 	httpSrv := &http.Server{
 		Addr:              *listen,
@@ -347,4 +372,36 @@ func (n nodeCacheSource) CachedNodeCount(ref string) int {
 		}
 	}
 	return count
+}
+
+// envOr returns the environment variable's value, or fallback when unset.
+func envOr(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}
+
+// buildLogsStore opens the object store build logs are read from. With an
+// endpoint it is a BucketStore over the dedicated logs bucket; without one it is
+// a local DirStore, the dev single-host case where the node wrote to the same
+// directory. Credentials come from the environment only, never a flag.
+func buildLogsStore(endpoint, bucket, region string, pathStyle bool, localDir string) (s3.ObjectStore, error) {
+	if endpoint == "" {
+		return s3.NewDirStore(localDir)
+	}
+	if bucket == "" {
+		return nil, fmt.Errorf("build logs: bucket required with an endpoint")
+	}
+	client, err := s3.New(s3.Config{
+		Endpoint:  endpoint,
+		Region:    region,
+		AccessKey: os.Getenv("BEAN_S3_ACCESS_KEY"),
+		SecretKey: os.Getenv("BEAN_S3_SECRET_KEY"),
+		PathStyle: pathStyle,
+	})
+	if err != nil {
+		return nil, err
+	}
+	return s3.NewBucketStore(context.Background(), client, bucket)
 }

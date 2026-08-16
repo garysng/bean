@@ -10,6 +10,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
+	"github.com/garysng/bean/internal/control/s3"
 	agentv1 "github.com/garysng/bean/internal/gen/bean/agent/v1"
 	commonv1 "github.com/garysng/bean/internal/gen/bean/common/v1"
 	nodev1 "github.com/garysng/bean/internal/gen/bean/node/v1"
@@ -21,9 +22,22 @@ import (
 type GRPCServer struct {
 	nodev1.UnimplementedSandboxServiceServer
 	mgr *Manager
+	// logs is where a build's output is uploaded, so any control-plane replica
+	// reads it back without the node relaying bytes. Nil disables upload, which
+	// leaves a build working but its log unreadable -- a node with no object
+	// store, the same condition that leaves a build node-local.
+	logs s3.ObjectStore
+	// builds tracks in-flight builds so CancelBuild can stop one started through a
+	// different control-plane connection.
+	builds *buildRegistry
 }
 
-func NewGRPCServer(mgr *Manager) *GRPCServer { return &GRPCServer{mgr: mgr} }
+// NewGRPCServer builds the node service. logs is the build-log object store
+// (BucketStore in production, DirStore in dev); it may be nil, which disables
+// build-log upload.
+func NewGRPCServer(mgr *Manager, logs s3.ObjectStore) *GRPCServer {
+	return &GRPCServer{mgr: mgr, logs: logs, builds: newBuildRegistry()}
+}
 
 // connErr maps AgentConn failures to gRPC codes: unknown sandbox -> NotFound,
 // non-runnable state -> FailedPrecondition (docs/api-design.md error table).
@@ -134,52 +148,108 @@ func (s *GRPCServer) PrewarmImage(ctx context.Context, req *nodev1.PrewarmImageR
 	return &nodev1.PrewarmImageResponse{Ready: true}, nil
 }
 
-// BuildImage builds a base image from a Dockerfile on this node, streaming
-// BuildKit's output as it is produced.
+// StartBuild builds a base image from a Dockerfile on this node, asynchronously.
 //
-// The call lasts the build's duration, which can be minutes. Holding the call
-// open is what makes cancellation work: the build runs under this stream's
-// context, so a caller that aborts the call kills buildctl. A unary call plus a
-// separate cancel RPC would need the node to track builds by name and would
-// leave a build running whenever the control plane restarted mid-build.
-func (s *GRPCServer) BuildImage(req *nodev1.BuildImageRequest,
-	stream nodev1.SandboxService_BuildImageServer) error {
-
+// It returns as soon as the build is registered and running, not when it
+// finishes. The build runs in a goroutine under a node-owned context (derived
+// from context.Background(), registered in the build registry by tag), NOT under
+// this RPC's context -- so the build survives the caller: a control-plane replica
+// may restart or a follower may hang up without killing it. This is the property
+// the old BuildImage server stream could not provide, where the stream's context
+// was the build's lifeline (docs/build-logs-s3.md §8).
+//
+// Output goes to the shared log store as BuildKit produces it, so any replica
+// follows the build without this node relaying bytes. The outcome is cached in
+// the registry and read back via GetBuildStatus; the build is stopped via
+// CancelBuild. Both reach the build by tag from any replica.
+func (s *GRPCServer) StartBuild(ctx context.Context, req *nodev1.BuildImageRequest) (*nodev1.StartBuildResponse, error) {
 	if req.Tag == "" {
-		return status.Error(codes.InvalidArgument, "tag required")
+		return nil, status.Error(codes.InvalidArgument, "tag required")
 	}
 	if req.Dockerfile == "" {
-		return status.Error(codes.InvalidArgument, "dockerfile required")
+		return nil, status.Error(codes.InvalidArgument, "dockerfile required")
 	}
 
-	logs := newBuildLogSender(stream)
-	defer logs.close()
-
-	res, err := s.mgr.BuildImage(stream.Context(), runtime.BuildRequest{
-		Tag:        req.Tag,
-		Dockerfile: req.Dockerfile,
-		ContextTar: req.ContextTar,
-		BuildArgs:  req.BuildArgs,
-		SizeMiB:    req.SizeMib,
-		Logs:       logs,
-	})
-	if err != nil {
-		// A cancelled build is reported as Canceled rather than Internal: the
-		// control plane distinguishes "someone stopped this" from "this node
-		// cannot build", and only the second is worth alerting on.
-		if cerr := stream.Context().Err(); cerr != nil {
-			return status.Errorf(codes.Canceled, "build %s stopped: %v", req.Tag, cerr)
+	// Open the log writer before returning so a failure to open the log surfaces
+	// synchronously as the StartBuild error, rather than vanishing into the
+	// goroutine. A nil store (no object store on this node) leaves the build
+	// working but its log unreadable, the same trade a node-local build makes for
+	// its artifact; the sink is then discard.
+	var logs io.Writer = io.Discard
+	var logw *s3.BuildLogWriter
+	if s.logs != nil {
+		w, err := s3.NewBuildLogWriter(s.logs, req.Tag)
+		if err != nil {
+			return nil, status.Errorf(codes.Internal, "build %s: open log: %v", req.Tag, err)
 		}
-		return status.Errorf(codes.Internal, "build %s: %v", req.Tag, err)
+		logw, logs = w, w
 	}
-	// Flushed before the result so a caller reading frames in order has the
-	// whole log by the time it learns the build finished.
-	logs.close()
-	// The artifact coordinates ride the result frame so the control plane records
-	// where the image lives; an empty overlaybd_ref means the build stayed
-	// node-local, which the control plane records as such.
-	return stream.Send(&nodev1.BuildImageEvent{
-		Event: &nodev1.BuildImageEvent_Result{
+
+	// Registered under a node-owned cancellable context, NOT ctx: ctx is this
+	// RPC's, which ends when StartBuild returns (immediately). CancelBuild reaches
+	// the build by tag through this registration.
+	bctx, done := s.builds.add(context.Background(), req.Tag)
+
+	go func() {
+		defer done()
+		res, err := s.mgr.BuildImage(bctx, runtime.BuildRequest{
+			Tag:        req.Tag,
+			Dockerfile: req.Dockerfile,
+			ContextTar: req.ContextTar,
+			BuildArgs:  req.BuildArgs,
+			SizeMiB:    req.SizeMib,
+			Logs:       logs,
+		})
+		if err != nil {
+			// A cancelled build records "build cancelled" rather than the raw
+			// error, so GetBuildStatus reports the same distinction the old
+			// Canceled status code carried: someone stopped this, versus this node
+			// cannot build.
+			reason := err.Error()
+			if bctx.Err() != nil {
+				reason = "build cancelled"
+			}
+			if logw != nil {
+				// Finalise the log so a follower sees the terminal manifest rather
+				// than waiting forever for output that will not come.
+				_ = logw.Finish(true, reason)
+			}
+			s.builds.setOutcome(req.Tag, runtime.BuildResult{}, errors.New(reason))
+			return
+		}
+		if logw != nil {
+			if err := logw.Finish(false, ""); err != nil {
+				// The artifact is built but its log manifest did not seal; report
+				// the build as failed so a follower is not left polling a log that
+				// never terminates. Rare, and the template is retryable.
+				s.builds.setOutcome(req.Tag, runtime.BuildResult{},
+					fmt.Errorf("finalise log: %v", err))
+				return
+			}
+		}
+		s.builds.setOutcome(req.Tag, res, nil)
+	}()
+
+	return &nodev1.StartBuildResponse{BuildId: req.Tag}, nil
+}
+
+// GetBuildStatus reports where a build (by tag) is: still running, succeeded
+// with its result, or failed with a reason. The control plane polls this after
+// StartBuild until a terminal phase. An unknown tag reports BUILD_UNKNOWN, not
+// an error, so a poll racing registration or resuming after a restart just keeps
+// polling (docs/build-logs-s3.md §8).
+func (s *GRPCServer) GetBuildStatus(ctx context.Context, req *nodev1.GetBuildStatusRequest) (*nodev1.GetBuildStatusResponse, error) {
+	if req.Tag == "" {
+		return nil, status.Error(codes.InvalidArgument, "tag required")
+	}
+	phase, res, reason := s.builds.status(req.Tag)
+	switch phase {
+	case buildSucceeded:
+		// The artifact coordinates ride the result so the control plane records
+		// where the image lives; an empty overlaybd_ref means the build stayed
+		// node-local, which the control plane records as such.
+		return &nodev1.GetBuildStatusResponse{
+			Phase: nodev1.BuildPhase_BUILD_SUCCEEDED,
 			Result: &nodev1.BuildImageResponse{
 				ImageRef:     res.ImageRef,
 				OverlaybdRef: res.OverlaybdRef,
@@ -187,8 +257,24 @@ func (s *GRPCServer) BuildImage(req *nodev1.BuildImageRequest,
 				LayerDigests: res.LayerDigests,
 				Config:       imageConfigToProto(res.Config),
 			},
-		},
-	})
+		}, nil
+	case buildFailed:
+		return &nodev1.GetBuildStatusResponse{Phase: nodev1.BuildPhase_BUILD_FAILED, Reason: reason}, nil
+	case buildRunning:
+		return &nodev1.GetBuildStatusResponse{Phase: nodev1.BuildPhase_BUILD_RUNNING}, nil
+	default:
+		return &nodev1.GetBuildStatusResponse{Phase: nodev1.BuildPhase_BUILD_UNKNOWN}, nil
+	}
+}
+
+// CancelBuild stops a build running on this node by tag. It is idempotent: an
+// unknown or already-finished tag reports found=false rather than an error, so a
+// racing double-cancel is harmless (docs/build-logs-s3.md §8).
+func (s *GRPCServer) CancelBuild(ctx context.Context, req *nodev1.CancelBuildRequest) (*nodev1.CancelBuildResponse, error) {
+	if req.Tag == "" {
+		return nil, status.Error(codes.InvalidArgument, "tag required")
+	}
+	return &nodev1.CancelBuildResponse{Found: s.builds.cancelBuild(req.Tag)}, nil
 }
 
 // imageConfigToProto converts a recovered image config to its wire form, or nil when

@@ -11,10 +11,10 @@ import (
 	"net/http"
 	"time"
 
-	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
 	"github.com/garysng/bean/internal/control/image"
+	"github.com/garysng/bean/internal/control/s3"
 	"github.com/garysng/bean/internal/control/store"
 	nodev1 "github.com/garysng/bean/internal/gen/bean/node/v1"
 	"github.com/garysng/bean/internal/logging"
@@ -121,16 +121,23 @@ func (s *Server) handleBuild(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Record which node runs the build before starting it, so /cancel and /logs
+	// on any replica resolve the owning node from the store rather than from this
+	// process's memory. This is what makes the build reachable cluster-wide.
+	if err := s.images.SetBuildNode(req.Tag, nodeID); err != nil {
+		s.failTemplate(req.Tag, err.Error())
+		writeErr(w, http.StatusInternalServerError, "INTERNAL", err.Error())
+		return
+	}
+
 	// A build legitimately takes minutes: it pulls a base image and runs the
 	// Dockerfile's commands. The context is detached from the request on purpose
-	// — see runBuild for why a client hanging up does not stop a build.
+	// — see runBuild for why a client hanging up does not stop a build. Its
+	// timeout bounds a wedged build; cancellation proper goes through the node
+	// (handleBuildCancel), not this context.
 	ctx, cancel := context.WithTimeout(context.Background(), maxBuildDuration)
-	// Registered before the goroutine starts, so a caller that asks for logs the
-	// instant it sees this response finds the build rather than a 404 it would
-	// have to retry through.
-	log := s.builds.start(req.Tag, cancel)
 
-	go s.runBuild(ctx, cancel, nodeID, req, contextTar, log)
+	go s.runBuild(ctx, cancel, nodeID, req, contextTar)
 
 	writeJSON(w, http.StatusAccepted, map[string]string{
 		"template": req.Tag,
@@ -186,15 +193,17 @@ func (s *Server) pickBuilder() (string, error) {
 // The bounded lifetime above is a different concern: it stops a wedged build
 // from holding a builder indefinitely, and is not a statement about readers.
 func (s *Server) runBuild(ctx context.Context, cancel context.CancelFunc,
-	nodeID string, req buildRequest, contextTar []byte, log *buildLog) {
+	nodeID string, req buildRequest, contextTar []byte) {
 
 	// cancel here rather than only in the handler: releasing the context is what
 	// stops the timer, and the build outliving the handler means the handler
 	// cannot be the one to do it.
 	defer cancel()
 
+	// The build's log is uploaded to the shared store by the node, not relayed
+	// through this call; failTemplate records the terminal state in the store,
+	// which is what /logs consults for the outcome.
 	fail := func(reason string) {
-		log.finish(true, reason)
 		s.failTemplate(req.Tag, reason)
 	}
 
@@ -204,77 +213,148 @@ func (s *Server) runBuild(ctx context.Context, cancel context.CancelFunc,
 		return
 	}
 
-	stream, err := client.BuildImage(ctx, &nodev1.BuildImageRequest{
+	// StartBuild returns as soon as the node has registered the build; it does not
+	// wait for the build to finish. The build then runs under a node-owned context,
+	// so ctx here bounds only how long this replica polls, not the build's life --
+	// a different replica (or this one after a restart) re-attaches by polling the
+	// same tag (see ReconcileBuilds).
+	if _, err := client.StartBuild(ctx, &nodev1.BuildImageRequest{
 		Tag:        req.Tag,
 		Dockerfile: req.Dockerfile,
 		ContextTar: contextTar,
 		BuildArgs:  req.BuildArgs,
 		SizeMib:    req.SizeMiB,
-	})
-	if err != nil {
+	}); err != nil {
 		slog.Error("build failed", logging.KeyImage, req.Tag, logging.KeyNode, nodeID, logging.KeyError, err)
 		fail(err.Error())
 		return
 	}
 
-	result, err := drainBuildStream(stream, log)
-	if err != nil {
-		// A cancelled build is not a failed one, but it is not a usable image
-		// either: the tag has to stop claiming to be on its way, or the ref is
-		// unusable until someone deletes the record by hand.
-		if status.Code(err) == codes.Canceled || ctx.Err() != nil {
-			slog.Info("build cancelled", logging.KeyImage, req.Tag, logging.KeyNode, nodeID)
-			log.finish(true, "build cancelled")
-			s.failTemplate(req.Tag, "build cancelled")
-			return
-		}
-		slog.Error("build failed", logging.KeyImage, req.Tag, logging.KeyNode, nodeID, logging.KeyError, err)
-		fail(status.Convert(err).Message())
-		return
-	}
-
-	// A built image needs no conversion — BuildKit's flat output is sealed into an
-	// overlaybd layer and published, so it goes straight to READY with the artifact's
-	// real coordinates.
-	//
-	// The node reports an empty overlaybd_ref when it has no object store: the build
-	// then exists only in the building node's ImageDir, and READY overstates its reach
-	// in a multi-node cluster. Ownership is recorded regardless of where the bytes are,
-	// so a later prewarm can publish it without revisiting who the image belongs to.
-	if err := s.images.MarkReady(req.Tag, result.GetOverlaybdRef(), result.GetSizeBytes(),
-		result.GetLayerDigests(), "", protoImageConfig(result.GetConfig())); err != nil {
-		slog.Error("cannot mark build ready", logging.KeyImage, req.Tag, logging.KeyError, err)
-		fail(err.Error())
-		return
-	}
-	log.finish(false, "")
+	s.pollBuild(ctx, nodeID, req.Tag)
 }
 
-// drainBuildStream copies log frames into log and returns once the node reports
-// the build finished.
+// buildStatusPollInterval is how often a poller asks the node for a build's
+// status. One second matches E2B's template-manager poll and is well under a
+// build's minutes-long duration, so the outcome is recorded promptly without
+// making the node's GetBuildStatus a hot path.
+const buildStatusPollInterval = time.Second
+
+// pollBuild polls the node that owns a build until it reaches a terminal phase,
+// then writes the authoritative template state (READY or FAILED). It is the
+// control-plane half of the poll model (docs/build-logs-s3.md §8): the node runs
+// the build under its own context and only reports status, so this is what
+// learns the outcome -- for a live build started by runBuild, and for an
+// in-flight build re-attached after a restart by ReconcileBuilds.
 //
-// A missing result frame is an error rather than a success: the node sends it
-// last, so a stream that ends without one means the build did not get to the end
-// and marking the image READY would publish a tag with no image behind it.
-func drainBuildStream(stream nodev1.SandboxService_BuildImageClient, log *buildLog) (*nodev1.BuildImageResponse, error) {
-	var result *nodev1.BuildImageResponse
+// It is safe to run concurrently for the same tag across replicas: MarkReady and
+// failTemplate route through the store's idempotent transition, so a duplicate
+// poller at most repeats a terminal write.
+//
+// ctx bounds the poll (maxBuildDuration): when it expires the build is recorded
+// FAILED, which stops a wedged build from leaving a template BUILDING forever.
+// Transient GetBuildStatus errors (the node restarting, a momentarily
+// unreachable connection) are tolerated -- they retry on the next tick rather
+// than failing the build, since the build itself is unaffected.
+func (s *Server) pollBuild(ctx context.Context, nodeID, tag string) {
+	client, err := s.router.Client(nodeID)
+	if err != nil {
+		s.failTemplate(tag, err.Error())
+		return
+	}
+
+	ticker := time.NewTicker(buildStatusPollInterval)
+	defer ticker.Stop()
 	for {
-		ev, err := stream.Recv()
-		if err == io.EOF {
-			if result == nil {
-				return nil, errors.New("node ended the build stream without a result")
+		select {
+		case <-ctx.Done():
+			// The poll deadline elapsed (or this replica is shutting down). The
+			// build may still be running on the node; recording FAILED here is the
+			// timeout ceiling, and a surviving build's later success is harmless
+			// because the tag is retryable.
+			slog.Info("build poll ended", logging.KeyImage, tag, logging.KeyNode, nodeID, logging.KeyError, ctx.Err())
+			s.failTemplate(tag, "build cancelled")
+			return
+		case <-ticker.C:
+			resp, err := client.GetBuildStatus(ctx, &nodev1.GetBuildStatusRequest{Tag: tag})
+			if err != nil {
+				// Transient: log at debug volume and retry on the next tick. A
+				// genuinely gone node eventually trips the ctx deadline above.
+				slog.Debug("build status poll error", logging.KeyImage, tag, logging.KeyNode, nodeID, logging.KeyError, err)
+				continue
 			}
-			return result, nil
+			switch resp.GetPhase() {
+			case nodev1.BuildPhase_BUILD_SUCCEEDED:
+				result := resp.GetResult()
+				// A built image needs no conversion — BuildKit's flat output is sealed
+				// into an overlaybd layer and published, so it goes straight to READY
+				// with the artifact's real coordinates.
+				//
+				// The node reports an empty overlaybd_ref when it has no object store:
+				// the build then exists only in the building node's ImageDir, and READY
+				// overstates its reach in a multi-node cluster. Ownership is recorded
+				// regardless of where the bytes are, so a later prewarm can publish it
+				// without revisiting who the image belongs to.
+				if err := s.images.MarkReady(tag, result.GetOverlaybdRef(), result.GetSizeBytes(),
+					result.GetLayerDigests(), "", protoImageConfig(result.GetConfig())); err != nil {
+					slog.Error("cannot mark build ready", logging.KeyImage, tag, logging.KeyError, err)
+					s.failTemplate(tag, err.Error())
+				}
+				return
+			case nodev1.BuildPhase_BUILD_FAILED:
+				// A cancelled build is not a failed one, but it is not a usable image
+				// either: the tag has to stop claiming to be on its way. The node's
+				// reason already distinguishes cancellation ("build cancelled").
+				reason := resp.GetReason()
+				if reason == "" {
+					reason = "build failed"
+				}
+				slog.Info("build finished", logging.KeyImage, tag, logging.KeyNode, nodeID, "reason", reason)
+				s.failTemplate(tag, reason)
+				return
+			default:
+				// BUILD_RUNNING or BUILD_UNKNOWN: keep polling. UNKNOWN covers a poll
+				// that raced registration or a node that has not yet learned of a
+				// build the store says it owns (restart reconcile); it resolves to a
+				// real phase or trips the deadline.
+			}
 		}
-		if err != nil {
-			return nil, err
+	}
+}
+
+// ReconcileBuilds re-attaches this replica to builds the store still records as
+// in flight. A build runs under the node's own context and survives a
+// control-plane restart, but the poller that records its outcome does not -- so
+// on startup a replica lists BUILDING templates and resumes polling each, under
+// a fresh maxBuildDuration bound. This is the restart half of the poll model:
+// without it, a build that finishes while every replica was down would leave its
+// template stuck BUILDING (docs/build-logs-s3.md §8).
+//
+// Templates with no NodeID (claimed but never assigned a builder before the
+// crash) are failed: no node owns them, so no outcome will ever arrive.
+func (s *Server) ReconcileBuilds(ctx context.Context) {
+	if s.images == nil {
+		return
+	}
+	templates, err := s.store.ListTemplates("")
+	if err != nil {
+		slog.Error("reconcile builds: list templates", logging.KeyError, err)
+		return
+	}
+	for _, t := range templates {
+		if t.State != store.TemplateBuilding {
+			continue
 		}
-		if data := ev.GetLog(); len(data) > 0 {
-			_, _ = log.Write(data)
+		if t.NodeID == "" {
+			slog.Warn("reconcile builds: BUILDING template has no node, failing", logging.KeyImage, t.Name)
+			s.failTemplate(t.Name, "build lost: no owning node after restart")
+			continue
 		}
-		if r := ev.GetResult(); r != nil {
-			result = r
-		}
+		slog.Info("reconcile builds: resuming poll", logging.KeyImage, t.Name, logging.KeyNode, t.NodeID)
+		bctx, cancel := context.WithTimeout(context.WithoutCancel(ctx), maxBuildDuration)
+		go func(nodeID, tag string) {
+			defer cancel()
+			s.pollBuild(bctx, nodeID, tag)
+		}(t.NodeID, t.Name)
 	}
 }
 
@@ -290,17 +370,37 @@ func drainBuildStream(stream nodev1.SandboxService_BuildImageClient, log *buildL
 //
 // ?follow=false returns what has been produced so far and stops, which is what a
 // script wants after a build has finished.
+//
+// The log is read from the shared store, not from this process, so any replica
+// serves any build and a gateway restart loses nothing. Offset addressing makes
+// a late reader and a reconnecting reader the same case: the client's byte offset
+// is handed straight to the store reader.
 func (s *Server) handleBuildLogs(w http.ResponseWriter, r *http.Request) {
 	ref := r.URL.Query().Get("ref")
 	if ref == "" {
 		writeErr(w, http.StatusBadRequest, "INVALID_ARGUMENT", "ref query param required")
 		return
 	}
-	log := s.builds.get(ref)
-	if log == nil {
-		writeErr(w, http.StatusNotFound, "BUILD_NOT_FOUND",
-			"no build logs retained for "+ref)
+	if s.buildLogs == nil {
+		writeErr(w, http.StatusNotImplemented, "NOT_IMPLEMENTED", "build log store not configured")
 		return
+	}
+	reader, err := s3.NewBuildLogReader(s.buildLogs, ref)
+	if err != nil {
+		writeErr(w, http.StatusBadRequest, "INVALID_ARGUMENT", err.Error())
+		return
+	}
+	// A build with no log objects at all is either unknown or has not flushed its
+	// first chunk. The store record decides which: a template in BUILDING has just
+	// not produced output yet, anything else with no log is a 404.
+	if ok, err := reader.Exists(r.Context()); err != nil {
+		writeErr(w, http.StatusInternalServerError, "INTERNAL", err.Error())
+		return
+	} else if !ok {
+		if tpl, _ := s.store.GetTemplateByName(ref); tpl == nil || tpl.State != store.TemplateBuilding {
+			writeErr(w, http.StatusNotFound, "BUILD_NOT_FOUND", "no build logs for "+ref)
+			return
+		}
 	}
 	flusher, ok := w.(http.Flusher)
 	if !ok {
@@ -318,69 +418,113 @@ func (s *Server) handleBuildLogs(w http.ResponseWriter, r *http.Request) {
 
 	var offset int64
 	for {
-		data, at, done := log.read(offset)
-		if at > offset && offset > 0 {
-			// The window slid past what this reader had. Saying so beats a silent
-			// gap, which would read as a build that skipped a step.
-			_, _ = io.WriteString(w, "\n[log truncated: earlier output dropped]\n")
-		}
-		offset = at + int64(len(data))
-		if len(data) > 0 {
-			if _, err := w.Write(data); err != nil {
-				return
-			}
-			flusher.Flush()
-		}
-		if done || !follow {
-			break
-		}
-		if !log.wait(r.Context(), offset) {
-			// Reader hung up. The build keeps going; see runBuild.
+		next, err := reader.ReadFrom(r.Context(), offset, w)
+		if err != nil {
+			// The reader may have hung up, or the store may have hiccuped. Either
+			// way the response is already committed, so stop rather than trying to
+			// signal an error mid-body.
 			return
 		}
-	}
-
-	// The outcome goes in the body rather than the status: the response was
-	// committed with 200 before the build's fate was known, so a reader that only
-	// checked the status would call a failed build a success.
-	if done, failed, reason := log.status(); done {
-		if failed {
-			_, _ = fmt.Fprintf(w, "\nbuild failed: %s\n", reason)
-		} else {
-			_, _ = io.WriteString(w, "\nbuild succeeded\n")
+		if next > offset {
+			offset = next
+			flusher.Flush()
 		}
-		flusher.Flush()
+		// The manifest is the log store's own progress marker; it tells a follower
+		// when to stop without a round trip to the control record on every poll.
+		m, merr := reader.Manifest(r.Context())
+		done := merr == nil && m.Done
+		if done || !follow {
+			s.writeBuildOutcome(w, ref, m, merr)
+			flusher.Flush()
+			return
+		}
+		select {
+		case <-r.Context().Done():
+			return
+		case <-time.After(buildLogPollInterval):
+		}
+	}
+}
+
+// buildLogPollInterval is how often a following reader re-checks the store for
+// new output. Short enough to feel live, long enough not to hammer the store.
+const buildLogPollInterval = 500 * time.Millisecond
+
+// writeBuildOutcome writes the terminal line a reader sees at the end. The
+// outcome goes in the body rather than the status: the response was committed
+// with 200 before the build's fate was known, so a reader that only checked the
+// status would call a failed build a success. The authoritative status is the
+// store record; the manifest is used only when the record is unavailable.
+func (s *Server) writeBuildOutcome(w io.Writer, ref string, m s3.BuildLogManifest, merr error) {
+	failed, reason, known := false, "", false
+	if tpl, err := s.store.GetTemplateByName(ref); err == nil && tpl != nil {
+		switch tpl.State {
+		case store.TemplateFailed:
+			failed, reason, known = true, tpl.Reason, true
+		case store.TemplateReady:
+			known = true
+		}
+	}
+	if !known && merr == nil && m.Done {
+		failed, reason, known = m.Failed, m.Reason, true
+	}
+	if !known {
+		return
+	}
+	if failed {
+		_, _ = fmt.Fprintf(w, "\nbuild failed: %s\n", reason)
+	} else {
+		_, _ = io.WriteString(w, "\nbuild succeeded\n")
 	}
 }
 
 // handleBuildCancel stops a running build.
 //
 // Cancelling is explicit because a build's result is shared: a reader
-// disconnecting does not imply nobody wants the image (see runBuild). The
-// cancelled build's tag is marked FAILED, which frees the ref for another
-// attempt.
+// disconnecting does not imply nobody wants the image (see runBuild). The build
+// runs on a node and is cancelled there, so this handler resolves the build's
+// node from the store record and calls the node's CancelBuild -- which works
+// from any replica, not only the one that started the build. The node's build
+// path then marks the tag FAILED, which frees the ref for another attempt.
 func (s *Server) handleBuildCancel(w http.ResponseWriter, r *http.Request) {
 	ref := r.URL.Query().Get("ref")
 	if ref == "" {
 		writeErr(w, http.StatusBadRequest, "INVALID_ARGUMENT", "ref query param required")
 		return
 	}
-	log := s.builds.get(ref)
-	if log == nil {
+	tpl, err := s.store.GetTemplateByName(ref)
+	if err != nil {
+		writeErr(w, http.StatusInternalServerError, "INTERNAL", err.Error())
+		return
+	}
+	if tpl == nil {
 		writeErr(w, http.StatusNotFound, "BUILD_NOT_FOUND", "no build in progress for "+ref)
 		return
 	}
-	if done, _, _ := log.status(); done {
-		// Already over: nothing to stop, and reporting success would suggest this
-		// call changed something.
+	if tpl.State != store.TemplateBuilding {
+		// Already over (READY or FAILED): nothing to stop, and reporting success
+		// would suggest this call changed something.
 		writeErr(w, http.StatusConflict, "BUILD_FINISHED",
-			"build for "+ref+" has already finished")
+			"build for "+ref+" is not in progress")
 		return
 	}
-	// Cancelling the context kills buildctl on the node. runBuild observes the
-	// cancellation and settles the image record, so this handler does not touch
-	// it — two writers to that state is how it ends up disagreeing.
-	log.cancel()
+	if tpl.NodeID == "" {
+		writeErr(w, http.StatusConflict, "BUILD_NOT_PLACED",
+			"build for "+ref+" has not been placed on a node yet")
+		return
+	}
+	client, err := s.router.Client(tpl.NodeID)
+	if err != nil {
+		writeErr(w, http.StatusServiceUnavailable, "NODE_UNAVAILABLE", err.Error())
+		return
+	}
+	// The node cancels the build's context, which kills buildctl; its build path
+	// observes the cancellation and settles the record, so this handler does not
+	// touch the state -- two writers to it is how it ends up disagreeing.
+	if _, err := client.CancelBuild(r.Context(), &nodev1.CancelBuildRequest{Tag: ref}); err != nil {
+		writeErr(w, http.StatusBadGateway, "CANCEL_FAILED", status.Convert(err).Message())
+		return
+	}
 	writeJSON(w, http.StatusAccepted, map[string]string{
 		"template": ref,
 		"state":    "CANCELLING",

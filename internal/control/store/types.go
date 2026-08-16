@@ -462,6 +462,12 @@ type Template struct {
 	BaseRef string `json:"baseRef,omitempty"`
 	// BuildID traces a built template back to the build that produced it.
 	BuildID string `json:"buildId,omitempty"`
+	// NodeID is the node running this template's build while it is BUILDING. The
+	// build's log and cancellation are reached through this node, so a gateway
+	// replica that did not start the build resolves it from here rather than from
+	// memory (docs/build-logs-s3.md §8). Empty once the build is not in flight, or
+	// for a template that was never built (a converted OCI image).
+	NodeID string `json:"nodeId,omitempty"`
 
 	// CachedNodes counts nodes reporting local blocks for this template,
 	// which drives affinity scoring and prewarm decisions.

@@ -20,6 +20,7 @@ import (
 	"google.golang.org/grpc/status"
 
 	"github.com/garysng/bean/internal/control/image"
+	"github.com/garysng/bean/internal/control/s3"
 	"github.com/garysng/bean/internal/control/scheduler"
 	"github.com/garysng/bean/internal/control/secret"
 	"github.com/garysng/bean/internal/control/snapshot"
@@ -105,14 +106,14 @@ type Server struct {
 	snapshots snapshot.Blobs
 	secrets   *secret.Box
 	bus       *eventBus
-	// builds holds in-flight and recently finished builds, which is what the
-	// build log and cancel endpoints address. It is per-replica, unlike
-	// everything else here: a build's log is only reachable from the gateway that
-	// started it, and moving it to the store would mean writing a stream of bytes
-	// through SQLite on the build's hot path.
-	builds  *buildTracker
-	metrics *obs.Registry
-	mux     *http.ServeMux
+	// buildLogs is the shared store a build's output is uploaded to by the node
+	// running it. The gateway holds no per-build log state: it reads logs back
+	// from here by byte offset, so any replica serves any build's logs and a
+	// restart loses nothing (docs/build-logs-s3.md). Nil disables the log and
+	// cancel endpoints, which is a deployment with no object store configured.
+	buildLogs s3.ObjectStore
+	metrics   *obs.Registry
+	mux       *http.ServeMux
 	// identity attributes an image to a caller. Nil means every image is
 	// unowned, which is what a deployment behind no identity-aware layer gets.
 	identity IdentityFunc
@@ -139,6 +140,11 @@ type Options struct {
 	Secrets *secret.Box
 	// Snapshots stores checkpoint blobs; nil disables snapshot endpoints.
 	Snapshots snapshot.Blobs
+	// BuildLogs is the object store build logs are read from, the same dedicated
+	// logs bucket the nodes upload to. Nil disables the build log and cancel
+	// endpoints -- a deployment with no object store cannot read what was never
+	// uploaded.
+	BuildLogs s3.ObjectStore
 	// Identity derives the owner to attribute an image to. Nil leaves every
 	// image unowned and every listing unfiltered, which is exactly the
 	// behaviour of a deployment from before ownership existed. See
@@ -169,7 +175,7 @@ func New(st Store, router Router, placer Placer, opts Options) *Server {
 	s := &Server{store: st, router: router, placer: placer, region: region,
 		runtimeTier: tier, domain: opts.Domain, apiKey: opts.APIKey, images: opts.Images,
 		secrets: opts.Secrets, snapshots: opts.Snapshots,
-		bus: newEventBus(), builds: newBuildTracker(),
+		bus: newEventBus(), buildLogs: opts.BuildLogs,
 		metrics: obs.NewRegistry(), mux: http.NewServeMux(),
 		createWait: opts.CreateWait, identity: opts.Identity}
 	s.routes()

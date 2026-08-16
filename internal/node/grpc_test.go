@@ -26,7 +26,7 @@ func startNodeGRPC(t *testing.T) (nodev1.SandboxServiceClient, *Manager) {
 		t.Fatal(err)
 	}
 	srv := grpc.NewServer()
-	nodev1.RegisterSandboxServiceServer(srv, NewGRPCServer(mgr))
+	nodev1.RegisterSandboxServiceServer(srv, NewGRPCServer(mgr, nil))
 	go srv.Serve(lis)
 	t.Cleanup(srv.Stop)
 	conn, err := grpc.NewClient(lis.Addr().String(), grpc.WithTransportCredentials(insecure.NewCredentials()))

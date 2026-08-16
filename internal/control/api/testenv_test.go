@@ -19,6 +19,7 @@ import (
 	"github.com/garysng/bean/internal/control/image"
 	"github.com/garysng/bean/internal/control/scheduler"
 	"github.com/garysng/bean/internal/control/secret"
+	"github.com/garysng/bean/internal/control/s3"
 	"github.com/garysng/bean/internal/control/snapshot"
 	"github.com/garysng/bean/internal/control/store"
 	nodev1 "github.com/garysng/bean/internal/gen/bean/node/v1"
@@ -54,11 +55,12 @@ func TestMain(m *testing.M) {
 type testEnv struct {
 	T       *testing.T
 	Server  *httptest.Server
-	Store   *store.Store
-	Sched   *scheduler.Scheduler
-	Blobs   snapshot.Blobs
-	Images  *image.Service
-	API     *Server
+	Store     *store.Store
+	Sched     *scheduler.Scheduler
+	Blobs     snapshot.Blobs
+	Images    *image.Service
+	BuildLogs s3.ObjectStore
+	API       *Server
 	NodeIDs []string
 
 	resolver *mapResolver
@@ -173,6 +175,13 @@ func startEnv(t *testing.T, opts envOpts) *testEnv {
 		apiOpts.Secrets = box
 	}
 
+	logsStore, err := s3.NewDirStore(filepath.Join(dir, "build-logs"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	env.BuildLogs = logsStore
+	apiOpts.BuildLogs = logsStore
+
 	router := NewNodeRouter(env.resolver, "")
 	t.Cleanup(router.Close)
 	env.API = New(st, router, env.Sched, apiOpts)
@@ -193,7 +202,7 @@ func startTestNode(t *testing.T) string {
 		t.Fatal(err)
 	}
 	srv := grpc.NewServer()
-	nodev1.RegisterSandboxServiceServer(srv, node.NewGRPCServer(mgr))
+	nodev1.RegisterSandboxServiceServer(srv, node.NewGRPCServer(mgr, nil))
 	go srv.Serve(lis)
 	t.Cleanup(srv.Stop)
 	return lis.Addr().String()

@@ -52,15 +52,34 @@ service SandboxService {
   // A first pull can take minutes — longer than a create should block — so the
   // control plane warms images before placing work that needs them.
   rpc PrewarmImage(PrewarmImageRequest) returns (PrewarmImageResponse);
-  // BuildImage builds a base image from a Dockerfile. The build runs on the
+  // StartBuild builds a base image from a Dockerfile. The build runs on the
   // node, where BuildKit and the image cache already are.
   //
-  // The reply streams BuildKit's progress as it happens and ends with the
-  // result. Streaming rather than a unary call buys two things: a build takes
-  // minutes and its output is the only way to see which layer is slow or
-  // broken, and cancelling the call is what stops the build -- the node runs
-  // buildctl under this call's context, so an aborted call kills it.
-  rpc BuildImage(BuildImageRequest) returns (stream BuildImageEvent);
+  // It returns as soon as the build is registered and running, not when it
+  // finishes: the build runs under a node-owned context (registered by tag),
+  // not under this call's context, so it survives the caller -- a control-plane
+  // replica may restart, or a follower may come and go, without killing the
+  // build. Progress is read from the shared log store (any replica), the
+  // outcome is polled via GetBuildStatus, and the build is stopped via
+  // CancelBuild. This replaced the old BuildImage server stream, whose context
+  // was the build's lifeline and so tied a build's life to one caller's.
+  rpc StartBuild(BuildImageRequest) returns (StartBuildResponse);
+  // GetBuildStatus reports whether a build (addressed by tag) is still running,
+  // succeeded (with its result), or failed (with a reason). The control plane
+  // polls this after StartBuild until a terminal phase, then writes the
+  // authoritative template state. An unknown tag reports BUILD_UNKNOWN rather
+  // than an error, so a poll that races registration or a restart is harmless.
+  rpc GetBuildStatus(GetBuildStatusRequest) returns (GetBuildStatusResponse);
+  // CancelBuild stops a build running on this node, addressed by its tag.
+  //
+  // It exists because a build no longer belongs to whoever holds the BuildImage
+  // stream: the node writes the log to shared storage itself, so any control-plane
+  // replica can follow a build, and any replica must therefore be able to stop one
+  // it did not start. The node keeps a registry of in-flight builds keyed by tag
+  // and cancels the matching one's context, which kills buildctl -- the same
+  // mechanism aborting the stream used to trigger. Cancelling an unknown or
+  // already-finished tag is not an error, so a racing double-cancel is harmless.
+  rpc CancelBuild(CancelBuildRequest) returns (CancelBuildResponse);
   // Data plane passthrough to AgentService.
   rpc Exec(bean.common.v1.ExecRequest) returns (bean.common.v1.ExecResponse);
   rpc StreamExec(stream bean.common.v1.StreamExecFrame) returns (stream bean.common.v1.StreamExecFrame);
@@ -491,18 +510,58 @@ message BuildImageResponse {
   ImageConfig config = 5;
 }
 
-// BuildImageEvent is one frame of a build's progress. Log frames arrive as
-// BuildKit produces them; exactly one result frame ends a successful build.
-//
-// A failure is not a frame: it is the stream's error status, so a caller that
-// only checks Recv's error cannot mistake a failed build for a finished one.
-message BuildImageEvent {
-  oneof event {
-    // log is raw BuildKit output, forwarded rather than parsed. BuildKit's
-    // progress format is its own and changes between versions; the bytes are
-    // what a person reads to find the failing step either way.
-    bytes log = 1;
-    // result closes a successful build.
-    BuildImageResponse result = 2;
-  }
+// StartBuildResponse acknowledges that a build was registered and is running.
+// build_id echoes the tag the build runs under (builds are keyed by tag, so
+// there is no separate id); it is informational -- the caller already knows the
+// tag it sent, and follows the build by that tag via GetBuildStatus/CancelBuild.
+message StartBuildResponse {
+  string build_id = 1;
+}
+
+// GetBuildStatusRequest names the build to report on by its tag, the same key
+// StartBuild registered it under.
+message GetBuildStatusRequest {
+  string tag = 1;
+}
+
+// BuildPhase is where a build is in its lifecycle, as the node's build registry
+// sees it. The control plane maps SUCCEEDED/FAILED onto the authoritative
+// template state; RUNNING and UNKNOWN mean "keep polling".
+enum BuildPhase {
+  // BUILD_UNKNOWN: no build with this tag is known to the node -- it never
+  // started here, already finished and aged out of the registry, or the poll
+  // raced registration. Not terminal: the caller keeps polling (a live build it
+  // just started will appear) until its own deadline.
+  BUILD_UNKNOWN = 0;
+  // BUILD_RUNNING: registered and building. result and reason are unset.
+  BUILD_RUNNING = 1;
+  // BUILD_SUCCEEDED: finished successfully; result carries the coordinates.
+  BUILD_SUCCEEDED = 2;
+  // BUILD_FAILED: finished with an error; reason carries a human-readable cause.
+  BUILD_FAILED = 3;
+}
+
+// GetBuildStatusResponse reports a build's current phase, plus the result on
+// success or a reason on failure. It reuses BuildImageResponse for the result
+// so the success coordinates are described in exactly one place.
+message GetBuildStatusResponse {
+  BuildPhase phase = 1;
+  // result is set only when phase == BUILD_SUCCEEDED.
+  BuildImageResponse result = 2;
+  // reason is set only when phase == BUILD_FAILED: a human-readable cause,
+  // the same text the template's failure reason records.
+  string reason = 3;
+}
+
+// CancelBuildRequest names the build to stop by its tag, the same key BuildImage
+// runs under.
+message CancelBuildRequest {
+  string tag = 1;
+}
+
+// CancelBuildResponse reports whether a matching build was found and cancelled.
+// A false found is not an error: the build already finished, or ran on a
+// different node, and the caller wanted it stopped either way.
+message CancelBuildResponse {
+  bool found = 1;
 }
