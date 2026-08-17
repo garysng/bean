@@ -142,20 +142,19 @@ message NodeResources {
 }
 
 message HeartbeatRequest {
+  // A heartbeat renews a lease and does nothing else. It is small, fixed size,
+  // and sent every few seconds, so it carries only the identity the control
+  // plane authenticates and renews `last_heartbeat` against.
+  //
+  // What the node holds and how full it is (disk_used, the sandbox set) moved to
+  // UpdateNodeStatus: those are consumed off the control plane's own view, not
+  // the liveness signal, and coupling them to the heartbeat meant a report could
+  // stall the lease. Field numbers 3 (sandboxes), 4 (usage) and 5 (cached_images)
+  // are retired and not reused.
   string node_id = 1;
   string node_token = 2;
-  repeated SandboxStatus sandboxes = 3;
-  NodeUsage usage = 4;
-  // cached_images maps image reference to its size on this node. The node is
-  // the authority on what it holds, so it reports rather than the control
-  // plane inferring; the scheduler uses it for image affinity and prewarm
-  // progress.
-  // Deprecated: moved to ReportInventory. Still accepted so a node and a control
-  // plane of different versions interoperate during a rollout -- a node that
-  // stops sending this before the control plane learns to read the new RPC would
-  // make every node look like it holds no images, which silently disables image
-  // affinity rather than failing.
-  map<string, int64> cached_images = 5 [deprecated = true];
+  reserved 3, 4, 5;
+  reserved "sandboxes", "usage", "cached_images";
 }
 
 // CachedImage is one image a node holds.
@@ -216,13 +215,31 @@ message UpdateNodeStatusRequest {
   // Adding a category is a new optional field here rather than a new RPC, so
   // this stays the single path for "what this node holds".
   optional ImageInventory images = 3;
+
+  // usage is how full the node is right now -- disk actually occupied by sandbox
+  // filesystems. It rode the heartbeat until it was found to be consumed only by
+  // the read-only /nodes view, never by placement (which uses the commitment
+  // ledger), so it belongs on the change-driven report, not the lease signal.
+  // The node sends it on every status report -- both the event-triggered ones
+  // (a create or destroy moved the figure) and the periodic floor -- so the
+  // operational view refreshes within seconds of a change rather than at the
+  // heartbeat cadence.
+  optional NodeUsage usage = 4;
 }
 
 message UpdateNodeStatusResponse {}
 
 message NodeUsage {
-  double cpu_committed = 1;
-  int64 memory_committed_mib = 2;
+  // disk_used_mib is the sandbox filesystem's real occupancy, measured (not
+  // summed from nominal requests): the sparse layer behind a 20 GiB request
+  // holds kilobytes, so summing requests would overstate the node by orders of
+  // magnitude. It is the only usage figure anything reads.
+  //
+  // cpu_committed (1) and memory_committed_mib (2) are retired: the control
+  // plane derives commitment from its own placement ledger, so a node-reported
+  // figure had no consumer. Field numbers are not reused.
+  reserved 1, 2;
+  reserved "cpu_committed", "memory_committed_mib";
   int64 disk_used_mib = 3;
 }
 
