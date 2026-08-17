@@ -94,14 +94,24 @@ type Manager struct {
 	sandboxes map[string]*Sandbox
 
 	stopCh chan struct{}
+
+	// statusKick asks the status-report loop to send now rather than wait for its
+	// slow periodic tick. A create/destroy/pause/resume changes what the node
+	// holds, and the ops view of disk usage should reflect that in seconds, not at
+	// the next 60s floor. Buffered with depth 1 and sent non-blockingly (kick), so
+	// a burst of lifecycle events coalesces into a single pending report and no
+	// caller ever blocks on a report in flight. The periodic tick remains the
+	// backstop that covers a dropped kick.
+	statusKick chan struct{}
 }
 
 func NewManager(rt runtime.Runtime) *Manager {
 	m := &Manager{
-		rt:        rt,
-		metrics:   obs.NewRegistry(),
-		sandboxes: map[string]*Sandbox{},
-		stopCh:    make(chan struct{}),
+		rt:         rt,
+		metrics:    obs.NewRegistry(),
+		sandboxes:  map[string]*Sandbox{},
+		stopCh:     make(chan struct{}),
+		statusKick: make(chan struct{}, 1),
 	}
 	// The runtime reports its own sub-phases through the manager, so runtime_create
 	// decomposes instead of being one opaque number. Attached here rather than passed
@@ -126,6 +136,22 @@ func NewManager(rt runtime.Runtime) *Manager {
 
 // Metrics exposes the node's registry for the /metrics endpoint.
 func (m *Manager) Metrics() *obs.Registry { return m.metrics }
+
+// StatusKick is the channel the status-report loop selects on to send ahead of
+// its periodic tick. It fires after a lifecycle change (see kick).
+func (m *Manager) StatusKick() <-chan struct{} { return m.statusKick }
+
+// kick nudges the status-report loop to send now. Non-blocking: the channel is
+// buffered to depth 1, so if a report is already pending the kick is dropped and
+// the pending one covers this change too -- coalescing a burst of creates into a
+// single report. A lifecycle path calls this after it has succeeded, never
+// before, so the report reflects committed state.
+func (m *Manager) kick() {
+	select {
+	case m.statusKick <- struct{}{}:
+	default:
+	}
+}
 
 // observePhase records one create-phase duration. Phase names mirror the
 // cold-start budget in docs/security-and-startup.md B1.
@@ -281,6 +307,9 @@ func (m *Manager) Create(ctx context.Context, spec *nodev1.SandboxSpec) (sb *San
 	sb.State = runtime.StateRunning
 	m.mu.Unlock()
 	outcome = "success"
+	// The node now holds one more sandbox; nudge a status report so the ops disk
+	// view reflects it in seconds rather than at the next periodic tick.
+	m.kick()
 
 	if spec.AutoStartCmd {
 		m.startUserProcess(ctx, conn, spec)
@@ -571,6 +600,10 @@ func (m *Manager) Destroy(ctx context.Context, id string, force bool) error {
 
 	m.metrics.IncCounter("bean_node_destroys_total", "Sandbox destroys handled by this node.",
 		map[string]string{"outcome": boolOutcome(err == nil), "runtime": m.rt.Name()}, 1)
+	// The record is gone regardless of the runtime's outcome, so the node holds
+	// less now; report it. Kicked even on a runtime error, matching the
+	// unconditional record delete above.
+	m.kick()
 	return err
 }
 
@@ -610,6 +643,7 @@ func (m *Manager) Pause(ctx context.Context, id string) error {
 		cur.State = runtime.StatePaused
 	}
 	m.mu.Unlock()
+	m.kick()
 	return nil
 }
 
@@ -1413,72 +1447,8 @@ func (m *Manager) Resume(ctx context.Context, id string) error {
 		cur.lastActivity = time.Now()
 	}
 	m.mu.Unlock()
+	m.kick()
 	return nil
-}
-
-// HeartbeatSnapshot returns the sandbox list and the committed totals from a single
-// pass under one lock.
-//
-// Combined rather than composed so the two are consistent. Gathered separately -- via
-// Statuses() then SpecOf() per sandbox -- a create landing between them appears in the
-// status list while its resources are missing from the totals, and the control plane sees
-// a sandbox the node is apparently not paying for.
-//
-// The lower lock count is incidental. It was the first suspect for a node being declared
-// LOST under a 300-sandbox burst and was measured not to be the cause.
-func (m *Manager) HeartbeatSnapshot() (statuses []*nodev1.SandboxStatus, cpu float64, memMiB int64) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	statuses = make([]*nodev1.SandboxStatus, 0, len(m.sandboxes))
-	for id, sb := range m.sandboxes {
-		st := &nodev1.SandboxStatus{
-			SandboxId:        id,
-			State:            string(sb.State),
-			Reason:           sb.Reason,
-			LastActivityUnix: sb.lastActivity.Unix(),
-		}
-		if sb.Handle != nil {
-			st.StartedAtUnix = sb.Handle.StartedAt.Unix()
-		}
-		statuses = append(statuses, st)
-
-		if sb.State != runtime.StateRunning && sb.State != runtime.StatePaused {
-			continue
-		}
-		if sb.Spec != nil {
-			cpu += sb.Spec.Cpu
-			memMiB += sb.Spec.MemoryMib
-		}
-	}
-	return statuses, cpu, memMiB
-}
-
-// CommittedUsage sums the CPU and memory promised to sandboxes that hold their
-// resources, under a single lock acquisition.
-//
-// It exists because the heartbeat needs this figure every few seconds and the obvious
-// composition -- Statuses() then SpecOf() per sandbox -- takes the mutex 2N+1 times.
-// At 300 sandboxes that is 601 acquisitions per beat, contending with every concurrent
-// create for the same lock, and it starved the heartbeat until the control plane
-// declared the node LOST.
-//
-// Only RUNNING and PAUSED count. A starting sandbox has not been handed its resources
-// and a stopped one has given them back; counting either would report usage the node
-// is not carrying, and the control plane treats this figure as what the node is
-// actually holding.
-func (m *Manager) CommittedUsage() (cpu float64, memMiB int64) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	for _, sb := range m.sandboxes {
-		if sb.State != runtime.StateRunning && sb.State != runtime.StatePaused {
-			continue
-		}
-		if sb.Spec != nil {
-			cpu += sb.Spec.Cpu
-			memMiB += sb.Spec.MemoryMib
-		}
-	}
-	return cpu, memMiB
 }
 
 // Statuses lists all sandboxes for heartbeat/reconcile.

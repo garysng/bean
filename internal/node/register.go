@@ -201,17 +201,13 @@ func (r *Registrar) session(ctx context.Context, client nodev1.NodeServiceClient
 		case <-ctx.Done():
 			return ctx.Err()
 		case <-t.C:
-			// Both fields from one lock acquisition. Calling Statuses() and usage()
-			// separately would take the manager's mutex twice per beat and, worse,
-			// report a set of sandboxes and a usage total gathered at different
-			// instants -- so a create landing between them shows up in one and not
-			// the other.
-			statuses, cpu, mem := r.mgr.HeartbeatSnapshot()
+			// A heartbeat renews the lease and nothing more: only the identity the
+			// control plane authenticates and stamps last_heartbeat against. What
+			// the node holds and how full it is travel on UpdateNodeStatus, off the
+			// lease path, so a slow status report cannot stall a renewal.
 			if err := stream.Send(&nodev1.HeartbeatRequest{
 				NodeId:    r.NodeID,
 				NodeToken: r.nodeToken,
-				Sandboxes: statuses,
-				Usage:     r.usageFrom(cpu, mem),
 			}); err != nil {
 				return fmt.Errorf("heartbeat send: %w", err)
 			}
@@ -252,6 +248,12 @@ func (r *Registrar) reportStatusLoop(ctx context.Context, client nodev1.NodeServ
 		case <-ctx.Done():
 			return
 		case <-t.C:
+			// Periodic floor: bounds staleness if a kick was dropped or nothing
+			// has changed in a while.
+			r.reportStatus(ctx, client)
+		case <-r.mgr.StatusKick():
+			// A lifecycle change (create/destroy/pause/resume) asked for a report
+			// now, so the ops disk view reflects it in seconds, not at the next tick.
 			r.reportStatus(ctx, client)
 		}
 	}
@@ -280,14 +282,17 @@ func (r *Registrar) reportStatus(ctx context.Context, client nodev1.NodeServiceC
 		}
 		req.Images = &nodev1.ImageInventory{Images: images}
 	}
-	if req.Images == nil {
-		// Nothing to say. Sending an empty request would cost a round trip to
-		// tell the control plane nothing it does not already know.
-		return
-	}
+	// Disk usage rides here rather than on the heartbeat: it is inventory the
+	// ops view reads, not a lease signal, so it must not share the renewal path.
+	// It is measured (statfs) rather than summed from sandbox requests -- a
+	// sandbox's disk request is nominal, the sparse layer behind a 20 GiB
+	// request holds kilobytes, so summing requests would overstate the node by
+	// orders of magnitude. Always set, so unlike the image inventory there is
+	// no "nothing to say" case: the report always carries a fresh disk figure.
+	req.Usage = &nodev1.NodeUsage{DiskUsedMib: r.mgr.DiskUsedMiB()}
 	if _, err := client.UpdateNodeStatus(ctx, req); err != nil {
-		slog.Warn("node status report failed; image affinity and warm-snapshot "+
-			"lookups use a stale view until the next one",
+		slog.Warn("node status report failed; image affinity, warm-snapshot "+
+			"lookups, and the disk-usage view use a stale view until the next one",
 			logging.KeyNode, r.NodeID, logging.KeyError, err)
 	}
 }
@@ -348,36 +353,5 @@ func (r *Registrar) reclaimHost(expected map[string]bool) {
 		// keeps holding whatever the previous process leaked, which is the
 		// behaviour before this existed.
 		slog.Error("host resource reconciliation failed", logging.KeyError, err)
-	}
-}
-
-func (r *Registrar) usage() *nodev1.NodeUsage {
-	cpu, mem := r.mgr.CommittedUsage()
-	return r.usageFrom(cpu, mem)
-}
-
-// usageFrom builds the report from figures a caller already holds, so the heartbeat can
-// gather the sandbox list and the totals under one lock rather than two.
-//
-// The reason is consistency, not speed. usage() used to call Statuses() and then SpecOf()
-// per sandbox -- 2N+1 acquisitions of the manager's mutex -- which meant the status list
-// and the usage totals were sampled at different instants: a create landing between them
-// appears in the list while its resources are missing from the totals, so the control
-// plane sees a sandbox the node is apparently not paying for.
-//
-// Not a performance fix, and worth saying so plainly. This was the first suspect for a
-// node being declared LOST under a 300-sandbox burst, and it was wrong: the manager's
-// lock is held only briefly on the create path, and a test built to catch the 2N+1 shape
-// passed against it. The actual cause was reconciliation running before the heartbeat
-// stream opened (see session).
-func (r *Registrar) usageFrom(cpu float64, memMiB int64) *nodev1.NodeUsage {
-	// Disk is measured rather than summed. CPU and memory commitments are close
-	// enough to real usage to be worth summing, but a sandbox's disk request is
-	// nominal: the sparse layer behind a 20 GiB request holds kilobytes, so adding
-	// the requests up would overstate the node by orders of magnitude.
-	return &nodev1.NodeUsage{
-		CpuCommitted:       cpu,
-		MemoryCommittedMib: memMiB,
-		DiskUsedMib:        r.mgr.DiskUsedMiB(),
 	}
 }

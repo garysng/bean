@@ -17,16 +17,40 @@ import (
 type fakeControlPlane struct {
 	nodev1.UnimplementedNodeServiceServer
 
-	mu         sync.Mutex
-	registered []*nodev1.RegisterRequest
-	heartbeats []*nodev1.HeartbeatRequest
-	expected   []*nodev1.SandboxSpec
-	syncCalls  int
-	hbSignal   chan struct{}
+	mu            sync.Mutex
+	registered    []*nodev1.RegisterRequest
+	heartbeats    []*nodev1.HeartbeatRequest
+	statusUpdates []*nodev1.UpdateNodeStatusRequest
+	expected      []*nodev1.SandboxSpec
+	syncCalls     int
+	hbSignal      chan struct{}
+	statusSignal  chan struct{}
 }
 
 func newFakeCP(expected []*nodev1.SandboxSpec) *fakeControlPlane {
-	return &fakeControlPlane{expected: expected, hbSignal: make(chan struct{}, 8)}
+	return &fakeControlPlane{
+		expected:     expected,
+		hbSignal:     make(chan struct{}, 8),
+		statusSignal: make(chan struct{}, 8),
+	}
+}
+
+func (f *fakeControlPlane) UpdateNodeStatus(_ context.Context, req *nodev1.UpdateNodeStatusRequest) (
+	*nodev1.UpdateNodeStatusResponse, error) {
+	f.mu.Lock()
+	f.statusUpdates = append(f.statusUpdates, req)
+	f.mu.Unlock()
+	select {
+	case f.statusSignal <- struct{}{}:
+	default:
+	}
+	return &nodev1.UpdateNodeStatusResponse{}, nil
+}
+
+func (f *fakeControlPlane) statusSnapshot() []*nodev1.UpdateNodeStatusRequest {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	return append([]*nodev1.UpdateNodeStatusRequest(nil), f.statusUpdates...)
 }
 
 func (f *fakeControlPlane) Register(_ context.Context, req *nodev1.RegisterRequest) (*nodev1.RegisterResponse, error) {
@@ -128,15 +152,37 @@ func TestRegistrarRegistersAndHeartbeats(t *testing.T) {
 		t.Fatal("no heartbeat recorded")
 	}
 	hb := hbs[0]
+	// A heartbeat is liveness only now: it carries the identity the control plane
+	// authenticates and stamps last_heartbeat against, and nothing else. What the
+	// node holds -- sandboxes, usage -- must not ride the lease path.
+	if hb.NodeId != "node-a" {
+		t.Errorf("heartbeat node id = %q, want node-a", hb.NodeId)
+	}
 	if hb.NodeToken != "tok-1" {
 		t.Errorf("heartbeat token = %q, want the one issued by Register", hb.NodeToken)
 	}
-	if len(hb.Sandboxes) != 1 || hb.Sandboxes[0].SandboxId != "hb1" {
-		t.Errorf("heartbeat sandboxes = %+v", hb.Sandboxes)
+
+	// Disk usage arrives on the status path instead. Wait for a status report and
+	// assert it carries a usage message (the node always measures disk).
+	select {
+	case <-cp.statusSignal:
+	case <-time.After(5 * time.Second):
+		t.Fatal("no status update received")
 	}
-	if hb.Usage == nil || hb.Usage.CpuCommitted != 1 {
-		t.Errorf("usage = %+v, want cpu=1 from the running sandbox", hb.Usage)
+	var withUsage *nodev1.UpdateNodeStatusRequest
+	for _, su := range cp.statusSnapshot() {
+		if su.GetUsage() != nil {
+			withUsage = su
+			break
+		}
 	}
+	if withUsage == nil {
+		t.Fatal("no status update carried a usage message; disk usage did not move off the heartbeat")
+	}
+	if withUsage.NodeToken != "tok-1" {
+		t.Errorf("status token = %q, want the one issued by Register", withUsage.NodeToken)
+	}
+
 	// The sandbox is still alive: it was in the expected set.
 	if mgr.StateOf("hb1") != runtime.StateRunning {
 		t.Errorf("state = %s", mgr.StateOf("hb1"))
