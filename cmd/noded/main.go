@@ -276,6 +276,11 @@ func main() {
 	minFreeDiskPct := flag.Float64("min-free-disk-percent", 0,
 		"same floor as --min-free-disk-mib but against total capacity; the larger of "+
 			"the two applies, so a percentage travels between differently sized nodes")
+	maxMemPct := flag.Float64("max-mem-percent", 0,
+		"refuse new sandboxes while real memory usage (1 - MemAvailable/MemTotal) is "+
+			"at or above this percent; 0 disables. The scheduler's memory ledger counts "+
+			"requests, not real usage, so a node can look under-committed while the OOM "+
+			"killer is one create away from reaping a running sandbox")
 	snapCacheHighMiB := flag.Int64("snapshot-cache-high-mib", 0,
 		"reclaim unpacked snapshots once the cache reaches this size; 0 leaves it "+
 			"unbounded, which grows by roughly one guest's memory per distinct "+
@@ -596,6 +601,20 @@ func main() {
 		slog.Info("low-disk admission floor set",
 			"minFreeMiB", *minFreeDiskMiB, "minFreePercent", *minFreeDiskPct,
 			"currentFreeBytes", stats.FreeBytes, "totalBytes", stats.TotalBytes)
+	}
+
+	// The memory ceiling is the RAM equivalent of the disk floor above.
+	mgr.Mem = node.MemGuard{MaxUsedPercent: *maxMemPct}
+	if err := mgr.Mem.Validate(); err != nil {
+		log.Fatalf("--max-mem-percent: %v", err)
+	}
+	if !mgr.Mem.Enabled() {
+		slog.Warn("no memory ceiling set; a create under real memory pressure can " +
+			"trigger the OOM killer against a running sandbox")
+	} else if stats, err := mgr.Mem.Stat(); err == nil {
+		slog.Info("memory admission ceiling set",
+			"maxUsedPercent", *maxMemPct, "currentUsedPercent", stats.UsedPercent(),
+			"totalBytes", stats.TotalBytes, "availableBytes", stats.AvailableBytes)
 	}
 
 	lis, err := net.Listen("tcp", *listen)

@@ -82,6 +82,11 @@ type Manager struct {
 	// scheduler's disk commitment rather than instead of it.
 	Disk DiskGuard
 
+	// Mem refuses new sandboxes while real memory usage is above a ceiling. The
+	// zero value admits everything. Same rationale as Disk: the scheduler's
+	// commitment ledger is not what the machine is actually using. See memguard.go.
+	Mem MemGuard
+
 	// Net gives each sandbox its own namespace, tap and egress rules. Nil means
 	// this node has no networking configured, and that path is not a degraded
 	// mode: sandboxes ran with no interface at all before this existed, and a node
@@ -202,6 +207,16 @@ func (m *Manager) Create(ctx context.Context, spec *nodev1.SandboxSpec) (sb *San
 		m.metrics.IncCounter("bean_node_creates_refused_total",
 			"Creates refused to protect running sandboxes.",
 			map[string]string{"reason": "disk_pressure"}, 1)
+		return nil, err
+	}
+	// Memory is checked alongside disk and for the same reason: the scheduler's
+	// commitment ledger is not real usage, and admitting under real pressure risks
+	// the OOM killer reaping running sandboxes. Before the slot is reserved, so a
+	// refused create leaves nothing to clean up.
+	if err := m.Mem.Admit(); err != nil {
+		m.metrics.IncCounter("bean_node_creates_refused_total",
+			"Creates refused to protect running sandboxes.",
+			map[string]string{"reason": "mem_pressure"}, 1)
 		return nil, err
 	}
 

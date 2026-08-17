@@ -58,6 +58,43 @@ func spec(id string, mut ...func(*nodev1.SandboxSpec)) *nodev1.SandboxSpec {
 	return s
 }
 
+func TestCreateRefusedUnderMemoryPressureLeavesNoSlot(t *testing.T) {
+	m := newTestManager(t)
+	ctx := context.Background()
+
+	// A meminfo showing 90% used against an 80% ceiling: the guard must refuse.
+	mi := filepath.Join(t.TempDir(), "meminfo")
+	if err := os.WriteFile(mi, []byte(
+		"MemTotal:       16777216 kB\nMemAvailable:    1677722 kB\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	m.Mem = MemGuard{MaxUsedPercent: 80, Path: mi}
+
+	_, err := m.Create(ctx, spec("mem-refused"))
+	if err == nil {
+		t.Fatal("expected Create to be refused under memory pressure")
+	}
+	var pressure *ErrMemPressure
+	if !errors.As(err, &pressure) {
+		t.Fatalf("refusal must be *ErrMemPressure, got %T: %v", err, err)
+	}
+	// The refusal happens before the slot is reserved, so nothing is left to clean
+	// up -- a refused create must not appear in the sandbox table.
+	if m.Get("mem-refused") != nil {
+		t.Error("a refused create must not leave a reserved slot")
+	}
+	if got := len(m.Statuses()); got != 0 {
+		t.Errorf("sandbox count = %d after a refused create, want 0", got)
+	}
+
+	// Raising the ceiling above real usage lets the same create through, proving
+	// the guard is what refused rather than something else.
+	m.Mem = MemGuard{MaxUsedPercent: 99, Path: mi}
+	if _, err := m.Create(ctx, spec("mem-admitted")); err != nil {
+		t.Fatalf("expected admission once the ceiling is above usage: %v", err)
+	}
+}
+
 func TestCreateDestroy(t *testing.T) {
 	m := newTestManager(t)
 	ctx := context.Background()

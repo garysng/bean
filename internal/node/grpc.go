@@ -54,12 +54,13 @@ func (s *GRPCServer) CreateSandbox(ctx context.Context, req *nodev1.CreateSandbo
 	}
 	sb, err := s.mgr.Create(ctx, req.Spec)
 	if err != nil {
-		// A node declining work because it is low on disk is not a failure of this
-		// request: the same spec would succeed on another node, and will succeed here
-		// once space is reclaimed. ResourceExhausted says that, where Internal would
-		// tell the caller to report a bug.
-		var pressure *ErrDiskPressure
-		if errors.As(err, &pressure) {
+		// A node declining work because it is low on disk or memory is not a failure
+		// of this request: the same spec would succeed on another node, and will
+		// succeed here once the pressure clears. ResourceExhausted says that, where
+		// Internal would tell the caller to report a bug.
+		var diskPressure *ErrDiskPressure
+		var memPressure *ErrMemPressure
+		if errors.As(err, &diskPressure) || errors.As(err, &memPressure) {
 			return nil, status.Errorf(codes.ResourceExhausted, "create: %v", err)
 		}
 		return nil, status.Errorf(codes.Internal, "create: %v", err)
