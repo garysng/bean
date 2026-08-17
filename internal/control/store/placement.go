@@ -434,9 +434,9 @@ type CachedImage struct {
 // and is the authority on it: merging would keep an image the node has since
 // evicted, and the scheduler would keep sending work to a node that has to pull.
 //
-// Separate from TouchNode so a lease renewal and an inventory report cannot
-// interfere. They used to share the heartbeat, which meant this JSON blob was
-// re-serialised and rewritten every few seconds for a value that rarely changes.
+// Separate from the lease renewal (RenewLease) so a lease and an inventory report
+// cannot interfere. They used to share the heartbeat, which meant this JSON blob
+// was re-serialised and rewritten every few seconds for a value that rarely changes.
 func (s *Store) PutNodeImages(nodeID string, images map[string]CachedImage) error {
 	cached, err := marshalJSON(images)
 	if err != nil {
@@ -446,17 +446,28 @@ func (s *Store) PutNodeImages(nodeID string, images map[string]CachedImage) erro
 	return err
 }
 
-// TouchNode records a heartbeat and clears a non-terminal doubt state.
-// diskUsedMiB is recorded from the same heartbeat, and a zero is written through
-// rather than skipped: a node that stops being able to measure itself should read
-// as "not reported" instead of holding its last known figure forever.
+// RenewLease records a heartbeat and clears a non-terminal doubt state. That is
+// all a heartbeat is now: liveness. Nothing about what the node holds travels on
+// this path -- disk usage moved to SetNodeDiskUsed (written from UpdateNodeStatus),
+// so a slow or missing status report can never stall a lease renewal.
 //
-// The image inventory is deliberately not here; see PutNodeImages.
-func (s *Store) TouchNode(nodeID string, diskUsedMiB int64) error {
+// The image inventory is deliberately not here either; see PutNodeImages.
+func (s *Store) RenewLease(nodeID string) error {
 	_, err := s.exec(`
-UPDATE nodes SET last_heartbeat=?, disk_used_mib=?,
+UPDATE nodes SET last_heartbeat=?,
   state = CASE WHEN state IN ('SUSPECT','LOST') THEN 'READY' ELSE state END
-WHERE id=?`, time.Now().UnixMilli(), diskUsedMiB, nodeID)
+WHERE id=?`, time.Now().UnixMilli(), nodeID)
+	return err
+}
+
+// SetNodeDiskUsed records the node's measured disk usage, reported through
+// UpdateNodeStatus rather than the heartbeat. A zero is written through rather
+// than skipped: a node that stops being able to measure itself should read as
+// "not reported" instead of holding its last known figure forever. Off the lease
+// path, so this write cannot delay a renewal.
+func (s *Store) SetNodeDiskUsed(nodeID string, diskUsedMiB int64) error {
+	_, err := s.exec(`UPDATE nodes SET disk_used_mib=? WHERE id=?`,
+		diskUsedMiB, nodeID)
 	return err
 }
 

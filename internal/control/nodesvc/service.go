@@ -155,25 +155,13 @@ func (s *Service) Heartbeat(stream nodev1.NodeService_HeartbeatServer) error {
 		if err := s.authNode(req.GetNodeId(), req.GetNodeToken()); err != nil {
 			return err
 		}
-		// Only the lease and the instantaneous usage. What the node holds arrives
-		// through UpdateNodeStatus, on its own schedule -- carrying it here meant
-		// re-serialising and rewriting an unchanged image list every few seconds.
-		if err := s.store.TouchNode(req.NodeId,
-			req.GetUsage().GetDiskUsedMib()); err != nil {
-			return status.Errorf(codes.Internal, "touch node: %v", err)
-		}
-		// Accepted from a node that has not learned UpdateNodeStatus yet, so a
-		// rollout in either order keeps image affinity working. Ignored once the
-		// node sends the new report, which is the case that overwrites this with the
-		// same data plus digests.
-		if len(req.GetCachedImages()) > 0 {
-			images := make(map[string]store.CachedImage, len(req.GetCachedImages()))
-			for ref, size := range req.GetCachedImages() {
-				images[ref] = store.CachedImage{SizeBytes: size}
-			}
-			if err := s.store.PutNodeImages(req.GetNodeId(), images); err != nil {
-				return status.Errorf(codes.Internal, "record node images: %v", err)
-			}
+		// A heartbeat is liveness and nothing else: renew the lease against the
+		// identity we just authenticated. What the node holds -- its disk usage and
+		// image inventory -- arrives through UpdateNodeStatus, on its own schedule
+		// and off this path, so a slow status report can never stall a renewal and
+		// cost the node its lease.
+		if err := s.store.RenewLease(req.GetNodeId()); err != nil {
+			return status.Errorf(codes.Internal, "renew lease: %v", err)
 		}
 		if err := stream.Send(&nodev1.HeartbeatResponse{LeaseOk: true}); err != nil {
 			return err
@@ -207,6 +195,16 @@ func (s *Service) UpdateNodeStatus(ctx context.Context, req *nodev1.UpdateNodeSt
 		}
 		if err := s.store.PutNodeImages(req.GetNodeId(), images); err != nil {
 			return nil, status.Errorf(codes.Internal, "record node images: %v", err)
+		}
+	}
+	// Disk usage rides here now rather than on the heartbeat. Present on every
+	// report (the node always measures it), unlike the image inventory which is
+	// sent only when it has something to say -- so unlike images, an absent usage
+	// message is a node that predates this change, and skipping the write leaves
+	// its last figure rather than clobbering it with a zero.
+	if u := req.GetUsage(); u != nil {
+		if err := s.store.SetNodeDiskUsed(req.GetNodeId(), u.GetDiskUsedMib()); err != nil {
+			return nil, status.Errorf(codes.Internal, "record node disk usage: %v", err)
 		}
 	}
 	return &nodev1.UpdateNodeStatusResponse{}, nil

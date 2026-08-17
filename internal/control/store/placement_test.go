@@ -62,7 +62,7 @@ func TestPutNodeImagesRoundTrips(t *testing.T) {
 	}
 }
 
-func TestTouchNodeClearsSuspectAndRecordsDisk(t *testing.T) {
+func TestRenewLeaseClearsSuspect(t *testing.T) {
 	st := openTestStore(t)
 	if err := st.UpsertNode(node("node-t", "r1")); err != nil {
 		t.Fatal(err)
@@ -70,20 +70,43 @@ func TestTouchNodeClearsSuspectAndRecordsDisk(t *testing.T) {
 	if _, err := st.SetNodeState("node-t", "SUSPECT"); err != nil {
 		t.Fatal(err)
 	}
-	if err := st.TouchNode("node-t", 4096); err != nil {
+	// A heartbeat is now liveness only: it returns a SUSPECT node to READY and
+	// touches nothing about what the node holds.
+	if err := st.RenewLease("node-t"); err != nil {
 		t.Fatal(err)
 	}
 	got, err := st.GetNode("node-t")
 	if err != nil {
 		t.Fatal(err)
 	}
-	// A heartbeat from a SUSPECT node returns it to READY and records the disk
-	// figure from the same beat.
 	if got.State != "READY" {
 		t.Errorf("state = %q, want READY after heartbeat", got.State)
 	}
+}
+
+func TestSetNodeDiskUsedRecordsDisk(t *testing.T) {
+	st := openTestStore(t)
+	if err := st.UpsertNode(node("node-t", "r1")); err != nil {
+		t.Fatal(err)
+	}
+	// Disk usage arrives on the status path, separate from the lease.
+	if err := st.SetNodeDiskUsed("node-t", 4096); err != nil {
+		t.Fatal(err)
+	}
+	got, err := st.GetNode("node-t")
+	if err != nil {
+		t.Fatal(err)
+	}
 	if got.DiskUsedMiB != 4096 {
 		t.Errorf("disk used = %d, want 4096", got.DiskUsedMiB)
+	}
+	// A heartbeat must not disturb the recorded disk figure -- it is off the lease
+	// path entirely now.
+	if err := st.RenewLease("node-t"); err != nil {
+		t.Fatal(err)
+	}
+	if got, _ = st.GetNode("node-t"); got.DiskUsedMiB != 4096 {
+		t.Errorf("disk used = %d after RenewLease, want it unchanged at 4096", got.DiskUsedMiB)
 	}
 }
 

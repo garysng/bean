@@ -46,10 +46,11 @@ func (f *fakeStore) GetNode(id string) (*store.NodeRecord, error) {
 	}
 	return nil, nil
 }
-func (f *fakeStore) UpsertNode(n *store.NodeRecord) error         { f.nodes = append(f.nodes, n); return nil }
-func (f *fakeStore) LoadNodes() ([]*store.NodeRecord, error)      { return f.nodes, nil }
-func (f *fakeStore) SetNodeState(id, state string) (bool, error)  { return true, nil }
-func (f *fakeStore) TouchNode(id string, diskUsedMiB int64) error { return nil }
+func (f *fakeStore) UpsertNode(n *store.NodeRecord) error               { f.nodes = append(f.nodes, n); return nil }
+func (f *fakeStore) LoadNodes() ([]*store.NodeRecord, error)            { return f.nodes, nil }
+func (f *fakeStore) SetNodeState(id, state string) (bool, error)        { return true, nil }
+func (f *fakeStore) RenewLease(id string) error                         { return nil }
+func (f *fakeStore) SetNodeDiskUsed(id string, diskUsedMiB int64) error { return nil }
 func (f *fakeStore) StaleNodes(olderThan time.Time, exclude ...string) ([]*store.NodeRecord, error) {
 	return nil, nil
 }

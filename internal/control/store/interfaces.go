@@ -119,15 +119,18 @@ type Nodes interface {
 	// is the same shape as Reserve's RowsAffected check -- the database decides, and
 	// the caller is told what it decided.
 	SetNodeState(nodeID, state string) (bool, error)
-	// TouchNode records a heartbeat and the node's measured disk use, and revives a
-	// node the sweep had marked SUSPECT or LOST.
+	// RenewLease records a heartbeat and revives a node the sweep had marked
+	// SUSPECT or LOST. Liveness only -- nothing about what the node holds.
 	//
 	// Separate from UpsertNode because a heartbeat must not be able to change a node's
 	// advertised capacity: a partial record arriving on the liveness path would
 	// otherwise silently shrink the cluster. The revival is part of the same statement
 	// for the same reason the other conditions are -- a heartbeat that arrived and a
 	// state that changed must not be two decisions.
-	TouchNode(nodeID string, diskUsedMiB int64) error
+	RenewLease(nodeID string) error
+	// SetNodeDiskUsed records the node's measured disk usage, reported through
+	// UpdateNodeStatus rather than the heartbeat so it stays off the lease path.
+	SetNodeDiskUsed(nodeID string, diskUsedMiB int64) error
 	// StaleNodes lists nodes whose last heartbeat is older than the cutoff.
 	StaleNodes(olderThan time.Time, excludeStates ...string) ([]*NodeRecord, error)
 	// PutNodeImages records which images a node has cached, which is what image

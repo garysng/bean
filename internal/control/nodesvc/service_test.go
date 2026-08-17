@@ -304,6 +304,32 @@ func TestUpdateNodeStatusRecordsImagesWithDigests(t *testing.T) {
 	}
 }
 
+// TestUpdateNodeStatusRecordsDiskUsage guards the move of disk usage off the
+// heartbeat and onto the status path: a usage message updates the node's recorded
+// disk figure, which is what the ops /nodes view reads.
+func TestUpdateNodeStatusRecordsDiskUsage(t *testing.T) {
+	c, st, _ := start(t, Options{BootstrapToken: "boot-tok"})
+	ctx := context.Background()
+	reg, err := c.Register(ctx, regReq("n1"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.UpdateNodeStatus(ctx, &nodev1.UpdateNodeStatusRequest{
+		NodeId:    "n1",
+		NodeToken: reg.NodeToken,
+		Usage:     &nodev1.NodeUsage{DiskUsedMib: 2048},
+	}); err != nil {
+		t.Fatalf("UpdateNodeStatus: %v", err)
+	}
+	n, err := st.GetNode("n1")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if n.DiskUsedMiB != 2048 {
+		t.Errorf("disk used = %d, want 2048", n.DiskUsedMiB)
+	}
+}
+
 // TestUpdateNodeStatusWithNoCategoryLeavesImagesAlone is the property the
 // optional fields exist for. A node reporting some other category on its own must
 // not read as a node that has dropped every image -- that would clear affinity
@@ -414,7 +440,6 @@ func TestHeartbeatDoesNotClearTheInventory(t *testing.T) {
 	for i := 0; i < 3; i++ {
 		if err := stream.Send(&nodev1.HeartbeatRequest{
 			NodeId: "n1", NodeToken: reg.NodeToken,
-			Usage: &nodev1.NodeUsage{DiskUsedMib: 10},
 		}); err != nil {
 			t.Fatal(err)
 		}
