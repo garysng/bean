@@ -134,7 +134,7 @@ design turned out to be wrong during implementation:
 
 - **`Create` does not take a rootfs.** The image provider is a field of the runtime rather than a parameter — because the moment at which the rootfs is assembled is coupled to the runtime's internal state: restore has to fill the CoW in **before the device is assembled** (otherwise dm-snapshot's exception table is already in the kernel and the filesystem is silently corrupted; see `docs/decisions.md` §3.0). A parameter-style interface cannot express that ordering.
 - **`Restore` takes `[]SnapshotLayer` rather than a single reader.** Incremental snapshots have to replay the whole chain, and each layer is an independent gzip stream; a single reader stops at the end of the first layer.
-- **There is no `Stats`.** It was never implemented and has no caller — resource watermarks are currently accounted from the committed amounts in the heartbeat.
+- **There is no `Stats`.** It was never implemented and has no caller — the scheduler accounts placement from committed amounts, not real per-runtime usage. Node-local admission is the exception: `DiskGuard` and `MemGuard` measure the real machine (statfs, `/proc/meminfo`) to refuse creates under real pressure, independent of the commitment ledger.
 
 There are also three **optional** interfaces that a runtime implements according
 to its capabilities and callers type-assert on: `ImageWarmer` (prewarm),
@@ -254,7 +254,7 @@ The API layer gains `resources.diskMiB` (the writable-layer ceiling, default
 | fc tier | A writable overlay disk (a sparse file with ext4 pre-created) | The disk size is the ceiling, a hard limit by construction; the sparse file occupies host space according to what is actually written |
 
 - Node disk is split into pools: `cache/` (image chunks, reclaimable by LRU) and `sandboxes/` (writable layers, lifetime bound to the sandbox) are accounted separately — the cache can always be sacrificed, the writable layer cannot
-- Writable-layer usage is reported by heartbeat (the basis for the scheduler's disk watermark); behaviour when full: ENOSPC on the container tier, ENOSPC inside the guest on the fc tier, and neither affects the host
+- Writable-layer usage (`disk_used`) is reported by `UpdateNodeStatus`, not the heartbeat, and feeds the ops `/nodes` view; the node also refuses creates locally via `DiskGuard` when real free space is below a floor. Behaviour when full: ENOSPC on the container tier, ENOSPC inside the guest on the fc tier, and neither affects the host
 - tmpfs: `/dev/shm` defaults to 64 MiB and counts against the memory quota; configurable
 
 ## 3.3 Volumes (an independent first-class resource) 📐
@@ -372,7 +372,7 @@ under crates, and the registryfs_v2 remote direct-read mode).
 
 - The LRU accounts at "image" granularity (with reference counting when blocks are shared by several images), and the chunk cache has its own LRU
 - Watermark control: the cache pool above 85% triggers background GC, above 95% refuses new PULLING and reports that to the scheduler; the headroom in the sandboxes pool is a hard scheduling constraint
-- Cache inventory digest: the heartbeat carries the delta of the local set of image refs + a bloom filter + the byte fraction (used by the scheduler's image affinity)
+- Cache inventory: `UpdateNodeStatus` (not the heartbeat) carries the local set of image refs + sizes + digests (used by the scheduler's image affinity), reported on the event-triggered/periodic status loop
 
 ### 4.3 Prewarm ✅
 
@@ -575,9 +575,10 @@ token.
 
 ### 7.1 Heartbeat ✅
 
-- A bidirectional stream at 3s intervals; it carries resource watermarks, per-sandbox {id, state, resource-usage summary}, the image cache delta, and the command ids currently executing
-- The control plane not receiving anything for 15s (5 intervals) → the node goes SUSPECT → after 30s → LOST: the RUNNING sandboxes on it are marked LOST and the scheduler stops dispatching to it
-- Recovery from a network blip: once the stream is re-established the full state is reported once; direct commands issued by the control plane during that window fail and are retried, and exceeding the threshold triggers rescheduling
+- A bidirectional stream at 3s intervals that is **liveness only**: it carries the node identity (`node_id` + `node_token`) the control plane authenticates and stamps `last_heartbeat` against, and the reply is `lease_ok`. Nothing about what the node holds rides this path — that was removed deliberately (see below), so a slow inventory report can never stall a lease renewal and cost the node its sandboxes.
+- What the node holds travels on `UpdateNodeStatus`, a separate unary call on its own goroutine: the image-cache inventory and the node's measured `disk_used`. This is **event-triggered plus a periodic floor** — a successful create/destroy/pause/resume kicks a report so the ops `/nodes` view reflects the change in seconds, and a slow ~60s tick backstops a dropped kick. (Previously the heartbeat also carried `sandboxes[]` and a `usage` message with `cpu_committed`/`memory_committed_mib`; all three had no control-plane consumer and were deleted rather than moved. Sandbox reconciliation is `SyncState`, which the node drives.)
+- The control plane not receiving a heartbeat for 15s (5 intervals) → the node goes SUSPECT → after 30s → LOST: the RUNNING sandboxes on it are marked LOST and the scheduler stops dispatching to it. Liveness reads only `last_heartbeat`.
+- Recovery from a network blip: once the stream is re-established the node re-registers and resumes heartbeating; the status report is resent on its own loop. Direct commands issued by the control plane during that window fail and are retried, and exceeding the threshold triggers rescheduling.
 
 ### 7.2 noded Restart reconcile ⚠️
 
