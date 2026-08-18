@@ -177,13 +177,18 @@ images, the snapshot cache, and other services sharing the volume.
 No overcommit factor. A factor asks an operator to guess a multiplier, and the
 nominal size of a sparse file was never a sound basis for accounting. Instead
 `statfs` measures real occupancy and reports it three ways:
-`bean_node_disk_{free,used}_bytes`, heartbeat `disk_used_mib`, and `diskUsedMiB`
-on `/v1/nodes`.
+`bean_node_disk_{free,used}_bytes`, `UpdateNodeStatus`'s `disk_used_mib` (moved
+off the heartbeat, which is now liveness-only), and `diskUsedMiB` on `/v1/nodes`.
 
-**Placement still uses the commitment ledger.** A ledger cannot be oversold by a
-burst, whereas measured occupancy lags — placing against a lagging number puts a
-batch into a wall when they all start writing. The real defence is on the node:
-`--min-free-disk-mib` / `--min-free-disk-percent`, off by default.
+**Placement filters on the commitment ledger; real load only scores.** A ledger
+cannot be oversold by a burst, whereas measured occupancy lags — filtering on a
+lagging number puts a batch into a wall when they all start writing, or refuses
+work a node can actually take. So feasibility stays on commitments, and the
+node's measured cpu%/mem%/disk feed a soft `Load` penalty in the score: a hot but
+lightly-committed node loses to an idle peer without ever being ruled out. The
+hard defence is still on the node: `--min-free-disk-mib` / `--min-free-disk-percent`
+and `--max-mem-percent`, off by default, and now retunable at runtime via
+`ConfigureAdmission` / `PATCH /v1/nodes/{id}/admission`.
 
 That defence is not optional, because the failure mode was measured
 ([decisions.md](decisions.md) §3.7) and it is unrecoverable: when the host

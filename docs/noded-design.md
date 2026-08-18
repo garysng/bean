@@ -134,7 +134,7 @@ design turned out to be wrong during implementation:
 
 - **`Create` does not take a rootfs.** The image provider is a field of the runtime rather than a parameter — because the moment at which the rootfs is assembled is coupled to the runtime's internal state: restore has to fill the CoW in **before the device is assembled** (otherwise dm-snapshot's exception table is already in the kernel and the filesystem is silently corrupted; see `docs/decisions.md` §3.0). A parameter-style interface cannot express that ordering.
 - **`Restore` takes `[]SnapshotLayer` rather than a single reader.** Incremental snapshots have to replay the whole chain, and each layer is an independent gzip stream; a single reader stops at the end of the first layer.
-- **There is no `Stats`.** It was never implemented and has no caller — the scheduler accounts placement from committed amounts, not real per-runtime usage. Node-local admission is the exception: `DiskGuard` and `MemGuard` measure the real machine (statfs, `/proc/meminfo`) to refuse creates under real pressure, independent of the commitment ledger.
+- **There is no `Stats`.** It was never implemented and has no caller — the scheduler accounts placement from committed amounts, not real per-runtime usage. Node-local admission is the exception: `DiskGuard` and `MemGuard` measure the real machine (statfs, `/proc/meminfo`) to refuse creates under real pressure, independent of the commitment ledger. Their thresholds are **runtime-tunable**: the startup flags (`--min-free-disk-*`, `--max-mem-percent`) are only the initial default, and the control plane can retune a live node through `ConfigureAdmission` (see §7.4) without a restart. The guards sit behind a lock so a push and a concurrent `Create` never race.
 
 There are also three **optional** interfaces that a runtime implements according
 to its capabilities and callers type-assert on: `ImageWarmer` (prewarm),
@@ -239,6 +239,7 @@ unexplainable timeouts rather than as a configuration error.
 
 - CPU: bursty eval workloads default to 3.0; a CPU-intensive node pool can be set to 1.0; cgroup cpu.weight is allocated in proportion to the shape to keep things fair; `dedicated: true` (a reserved field) → vCPU pinning, excluded from overcommit
 - Memory: the container tier naturally reuses memory according to actual RSS; the fc tier relies on the balloon — noded drives balloon reclaim of idle guest memory periodically, and the scheduler accounts on two watermarks, the "shape's committed amount" and the "actual usage after ballooning": new creations look at the commitment (so resume/burst have headroom), alerting looks at actual usage
+- Real load feeds placement, but only as a **soft score, never a filter**. The node measures its own cpu% (`/proc/stat`, two-sample delta) and mem% (`/proc/meminfo`) and reports them on the `UpdateNodeStatus` loop; the scheduler subtracts a `Load`-weighted penalty for the hotter of the two, so a lightly-committed but hot node loses to an idle peer. Feasibility stays on the commitment ledger alone: real usage is advisory and lags, so letting it gate placement would risk refusing work a node can actually take. Deciding placement on committed amounts is also what keeps replicas safe from overselling — see the scheduler note in `architecture.md`.
 - A change to the factor affects only subsequent scheduling decisions; existing sandboxes are unaffected; when lowering it puts the commitment above the new allocatable, the node is marked "no longer accepting work" and drains naturally
 - PAUSED: neither tier releases the memory allocation (to prevent OOM on resume); to release it, go through snapshot
 - Shape ceiling: a single sandbox ≤ 32 vCPU / 128 GiB (an FC constraint on the fc tier; the container tier keeps the same limit for consistency)
@@ -616,6 +617,31 @@ orphan scan compares by prefix against the set of live sandboxes.
 | exec session | 60s disconnected with no reattach |
 | Temporary files (S3 staging downloads) | An S3 lifecycle rule at 1 day |
 | Terminal-state sandbox records in Postgres | A control-plane archival job moves them to cold storage after 30 days |
+
+### 7.4 Downward config: ConfigureAdmission ✅
+
+Almost every RPC in bean flows node→control (Register, Heartbeat, SyncState,
+UpdateNodeStatus) or is a command riding the control→node `SandboxService`
+channel that already exists for placement (Create/Destroy/…). `ConfigureAdmission`
+is a control→node RPC on that same `SandboxService`: the control plane retunes a
+live node's admission thresholds without a restart.
+
+- **Shape.** `ConfigureAdmission(node_id, AdmissionConfig)` where every field of
+  `AdmissionConfig` (`min_free_disk_mib`, `min_free_disk_percent`,
+  `max_mem_percent`) is `optional`. An absent field means "leave it", so one knob
+  can be pushed without restating the rest; the node overlays the set fields onto
+  its live guards, validates the result, and installs it only if valid — a bad
+  threshold is rejected with `InvalidArgument` and the node keeps its previous
+  guards rather than adopting a broken one.
+- **Operator surface.** `PATCH /v1/nodes/{id}/admission` on bean-api forwards the
+  same partial patch. The gateway holds no admission state; it resolves the node's
+  `SandboxService` client and forwards. A rejected threshold surfaces as the node's
+  own 400; an unreachable node as 503.
+- **Persistence gap (not yet built).** A retune is held only in the node's memory,
+  so a node restart falls back to its startup flags rather than the last pushed
+  policy. Converging a restarted node back to cluster policy needs the default to
+  be persisted control-plane-side and re-pushed on register — deferred until the
+  config's owner (global default vs per-node override) is decided.
 
 ## 8. noded's Own Observability ✅
 
