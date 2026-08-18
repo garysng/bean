@@ -225,6 +225,45 @@ func TestNVMePreferredForColdImage(t *testing.T) {
 	}
 }
 
+func TestRealLoadPrefersIdleNode(t *testing.T) {
+	// Two identical nodes by commitment; one reports it is really hot. The soft
+	// load term must send work to the idle one even though the commitment ledger
+	// sees them as equal.
+	s, st := newSched(t, node("hot", 8, 8192), node("idle", 8, 8192))
+	// Load is reported via the status path, not carried on the node record through
+	// registration -- so it is set the way the node would, via SetNodeUsage.
+	if err := st.SetNodeUsage("hot", 0, 95, 40); err != nil {
+		t.Fatal(err)
+	}
+	if err := st.SetNodeUsage("idle", 0, 5, 10); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.Schedule(req("s1", 1, 512))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got != "idle" {
+		t.Errorf("node = %s, want idle (real load score)", got)
+	}
+}
+
+func TestRealLoadNeverFiltersOnlyScores(t *testing.T) {
+	// A node reporting 100% real load must still be placeable when it is the only
+	// one: load shapes preference, it is not a feasibility gate. Commitment
+	// headroom is what feasibility checks, and this node has it.
+	s, st := newSched(t, node("hot", 8, 8192))
+	if err := st.SetNodeUsage("hot", 0, 100, 100); err != nil {
+		t.Fatal(err)
+	}
+	got, err := s.Schedule(req("s1", 1, 512))
+	if err != nil {
+		t.Fatalf("a hot-but-uncommitted node must still be placeable: %v", err)
+	}
+	if got != "hot" {
+		t.Errorf("node = %s, want hot (only node, load is not a filter)", got)
+	}
+}
+
 func TestSpreadAcrossNodes(t *testing.T) {
 	s, _ := newSched(t, node("a", 16, 16384), node("b", 16, 16384), node("c", 16, 16384))
 	seen := map[string]int{}

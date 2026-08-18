@@ -84,13 +84,14 @@ func TestRenewLeaseClearsSuspect(t *testing.T) {
 	}
 }
 
-func TestSetNodeDiskUsedRecordsDisk(t *testing.T) {
+func TestSetNodeUsageRecordsLoad(t *testing.T) {
 	st := openTestStore(t)
 	if err := st.UpsertNode(node("node-t", "r1")); err != nil {
 		t.Fatal(err)
 	}
-	// Disk usage arrives on the status path, separate from the lease.
-	if err := st.SetNodeDiskUsed("node-t", 4096); err != nil {
+	// Usage -- disk plus real cpu%/mem% -- arrives on the status path, separate
+	// from the lease.
+	if err := st.SetNodeUsage("node-t", 4096, 42.5, 73.25); err != nil {
 		t.Fatal(err)
 	}
 	got, err := st.GetNode("node-t")
@@ -100,13 +101,20 @@ func TestSetNodeDiskUsedRecordsDisk(t *testing.T) {
 	if got.DiskUsedMiB != 4096 {
 		t.Errorf("disk used = %d, want 4096", got.DiskUsedMiB)
 	}
-	// A heartbeat must not disturb the recorded disk figure -- it is off the lease
-	// path entirely now.
+	if got.CPUUsedPercent != 42.5 {
+		t.Errorf("cpu used = %g, want 42.5", got.CPUUsedPercent)
+	}
+	if got.MemUsedPercent != 73.25 {
+		t.Errorf("mem used = %g, want 73.25", got.MemUsedPercent)
+	}
+	// A heartbeat must not disturb the recorded figures -- it is off the lease path
+	// entirely now.
 	if err := st.RenewLease("node-t"); err != nil {
 		t.Fatal(err)
 	}
-	if got, _ = st.GetNode("node-t"); got.DiskUsedMiB != 4096 {
-		t.Errorf("disk used = %d after RenewLease, want it unchanged at 4096", got.DiskUsedMiB)
+	if got, _ = st.GetNode("node-t"); got.DiskUsedMiB != 4096 || got.CPUUsedPercent != 42.5 {
+		t.Errorf("usage disturbed by RenewLease: disk=%d cpu=%g",
+			got.DiskUsedMiB, got.CPUUsedPercent)
 	}
 }
 

@@ -262,7 +262,12 @@ CREATE TABLE IF NOT EXISTS nodes (
   -- sandboxes were promised. A sandbox's disk request is nominal and its layer is
   -- sparse, so the two differ by orders of magnitude. Advisory: placement stays on
   -- the commitment ledger, and the node's own floor is what protects it.
-  disk_used_mib INTEGER NOT NULL DEFAULT 0
+  disk_used_mib INTEGER NOT NULL DEFAULT 0,
+  -- The node's real measured load, reported alongside disk_used_mib. These feed
+  -- the scheduler's score (prefer a less-loaded node) but never admission, which
+  -- stays on the commitment ledger. 0 means not reported.
+  cpu_used_percent REAL NOT NULL DEFAULT 0,
+  mem_used_percent REAL NOT NULL DEFAULT 0
 );
 CREATE INDEX IF NOT EXISTS idx_nodes_region_state ON nodes(region, state);
 -- One reservation per sandbox: the primary key makes Reserve idempotent
@@ -324,6 +329,8 @@ func (s *Store) addMissingColumns() error {
 		{"nodes", `cpu_template TEXT NOT NULL DEFAULT ''`},
 		{"snapshots", `base_id TEXT NOT NULL DEFAULT ''`},
 		{"nodes", `disk_used_mib INTEGER NOT NULL DEFAULT 0`},
+		{"nodes", `cpu_used_percent REAL NOT NULL DEFAULT 0`},
+		{"nodes", `mem_used_percent REAL NOT NULL DEFAULT 0`},
 		{"templates", `owner TEXT NOT NULL DEFAULT ''`},
 	} {
 		stmt := s.d.ddl(s.d.addColumn(c.table, c.def))

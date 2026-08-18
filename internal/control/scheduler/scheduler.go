@@ -77,6 +77,12 @@ type Weights struct {
 	Packing        float64
 	NVMeCache      float64
 	Spread         float64
+	// Load penalises a node by its real measured cpu%/mem% (reported by the node,
+	// not the commitment ledger), scaled 0..1. Subtracted, never a filter: a hot
+	// node stays placeable but is preferred less, so the fleet drifts work toward
+	// nodes that are actually idle even when commitments tie. Advisory and lagging,
+	// which is exactly why it shapes score rather than feasibility.
+	Load float64
 }
 
 // DefaultWeights orders the terms by what they cost when got wrong.
@@ -91,7 +97,7 @@ type Weights struct {
 // necessarily has the image, so a warm node scores both.
 func DefaultWeights() Weights {
 	return Weights{ImageAffinity: 10, WarmSnapshot: 15, CreatePressure: 12,
-		Packing: 3, NVMeCache: 2, Spread: 4}
+		Packing: 3, NVMeCache: 2, Spread: 4, Load: 6}
 }
 
 // Store is what the scheduler needs of the state store: the resource ledger and the
@@ -377,6 +383,19 @@ func (s *Scheduler) score(n *store.NodeRecord, spread map[string]int, req *Reque
 		memFrac = float64(n.MemoryCommitMiB+req.MemoryMiB) / float64(n.MemoryAllocateMiB)
 	}
 	score += s.weights.Packing * (cpuFrac + memFrac) / 2
+
+	// Real load: prefer a node that is actually idle. This is the counterweight to
+	// Packing -- Packing reasons about commitments (what was promised), this reasons
+	// about what the node reported it is really using, and the two disagree exactly
+	// when it matters (a node packed with idle sandboxes, or one light on
+	// commitments but hot from a runaway workload). The hotter of cpu%/mem% is the
+	// binding constraint, scaled to 0..1. A node that has not reported load yet
+	// (0%) is simply not penalised, so this never makes a silent node unplaceable.
+	if load := n.CPUUsedPercent; n.MemUsedPercent > load {
+		score -= s.weights.Load * n.MemUsedPercent / 100
+	} else {
+		score -= s.weights.Load * load / 100
+	}
 
 	// A cold image benefits from a fast local cache disk.
 	if n.NVMeCache {

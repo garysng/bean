@@ -203,8 +203,9 @@ func (s *Service) UpdateNodeStatus(ctx context.Context, req *nodev1.UpdateNodeSt
 	// message is a node that predates this change, and skipping the write leaves
 	// its last figure rather than clobbering it with a zero.
 	if u := req.GetUsage(); u != nil {
-		if err := s.store.SetNodeDiskUsed(req.GetNodeId(), u.GetDiskUsedMib()); err != nil {
-			return nil, status.Errorf(codes.Internal, "record node disk usage: %v", err)
+		if err := s.store.SetNodeUsage(req.GetNodeId(), u.GetDiskUsedMib(),
+			u.GetCpuUsedPercent(), u.GetMemUsedPercent()); err != nil {
+			return nil, status.Errorf(codes.Internal, "record node usage: %v", err)
 		}
 	}
 	return &nodev1.UpdateNodeStatusResponse{}, nil

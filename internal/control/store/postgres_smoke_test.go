@@ -94,7 +94,7 @@ func TestPostgresEveryMethodExecutes(t *testing.T) {
 	_, err = s.GetNode("n-1")
 	check("GetNode", err)
 	check("RenewLease", s.RenewLease("n-1"))
-	check("SetNodeDiskUsed", s.SetNodeDiskUsed("n-1", 128))
+	check("SetNodeUsage", s.SetNodeUsage("n-1", 128, 10, 20))
 	check("PutNodeImages", s.PutNodeImages("n-1", map[string]CachedImage{"img:1": {SizeBytes: 1}}))
 	_, err = s.StaleNodes(now.Add(-time.Minute))
 	check("StaleNodes", err)

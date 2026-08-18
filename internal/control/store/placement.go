@@ -52,6 +52,15 @@ type NodeRecord struct {
 	// thing that actually protects it (see node.DiskGuard).
 	DiskUsedMiB int64 `json:"diskUsedMiB"`
 
+	// CPUUsedPercent and MemUsedPercent are the node's real measured load, as
+	// opposed to the commitment ledger above. Unlike DiskUsedMiB these do feed
+	// placement -- but only the score, never admission: the scheduler prefers a
+	// less-loaded node when commitments tie, while feasibility stays on the ledger
+	// so a burst cannot oversell and a lagging load reading cannot strand capacity.
+	// 0 means the node has not reported it (older node, or measurement gap).
+	CPUUsedPercent float64 `json:"cpuUsedPercent"`
+	MemUsedPercent float64 `json:"memUsedPercent"`
+
 	// CreateInFlight bounds concurrent creates so a burst becomes a
 	// pipeline instead of a stampede.
 	CreateInFlight int `json:"createInFlight"`
@@ -147,7 +156,8 @@ SELECT id, region, labels, runtimes, cpu_alloc, mem_alloc, disk_alloc, gpu_count
        cpu_committed, mem_committed, disk_committed, gpu_committed,
        create_in_flight, max_creates, cached_images, nvme_cache, state,
        advertise_addr, last_heartbeat,
-       cpu_vendor, cpu_family, cpu_template, disk_used_mib
+       cpu_vendor, cpu_family, cpu_template, disk_used_mib,
+       cpu_used_percent, mem_used_percent
 FROM nodes ORDER BY id`)
 	if err != nil {
 		return nil, err
@@ -171,7 +181,8 @@ SELECT id, region, labels, runtimes, cpu_alloc, mem_alloc, disk_alloc, gpu_count
        cpu_committed, mem_committed, disk_committed, gpu_committed,
        create_in_flight, max_creates, cached_images, nvme_cache, state,
        advertise_addr, last_heartbeat,
-       cpu_vendor, cpu_family, cpu_template, disk_used_mib
+       cpu_vendor, cpu_family, cpu_template, disk_used_mib,
+       cpu_used_percent, mem_used_percent
 FROM nodes WHERE id=?`, id)
 	n, err := scanNode(row)
 	if err == sql.ErrNoRows {
@@ -193,7 +204,8 @@ func scanNode(sc rowScanner) (*NodeRecord, error) {
 		&n.CPUCommitted, &n.MemoryCommitMiB, &n.DiskCommitMiB, &n.GPUCommitted,
 		&n.CreateInFlight, &n.MaxCreates, &cached, &n.NVMeCache, &n.State,
 		&n.AdvertiseAddr, &hb,
-		&n.CPUVendor, &n.CPUFamily, &n.CPUTemplate, &n.DiskUsedMiB); err != nil {
+		&n.CPUVendor, &n.CPUFamily, &n.CPUTemplate, &n.DiskUsedMiB,
+		&n.CPUUsedPercent, &n.MemUsedPercent); err != nil {
 		return nil, err
 	}
 	if err := unmarshalJSON(labels, &n.Labels); err != nil {
@@ -448,7 +460,7 @@ func (s *Store) PutNodeImages(nodeID string, images map[string]CachedImage) erro
 
 // RenewLease records a heartbeat and clears a non-terminal doubt state. That is
 // all a heartbeat is now: liveness. Nothing about what the node holds travels on
-// this path -- disk usage moved to SetNodeDiskUsed (written from UpdateNodeStatus),
+// this path -- usage moved to SetNodeUsage (written from UpdateNodeStatus),
 // so a slow or missing status report can never stall a lease renewal.
 //
 // The image inventory is deliberately not here either; see PutNodeImages.
@@ -460,14 +472,18 @@ WHERE id=?`, time.Now().UnixMilli(), nodeID)
 	return err
 }
 
-// SetNodeDiskUsed records the node's measured disk usage, reported through
-// UpdateNodeStatus rather than the heartbeat. A zero is written through rather
-// than skipped: a node that stops being able to measure itself should read as
-// "not reported" instead of holding its last known figure forever. Off the lease
-// path, so this write cannot delay a renewal.
-func (s *Store) SetNodeDiskUsed(nodeID string, diskUsedMiB int64) error {
-	_, err := s.exec(`UPDATE nodes SET disk_used_mib=? WHERE id=?`,
-		diskUsedMiB, nodeID)
+// SetNodeUsage records the node's measured load -- disk, plus real cpu%/mem% --
+// reported through UpdateNodeStatus rather than the heartbeat. Zeros are written
+// through rather than skipped: a node that stops being able to measure itself
+// should read as "not reported" instead of holding its last known figures
+// forever. Off the lease path, so this write cannot delay a renewal.
+//
+// disk_used feeds only the ops view; cpu%/mem% feed the scheduler's soft load
+// score. Neither feeds admission -- that stays on the commitment ledger.
+func (s *Store) SetNodeUsage(nodeID string, diskUsedMiB int64, cpuPct, memPct float64) error {
+	_, err := s.exec(
+		`UPDATE nodes SET disk_used_mib=?, cpu_used_percent=?, mem_used_percent=? WHERE id=?`,
+		diskUsedMiB, cpuPct, memPct, nodeID)
 	return err
 }
 

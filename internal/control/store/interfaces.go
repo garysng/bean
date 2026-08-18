@@ -128,9 +128,11 @@ type Nodes interface {
 	// for the same reason the other conditions are -- a heartbeat that arrived and a
 	// state that changed must not be two decisions.
 	RenewLease(nodeID string) error
-	// SetNodeDiskUsed records the node's measured disk usage, reported through
-	// UpdateNodeStatus rather than the heartbeat so it stays off the lease path.
-	SetNodeDiskUsed(nodeID string, diskUsedMiB int64) error
+	// SetNodeUsage records the node's measured load -- disk plus real cpu%/mem% --
+	// reported through UpdateNodeStatus rather than the heartbeat so it stays off
+	// the lease path. cpu%/mem% feed the scheduler's soft load score; none of it
+	// feeds admission.
+	SetNodeUsage(nodeID string, diskUsedMiB int64, cpuPct, memPct float64) error
 	// StaleNodes lists nodes whose last heartbeat is older than the cutoff.
 	StaleNodes(olderThan time.Time, excludeStates ...string) ([]*NodeRecord, error)
 	// PutNodeImages records which images a node has cached, which is what image
