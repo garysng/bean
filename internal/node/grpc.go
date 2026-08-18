@@ -278,6 +278,46 @@ func (s *GRPCServer) CancelBuild(ctx context.Context, req *nodev1.CancelBuildReq
 	return &nodev1.CancelBuildResponse{Found: s.builds.cancelBuild(req.Tag)}, nil
 }
 
+// ConfigureAdmission retunes the node's admission thresholds at runtime. Every
+// field of the config is optional and applied over the current guards, so a push
+// that names only the memory ceiling leaves the disk floor as it was -- which is
+// what lets the control plane adjust one knob without having to restate the rest.
+//
+// The new guards are validated before they are installed, so a bad config is
+// rejected with InvalidArgument and the node keeps running under its previous
+// thresholds rather than adopting a broken one.
+func (s *GRPCServer) ConfigureAdmission(ctx context.Context, req *nodev1.ConfigureAdmissionRequest) (
+	*nodev1.ConfigureAdmissionResponse, error) {
+	cfg := req.GetConfig()
+	if cfg == nil {
+		// No-op rather than an error: an empty config changes nothing, and treating
+		// "change nothing" as a failure would make a caller special-case it.
+		return &nodev1.ConfigureAdmissionResponse{}, nil
+	}
+
+	// Start from the live guards and overlay only the fields the caller set, so an
+	// absent field means "leave it" rather than "reset to zero".
+	disk, mem := s.mgr.Admission()
+	if cfg.MinFreeDiskMib != nil {
+		disk.MinFreeBytes = cfg.GetMinFreeDiskMib() << 20
+	}
+	if cfg.MinFreeDiskPercent != nil {
+		disk.MinFreePercent = cfg.GetMinFreeDiskPercent()
+	}
+	if cfg.MaxMemPercent != nil {
+		mem.MaxUsedPercent = cfg.GetMaxMemPercent()
+	}
+
+	if err := disk.Validate(); err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "disk admission: %v", err)
+	}
+	if err := mem.Validate(); err != nil {
+		return nil, status.Errorf(codes.InvalidArgument, "memory admission: %v", err)
+	}
+	s.mgr.SetAdmission(disk, mem)
+	return &nodev1.ConfigureAdmissionResponse{}, nil
+}
+
 // imageConfigToProto converts a recovered image config to its wire form, or nil when
 // the build or conversion declared none. The control plane records it on the template
 // so a create honours the ENV/ENTRYPOINT/CMD/WORKDIR and `template status` shows it.

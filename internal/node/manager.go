@@ -77,15 +77,15 @@ type Manager struct {
 	rt      runtime.Runtime
 	metrics *obs.Registry
 
-	// Disk refuses new sandboxes while free space is below a floor. The zero value
-	// admits everything. See diskguard.go for why this exists as well as the
-	// scheduler's disk commitment rather than instead of it.
-	Disk DiskGuard
-
-	// Mem refuses new sandboxes while real memory usage is above a ceiling. The
-	// zero value admits everything. Same rationale as Disk: the scheduler's
-	// commitment ledger is not what the machine is actually using. See memguard.go.
-	Mem MemGuard
+	// admission holds the two guards behind admissionMu. They are mutable at
+	// runtime -- ConfigureAdmission rewrites them from the control plane while
+	// Create reads them -- so every access goes through diskGuard()/memGuard()/
+	// SetAdmission rather than touching the fields, which is what makes that safe.
+	// The guards themselves are value types with no internal state, so a reader
+	// copies one out under the lock and then runs Admit/Stat lock-free.
+	admissionMu sync.RWMutex
+	disk        DiskGuard
+	mem         MemGuard
 
 	// Net gives each sandbox its own namespace, tap and egress rules. Nil means
 	// this node has no networking configured, and that path is not a degraded
@@ -209,7 +209,7 @@ func (m *Manager) Create(ctx context.Context, spec *nodev1.SandboxSpec) (sb *San
 	// is the only party that can see its own filesystem, and the space at risk
 	// includes things the scheduler never accounted for — base images, the snapshot
 	// cache, anything else sharing the volume.
-	if err := m.Disk.Admit(); err != nil {
+	if err := m.diskGuard().Admit(); err != nil {
 		m.metrics.IncCounter("bean_node_creates_refused_total",
 			"Creates refused to protect running sandboxes.",
 			map[string]string{"reason": "disk_pressure"}, 1)
@@ -219,7 +219,7 @@ func (m *Manager) Create(ctx context.Context, spec *nodev1.SandboxSpec) (sb *San
 	// commitment ledger is not real usage, and admitting under real pressure risks
 	// the OOM killer reaping running sandboxes. Before the slot is reserved, so a
 	// refused create leaves nothing to clean up.
-	if err := m.Mem.Admit(); err != nil {
+	if err := m.memGuard().Admit(); err != nil {
 		m.metrics.IncCounter("bean_node_creates_refused_total",
 			"Creates refused to protect running sandboxes.",
 			map[string]string{"reason": "mem_pressure"}, 1)
@@ -1592,8 +1592,8 @@ func (m *Manager) RefreshGauges() {
 	// disagree by orders of magnitude — a 20 GiB sparse layer holding 44 KiB is
 	// counted as 20 GiB by the ledger — and the gap is only visible if both are
 	// published.
-	if m.Disk.Path != "" {
-		if stats, err := m.Disk.Stat(); err == nil {
+	if disk := m.diskGuard(); disk.Path != "" {
+		if stats, err := disk.Stat(); err == nil {
 			m.metrics.SetGauge("bean_node_disk_free_bytes",
 				"Free space on the sandbox filesystem, excluding the root reserve.",
 				nil, float64(stats.FreeBytes))
@@ -1611,14 +1611,47 @@ func (m *Manager) RefreshGauges() {
 // rather than "empty": the control plane treats it as advisory, so a node that
 // cannot measure itself is not mistaken for one with an empty disk.
 func (m *Manager) DiskUsedMiB() int64 {
-	if m.Disk.Path == "" {
+	disk := m.diskGuard()
+	if disk.Path == "" {
 		return 0
 	}
-	stats, err := m.Disk.Stat()
+	stats, err := disk.Stat()
 	if err != nil {
 		return 0
 	}
 	return stats.UsedBytes >> 20
+}
+
+// diskGuard and memGuard return the current guards by value, taken under the
+// admission lock. Callers run Admit/Stat on the returned copy, so a concurrent
+// SetAdmission cannot mutate a guard mid-check.
+func (m *Manager) diskGuard() DiskGuard {
+	m.admissionMu.RLock()
+	defer m.admissionMu.RUnlock()
+	return m.disk
+}
+
+func (m *Manager) memGuard() MemGuard {
+	m.admissionMu.RLock()
+	defer m.admissionMu.RUnlock()
+	return m.mem
+}
+
+// SetAdmission installs new guards, replacing both. cmd/noded uses it once at
+// startup (from flags); ConfigureAdmission uses it at runtime (from the control
+// plane). The caller has already Validate()d them -- this only swaps them in.
+func (m *Manager) SetAdmission(disk DiskGuard, mem MemGuard) {
+	m.admissionMu.Lock()
+	defer m.admissionMu.Unlock()
+	m.disk, m.mem = disk, mem
+}
+
+// Admission returns the current guards, so a caller applying a partial config
+// update can read the fields it is not changing. Taken under the lock.
+func (m *Manager) Admission() (DiskGuard, MemGuard) {
+	m.admissionMu.RLock()
+	defer m.admissionMu.RUnlock()
+	return m.disk, m.mem
 }
 
 // LoadSample reports the node's real CPU and memory utilisation as percentages

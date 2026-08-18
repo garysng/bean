@@ -583,35 +583,39 @@ func main() {
 	defer mgr.Close()
 
 	// The guard watches the base directory because that is where the sparse
-	// copy-on-write layers live, which is the space that actually runs out.
-	mgr.Disk = node.DiskGuard{
+	// copy-on-write layers live, which is the space that actually runs out. These
+	// flags are the *initial* thresholds; the control plane can retune them at
+	// runtime via ConfigureAdmission (which calls mgr.SetAdmission), and re-pushes
+	// the current config after this node registers, so a restart converges back to
+	// the cluster's policy rather than to these flags.
+	disk := node.DiskGuard{
 		Path:           *baseDir,
 		MinFreeBytes:   *minFreeDiskMiB << 20,
 		MinFreePercent: *minFreeDiskPct,
 	}
-	if err := mgr.Disk.Validate(); err != nil {
+	if err := disk.Validate(); err != nil {
 		log.Fatalf("--min-free-disk-*: %v", err)
 	}
-	if !mgr.Disk.Enabled() {
+	// The memory ceiling is the RAM equivalent of the disk floor above.
+	mem := node.MemGuard{MaxUsedPercent: *maxMemPct}
+	if err := mem.Validate(); err != nil {
+		log.Fatalf("--max-mem-percent: %v", err)
+	}
+	mgr.SetAdmission(disk, mem)
+	if !disk.Enabled() {
 		// Stated because the failure it guards against is unrecoverable and silent:
 		// a guest whose layer cannot allocate keeps reporting successful writes.
 		slog.Warn("no low-disk floor set; a full disk will destroy the " +
 			"copy-on-write layer of any sandbox that writes to it")
-	} else if stats, err := mgr.Disk.Stat(); err == nil {
+	} else if stats, err := disk.Stat(); err == nil {
 		slog.Info("low-disk admission floor set",
 			"minFreeMiB", *minFreeDiskMiB, "minFreePercent", *minFreeDiskPct,
 			"currentFreeBytes", stats.FreeBytes, "totalBytes", stats.TotalBytes)
 	}
-
-	// The memory ceiling is the RAM equivalent of the disk floor above.
-	mgr.Mem = node.MemGuard{MaxUsedPercent: *maxMemPct}
-	if err := mgr.Mem.Validate(); err != nil {
-		log.Fatalf("--max-mem-percent: %v", err)
-	}
-	if !mgr.Mem.Enabled() {
+	if !mem.Enabled() {
 		slog.Warn("no memory ceiling set; a create under real memory pressure can " +
 			"trigger the OOM killer against a running sandbox")
-	} else if stats, err := mgr.Mem.Stat(); err == nil {
+	} else if stats, err := mem.Stat(); err == nil {
 		slog.Info("memory admission ceiling set",
 			"maxUsedPercent", *maxMemPct, "currentUsedPercent", stats.UsedPercent(),
 			"totalBytes", stats.TotalBytes, "availableBytes", stats.AvailableBytes)

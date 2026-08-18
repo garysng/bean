@@ -68,7 +68,7 @@ func TestCreateRefusedUnderMemoryPressureLeavesNoSlot(t *testing.T) {
 		"MemTotal:       16777216 kB\nMemAvailable:    1677722 kB\n"), 0o644); err != nil {
 		t.Fatal(err)
 	}
-	m.Mem = MemGuard{MaxUsedPercent: 80, Path: mi}
+	m.SetAdmission(DiskGuard{}, MemGuard{MaxUsedPercent: 80, Path: mi})
 
 	_, err := m.Create(ctx, spec("mem-refused"))
 	if err == nil {
@@ -89,7 +89,7 @@ func TestCreateRefusedUnderMemoryPressureLeavesNoSlot(t *testing.T) {
 
 	// Raising the ceiling above real usage lets the same create through, proving
 	// the guard is what refused rather than something else.
-	m.Mem = MemGuard{MaxUsedPercent: 99, Path: mi}
+	m.SetAdmission(DiskGuard{}, MemGuard{MaxUsedPercent: 99, Path: mi})
 	if _, err := m.Create(ctx, spec("mem-admitted")); err != nil {
 		t.Fatalf("expected admission once the ceiling is above usage: %v", err)
 	}
