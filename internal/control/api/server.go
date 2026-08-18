@@ -265,6 +265,7 @@ func (s *Server) routes() {
 	s.mux.HandleFunc("GET /metrics", s.handleMetrics)
 	s.mux.HandleFunc("GET /v1/nodes", s.handleListNodes)
 	s.mux.HandleFunc("POST /v1/nodes/{id}/drain", s.handleDrainNode)
+	s.mux.HandleFunc("PATCH /v1/nodes/{id}/admission", s.handleConfigureNodeAdmission)
 }
 
 // ---- auth / errors ----

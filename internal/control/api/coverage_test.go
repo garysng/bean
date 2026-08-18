@@ -47,6 +47,44 @@ func TestDrainNodeStopsPlacement(t *testing.T) {
 	}
 }
 
+// TestConfigureNodeAdmission drives the whole downward path -- gateway PATCH
+// forwarded over SandboxService to the node's ConfigureAdmission -- and covers
+// the guards that make it a usable operator surface: an unknown node, an empty
+// patch, and a threshold the node rejects.
+func TestConfigureNodeAdmission(t *testing.T) {
+	env := startEnv(t, envOpts{})
+	node := env.NodeIDs[0]
+
+	// A valid one-knob patch reaches the node and is accepted (204).
+	resp, out := env.do("PATCH", "/v1/nodes/"+node+"/admission",
+		map[string]any{"maxMemPercent": 85})
+	if resp.StatusCode != http.StatusNoContent {
+		t.Fatalf("configure = %d, want 204: %v", resp.StatusCode, out)
+	}
+
+	// An unknown node never leaves the gateway.
+	resp, _ = env.do("PATCH", "/v1/nodes/node-absent/admission",
+		map[string]any{"maxMemPercent": 85})
+	if resp.StatusCode != http.StatusNotFound {
+		t.Errorf("unknown node = %d, want 404", resp.StatusCode)
+	}
+
+	// An empty patch is refused up front: nothing to change is a client error,
+	// not a silent no-op the operator can't tell from success.
+	resp, _ = env.do("PATCH", "/v1/nodes/"+node+"/admission", map[string]any{})
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("empty patch = %d, want 400", resp.StatusCode)
+	}
+
+	// An out-of-range ceiling is the node's to reject; the gateway maps its
+	// InvalidArgument to 400 rather than a generic 5xx.
+	resp, _ = env.do("PATCH", "/v1/nodes/"+node+"/admission",
+		map[string]any{"maxMemPercent": 150})
+	if resp.StatusCode != http.StatusBadRequest {
+		t.Errorf("out-of-range ceiling = %d, want 400", resp.StatusCode)
+	}
+}
+
 // TestBuildLogsRequiresRef and the not-found path cover handleBuildLogs's
 // guards without needing a running build.
 func TestBuildLogsRequiresRef(t *testing.T) {

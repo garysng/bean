@@ -1,9 +1,11 @@
 package api
 
 import (
+	"encoding/json"
 	"net/http"
 
 	"github.com/garysng/bean/internal/control/store"
+	nodev1 "github.com/garysng/bean/internal/gen/bean/node/v1"
 )
 
 // Node endpoints are the operational view of the cluster: what capacity
@@ -80,4 +82,64 @@ func (s *Server) handleDrainNode(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusAccepted)
+}
+
+// admissionPatch is the runtime-tunable admission surface. Every field is a
+// pointer so the operator can push one knob without restating the rest: an
+// absent field means "leave it", which is the same optional-overlay semantics
+// the node applies. It maps one-to-one onto AdmissionConfig's optional fields.
+type admissionPatch struct {
+	MinFreeDiskMiB     *int64   `json:"minFreeDiskMiB"`
+	MinFreeDiskPercent *float64 `json:"minFreeDiskPercent"`
+	MaxMemPercent      *float64 `json:"maxMemPercent"`
+}
+
+// handleConfigureNodeAdmission retunes a node's disk/memory admission thresholds
+// at runtime, so the point at which a node refuses new work can be changed
+// without a restart -- the startup flags are only the initial default.
+//
+// The gateway holds no admission state: it forwards the patch straight to the
+// node over the same SandboxService channel that carries placement, and the node
+// validates and installs it. A bad threshold is the node's to reject, surfaced
+// here as the node reported it.
+func (s *Server) handleConfigureNodeAdmission(w http.ResponseWriter, r *http.Request) {
+	nodeID := r.PathValue("id")
+	// A node with no record cannot be reached and would otherwise surface as an
+	// opaque dial error; refusing up front names the actual problem.
+	if s.nodeRecord(nodeID) == nil {
+		writeErr(w, http.StatusNotFound, "NODE_NOT_FOUND", "unknown node "+nodeID)
+		return
+	}
+
+	var patch admissionPatch
+	if err := json.NewDecoder(r.Body).Decode(&patch); err != nil {
+		writeErr(w, http.StatusBadRequest, "BAD_REQUEST", err.Error())
+		return
+	}
+	if patch.MinFreeDiskMiB == nil && patch.MinFreeDiskPercent == nil && patch.MaxMemPercent == nil {
+		writeErr(w, http.StatusBadRequest, "BAD_REQUEST",
+			"at least one of minFreeDiskMiB, minFreeDiskPercent, maxMemPercent is required")
+		return
+	}
+
+	client, err := s.router.Client(nodeID)
+	if err != nil {
+		writeErr(w, http.StatusServiceUnavailable, "NODE_UNREACHABLE", err.Error())
+		return
+	}
+	if _, err := client.ConfigureAdmission(r.Context(), &nodev1.ConfigureAdmissionRequest{
+		NodeId: nodeID,
+		Config: &nodev1.AdmissionConfig{
+			MinFreeDiskMib:     patch.MinFreeDiskMiB,
+			MinFreeDiskPercent: patch.MinFreeDiskPercent,
+			MaxMemPercent:      patch.MaxMemPercent,
+		},
+	}); err != nil {
+		// A rejected threshold comes back as InvalidArgument (400); an unreachable
+		// node as something grpcFault maps to 5xx. Either way the node's own words
+		// reach the operator rather than a generic gateway error.
+		grpcToHTTP(w, err)
+		return
+	}
+	w.WriteHeader(http.StatusNoContent)
 }
