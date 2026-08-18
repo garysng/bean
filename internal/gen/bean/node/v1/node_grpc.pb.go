@@ -267,25 +267,26 @@ var NodeService_ServiceDesc = grpc.ServiceDesc{
 }
 
 const (
-	SandboxService_CreateSandbox_FullMethodName    = "/bean.node.v1.SandboxService/CreateSandbox"
-	SandboxService_DestroySandbox_FullMethodName   = "/bean.node.v1.SandboxService/DestroySandbox"
-	SandboxService_PauseSandbox_FullMethodName     = "/bean.node.v1.SandboxService/PauseSandbox"
-	SandboxService_ResumeSandbox_FullMethodName    = "/bean.node.v1.SandboxService/ResumeSandbox"
-	SandboxService_GetSandbox_FullMethodName       = "/bean.node.v1.SandboxService/GetSandbox"
-	SandboxService_SnapshotSandbox_FullMethodName  = "/bean.node.v1.SandboxService/SnapshotSandbox"
-	SandboxService_RestoreSandbox_FullMethodName   = "/bean.node.v1.SandboxService/RestoreSandbox"
-	SandboxService_StartUserProcess_FullMethodName = "/bean.node.v1.SandboxService/StartUserProcess"
-	SandboxService_PrewarmImage_FullMethodName     = "/bean.node.v1.SandboxService/PrewarmImage"
-	SandboxService_StartBuild_FullMethodName       = "/bean.node.v1.SandboxService/StartBuild"
-	SandboxService_GetBuildStatus_FullMethodName   = "/bean.node.v1.SandboxService/GetBuildStatus"
-	SandboxService_CancelBuild_FullMethodName      = "/bean.node.v1.SandboxService/CancelBuild"
-	SandboxService_Exec_FullMethodName             = "/bean.node.v1.SandboxService/Exec"
-	SandboxService_StreamExec_FullMethodName       = "/bean.node.v1.SandboxService/StreamExec"
-	SandboxService_ReadFile_FullMethodName         = "/bean.node.v1.SandboxService/ReadFile"
-	SandboxService_WriteFile_FullMethodName        = "/bean.node.v1.SandboxService/WriteFile"
-	SandboxService_DeleteFile_FullMethodName       = "/bean.node.v1.SandboxService/DeleteFile"
-	SandboxService_ListDir_FullMethodName          = "/bean.node.v1.SandboxService/ListDir"
-	SandboxService_GetLogs_FullMethodName          = "/bean.node.v1.SandboxService/GetLogs"
+	SandboxService_CreateSandbox_FullMethodName      = "/bean.node.v1.SandboxService/CreateSandbox"
+	SandboxService_DestroySandbox_FullMethodName     = "/bean.node.v1.SandboxService/DestroySandbox"
+	SandboxService_PauseSandbox_FullMethodName       = "/bean.node.v1.SandboxService/PauseSandbox"
+	SandboxService_ResumeSandbox_FullMethodName      = "/bean.node.v1.SandboxService/ResumeSandbox"
+	SandboxService_GetSandbox_FullMethodName         = "/bean.node.v1.SandboxService/GetSandbox"
+	SandboxService_SnapshotSandbox_FullMethodName    = "/bean.node.v1.SandboxService/SnapshotSandbox"
+	SandboxService_RestoreSandbox_FullMethodName     = "/bean.node.v1.SandboxService/RestoreSandbox"
+	SandboxService_StartUserProcess_FullMethodName   = "/bean.node.v1.SandboxService/StartUserProcess"
+	SandboxService_PrewarmImage_FullMethodName       = "/bean.node.v1.SandboxService/PrewarmImage"
+	SandboxService_StartBuild_FullMethodName         = "/bean.node.v1.SandboxService/StartBuild"
+	SandboxService_GetBuildStatus_FullMethodName     = "/bean.node.v1.SandboxService/GetBuildStatus"
+	SandboxService_CancelBuild_FullMethodName        = "/bean.node.v1.SandboxService/CancelBuild"
+	SandboxService_ConfigureAdmission_FullMethodName = "/bean.node.v1.SandboxService/ConfigureAdmission"
+	SandboxService_Exec_FullMethodName               = "/bean.node.v1.SandboxService/Exec"
+	SandboxService_StreamExec_FullMethodName         = "/bean.node.v1.SandboxService/StreamExec"
+	SandboxService_ReadFile_FullMethodName           = "/bean.node.v1.SandboxService/ReadFile"
+	SandboxService_WriteFile_FullMethodName          = "/bean.node.v1.SandboxService/WriteFile"
+	SandboxService_DeleteFile_FullMethodName         = "/bean.node.v1.SandboxService/DeleteFile"
+	SandboxService_ListDir_FullMethodName            = "/bean.node.v1.SandboxService/ListDir"
+	SandboxService_GetLogs_FullMethodName            = "/bean.node.v1.SandboxService/GetLogs"
 )
 
 // SandboxServiceClient is the client API for SandboxService service.
@@ -342,6 +343,17 @@ type SandboxServiceClient interface {
 	// mechanism aborting the stream used to trigger. Cancelling an unknown or
 	// already-finished tag is not an error, so a racing double-cancel is harmless.
 	CancelBuild(ctx context.Context, in *CancelBuildRequest, opts ...grpc.CallOption) (*CancelBuildResponse, error)
+	// ConfigureAdmission updates the node's local admission thresholds (the disk
+	// floor and memory ceiling that DiskGuard/MemGuard enforce on Create) at
+	// runtime, so an operator can tighten or loosen a node without restarting it.
+	//
+	// It lives on SandboxService because that is bean's only control-plane->node
+	// channel; the startup flags remain the initial default, and the control plane
+	// re-pushes the current config after a node registers or reconnects so a
+	// restarted node converges back to it rather than reverting to its flags. Only
+	// the fields present in the AdmissionConfig are changed; an absent field leaves
+	// that threshold as it was.
+	ConfigureAdmission(ctx context.Context, in *ConfigureAdmissionRequest, opts ...grpc.CallOption) (*ConfigureAdmissionResponse, error)
 	// Data plane passthrough to AgentService.
 	Exec(ctx context.Context, in *v1.ExecRequest, opts ...grpc.CallOption) (*v1.ExecResponse, error)
 	StreamExec(ctx context.Context, opts ...grpc.CallOption) (grpc.BidiStreamingClient[v1.StreamExecFrame, v1.StreamExecFrame], error)
@@ -486,6 +498,16 @@ func (c *sandboxServiceClient) CancelBuild(ctx context.Context, in *CancelBuildR
 	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
 	out := new(CancelBuildResponse)
 	err := c.cc.Invoke(ctx, SandboxService_CancelBuild_FullMethodName, in, out, cOpts...)
+	if err != nil {
+		return nil, err
+	}
+	return out, nil
+}
+
+func (c *sandboxServiceClient) ConfigureAdmission(ctx context.Context, in *ConfigureAdmissionRequest, opts ...grpc.CallOption) (*ConfigureAdmissionResponse, error) {
+	cOpts := append([]grpc.CallOption{grpc.StaticMethod()}, opts...)
+	out := new(ConfigureAdmissionResponse)
+	err := c.cc.Invoke(ctx, SandboxService_ConfigureAdmission_FullMethodName, in, out, cOpts...)
 	if err != nil {
 		return nil, err
 	}
@@ -640,6 +662,17 @@ type SandboxServiceServer interface {
 	// mechanism aborting the stream used to trigger. Cancelling an unknown or
 	// already-finished tag is not an error, so a racing double-cancel is harmless.
 	CancelBuild(context.Context, *CancelBuildRequest) (*CancelBuildResponse, error)
+	// ConfigureAdmission updates the node's local admission thresholds (the disk
+	// floor and memory ceiling that DiskGuard/MemGuard enforce on Create) at
+	// runtime, so an operator can tighten or loosen a node without restarting it.
+	//
+	// It lives on SandboxService because that is bean's only control-plane->node
+	// channel; the startup flags remain the initial default, and the control plane
+	// re-pushes the current config after a node registers or reconnects so a
+	// restarted node converges back to it rather than reverting to its flags. Only
+	// the fields present in the AdmissionConfig are changed; an absent field leaves
+	// that threshold as it was.
+	ConfigureAdmission(context.Context, *ConfigureAdmissionRequest) (*ConfigureAdmissionResponse, error)
 	// Data plane passthrough to AgentService.
 	Exec(context.Context, *v1.ExecRequest) (*v1.ExecResponse, error)
 	StreamExec(grpc.BidiStreamingServer[v1.StreamExecFrame, v1.StreamExecFrame]) error
@@ -693,6 +726,9 @@ func (UnimplementedSandboxServiceServer) GetBuildStatus(context.Context, *GetBui
 }
 func (UnimplementedSandboxServiceServer) CancelBuild(context.Context, *CancelBuildRequest) (*CancelBuildResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method CancelBuild not implemented")
+}
+func (UnimplementedSandboxServiceServer) ConfigureAdmission(context.Context, *ConfigureAdmissionRequest) (*ConfigureAdmissionResponse, error) {
+	return nil, status.Error(codes.Unimplemented, "method ConfigureAdmission not implemented")
 }
 func (UnimplementedSandboxServiceServer) Exec(context.Context, *v1.ExecRequest) (*v1.ExecResponse, error) {
 	return nil, status.Error(codes.Unimplemented, "method Exec not implemented")
@@ -934,6 +970,24 @@ func _SandboxService_CancelBuild_Handler(srv interface{}, ctx context.Context, d
 	return interceptor(ctx, in, info, handler)
 }
 
+func _SandboxService_ConfigureAdmission_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
+	in := new(ConfigureAdmissionRequest)
+	if err := dec(in); err != nil {
+		return nil, err
+	}
+	if interceptor == nil {
+		return srv.(SandboxServiceServer).ConfigureAdmission(ctx, in)
+	}
+	info := &grpc.UnaryServerInfo{
+		Server:     srv,
+		FullMethod: SandboxService_ConfigureAdmission_FullMethodName,
+	}
+	handler := func(ctx context.Context, req interface{}) (interface{}, error) {
+		return srv.(SandboxServiceServer).ConfigureAdmission(ctx, req.(*ConfigureAdmissionRequest))
+	}
+	return interceptor(ctx, in, info, handler)
+}
+
 func _SandboxService_Exec_Handler(srv interface{}, ctx context.Context, dec func(interface{}) error, interceptor grpc.UnaryServerInterceptor) (interface{}, error) {
 	in := new(v1.ExecRequest)
 	if err := dec(in); err != nil {
@@ -1070,6 +1124,10 @@ var SandboxService_ServiceDesc = grpc.ServiceDesc{
 		{
 			MethodName: "CancelBuild",
 			Handler:    _SandboxService_CancelBuild_Handler,
+		},
+		{
+			MethodName: "ConfigureAdmission",
+			Handler:    _SandboxService_ConfigureAdmission_Handler,
 		},
 		{
 			MethodName: "Exec",

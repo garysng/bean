@@ -80,6 +80,17 @@ service SandboxService {
   // mechanism aborting the stream used to trigger. Cancelling an unknown or
   // already-finished tag is not an error, so a racing double-cancel is harmless.
   rpc CancelBuild(CancelBuildRequest) returns (CancelBuildResponse);
+  // ConfigureAdmission updates the node's local admission thresholds (the disk
+  // floor and memory ceiling that DiskGuard/MemGuard enforce on Create) at
+  // runtime, so an operator can tighten or loosen a node without restarting it.
+  //
+  // It lives on SandboxService because that is bean's only control-plane->node
+  // channel; the startup flags remain the initial default, and the control plane
+  // re-pushes the current config after a node registers or reconnects so a
+  // restarted node converges back to it rather than reverting to its flags. Only
+  // the fields present in the AdmissionConfig are changed; an absent field leaves
+  // that threshold as it was.
+  rpc ConfigureAdmission(ConfigureAdmissionRequest) returns (ConfigureAdmissionResponse);
   // Data plane passthrough to AgentService.
   rpc Exec(bean.common.v1.ExecRequest) returns (bean.common.v1.ExecResponse);
   rpc StreamExec(stream bean.common.v1.StreamExecFrame) returns (stream bean.common.v1.StreamExecFrame);
@@ -241,7 +252,43 @@ message NodeUsage {
   reserved 1, 2;
   reserved "cpu_committed", "memory_committed_mib";
   int64 disk_used_mib = 3;
+
+  // cpu_used_percent and mem_used_percent are the node's REAL load, measured on
+  // the machine (cpu from /proc/stat deltas, mem from /proc/meminfo
+  // MemAvailable), not summed from what sandboxes were promised. Unlike the
+  // retired committed figures, these have a consumer: the scheduler scores them
+  // as a soft preference so placement can avoid a node that is actually hot even
+  // when its commitment ledger still shows headroom. They are advisory and lag
+  // reality, so they inform score, never the feasibility gate (which stays on
+  // the commitment ledger for oversell-safety across replicas). 0 means the node
+  // does not measure it yet.
+  double cpu_used_percent = 4;
+  double mem_used_percent = 5;
 }
+
+// AdmissionConfig is the node-local admission policy the guards enforce on
+// Create. Every field is optional so a partial push changes only what it names
+// and leaves the rest -- the control plane can raise the memory ceiling without
+// having to restate the disk floor. An absent AdmissionConfig (or all-absent
+// fields) is a no-op.
+message AdmissionConfig {
+  // Disk floor: refuse a create while free space on the sandbox filesystem is
+  // below the larger of these two. Mirrors --min-free-disk-mib /
+  // --min-free-disk-percent. 0 for either disables that half.
+  optional int64 min_free_disk_mib = 1;
+  optional double min_free_disk_percent = 2;
+  // Memory ceiling: refuse a create while real memory usage is at or above this
+  // percent. Mirrors --max-mem-percent. 0 disables.
+  optional double max_mem_percent = 3;
+}
+
+message ConfigureAdmissionRequest {
+  string node_id = 1;
+  string node_token = 2;
+  AdmissionConfig config = 3;
+}
+
+message ConfigureAdmissionResponse {}
 
 message HeartbeatResponse {
   bool lease_ok = 1;

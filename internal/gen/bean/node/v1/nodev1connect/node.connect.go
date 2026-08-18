@@ -81,6 +81,9 @@ const (
 	// SandboxServiceCancelBuildProcedure is the fully-qualified name of the SandboxService's
 	// CancelBuild RPC.
 	SandboxServiceCancelBuildProcedure = "/bean.node.v1.SandboxService/CancelBuild"
+	// SandboxServiceConfigureAdmissionProcedure is the fully-qualified name of the SandboxService's
+	// ConfigureAdmission RPC.
+	SandboxServiceConfigureAdmissionProcedure = "/bean.node.v1.SandboxService/ConfigureAdmission"
 	// SandboxServiceExecProcedure is the fully-qualified name of the SandboxService's Exec RPC.
 	SandboxServiceExecProcedure = "/bean.node.v1.SandboxService/Exec"
 	// SandboxServiceStreamExecProcedure is the fully-qualified name of the SandboxService's StreamExec
@@ -328,6 +331,17 @@ type SandboxServiceClient interface {
 	// mechanism aborting the stream used to trigger. Cancelling an unknown or
 	// already-finished tag is not an error, so a racing double-cancel is harmless.
 	CancelBuild(context.Context, *connect.Request[v1.CancelBuildRequest]) (*connect.Response[v1.CancelBuildResponse], error)
+	// ConfigureAdmission updates the node's local admission thresholds (the disk
+	// floor and memory ceiling that DiskGuard/MemGuard enforce on Create) at
+	// runtime, so an operator can tighten or loosen a node without restarting it.
+	//
+	// It lives on SandboxService because that is bean's only control-plane->node
+	// channel; the startup flags remain the initial default, and the control plane
+	// re-pushes the current config after a node registers or reconnects so a
+	// restarted node converges back to it rather than reverting to its flags. Only
+	// the fields present in the AdmissionConfig are changed; an absent field leaves
+	// that threshold as it was.
+	ConfigureAdmission(context.Context, *connect.Request[v1.ConfigureAdmissionRequest]) (*connect.Response[v1.ConfigureAdmissionResponse], error)
 	// Data plane passthrough to AgentService.
 	Exec(context.Context, *connect.Request[v11.ExecRequest]) (*connect.Response[v11.ExecResponse], error)
 	StreamExec(context.Context) *connect.BidiStreamForClient[v11.StreamExecFrame, v11.StreamExecFrame]
@@ -421,6 +435,12 @@ func NewSandboxServiceClient(httpClient connect.HTTPClient, baseURL string, opts
 			connect.WithSchema(sandboxServiceMethods.ByName("CancelBuild")),
 			connect.WithClientOptions(opts...),
 		),
+		configureAdmission: connect.NewClient[v1.ConfigureAdmissionRequest, v1.ConfigureAdmissionResponse](
+			httpClient,
+			baseURL+SandboxServiceConfigureAdmissionProcedure,
+			connect.WithSchema(sandboxServiceMethods.ByName("ConfigureAdmission")),
+			connect.WithClientOptions(opts...),
+		),
 		exec: connect.NewClient[v11.ExecRequest, v11.ExecResponse](
 			httpClient,
 			baseURL+SandboxServiceExecProcedure,
@@ -468,25 +488,26 @@ func NewSandboxServiceClient(httpClient connect.HTTPClient, baseURL string, opts
 
 // sandboxServiceClient implements SandboxServiceClient.
 type sandboxServiceClient struct {
-	createSandbox    *connect.Client[v1.CreateSandboxRequest, v1.CreateSandboxResponse]
-	destroySandbox   *connect.Client[v1.DestroySandboxRequest, v1.DestroySandboxResponse]
-	pauseSandbox     *connect.Client[v1.PauseSandboxRequest, v1.PauseSandboxResponse]
-	resumeSandbox    *connect.Client[v1.ResumeSandboxRequest, v1.ResumeSandboxResponse]
-	getSandbox       *connect.Client[v1.GetSandboxRequest, v1.GetSandboxResponse]
-	snapshotSandbox  *connect.Client[v1.SnapshotSandboxRequest, v1.SnapshotChunk]
-	restoreSandbox   *connect.Client[v1.RestoreSandboxFrame, v1.RestoreSandboxResponse]
-	startUserProcess *connect.Client[v1.StartUserProcessNodeRequest, v1.StartUserProcessNodeResponse]
-	prewarmImage     *connect.Client[v1.PrewarmImageRequest, v1.PrewarmImageResponse]
-	startBuild       *connect.Client[v1.BuildImageRequest, v1.StartBuildResponse]
-	getBuildStatus   *connect.Client[v1.GetBuildStatusRequest, v1.GetBuildStatusResponse]
-	cancelBuild      *connect.Client[v1.CancelBuildRequest, v1.CancelBuildResponse]
-	exec             *connect.Client[v11.ExecRequest, v11.ExecResponse]
-	streamExec       *connect.Client[v11.StreamExecFrame, v11.StreamExecFrame]
-	readFile         *connect.Client[v11.ReadFileRequest, v11.FileChunk]
-	writeFile        *connect.Client[v11.WriteFileFrame, v11.WriteFileResponse]
-	deleteFile       *connect.Client[v11.DeleteFileRequest, v11.DeleteFileResponse]
-	listDir          *connect.Client[v11.ListDirRequest, v11.ListDirResponse]
-	getLogs          *connect.Client[v11.GetLogsRequest, v11.LogChunk]
+	createSandbox      *connect.Client[v1.CreateSandboxRequest, v1.CreateSandboxResponse]
+	destroySandbox     *connect.Client[v1.DestroySandboxRequest, v1.DestroySandboxResponse]
+	pauseSandbox       *connect.Client[v1.PauseSandboxRequest, v1.PauseSandboxResponse]
+	resumeSandbox      *connect.Client[v1.ResumeSandboxRequest, v1.ResumeSandboxResponse]
+	getSandbox         *connect.Client[v1.GetSandboxRequest, v1.GetSandboxResponse]
+	snapshotSandbox    *connect.Client[v1.SnapshotSandboxRequest, v1.SnapshotChunk]
+	restoreSandbox     *connect.Client[v1.RestoreSandboxFrame, v1.RestoreSandboxResponse]
+	startUserProcess   *connect.Client[v1.StartUserProcessNodeRequest, v1.StartUserProcessNodeResponse]
+	prewarmImage       *connect.Client[v1.PrewarmImageRequest, v1.PrewarmImageResponse]
+	startBuild         *connect.Client[v1.BuildImageRequest, v1.StartBuildResponse]
+	getBuildStatus     *connect.Client[v1.GetBuildStatusRequest, v1.GetBuildStatusResponse]
+	cancelBuild        *connect.Client[v1.CancelBuildRequest, v1.CancelBuildResponse]
+	configureAdmission *connect.Client[v1.ConfigureAdmissionRequest, v1.ConfigureAdmissionResponse]
+	exec               *connect.Client[v11.ExecRequest, v11.ExecResponse]
+	streamExec         *connect.Client[v11.StreamExecFrame, v11.StreamExecFrame]
+	readFile           *connect.Client[v11.ReadFileRequest, v11.FileChunk]
+	writeFile          *connect.Client[v11.WriteFileFrame, v11.WriteFileResponse]
+	deleteFile         *connect.Client[v11.DeleteFileRequest, v11.DeleteFileResponse]
+	listDir            *connect.Client[v11.ListDirRequest, v11.ListDirResponse]
+	getLogs            *connect.Client[v11.GetLogsRequest, v11.LogChunk]
 }
 
 // CreateSandbox calls bean.node.v1.SandboxService.CreateSandbox.
@@ -547,6 +568,11 @@ func (c *sandboxServiceClient) GetBuildStatus(ctx context.Context, req *connect.
 // CancelBuild calls bean.node.v1.SandboxService.CancelBuild.
 func (c *sandboxServiceClient) CancelBuild(ctx context.Context, req *connect.Request[v1.CancelBuildRequest]) (*connect.Response[v1.CancelBuildResponse], error) {
 	return c.cancelBuild.CallUnary(ctx, req)
+}
+
+// ConfigureAdmission calls bean.node.v1.SandboxService.ConfigureAdmission.
+func (c *sandboxServiceClient) ConfigureAdmission(ctx context.Context, req *connect.Request[v1.ConfigureAdmissionRequest]) (*connect.Response[v1.ConfigureAdmissionResponse], error) {
+	return c.configureAdmission.CallUnary(ctx, req)
 }
 
 // Exec calls bean.node.v1.SandboxService.Exec.
@@ -632,6 +658,17 @@ type SandboxServiceHandler interface {
 	// mechanism aborting the stream used to trigger. Cancelling an unknown or
 	// already-finished tag is not an error, so a racing double-cancel is harmless.
 	CancelBuild(context.Context, *connect.Request[v1.CancelBuildRequest]) (*connect.Response[v1.CancelBuildResponse], error)
+	// ConfigureAdmission updates the node's local admission thresholds (the disk
+	// floor and memory ceiling that DiskGuard/MemGuard enforce on Create) at
+	// runtime, so an operator can tighten or loosen a node without restarting it.
+	//
+	// It lives on SandboxService because that is bean's only control-plane->node
+	// channel; the startup flags remain the initial default, and the control plane
+	// re-pushes the current config after a node registers or reconnects so a
+	// restarted node converges back to it rather than reverting to its flags. Only
+	// the fields present in the AdmissionConfig are changed; an absent field leaves
+	// that threshold as it was.
+	ConfigureAdmission(context.Context, *connect.Request[v1.ConfigureAdmissionRequest]) (*connect.Response[v1.ConfigureAdmissionResponse], error)
 	// Data plane passthrough to AgentService.
 	Exec(context.Context, *connect.Request[v11.ExecRequest]) (*connect.Response[v11.ExecResponse], error)
 	StreamExec(context.Context, *connect.BidiStream[v11.StreamExecFrame, v11.StreamExecFrame]) error
@@ -721,6 +758,12 @@ func NewSandboxServiceHandler(svc SandboxServiceHandler, opts ...connect.Handler
 		connect.WithSchema(sandboxServiceMethods.ByName("CancelBuild")),
 		connect.WithHandlerOptions(opts...),
 	)
+	sandboxServiceConfigureAdmissionHandler := connect.NewUnaryHandler(
+		SandboxServiceConfigureAdmissionProcedure,
+		svc.ConfigureAdmission,
+		connect.WithSchema(sandboxServiceMethods.ByName("ConfigureAdmission")),
+		connect.WithHandlerOptions(opts...),
+	)
 	sandboxServiceExecHandler := connect.NewUnaryHandler(
 		SandboxServiceExecProcedure,
 		svc.Exec,
@@ -789,6 +832,8 @@ func NewSandboxServiceHandler(svc SandboxServiceHandler, opts ...connect.Handler
 			sandboxServiceGetBuildStatusHandler.ServeHTTP(w, r)
 		case SandboxServiceCancelBuildProcedure:
 			sandboxServiceCancelBuildHandler.ServeHTTP(w, r)
+		case SandboxServiceConfigureAdmissionProcedure:
+			sandboxServiceConfigureAdmissionHandler.ServeHTTP(w, r)
 		case SandboxServiceExecProcedure:
 			sandboxServiceExecHandler.ServeHTTP(w, r)
 		case SandboxServiceStreamExecProcedure:
@@ -858,6 +903,10 @@ func (UnimplementedSandboxServiceHandler) GetBuildStatus(context.Context, *conne
 
 func (UnimplementedSandboxServiceHandler) CancelBuild(context.Context, *connect.Request[v1.CancelBuildRequest]) (*connect.Response[v1.CancelBuildResponse], error) {
 	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("bean.node.v1.SandboxService.CancelBuild is not implemented"))
+}
+
+func (UnimplementedSandboxServiceHandler) ConfigureAdmission(context.Context, *connect.Request[v1.ConfigureAdmissionRequest]) (*connect.Response[v1.ConfigureAdmissionResponse], error) {
+	return nil, connect.NewError(connect.CodeUnimplemented, errors.New("bean.node.v1.SandboxService.ConfigureAdmission is not implemented"))
 }
 
 func (UnimplementedSandboxServiceHandler) Exec(context.Context, *connect.Request[v11.ExecRequest]) (*connect.Response[v11.ExecResponse], error) {
