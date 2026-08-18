@@ -282,14 +282,21 @@ func (r *Registrar) reportStatus(ctx context.Context, client nodev1.NodeServiceC
 		}
 		req.Images = &nodev1.ImageInventory{Images: images}
 	}
-	// Disk usage rides here rather than on the heartbeat: it is inventory the
-	// ops view reads, not a lease signal, so it must not share the renewal path.
-	// It is measured (statfs) rather than summed from sandbox requests -- a
-	// sandbox's disk request is nominal, the sparse layer behind a 20 GiB
-	// request holds kilobytes, so summing requests would overstate the node by
-	// orders of magnitude. Always set, so unlike the image inventory there is
-	// no "nothing to say" case: the report always carries a fresh disk figure.
-	req.Usage = &nodev1.NodeUsage{DiskUsedMib: r.mgr.DiskUsedMiB()}
+	// Usage rides here rather than on the heartbeat: it is inventory the ops view
+	// and the scheduler's soft load score read, not a lease signal, so it must not
+	// share the renewal path. Disk is measured (statfs) rather than summed from
+	// sandbox requests -- a sandbox's disk request is nominal, the sparse layer
+	// behind a 20 GiB request holds kilobytes, so summing would overstate the node
+	// by orders of magnitude. CPU and memory are the node's real utilisation, CPU
+	// sampled as the delta since the last report (hence measured here, on the
+	// steady status cadence). Always set, so unlike the image inventory there is no
+	// "nothing to say" case: the report always carries a fresh usage figure.
+	cpuPct, memPct := r.mgr.LoadSample()
+	req.Usage = &nodev1.NodeUsage{
+		DiskUsedMib:    r.mgr.DiskUsedMiB(),
+		CpuUsedPercent: cpuPct,
+		MemUsedPercent: memPct,
+	}
 	if _, err := client.UpdateNodeStatus(ctx, req); err != nil {
 		slog.Warn("node status report failed; image affinity, warm-snapshot "+
 			"lookups, and the disk-usage view use a stale view until the next one",

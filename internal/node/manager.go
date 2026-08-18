@@ -100,6 +100,11 @@ type Manager struct {
 
 	stopCh chan struct{}
 
+	// cpu samples host CPU utilisation across status reports for the scheduler's
+	// real-load score. Memory is read on demand from MemGuard; CPU needs a
+	// stored previous sample, which this holds.
+	cpu *cpuSampler
+
 	// statusKick asks the status-report loop to send now rather than wait for its
 	// slow periodic tick. A create/destroy/pause/resume changes what the node
 	// holds, and the ops view of disk usage should reflect that in seconds, not at
@@ -117,6 +122,7 @@ func NewManager(rt runtime.Runtime) *Manager {
 		sandboxes:  map[string]*Sandbox{},
 		stopCh:     make(chan struct{}),
 		statusKick: make(chan struct{}, 1),
+		cpu:        newCPUSampler(""),
 	}
 	// The runtime reports its own sub-phases through the manager, so runtime_create
 	// decomposes instead of being one opaque number. Attached here rather than passed
@@ -1613,4 +1619,21 @@ func (m *Manager) DiskUsedMiB() int64 {
 		return 0
 	}
 	return stats.UsedBytes >> 20
+}
+
+// LoadSample reports the node's real CPU and memory utilisation as percentages
+// for the scheduler's soft load score, sampled once per call.
+//
+// Memory reads MemAvailable unconditionally -- via a bare MemGuard so a node that
+// left the memory ceiling disabled still reports its load (measuring is cheap and
+// the guard's ceiling is a separate concern from reporting). CPU is the delta
+// since the previous call, so this must be called on a steady cadence -- the
+// status-report loop -- for the figure to mean anything. Either is 0 when it
+// cannot be measured, which the control plane reads as "not reported".
+func (m *Manager) LoadSample() (cpuPct, memPct float64) {
+	cpuPct = m.cpu.Percent()
+	if stats, err := (MemGuard{}).Stat(); err == nil {
+		memPct = stats.UsedPercent()
+	}
+	return cpuPct, memPct
 }
