@@ -30,6 +30,10 @@ type GRPCServer struct {
 	// builds tracks in-flight builds so CancelBuild can stop one started through a
 	// different control-plane connection.
 	builds *buildRegistry
+	// persistAdmission writes a retuned threshold to the node's config file so it
+	// survives a restart. Nil leaves ConfigureAdmission in-memory only (tests, and
+	// a deployment that opts out of persistence). Set by SetAdmissionPersister.
+	persistAdmission func(disk DiskGuard, mem MemGuard) error
 }
 
 // NewGRPCServer builds the node service. logs is the build-log object store
@@ -37,6 +41,13 @@ type GRPCServer struct {
 // build-log upload.
 func NewGRPCServer(mgr *Manager, logs s3.ObjectStore) *GRPCServer {
 	return &GRPCServer{mgr: mgr, logs: logs, builds: newBuildRegistry()}
+}
+
+// SetAdmissionPersister installs the function ConfigureAdmission calls to make a
+// retuned threshold durable. Wired in cmd/noded to SaveAdmission; left unset in
+// tests that only exercise the in-memory guard behaviour.
+func (s *GRPCServer) SetAdmissionPersister(fn func(disk DiskGuard, mem MemGuard) error) {
+	s.persistAdmission = fn
 }
 
 // connErr maps AgentConn failures to gRPC codes: unknown sandbox -> NotFound,
@@ -313,6 +324,16 @@ func (s *GRPCServer) ConfigureAdmission(ctx context.Context, req *nodev1.Configu
 	}
 	if err := mem.Validate(); err != nil {
 		return nil, status.Errorf(codes.InvalidArgument, "memory admission: %v", err)
+	}
+
+	// Persist before applying, so the two never disagree: if the write fails the
+	// node keeps its previous guards and the caller is told the change would not
+	// have survived a restart, rather than running under a threshold that silently
+	// reverts on the next boot.
+	if s.persistAdmission != nil {
+		if err := s.persistAdmission(disk, mem); err != nil {
+			return nil, status.Errorf(codes.Internal, "persist admission: %v", err)
+		}
 	}
 	s.mgr.SetAdmission(disk, mem)
 	return &nodev1.ConfigureAdmissionResponse{}, nil

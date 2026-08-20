@@ -268,19 +268,12 @@ func main() {
 		"log guest writes so checkpoints can capture only what changed; must be on "+
 			"from boot, so a guest started without it can never produce an "+
 			"incremental snapshot (fc runtime)")
-	minFreeDiskMiB := flag.Int64("min-free-disk-mib", 0,
-		"refuse new sandboxes while the sandbox filesystem has less than this much "+
-			"free; 0 disables. A sandbox whose sparse layer cannot allocate gets EIO "+
-			"and its filesystem becomes unrecoverable while writes still appear to "+
-			"succeed, so refusing a create is much cheaper than admitting one")
-	minFreeDiskPct := flag.Float64("min-free-disk-percent", 0,
-		"same floor as --min-free-disk-mib but against total capacity; the larger of "+
-			"the two applies, so a percentage travels between differently sized nodes")
-	maxMemPct := flag.Float64("max-mem-percent", 0,
-		"refuse new sandboxes while real memory usage (1 - MemAvailable/MemTotal) is "+
-			"at or above this percent; 0 disables. The scheduler's memory ledger counts "+
-			"requests, not real usage, so a node can look under-committed while the OOM "+
-			"killer is one create away from reaping a running sandbox")
+	admissionConfig := flag.String("admission-config", "/var/lib/bean/noded/admission.json",
+		"path to the admission threshold file (disk floor, memory ceiling). The node "+
+			"owns it: it is read at startup and rewritten when the control plane retunes "+
+			"a threshold via ConfigureAdmission, so the last policy set survives a "+
+			"restart. Absent means admission disabled until an operator provisions the "+
+			"file or pushes a config -- thresholds are a runtime parameter, not a flag")
 	snapCacheHighMiB := flag.Int64("snapshot-cache-high-mib", 0,
 		"reclaim unpacked snapshots once the cache reaches this size; 0 leaves it "+
 			"unbounded, which grows by roughly one guest's memory per distinct "+
@@ -582,26 +575,23 @@ func main() {
 	mgr.Net = netProv
 	defer mgr.Close()
 
-	// The guard watches the base directory because that is where the sparse
-	// copy-on-write layers live, which is the space that actually runs out. These
-	// flags are the *initial* thresholds; the control plane can retune them at
-	// runtime via ConfigureAdmission (which calls mgr.SetAdmission), and re-pushes
-	// the current config after this node registers, so a restart converges back to
-	// the cluster's policy rather than to these flags.
-	disk := node.DiskGuard{
-		Path:           *baseDir,
-		MinFreeBytes:   *minFreeDiskMiB << 20,
-		MinFreePercent: *minFreeDiskPct,
-	}
-	if err := disk.Validate(); err != nil {
-		log.Fatalf("--min-free-disk-*: %v", err)
-	}
-	// The memory ceiling is the RAM equivalent of the disk floor above.
-	mem := node.MemGuard{MaxUsedPercent: *maxMemPct}
-	if err := mem.Validate(); err != nil {
-		log.Fatalf("--max-mem-percent: %v", err)
+	// Admission thresholds are a runtime parameter, not a flag: they are read from
+	// a node-owned file at startup and rewritten when the control plane retunes one
+	// via ConfigureAdmission, so the last policy set survives a restart. The disk
+	// floor watches --base-dir, where the sparse copy-on-write layers live and the
+	// space actually runs out; that Path is a startup concern, so it is supplied
+	// here rather than persisted. A fresh node with no file comes up with admission
+	// disabled until an operator provisions the file or pushes a config.
+	disk, mem, found, err := node.LoadAdmission(*admissionConfig, *baseDir)
+	if err != nil {
+		log.Fatalf("admission config: %v", err)
 	}
 	mgr.SetAdmission(disk, mem)
+	if found {
+		slog.Info("admission thresholds loaded", "path", *admissionConfig,
+			"minFreeDiskMiB", disk.MinFreeBytes>>20, "minFreeDiskPercent", disk.MinFreePercent,
+			"maxMemPercent", mem.MaxUsedPercent)
+	}
 	if !disk.Enabled() {
 		// Stated because the failure it guards against is unrecoverable and silent:
 		// a guest whose layer cannot allocate keeps reporting successful writes.
@@ -609,7 +599,7 @@ func main() {
 			"copy-on-write layer of any sandbox that writes to it")
 	} else if stats, err := disk.Stat(); err == nil {
 		slog.Info("low-disk admission floor set",
-			"minFreeMiB", *minFreeDiskMiB, "minFreePercent", *minFreeDiskPct,
+			"minFreeMiB", disk.MinFreeBytes>>20, "minFreePercent", disk.MinFreePercent,
 			"currentFreeBytes", stats.FreeBytes, "totalBytes", stats.TotalBytes)
 	}
 	if !mem.Enabled() {
@@ -617,7 +607,7 @@ func main() {
 			"trigger the OOM killer against a running sandbox")
 	} else if stats, err := mem.Stat(); err == nil {
 		slog.Info("memory admission ceiling set",
-			"maxUsedPercent", *maxMemPct, "currentUsedPercent", stats.UsedPercent(),
+			"maxUsedPercent", mem.MaxUsedPercent, "currentUsedPercent", stats.UsedPercent(),
 			"totalBytes", stats.TotalBytes, "availableBytes", stats.AvailableBytes)
 	}
 
@@ -646,7 +636,14 @@ func main() {
 		grpc.ChainUnaryInterceptor(obs.UnaryServerTrace("noded"), unaryAuth),
 		grpc.ChainStreamInterceptor(obs.StreamServerTrace("noded"), streamAuth),
 	)
-	nodev1.RegisterSandboxServiceServer(srv, node.NewGRPCServer(mgr, logsStore))
+	sbxSrv := node.NewGRPCServer(mgr, logsStore)
+	// A retune persists to the same file startup reads, so the last threshold set
+	// survives a restart. The disk Path is not part of the stored form; it comes
+	// from --base-dir on the next load, so the closure need not thread it.
+	sbxSrv.SetAdmissionPersister(func(disk node.DiskGuard, mem node.MemGuard) error {
+		return node.SaveAdmission(*admissionConfig, disk, mem)
+	})
+	nodev1.RegisterSandboxServiceServer(srv, sbxSrv)
 
 	go func() {
 		sig := make(chan os.Signal, 1)
