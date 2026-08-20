@@ -134,7 +134,7 @@ design turned out to be wrong during implementation:
 
 - **`Create` does not take a rootfs.** The image provider is a field of the runtime rather than a parameter — because the moment at which the rootfs is assembled is coupled to the runtime's internal state: restore has to fill the CoW in **before the device is assembled** (otherwise dm-snapshot's exception table is already in the kernel and the filesystem is silently corrupted; see `docs/decisions.md` §3.0). A parameter-style interface cannot express that ordering.
 - **`Restore` takes `[]SnapshotLayer` rather than a single reader.** Incremental snapshots have to replay the whole chain, and each layer is an independent gzip stream; a single reader stops at the end of the first layer.
-- **There is no `Stats`.** It was never implemented and has no caller — the scheduler accounts placement from committed amounts, not real per-runtime usage. Node-local admission is the exception: `DiskGuard` and `MemGuard` measure the real machine (statfs, `/proc/meminfo`) to refuse creates under real pressure, independent of the commitment ledger. Their thresholds are **runtime-tunable**: the startup flags (`--min-free-disk-*`, `--max-mem-percent`) are only the initial default, and the control plane can retune a live node through `ConfigureAdmission` (see §7.4) without a restart. The guards sit behind a lock so a push and a concurrent `Create` never race.
+- **There is no `Stats`.** It was never implemented and has no caller — the scheduler accounts placement from committed amounts, not real per-runtime usage. Node-local admission is the exception: `DiskGuard` and `MemGuard` measure the real machine (statfs, `/proc/meminfo`) to refuse creates under real pressure, independent of the commitment ledger. Their thresholds are a **runtime parameter, not a flag**: they live in a node-owned file (`--admission-config`) read at startup, and the control plane retunes a live node through `ConfigureAdmission` (see §7.4), which rewrites that file so the change survives a restart. The guards sit behind a lock so a push and a concurrent `Create` never race.
 
 There are also three **optional** interfaces that a runtime implements according
 to its capabilities and callers type-assert on: `ImageWarmer` (prewarm),
@@ -637,11 +637,19 @@ live node's admission thresholds without a restart.
   same partial patch. The gateway holds no admission state; it resolves the node's
   `SandboxService` client and forwards. A rejected threshold surfaces as the node's
   own 400; an unreachable node as 503.
-- **Persistence gap (not yet built).** A retune is held only in the node's memory,
-  so a node restart falls back to its startup flags rather than the last pushed
-  policy. Converging a restarted node back to cluster policy needs the default to
-  be persisted control-plane-side and re-pushed on register — deferred until the
-  config's owner (global default vs per-node override) is decided.
+- **Persistence: the node owns its policy.** The thresholds are a runtime
+  parameter, not a flag. `noded` reads them from a node-owned file
+  (`--admission-config`, default `/var/lib/bean/noded/admission.json`) at startup,
+  and a `ConfigureAdmission` push rewrites that file (atomically, via
+  temp-file+rename) before it installs the new guards — so the last policy set
+  survives a restart without the control plane having to re-push, and a write that
+  fails leaves both the file and the live guards on the previous policy rather than
+  letting them drift apart. A fresh node with no file comes up with admission
+  disabled until an operator provisions the file or pushes a config. The disk
+  floor's watched path is *not* in the file: it is `--base-dir` (where the sandbox
+  layers live), a startup concern re-supplied on each load. This keeps admission
+  node-local — there is deliberately no cluster-wide default persisted control-plane
+  side; a fleet-wide "set every node to 80%" would be a separate feature.
 
 ## 8. noded's Own Observability ✅
 

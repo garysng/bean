@@ -186,9 +186,10 @@ lagging number puts a batch into a wall when they all start writing, or refuses
 work a node can actually take. So feasibility stays on commitments, and the
 node's measured cpu%/mem%/disk feed a soft `Load` penalty in the score: a hot but
 lightly-committed node loses to an idle peer without ever being ruled out. The
-hard defence is still on the node: `--min-free-disk-mib` / `--min-free-disk-percent`
-and `--max-mem-percent`, off by default, and now retunable at runtime via
-`ConfigureAdmission` / `PATCH /v1/nodes/{id}/admission`.
+hard defence is still on the node: a disk floor and memory ceiling, off by
+default, read from a node-owned config file (`--admission-config`) at startup and
+retunable at runtime via `ConfigureAdmission` / `PATCH /v1/nodes/{id}/admission`,
+which rewrites that file so the policy survives a restart.
 
 That defence is not optional, because the failure mode was measured
 ([decisions.md](decisions.md) §3.7) and it is unrecoverable: when the host
