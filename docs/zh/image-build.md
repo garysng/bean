@@ -6,7 +6,7 @@
 
 ## 1. 为什么需要
 
-bean 的立足点是「任意 OCI 镜像零转换直启」，所以不需要 e2b 式的 per-image
+wizard 的立足点是「任意 OCI 镜像零转换直启」，所以不需要 e2b 式的 per-image
 template build。但完全没有构建能力留下两个真实缺口：
 
 - **加依赖无处可去**：用户想在 `python:3.12` 上装 `requirements.txt`，只能自己
@@ -43,7 +43,7 @@ template build。但完全没有构建能力留下两个真实缺口：
 e2b 与 Daytona 同样用 BuildKit。
 
 ```
-bean build -f Dockerfile -t myteam/eval-base:v1 .
+wizard build -f Dockerfile -t myteam/eval-base:v1 .
 ```
 
 CLI 打包 build context（受 `.dockerignore` 约束）上传，**平台侧执行构建**——
@@ -119,7 +119,7 @@ type BuildStep struct {
 
 > 构建的**日志流与取消**已实现:日志端点(`build.go:289`)与取消(`build.go:358`)
 > 走 noded 的长活 `BuildImage` 流(`grpc.go:143`)。仅剩一个注意点 —— 日志缓冲是
-> 每副本进程内内存(`buildlog.go`),所以多副本 bean-api 下,logs/cancel 请求必须打到
+> 每副本进程内内存(`buildlog.go`),所以多副本 wizard-api 下,logs/cancel 请求必须打到
 > 发起该 build 的那个副本;见 [build-service.md §3.5](build-service.md)。
 
 
@@ -188,7 +188,7 @@ buildctl --addr <buildkitd> build
 
 ## 8. 不做（明确边界）
 
-- **push 回外部 OCI registry**：built 镜像只在 bean 内部可用。反向转换或双格式
+- **push 回外部 OCI registry**：built 镜像只在 wizard 内部可用。反向转换或双格式
   存储成本明显更高，且当前场景（内部 eval）不需要。若将来要，影响的是 blob
   布局，需要重新设计
 - **build 期间的任意网络访问策略**：沿用 sandbox 的 `egress-only`，不单独开口子
@@ -201,6 +201,6 @@ buildctl --addr <buildkitd> build
 | e2b | Dockerfile | BuildKit → 转 VM rootfs | template（5–15 分钟/个） |
 | Daytona | Dockerfile / Declarative Builder | BuildKit | snapshot |
 | Modal | Python 链式调用 | 自研构建器（要求镜像内有 Python） | 内容寻址层 |
-| **bean** | Dockerfile ✅ / 声明式 steps 📐 | BuildKit（平台侧）✅ | ⚠️ 当前落节点本地 ext4;overlaybd layer on S3 是目标 |
+| **wizard** | Dockerfile ✅ / 声明式 steps 📐 | BuildKit（平台侧）✅ | ⚠️ 当前落节点本地 ext4;overlaybd layer on S3 是目标 |
 
-bean 的差异：构建形式统一到一个 plan;产物直接是 fc 档可用的块设备格式，不需要再转一次。
+wizard 的差异：构建形式统一到一个 plan;产物直接是 fc 档可用的块设备格式，不需要再转一次。

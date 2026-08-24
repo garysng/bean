@@ -13,7 +13,7 @@ import (
 
 	"golang.org/x/sys/unix"
 
-	"github.com/garysng/bean/internal/logging"
+	"github.com/garysng/wizard/internal/logging"
 )
 
 // A ublk queue: the loop that serves one device's block IO from userspace.

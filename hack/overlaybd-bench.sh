@@ -16,13 +16,13 @@
 # Usage: overlaybd-bench.sh
 set -uo pipefail
 
-BIN=${BIN:-/tmp/beantest/bin}
+BIN=${BIN:-/tmp/wizardtest/bin}
 STACK=${STACK:-$(dirname "$0")/dev-fc-stack.sh}
-RUN=${RUN:-/tmp/beanrun}
+RUN=${RUN:-/tmp/wizardrun}
 IMAGES=${IMAGES:-"python:3.12-slim python:3.11-slim"}
-IMAGE_DIR=/var/lib/bean/images
-export BEAN_BASE_URL=http://127.0.0.1:18080
-export BEAN_API_KEY=devkey
+IMAGE_DIR=/var/lib/wizard/images
+export WIZARD_BASE_URL=http://127.0.0.1:18080
+export WIZARD_API_KEY=devkey
 
 cleanup() { BIN=$BIN bash "$STACK" stop >/dev/null 2>&1; }
 trap cleanup EXIT
@@ -60,7 +60,7 @@ run_backend() {  # run_backend <label> <noded flags>
     cpu0=$(noded_cpu)
     t0=$(date +%s.%N)
     local sbx
-    sbx=$(timeout 300 "$BIN/bean" run --image "$img" --quiet 2>/dev/null)
+    sbx=$(timeout 300 "$BIN/wizard" run --image "$img" --quiet 2>/dev/null)
     t1=$(date +%s.%N)
     cpu1=$(noded_cpu)
 
@@ -74,7 +74,7 @@ run_backend() {  # run_backend <label> <noded flags>
     printf "  image %d (%s): create %.1fs, noded cpu %.1fs\n" \
       "$n" "$img" "$(echo "$t1 - $t0" | bc)" \
       "$(echo "scale=2; ($cpu1 - $cpu0) / $hz" | bc)"
-    "$BIN/bean" kill "$sbx" >/dev/null 2>&1
+    "$BIN/wizard" kill "$sbx" >/dev/null 2>&1
   done
 
   echo "  --- disk after both images ---"

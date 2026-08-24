@@ -4,7 +4,7 @@ import (
 	"errors"
 	"testing"
 
-	"github.com/garysng/bean/internal/control/store"
+	"github.com/garysng/wizard/internal/control/store"
 )
 
 func TestZeroPolicyPermitsEverything(t *testing.T) {

@@ -212,7 +212,7 @@ type fcMemBackend struct {
 // loading. Nothing sets it, and that is the intended state.
 //
 // A snapshot records the host device name its interface was attached to, and a
-// restore looks for that name again. The name is beantap0 in every namespace, so
+// restore looks for that name again. The name is wizardtap0 in every namespace, so
 // what the snapshot recorded is already correct wherever it is restored — the
 // override would only ever restate it. Sending one anyway would be worse than
 // pointless: it would make the restore path look as though it depends on the

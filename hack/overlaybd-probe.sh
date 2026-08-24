@@ -16,7 +16,7 @@ OBD=/opt/overlaybd/bin
 CORE=/sys/kernel/config/target/core
 LOOP=/sys/kernel/config/target/loopback
 HBA=user_999
-WORK=${WORK:-/var/lib/bean/obdprobe}
+WORK=${WORK:-/var/lib/wizard/obdprobe}
 
 pass() { echo "PASS  $*"; }
 fail() { echo "FAIL  $*"; FAILED=1; }

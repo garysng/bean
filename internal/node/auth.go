@@ -11,7 +11,7 @@ import (
 )
 
 // MetadataTokenKey carries the node token on control-plane -> noded calls.
-const MetadataTokenKey = "bean-node-token"
+const MetadataTokenKey = "wizard-node-token"
 
 // TokenAuth returns unary/stream interceptors enforcing a shared node token.
 // An empty token disables enforcement (loopback dev only); production

@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Which runsc --network mode lets the node reach an agent inside the sandbox?
 #
-# The agent now listens successfully inside a gVisor sandbox -- "beand listening
+# The agent now listens successfully inside a gVisor sandbox -- "wizardd listening
 # addr=tcp:0.0.0.0:8111" -- and the node still cannot connect: "network is unreachable"
 # on a veth address that is UP and reachable four other ways (netns-selfdial-check.sh).
 #

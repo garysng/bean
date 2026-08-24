@@ -1,6 +1,6 @@
-# Bean architecture diagrams
+# Wizard architecture diagrams
 
-> Hand-drawn architecture views for the bean sandbox platform. Colors mark roles:
+> Hand-drawn architecture views for the wizard sandbox platform. Colors mark roles:
 > blue = client, green = control plane, yellow = data plane, purple = storage.
 > Diagrams follow the code, not older docs — e.g. the image block layer is TCMU
 > (`internal/node/image/obdtcmu_linux.go`), not ublk.
@@ -10,7 +10,7 @@
 ## 1. Overall architecture
 
 Four bands top to bottom: clients → control plane → nodes → sandbox. S3 backs the
-node. `bean-proxy` is the data-plane path for port traffic into a sandbox.
+node. `wizard-proxy` is the data-plane path for port traffic into a sandbox.
 
 ```mermaid
 ---
@@ -27,7 +27,7 @@ flowchart TB
     CLI["CLI"]
   end
 
-  subgraph CP["control plane · bean-api (one process)"]
+  subgraph CP["control plane · wizard-api (one process)"]
     direction LR
     API["api-gateway<br>auth · quota"]
     SCHED["scheduler<br>placement · leases"]
@@ -35,7 +35,7 @@ flowchart TB
     STORE[("state store<br>SQLite / PG")]
   end
 
-  PROXY["bean-proxy<br>port routing"]
+  PROXY["wizard-proxy<br>port routing"]
 
   subgraph NODED["noded · one per host"]
     direction LR
@@ -44,7 +44,7 @@ flowchart TB
   end
 
   subgraph SBX["sandbox"]
-    BEAND["beand (PID1)<br>+ user process"]
+    WIZARDD["wizardd (PID1)<br>+ user process"]
   end
 
   S3[("S3<br>blobs · artifacts · snapshots")]
@@ -55,7 +55,7 @@ flowchart TB
   SCHED <== commands / heartbeat ==> IMGSUB
   PROXY -. forward .-> IMGSUB
   IMGSUB --> RT
-  RT --> BEAND
+  RT --> WIZARDD
   IMGSUB -. range-read .-> S3
   RT -. snapshots .-> S3
 
@@ -65,7 +65,7 @@ flowchart TB
   classDef store fill:#F3E8FD,stroke:#A142F4,color:#111;
   class SDK,CLI client;
   class API,SCHED,IMGS control;
-  class PROXY,IMGSUB,RT,BEAND data;
+  class PROXY,IMGSUB,RT,WIZARDD data;
   class STORE,S3 store;
 ```
 
@@ -111,7 +111,7 @@ flowchart LR
     SNAP["snapshot<br>bundle · CPU template"]
   end
 
-  GUEST["guest<br>beand + user process"]
+  GUEST["guest<br>wizardd + user process"]
 
   REG -. blocks on demand .-> OBD
   TCMU -- /dev/sdX --> DRV
@@ -135,7 +135,7 @@ container tier with runc / runsc) is detailed in the next section.
 
 ## 3. Port forwarding into a sandbox
 
-A client addresses `{port}-{sandbox}`. `bean-proxy` asks bean-api which node holds
+A client addresses `{port}-{sandbox}`. `wizard-proxy` asks wizard-api which node holds
 it, then forwards with a node token. The node's forwarder does the protocol
 conversion — it's the only thing that can reach the agent inside the sandbox's
 network namespace.
@@ -150,13 +150,13 @@ config:
 ---
 flowchart LR
   CLIENT["client<br>HTTP {port}-{sbx}"]
-  API["bean-api<br>placement"]
-  PROXY["bean-proxy<br>reverse proxy"]
+  API["wizard-api<br>placement"]
+  PROXY["wizard-proxy<br>reverse proxy"]
 
   subgraph NODE["node · netns boundary"]
     direction LR
     FWD["forwarder<br>protocol conversion"]
-    AGENT["beand<br>guest port"]
+    AGENT["wizardd<br>guest port"]
     FWD --> AGENT
   end
 
@@ -214,7 +214,7 @@ flowchart TB
     direction TB
     MC["/machine-config<br>vcpu · mem · dirty-pages"]
     CPU["/cpu-config<br>template mask (pre-boot)"]
-    BOOT["/boot-source<br>kernel + init=/bean/beand"]
+    BOOT["/boot-source<br>kernel + init=/wizard/wizardd"]
     DA["/drives/agent<br>/dev/vda · root · ro"]
     DR["/drives/rootfs<br>/dev/vdb · user image"]
     REST["/vsock · /network-interfaces (tap) · /mmds"]
@@ -229,7 +229,7 @@ flowchart TB
     UFFD --> LOAD
   end
 
-  GB["guest boots<br>beand (PID1) pivots to user rootfs"]
+  GB["guest boots<br>wizardd (PID1) pivots to user rootfs"]
   GR["guest resumes<br>pages faulted in on demand (uffd)"]
 
   SPEC --> STAGE

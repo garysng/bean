@@ -9,9 +9,9 @@ import (
 	"strings"
 	"time"
 
-	"github.com/garysng/bean/internal/control/image"
-	"github.com/garysng/bean/internal/control/secret"
-	"github.com/garysng/bean/internal/control/store"
+	"github.com/garysng/wizard/internal/control/image"
+	"github.com/garysng/wizard/internal/control/secret"
+	"github.com/garysng/wizard/internal/control/store"
 )
 
 // Registry credential endpoints. Callers register a credential per registry
@@ -30,7 +30,7 @@ type registryRequest struct {
 func (s *Server) handlePutRegistry(w http.ResponseWriter, r *http.Request) {
 	if s.secrets == nil {
 		writeErr(w, http.StatusNotImplemented, "NOT_IMPLEMENTED",
-			"registry credentials require a master key (--secret-key or BEAN_SECRET_KEY)")
+			"registry credentials require a master key (--secret-key or WIZARD_SECRET_KEY)")
 		return
 	}
 	var req registryRequest

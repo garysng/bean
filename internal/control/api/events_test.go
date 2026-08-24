@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/garysng/bean/internal/control/store"
+	"github.com/garysng/wizard/internal/control/store"
 )
 
 func TestParseLabelFilter(t *testing.T) {

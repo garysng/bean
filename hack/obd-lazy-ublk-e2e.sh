@@ -21,21 +21,21 @@
 # demonstrated what it claimed.
 set -uo pipefail
 
-BIN=${BIN:-/tmp/beantest/bin}
+BIN=${BIN:-/tmp/wizardtest/bin}
 STACK=${STACK:-$(dirname "$0")/dev-fc-stack.sh}
-IMAGE=${IMAGE:-beanreg.local:5443/alpine:3.20}
-LAYER_DIR=${LAYER_DIR:-/var/lib/bean/images/layers}
+IMAGE=${IMAGE:-wizardreg.local:5443/alpine:3.20}
+LAYER_DIR=${LAYER_DIR:-/var/lib/wizard/images/layers}
 STASH=${STASH:-/tmp/obd-lazy-stash}
 S3=${S3_ENDPOINT:-http://127.0.0.1:9000}
 
-export BEAN_BASE_URL=${BEAN_BASE_URL:-http://127.0.0.1:18080}
-export BEAN_API_KEY=${BEAN_API_KEY:-devkey}
-export BEAN_S3_ACCESS_KEY=${BEAN_S3_ACCESS_KEY:-beanadmin}
-export BEAN_S3_SECRET_KEY=${BEAN_S3_SECRET_KEY:-beansecret123}
+export WIZARD_BASE_URL=${WIZARD_BASE_URL:-http://127.0.0.1:18080}
+export WIZARD_API_KEY=${WIZARD_API_KEY:-devkey}
+export WIZARD_S3_ACCESS_KEY=${WIZARD_S3_ACCESS_KEY:-wizardadmin}
+export WIZARD_S3_SECRET_KEY=${WIZARD_S3_SECRET_KEY:-wizardsecret123}
 export NODE_CPU=${NODE_CPU:-32}
 export NODE_MEM_MIB=${NODE_MEM_MIB:-32768}
 export NODE_DISK_MIB=${NODE_DISK_MIB:-131072}
-export KERNEL=${KERNEL:-/var/lib/bean/assets/vmlinux-6.1.175}
+export KERNEL=${KERNEL:-/var/lib/wizard/assets/vmlinux-6.1.175}
 
 say() { printf '%s\n' "$*"; }
 
@@ -54,8 +54,8 @@ cleanup() {
 trap cleanup EXIT
 
 kill_all() {
-	for s in $("$BIN/bean" ls 2>/dev/null | awk '/^sbx_/ {print $1}'); do
-		"$BIN/bean" kill "$s" >/dev/null 2>&1
+	for s in $("$BIN/wizard" ls 2>/dev/null | awk '/^sbx_/ {print $1}'); do
+		"$BIN/wizard" kill "$s" >/dev/null 2>&1
 	done
 	sleep 2
 }
@@ -83,11 +83,11 @@ NODED_FLAGS="--fc-overlaybd --fc-ublk --fc-overlaybd-lazy-pull --s3-endpoint $S3
 	exit 1
 }
 sleep 3
-grep -oE 'rootfs via overlaybd.{0,120}' /tmp/beanrun/noded.log | tail -1
+grep -oE 'rootfs via overlaybd.{0,120}' /tmp/wizardrun/noded.log | tail -1
 
 say ""
 say "== 2. first create: converts and publishes =="
-if ! "$BIN/bean" run --image-ref "$IMAGE" --disk-mib 2048 >/tmp/lazy-warm.log 2>&1; then
+if ! "$BIN/wizard" run --image-ref "$IMAGE" --disk-mib 2048 >/tmp/lazy-warm.log 2>&1; then
 	say "the first create failed, so nothing was published:"
 	tail -5 /tmp/lazy-warm.log
 	exit 1
@@ -116,19 +116,19 @@ fi
 
 say ""
 say "== 4. second create: the layer is only in the store =="
-SBX=$("$BIN/bean" run --image-ref "$IMAGE" --disk-mib 2048 2>&1 | awk '/^sbx_/ {print $1}')
+SBX=$("$BIN/wizard" run --image-ref "$IMAGE" --disk-mib 2048 2>&1 | awk '/^sbx_/ {print $1}')
 if [ -z "$SBX" ]; then
 	say "create FAILED with the layer absent:"
-	"$BIN/bean" run --image-ref "$IMAGE" --disk-mib 2048 2>&1 | tail -4
+	"$BIN/wizard" run --image-ref "$IMAGE" --disk-mib 2048 2>&1 | tail -4
 	say "--- noded:"
-	grep -oE 'level=ERROR.{0,200}' /tmp/beanrun/noded.log | tail -3
+	grep -oE 'level=ERROR.{0,200}' /tmp/wizardrun/noded.log | tail -3
 	exit 1
 fi
 say "sandbox: $SBX"
 
 say ""
 say "== 5. read inside the guest =="
-"$BIN/bean" exec "$SBX" -- sh -c 'cat /etc/alpine-release; uname -m; ls /bin/busybox' 2>&1 | head -4
+"$BIN/wizard" exec "$SBX" -- sh -c 'cat /etc/alpine-release; uname -m; ls /bin/busybox' 2>&1 | head -4
 
 say ""
 say "== 6. did the layer come back to disk? =="

@@ -15,10 +15,10 @@ import (
 // exactly what ObjectStore serves: a build's output goes to a dedicated logs
 // bucket, one immutable chunk per flush, and any reader ranges back over the
 // chunks by byte offset. This is what lets the control plane hold no per-build
-// log state -- every bean-api replica reads the same objects, and a restart
+// log state -- every wizard-api replica reads the same objects, and a restart
 // loses nothing (docs/build-logs-s3.md).
 //
-// The writer (noded) and the reader (bean-api) share this file so the key
+// The writer (noded) and the reader (wizard-api) share this file so the key
 // scheme and the manifest shape are defined once; a mismatch between the two
 // sides would silently strand a log, so neither derives its own.
 
@@ -254,7 +254,7 @@ func (w *BuildLogWriter) Finish(failed bool, reason string) error {
 
 // BuildLogReader reads a build's log back out of the logs store by byte offset,
 // holding no state the caller cannot reconstruct: it is created per request and
-// any bean-api replica can create one. It is the stateless replacement for the
+// any wizard-api replica can create one. It is the stateless replacement for the
 // in-memory ring buffer.
 type BuildLogReader struct {
 	store ObjectStore

@@ -17,10 +17,10 @@ set -uo pipefail
 
 COUNT=${COUNT:-6}
 IMAGE=${IMAGE:-alpine:3.20}
-BASE_URL=${BEAN_BASE_URL:-http://127.0.0.1:18080}
-API_KEY=${BEAN_API_KEY:-devkey}
-BEAN=${BEAN:-/tmp/bean}
-CACHE=${CACHE:-/var/lib/bean/sandboxes/.snapshots}
+BASE_URL=${WIZARD_BASE_URL:-http://127.0.0.1:18080}
+API_KEY=${WIZARD_API_KEY:-devkey}
+WIZARD=${WIZARD:-/tmp/wizard}
+CACHE=${CACHE:-/var/lib/wizard/sandboxes/.snapshots}
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -30,11 +30,11 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-export BEAN_BASE_URL="$BASE_URL" BEAN_API_KEY="$API_KEY"
+export WIZARD_BASE_URL="$BASE_URL" WIZARD_API_KEY="$API_KEY"
 say() { printf '%s\n' "$*"; }
 hr() { printf -- '------------------------------------------------------------\n'; }
 
-[[ -x "$BEAN" ]] || { say "bean CLI not executable: $BEAN"; exit 69; }
+[[ -x "$WIZARD" ]] || { say "wizard CLI not executable: $WIZARD"; exit 69; }
 
 cache_bytes() { du -sb "$CACHE" 2>/dev/null | cut -f1 || echo 0; }
 cache_entries() { find "$CACHE" -mindepth 1 -maxdepth 1 -type d ! -name '.*' 2>/dev/null | wc -l; }
@@ -59,9 +59,9 @@ for i in $(seq 1 "$COUNT"); do
   if [[ -z "$sbx" ]]; then say "create $i failed"; continue; fi
   # Each snapshot gets a distinct marker, so a restore that silently served
   # another snapshot's filesystem is detectable rather than plausible.
-  "$BEAN" exec "$sbx" -- sh -c "echo marker-$i > /marker.txt; sync" >/dev/null 2>&1
-  snap=$("$BEAN" snapshot create "$sbx" --name "evict-$i" --quiet 2>/dev/null)
-  "$BEAN" kill "$sbx" >/dev/null 2>&1
+  "$WIZARD" exec "$sbx" -- sh -c "echo marker-$i > /marker.txt; sync" >/dev/null 2>&1
+  snap=$("$WIZARD" snapshot create "$sbx" --name "evict-$i" --quiet 2>/dev/null)
+  "$WIZARD" kill "$sbx" >/dev/null 2>&1
   if [[ -z "$snap" ]]; then say "snapshot $i failed"; continue; fi
   snaps+=("$snap:$i")
   say "  snapshot $i: $snap"
@@ -72,7 +72,7 @@ say "restoring each snapshot once, which is what fills the cache"
 restored=()
 for entry in "${snaps[@]}"; do
   snap="${entry%%:*}"; want="${entry##*:}"
-  sbx=$("$BEAN" run --snapshot "$snap" --quiet 2>/dev/null)
+  sbx=$("$WIZARD" run --snapshot "$snap" --quiet 2>/dev/null)
   if [[ -z "$sbx" ]]; then say "  restore of $snap FAILED"; continue; fi
   restored+=("$sbx:$want")
   say "  restored $snap -> $sbx  (cache now $(cache_bytes) bytes, $(cache_entries) entries)"
@@ -89,7 +89,7 @@ echo 3 > /proc/sys/vm/drop_caches
 failures=0
 for entry in "${restored[@]}"; do
   sbx="${entry%%:*}"; want="${entry##*:}"
-  got=$("$BEAN" exec "$sbx" -- cat /marker.txt 2>/dev/null | tr -d '\r\n')
+  got=$("$WIZARD" exec "$sbx" -- cat /marker.txt 2>/dev/null | tr -d '\r\n')
   if [[ "$got" == "marker-$want" ]]; then
     say "  $sbx: marker-$want OK"
   else
@@ -103,7 +103,7 @@ final_bytes=$(cache_bytes)
 say "cache after: $final_bytes bytes across $(cache_entries) entries"
 
 for entry in "${restored[@]}"; do
-  "$BEAN" kill "${entry%%:*}" >/dev/null 2>&1 &
+  "$WIZARD" kill "${entry%%:*}" >/dev/null 2>&1 &
 done
 wait
 

@@ -20,9 +20,9 @@ set -uo pipefail
 
 COUNT=${COUNT:-3}
 IMAGE=${IMAGE:-alpine:3.20}
-BASE_URL=${BEAN_BASE_URL:-http://127.0.0.1:18080}
-API_KEY=${BEAN_API_KEY:-devkey}
-BEAN=${BEAN:-/tmp/bean}
+BASE_URL=${WIZARD_BASE_URL:-http://127.0.0.1:18080}
+API_KEY=${WIZARD_API_KEY:-devkey}
+WIZARD=${WIZARD:-/tmp/wizard}
 MARKER="restore-repeat-marker"
 
 while [[ $# -gt 0 ]]; do
@@ -33,11 +33,11 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-export BEAN_BASE_URL="$BASE_URL" BEAN_API_KEY="$API_KEY"
+export WIZARD_BASE_URL="$BASE_URL" WIZARD_API_KEY="$API_KEY"
 say() { printf '%s\n' "$*"; }
 hr() { printf -- '------------------------------------------------------------\n'; }
 
-[[ -x "$BEAN" ]] || { say "bean CLI not executable: $BEAN"; exit 69; }
+[[ -x "$WIZARD" ]] || { say "wizard CLI not executable: $WIZARD"; exit 69; }
 
 # The CLI has no resource flags and the default 20 GiB request would exhaust the
 # node's disk commitment before this finishes.
@@ -52,9 +52,9 @@ SRC=$(create_small)
 [[ -n "$SRC" ]] || { say "could not create the source sandbox"; exit 70; }
 say "source sandbox: $SRC"
 
-"$BEAN" exec "$SRC" -- sh -c "echo $MARKER > /marker.txt; sync" >/dev/null 2>&1
-SNAP=$("$BEAN" snapshot create "$SRC" --name restore-repeat --quiet 2>/dev/null)
-"$BEAN" kill "$SRC" >/dev/null 2>&1
+"$WIZARD" exec "$SRC" -- sh -c "echo $MARKER > /marker.txt; sync" >/dev/null 2>&1
+SNAP=$("$WIZARD" snapshot create "$SRC" --name restore-repeat --quiet 2>/dev/null)
+"$WIZARD" kill "$SRC" >/dev/null 2>&1
 [[ -n "$SNAP" ]] || { say "snapshot failed"; exit 70; }
 say "snapshot: $SNAP"
 hr
@@ -66,7 +66,7 @@ for i in $(seq 1 "$COUNT"); do
   # the early-exit path, so a single average would hide the difference this change
   # exists to produce.
   start=$(date +%s%3N)
-  sbx=$("$BEAN" run --snapshot "$SNAP" --quiet 2>&1)
+  sbx=$("$WIZARD" run --snapshot "$SNAP" --quiet 2>&1)
   elapsed=$(( $(date +%s%3N) - start ))
   if [[ "$sbx" != sbx_* ]]; then
     say "  restore $i FAILED after ${elapsed}ms: $sbx"
@@ -85,7 +85,7 @@ sync
 echo 3 > /proc/sys/vm/drop_caches
 
 for sbx in "${restored[@]}"; do
-  got=$("$BEAN" exec "$sbx" -- cat /marker.txt 2>/dev/null | tr -d '\r\n')
+  got=$("$WIZARD" exec "$sbx" -- cat /marker.txt 2>/dev/null | tr -d '\r\n')
   if [[ "$got" == "$MARKER" ]]; then
     say "  $sbx: marker OK"
   else
@@ -96,7 +96,7 @@ done
 
 hr
 for sbx in "${restored[@]}"; do
-  "$BEAN" kill "$sbx" >/dev/null 2>&1 &
+  "$WIZARD" kill "$sbx" >/dev/null 2>&1 &
 done
 wait
 

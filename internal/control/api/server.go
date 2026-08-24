@@ -1,4 +1,4 @@
-// Package api implements the bean-api REST gateway.
+// Package api implements the wizard-api REST gateway.
 package api
 
 import (
@@ -19,16 +19,16 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	"github.com/garysng/bean/internal/control/image"
-	"github.com/garysng/bean/internal/control/s3"
-	"github.com/garysng/bean/internal/control/scheduler"
-	"github.com/garysng/bean/internal/control/secret"
-	"github.com/garysng/bean/internal/control/snapshot"
-	"github.com/garysng/bean/internal/control/store"
-	commonv1 "github.com/garysng/bean/internal/gen/bean/common/v1"
-	nodev1 "github.com/garysng/bean/internal/gen/bean/node/v1"
-	"github.com/garysng/bean/internal/logging"
-	"github.com/garysng/bean/internal/obs"
+	"github.com/garysng/wizard/internal/control/image"
+	"github.com/garysng/wizard/internal/control/s3"
+	"github.com/garysng/wizard/internal/control/scheduler"
+	"github.com/garysng/wizard/internal/control/secret"
+	"github.com/garysng/wizard/internal/control/snapshot"
+	"github.com/garysng/wizard/internal/control/store"
+	commonv1 "github.com/garysng/wizard/internal/gen/wizard/common/v1"
+	nodev1 "github.com/garysng/wizard/internal/gen/wizard/node/v1"
+	"github.com/garysng/wizard/internal/logging"
+	"github.com/garysng/wizard/internal/obs"
 )
 
 const (
@@ -98,7 +98,7 @@ type Server struct {
 	// are internal (docs/architecture.md D3): callers never choose one.
 	runtimeTier string
 	// domain is the data-plane base stamped onto every sandbox record so the
-	// client can build "{port}-{id}.{domain}" URLs through bean-proxy. Empty
+	// client can build "{port}-{id}.{domain}" URLs through wizard-proxy. Empty
 	// leaves the record's Domain empty and the client on the relay fallback.
 	domain    string
 	apiKey    string
@@ -129,9 +129,9 @@ type Options struct {
 	// RuntimeTier is the node capability required for placement; defaults
 	// to "fc" (the main tier) when empty.
 	RuntimeTier string
-	// Domain is the bean-proxy public base stamped onto every sandbox record,
+	// Domain is the wizard-proxy public base stamped onto every sandbox record,
 	// so a client can address a port as "{port}-{id}.{Domain}". Empty means no
-	// data-plane proxy is configured and clients use the bean-api relay path.
+	// data-plane proxy is configured and clients use the wizard-api relay path.
 	Domain string
 	// Images enables the image endpoints and image registration on create.
 	Images *image.Service
@@ -200,7 +200,7 @@ func (s *Server) Handler() http.Handler { return s.traceMiddleware(s.authMiddlew
 // place they would inevitably diverge is the path that matters — a request that
 // crossed a process boundary.
 func (s *Server) traceMiddleware(next http.Handler) http.Handler {
-	tracer := obs.Tracer("bean-api")
+	tracer := obs.Tracer("wizard-api")
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/healthz" || r.URL.Path == "/metrics" {
 			next.ServeHTTP(w, r)
@@ -215,7 +215,7 @@ func (s *Server) traceMiddleware(next http.Handler) http.Handler {
 			ctx = logging.WithRequest(ctx, id)
 			// Returning the id lets a caller reporting a slow request name
 			// the trace to look up, instead of correlating by timestamp.
-			w.Header().Set("X-Bean-Trace-Id", id)
+			w.Header().Set("X-Wizard-Trace-Id", id)
 		}
 		next.ServeHTTP(w, r.WithContext(ctx))
 	})
@@ -393,7 +393,7 @@ type createRequest struct {
 	// node pulls and converts it; the conversion produces a template the
 	// platform can later reuse by its OCI content digest without re-converting.
 	ImageRef string `json:"imageRef"`
-	// Template names an already-produced bean template (from a build, or from a
+	// Template names an already-produced wizard template (from a build, or from a
 	// prior OCI conversion) by its id or name.
 	Template string `json:"template"`
 	// Snapshot restores a previously captured sandbox instead of starting from
@@ -420,10 +420,10 @@ func (s *Server) handleCreate(w http.ResponseWriter, r *http.Request) {
 	start := time.Now()
 	outcome := "error"
 	defer func() {
-		s.metrics.IncCounter("bean_sandbox_creates_total",
+		s.metrics.IncCounter("wizard_sandbox_creates_total",
 			"Sandbox create attempts by outcome.",
 			map[string]string{"outcome": outcome}, 1)
-		s.metrics.ObserveDuration("bean_sandbox_create_duration_seconds",
+		s.metrics.ObserveDuration("wizard_sandbox_create_duration_seconds",
 			"End-to-end sandbox create latency.",
 			map[string]string{"outcome": outcome}, time.Since(start))
 	}()
@@ -747,7 +747,7 @@ func (s *Server) refreshStateGauges() {
 		}
 	}
 	for st, n := range counts {
-		s.metrics.SetGauge("bean_sandboxes", "Sandboxes by state.",
+		s.metrics.SetGauge("wizard_sandboxes", "Sandboxes by state.",
 			map[string]string{"state": st}, n)
 	}
 }
@@ -902,7 +902,7 @@ func (s *Server) handleExec(w http.ResponseWriter, r *http.Request) {
 		Stdin:          req.Stdin,
 		MaxOutputBytes: req.MaxOutputBytes,
 	})
-	s.metrics.ObserveDuration("bean_exec_duration_seconds",
+	s.metrics.ObserveDuration("wizard_exec_duration_seconds",
 		"Exec round-trip latency through the gateway.",
 		map[string]string{"outcome": execOutcome(err)}, time.Since(execStart))
 	if err != nil {
@@ -1155,9 +1155,9 @@ func (s *Server) emit(sandboxID, typ string, data map[string]string) {
 		labels = rec.Labels
 	}
 	s.bus.publish(ev, labels)
-	s.metrics.IncCounter("bean_events_total", "Lifecycle events emitted by type.",
+	s.metrics.IncCounter("wizard_events_total", "Lifecycle events emitted by type.",
 		map[string]string{"type": typ}, 1)
-	s.metrics.SetGauge("bean_event_subscribers", "Live event stream subscribers.",
+	s.metrics.SetGauge("wizard_event_subscribers", "Live event stream subscribers.",
 		nil, float64(s.bus.subscriberCount()))
 }
 

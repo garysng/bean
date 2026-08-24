@@ -13,9 +13,9 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
-	"github.com/garysng/bean/internal/control/s3"
-	nodev1 "github.com/garysng/bean/internal/gen/bean/node/v1"
-	"github.com/garysng/bean/internal/node/runtime"
+	"github.com/garysng/wizard/internal/control/s3"
+	nodev1 "github.com/garysng/wizard/internal/gen/wizard/node/v1"
+	"github.com/garysng/wizard/internal/node/runtime"
 )
 
 // buildingRuntime is LocalRuntime plus a scripted BuildImage. BuildKit is not

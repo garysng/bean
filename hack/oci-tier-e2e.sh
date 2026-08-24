@@ -13,21 +13,21 @@
 set -uo pipefail
 
 RUNTIME=${RUNTIME:-runsc}
-BIN=${BIN:-/tmp/beantest/bin}
+BIN=${BIN:-/tmp/wizardtest/bin}
 STACK=${STACK:-$(dirname "$0")/dev-fc-stack.sh}
-RUN=${RUN:-/tmp/beanrun}
+RUN=${RUN:-/tmp/wizardrun}
 IMG=${IMG:-docker.m.daocloud.io/library/python:3.11-slim}
 UPLINK=${UPLINK:-$(ip route | awk '/^default/ {print $5; exit}')}
 GUEST_SUBNET=${GUEST_SUBNET:-172.31.0.0/30}
-export BEAN_BASE_URL=http://127.0.0.1:18080
-export BEAN_API_KEY=devkey
+export WIZARD_BASE_URL=http://127.0.0.1:18080
+export WIZARD_API_KEY=devkey
 
 FAILED=0
 pass() { printf '  PASS  %s\n' "$1"; }
 fail() { printf '  FAIL  %s\n' "$1"; FAILED=1; }
 
 cleanup() {
-  [ -n "${SBX:-}" ] && "$BIN/bean" kill "$SBX" >/dev/null 2>&1
+  [ -n "${SBX:-}" ] && "$BIN/wizard" kill "$SBX" >/dev/null 2>&1
   BIN=$BIN bash "$STACK" stop >/dev/null 2>&1
 }
 trap cleanup EXIT
@@ -39,7 +39,7 @@ echo "uplink: $UPLINK  guest subnet: $GUEST_SUBNET"
 # The container tier needs node networking: the agent is reached through the sandbox's
 # network namespace, so without a pool there is no address to dial. noded refuses the
 # create in that case rather than starting something unreachable.
-rm -rf "$RUN" /var/lib/bean/images
+rm -rf "$RUN" /var/lib/wizard/images
 GUEST_SUBNET=$GUEST_SUBNET UPLINK=$UPLINK BIN=$BIN BUILDKIT_ADDR= \
   RUNTIME=$RUNTIME NODED_FLAGS="--fc-overlaybd" \
   bash "$STACK" start >"${TMPDIR:-/tmp}/oci-e2e-stack.log" 2>&1 || {
@@ -56,7 +56,7 @@ echo "### create"
 # it is: measured 16.3s cold against 0.9s warm, with the phase metrics attributing
 # 16.86s of 17.09s total to runtime_create and 0.072s to agent_ready.
 start=$(date +%s.%N)
-COLD=$("$BIN/bean" run --image "$IMG" --quiet 2>&1)
+COLD=$("$BIN/wizard" run --image "$IMG" --quiet 2>&1)
 end=$(date +%s.%N)
 if [ -z "$COLD" ] || printf '%s' "$COLD" | grep -qi error; then
   fail "create: $COLD"
@@ -66,7 +66,7 @@ fi
 printf '  cold (image converted here): %.1fs\n' "$(echo "$end - $start" | bc)"
 
 start=$(date +%s.%N)
-SBX=$("$BIN/bean" run --image "$IMG" --quiet 2>&1)
+SBX=$("$BIN/wizard" run --image "$IMG" --quiet 2>&1)
 end=$(date +%s.%N)
 if [ -z "$SBX" ] || printf '%s' "$SBX" | grep -qi error; then
   fail "second create: $SBX"
@@ -74,7 +74,7 @@ if [ -z "$SBX" ] || printf '%s' "$SBX" | grep -qi error; then
 fi
 warm=$(echo "$end - $start" | bc)
 printf '  warm (steady state): %.1fs\n' "$warm"
-"$BIN/bean" kill "$COLD" >/dev/null 2>&1
+"$BIN/wizard" kill "$COLD" >/dev/null 2>&1
 
 # A steady-state create is dominated by mounting the rootfs and starting one process,
 # so seconds would mean something is wrong -- a shell-out retrying, or the agent
@@ -89,7 +89,7 @@ echo
 echo "### the agent is reachable through the sandbox's network namespace"
 # exec goes node -> AgentConn -> agent gRPC. It working at all is the proof that the
 # netns transport resolved, since there is no other way in.
-if out=$("$BIN/bean" exec "$SBX" -- echo agent-reachable 2>&1) &&
+if out=$("$BIN/wizard" exec "$SBX" -- echo agent-reachable 2>&1) &&
    printf '%s' "$out" | grep -q agent-reachable; then
   pass "exec reached the agent"
 else
@@ -102,7 +102,7 @@ echo
 echo "### the rootfs is the image's, down to the bytes"
 # An interpreter that runs and a file whose checksum is right. Listing a directory
 # would pass on a filesystem that mounted and served nothing.
-out=$("$BIN/bean" exec "$SBX" -- python3 -c '
+out=$("$BIN/wizard" exec "$SBX" -- python3 -c '
 import hashlib, json, os, sysconfig, sys
 p = os.path.join(sysconfig.get_paths()["stdlib"], "json", "decoder.py")
 b = open(p, "rb").read()
@@ -121,7 +121,7 @@ echo "### the sandbox is isolated from the host"
 # A container that can see the host's process table is not isolated. The count is
 # small rather than zero because the sandbox has its own processes.
 hostprocs=$(ls -d /proc/[0-9]* 2>/dev/null | wc -l)
-inprocs=$("$BIN/bean" exec "$SBX" -- sh -c 'ls -d /proc/[0-9]* | wc -l' 2>&1 | tail -1)
+inprocs=$("$BIN/wizard" exec "$SBX" -- sh -c 'ls -d /proc/[0-9]* | wc -l' 2>&1 | tail -1)
 if [ "${inprocs:-0}" -gt 0 ] 2>/dev/null && [ "${inprocs:-0}" -lt 50 ]; then
   pass "own pid namespace: $inprocs processes inside vs $hostprocs on the host"
 else
@@ -130,7 +130,7 @@ fi
 
 # CAP_SYS_ADMIN is what the spec deliberately withholds, because with it a process can
 # mount and mounting is most of the way out of a container.
-out=$("$BIN/bean" exec "$SBX" -- sh -c 'mount -t tmpfs none /mnt 2>&1; echo rc=$?' 2>&1 | tail -2)
+out=$("$BIN/wizard" exec "$SBX" -- sh -c 'mount -t tmpfs none /mnt 2>&1; echo rc=$?' 2>&1 | tail -2)
 if printf '%s' "$out" | grep -q "rc=0"; then
   fail "the sandbox could mount: CAP_SYS_ADMIN was not dropped"
 else
@@ -139,12 +139,12 @@ fi
 
 echo
 echo "### writes land in the sandbox, not on the host"
-"$BIN/bean" exec "$SBX" -- sh -c 'echo written-inside > /marker.txt' >/dev/null 2>&1
+"$BIN/wizard" exec "$SBX" -- sh -c 'echo written-inside > /marker.txt' >/dev/null 2>&1
 if [ -f /marker.txt ]; then
   fail "a file written inside appeared on the host filesystem"
   rm -f /marker.txt
 else
-  back=$("$BIN/bean" exec "$SBX" -- cat /marker.txt 2>&1 | tail -1)
+  back=$("$BIN/wizard" exec "$SBX" -- cat /marker.txt 2>&1 | tail -1)
   if [ "$back" = "written-inside" ]; then
     pass "written inside, readable inside, absent on the host"
   else
@@ -157,17 +157,17 @@ echo "### file transfer through the agent"
 # cp exercises the agent's file streaming rather than exec, which is a separate RPC
 # path -- and the one a user hits when moving a task's inputs in and results out.
 printf 'payload from the host\n' > /tmp/oci-e2e-in.txt
-if "$BIN/bean" cp /tmp/oci-e2e-in.txt "sbx:$SBX:/in.txt" >/dev/null 2>&1 &&
-   back=$("$BIN/bean" exec "$SBX" -- cat /in.txt 2>&1 | tail -1) &&
+if "$BIN/wizard" cp /tmp/oci-e2e-in.txt "sbx:$SBX:/in.txt" >/dev/null 2>&1 &&
+   back=$("$BIN/wizard" exec "$SBX" -- cat /in.txt 2>&1 | tail -1) &&
    [ "$back" = "payload from the host" ]; then
   pass "cp host -> sandbox"
 else
   fail "cp into the sandbox: $back"
 fi
 
-"$BIN/bean" exec "$SBX" -- sh -c 'echo result-from-sandbox > /out.txt' >/dev/null 2>&1
+"$BIN/wizard" exec "$SBX" -- sh -c 'echo result-from-sandbox > /out.txt' >/dev/null 2>&1
 rm -f /tmp/oci-e2e-out.txt
-if "$BIN/bean" cp "sbx:$SBX:/out.txt" /tmp/oci-e2e-out.txt >/dev/null 2>&1 &&
+if "$BIN/wizard" cp "sbx:$SBX:/out.txt" /tmp/oci-e2e-out.txt >/dev/null 2>&1 &&
    [ "$(cat /tmp/oci-e2e-out.txt 2>/dev/null)" = "result-from-sandbox" ]; then
   pass "cp sandbox -> host"
 else
@@ -180,12 +180,12 @@ echo "### a port inside the sandbox, reached through the proxy"
 # The claim this checks is that the container tier needs no proxy changes: the node
 # dials into the sandbox's netns either way. Asserted rather than assumed, because
 # "should work by construction" is how the veth-vs-tap mistake got made.
-"$BIN/bean" exec "$SBX" -- sh -c \
+"$BIN/wizard" exec "$SBX" -- sh -c \
   'nohup python3 -m http.server 8080 --bind 0.0.0.0 >/tmp/http.log 2>&1 &' >/dev/null 2>&1
 served=""
 for _ in $(seq 1 15); do
   served=$(curl -fsS -m 3 -H "Host: 8080-$SBX.local" \
-    -H "Authorization: Bearer $BEAN_API_KEY" http://127.0.0.1:17460/ 2>/dev/null | head -c 80)
+    -H "Authorization: Bearer $WIZARD_API_KEY" http://127.0.0.1:17460/ 2>/dev/null | head -c 80)
   [ -n "$served" ] && break
   sleep 1
 done
@@ -212,7 +212,7 @@ import socket, sys
 socket.setdefaulttimeout(5)
 socket.create_connection((sys.argv[1], 443)).close()
 " "$EGRESS_HOST" 2>/dev/null; then
-  if "$BIN/bean" exec "$SBX" -- timeout 10 python3 -c "
+  if "$BIN/wizard" exec "$SBX" -- timeout 10 python3 -c "
 import socket, sys
 socket.setdefaulttimeout(6)
 socket.create_connection((sys.argv[1], 443)).close()
@@ -228,7 +228,7 @@ else
   echo "  SKIP  the host itself cannot reach $EGRESS_HOST:443; nothing to compare against"
 fi
 
-if "$BIN/bean" exec "$SBX" -- timeout 10 python3 -c "
+if "$BIN/wizard" exec "$SBX" -- timeout 10 python3 -c "
 import socket
 socket.setdefaulttimeout(6)
 print('dns-ok', socket.gethostbyname('one.one.one.one'))
@@ -242,10 +242,10 @@ fi
 
 echo
 echo "### pause and resume"
-if "$BIN/bean" pause "$SBX" >/dev/null 2>&1; then
+if "$BIN/wizard" pause "$SBX" >/dev/null 2>&1; then
   # An exec after pause must still work: the manager wakes a paused sandbox rather
   # than refusing, which is what makes idle-pause usable at all.
-  woke=$("$BIN/bean" exec "$SBX" -- echo awake 2>&1 | tail -1)
+  woke=$("$BIN/wizard" exec "$SBX" -- echo awake 2>&1 | tail -1)
   if [ "$woke" = "awake" ]; then
     pass "paused, then woken by exec"
   else
@@ -257,14 +257,14 @@ fi
 
 echo
 echo "### logs and listing"
-if "$BIN/bean" ls 2>&1 | grep -q "$SBX"; then
+if "$BIN/wizard" ls 2>&1 | grep -q "$SBX"; then
   pass "ls reports the sandbox"
 else
   fail "ls does not list $SBX"
 fi
 # logs may legitimately be empty -- what matters is that the call is served rather
 # than erroring, since it goes through the same agent path.
-if "$BIN/bean" logs "$SBX" >/dev/null 2>&1; then
+if "$BIN/wizard" logs "$SBX" >/dev/null 2>&1; then
   pass "logs served"
 else
   fail "logs errored"
@@ -272,16 +272,16 @@ fi
 
 echo
 echo "### destroy releases the mount and the device"
-mounts_before=$(grep -c "$RUN\|/var/lib/bean/sandboxes" /proc/mounts 2>/dev/null || echo 0)
-"$BIN/bean" kill "$SBX" >/dev/null 2>&1
+mounts_before=$(grep -c "$RUN\|/var/lib/wizard/sandboxes" /proc/mounts 2>/dev/null || echo 0)
+"$BIN/wizard" kill "$SBX" >/dev/null 2>&1
 SBX=""
 sleep 2
-leaked=$(grep "/var/lib/bean/sandboxes" /proc/mounts 2>/dev/null | wc -l)
+leaked=$(grep "/var/lib/wizard/sandboxes" /proc/mounts 2>/dev/null | wc -l)
 if [ "$leaked" -eq 0 ]; then
   pass "no sandbox mount left behind"
 else
   fail "$leaked mount(s) still present after destroy:"
-  grep "/var/lib/bean/sandboxes" /proc/mounts | head -3
+  grep "/var/lib/wizard/sandboxes" /proc/mounts | head -3
 fi
 
 echo

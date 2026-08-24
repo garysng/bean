@@ -1,8 +1,8 @@
-# noded（Node Daemon）与 beand（In-Sandbox Daemon）详细设计
+# noded（Node Daemon）与 wizardd（In-Sandbox Daemon）详细设计
 
 > **noded**：每节点一个的守护进程（二进制 `noded`），sandbox 生命周期的实际执行者。
-> **beand**：sandbox 内的 init/PID1（二进制 `beand`），exec/文件/端口的执行末端。
-> 命名约定：**noded 在宿主上，beand 在 sandbox 内**。
+> **wizardd**：sandbox 内的 init/PID1（二进制 `wizardd`），exec/文件/端口的执行末端。
+> 命名约定：**noded 在宿主上，wizardd 在 sandbox 内**。
 
 > 状态标注约定见 [architecture.md](architecture.md) §0。
 
@@ -33,7 +33,7 @@ internal/node/
 `gc` 的部分落在 `manager.go`(idle 回收),其余三个没有任何代码。
 
 **配置方式:flag,不是 YAML。** 全仓库 `grep -rn yaml --include='*.go'` 为空,
-不存在 `/etc/bean/noded.yaml`。实际参数(`cmd/noded/main.go`):
+不存在 `/etc/wizard/noded.yaml`。实际参数(`cmd/noded/main.go`):
 
 ```
 --listen / --control-plane / --node-token / --bootstrap-token / --region
@@ -64,7 +64,7 @@ s3:
 containerd: null        # ✅ 容器档已实现,且不需要 containerd(D2/D3)
 cidr: 10.100.0.0/24     # 📐 形态不是这样 —— 网络是每 sandbox 的 /30，不是节点子网（见 §5）；guest /30 用 --guest-subnet 设置
 cache:
-  dir: /var/lib/bean/cache
+  dir: /var/lib/wizard/cache
   maxBytes: 800Gi        # 📐 无缓存 LRU;当前基础镜像不自动回收
 runtimes: auto           # 📐 不探测,靠 --runtime 显式指定
 overcommit:              # ✅ 已实装,见 §3.2
@@ -157,16 +157,16 @@ local 档跑宿主进程,没有「缓存镜像」这个概念,让它 stub 掉这
 
 ```
 1. image 模块产出 rootfs 块设备:**dm-snapshot** —— 共享只读 base(loop 挂载)
-   + 每 sandbox 稀疏 CoW 文件,合成单一 `/dev/mapper/bean-<id>`。
+   + 每 sandbox 稀疏 CoW 文件,合成单一 `/dev/mapper/wizard-<id>`。
    配额 = CoW 文件大小;快照抓的就是这个 CoW 层。
    (overlaybd 是目标形态,现已接在 `--fc-overlaybd` 后面、走 TCMU;
    lazy pull 本身已实现但未对真 registry 测过)
 2. noded 直接 exec firecracker(**无 jailer**,见 security §A3):
-   virtio-blk: **agent 盘为 root device**(`agent.ext4`,含 beand)
+   virtio-blk: **agent 盘为 root device**(`agent.ext4`,含 wizardd)
                + 用户镜像为第二盘(guest 内 `/dev/vdb`)
    vsock;一张 tap 网卡(启动前注册,见 §5.3),**无 balloon**(balloon 未接)
-   kernel cmdline: `init=/bean/beand -- --listen vsock:1024 --pivot ...`
-3. guest 内 beand 作为 init：
+   kernel cmdline: `init=/wizard/wizardd -- --listen vsock:1024 --pivot ...`
+3. guest 内 wizardd 作为 init：
    a. 挂载矩阵：/proc /sys /dev /dev/shm /dev/pts /dev/mqueue /tmp
       （按 OCI runtime spec 默认 mounts 复刻）
    b. 挂载 rootfs 盘并切根（guest 只见一块 rootfs 盘，零 union 逻辑）
@@ -316,10 +316,10 @@ fc 档两个平台工件,均由 CI 构建、S3 分发、noded 启动时按版本
 | 工件 | 内容 | 构建 | 版本策略 |
 |---|---|---|---|
 | guest 内核 | 6.x LTS,内嵌 virtio/vsock/nfs/overlayfs 等必需项的精简 config,bzImage | 内核源码 + config 入库,CI 复现构建 | 独立版本号;manifest 记录,snapshot restore 校验一致性 |
-| agent 盘 | ext4 只读镜像:beand 静态二进制 + busybox 级工具 | CI 打包,与 noded 同版本发布 | 随 noded 版本;旧版本保留至无运行中引用 |
+| agent 盘 | ext4 只读镜像:wizardd 静态二进制 + busybox 级工具 | CI 打包,与 noded 同版本发布 | 随 noded 版本;旧版本保留至无运行中引用 |
 
-- 存放：`s3://bean/artifacts/{kernel,agent-disk}/<version>/` + sha256 校验
-- noded 配置声明版本（默认跟随 noded 发布版），本地缓存 `/var/lib/bean/artifacts/`
+- 存放：`s3://wizard/artifacts/{kernel,agent-disk}/<version>/` + sha256 校验
+- noded 配置声明版本（默认跟随 noded 发布版），本地缓存 `/var/lib/wizard/artifacts/`
 - 容器档的 agent 直接用 agent 盘内同一个二进制 bind mount，两档单一构建产物
 
 ## 4. 镜像模块 ⚠️
@@ -347,7 +347,7 @@ AgentENV 源码（`src/overlaybd/`、crates 下 uvm-ublk,以及 registryfs_v2 �
 ### 4.2 缓存管理 📐
 
 ```
-/var/lib/bean/
+/var/lib/wizard/
 ├── cache/               # 可牺牲池（LRU）
 │   ├── content/         #   containerd content store（标准层 blob，兜底路径）
 │   ├── snapshots/       #   overlayfs/overlaybd 快照目录
@@ -370,7 +370,7 @@ AgentENV 源码（`src/overlaybd/`、crates 下 uvm-ublk,以及 registryfs_v2 �
 ### 4.4 image-service 部署形态 ⚠️
 
 image-service 是 **control plane 的逻辑模块**（`internal/control/image`），非独立
-部署服务;P0–P2 内嵌 bean-api 进程。职责需要全局视角所以不能下放节点：
+部署服务;P0–P2 内嵌 wizard-api 进程。职责需要全局视角所以不能下放节点：
 
 - 格式转换全局去重（一个镜像只转一次，多节点不打架）
 - prewarm 编排需要全节点缓存视图
@@ -386,7 +386,7 @@ image-service 是 **control plane 的逻辑模块**（`internal/control/image`�
 > 完整推导与两条在硬件上验证过的性质见 [network.md](network.md),安全语义见
 > security-and-startup.md §A4。
 >
-> 注意形态**不是**本节原先写的「桥 + 节点本地 IPAM」草图。没有 `bean0` 桥,也没有
+> 注意形态**不是**本节原先写的「桥 + 节点本地 IPAM」草图。没有 `wizard0` 桥,也没有
 > 位图分出的每节点子网。Firecracker 恢复快照会带回原 IP,所以每个 sandbox 拿到
 > **自己的** netns 和一个**恒定**的 guest 地址,只有宿主端随索引变化。规则用的是
 > **iptables**(经 `iptables-restore` 批量下发),不是 nftables。
@@ -399,8 +399,8 @@ image-service 是 **control plane 的逻辑模块**（`internal/control/image`�
 
 ```
 Setup（network/setup_linux.go，每 sandbox 一次）：
-1. ip netns add bean-<idx>
-2. netns 内 tap "beantap0"（每次同名，快照才能找回它记录的设备）
+1. ip netns add wizard-<idx>
+2. netns 内 tap "wizardtap0"（每次同名，快照才能找回它记录的设备）
      地址 172.31.0.1/30  ← guest 的网关
 3. veth 对 bnv<idx> (host) ↔ bnp<idx> (netns)，一端移入 netns
      host  端 10.<idx/64>.<idx%64*4>.1/30
@@ -416,7 +416,7 @@ network.md §2)。宿主端由 sandbox 的槽位索引推导;`/30` 步长为 4,�
 sandbox(network.md §3,`network/alloc.go` + `pool.go`)。
 
 DNS:guest 的解析器由 guest 内的 agent 处理,而不是桥侧的转发器 —— 用宿主的上游
-解析器,可用 `--guest-dns` 配置(network.md §6)。这条路径上没有 `bean0`、没有节点
+解析器,可用 `--guest-dns` 配置(network.md §6)。这条路径上没有 `wizard0`、没有节点
 DNS 转发进程,也不注入 `/etc/hosts`。
 
 ### 5.2 iptables 规则（两层 NAT + FORWARD DROP，每 sandbox 一套）✅
@@ -457,30 +457,30 @@ netns 内（源仍是 guest，172.31.0.0/30）：
 FC **配了** tap 网卡(`runtime/fc_linux.go`):在 InstanceStart 之前,noded 通过
 `/network-interfaces/<id>` 注册 tap,`HostDevName` 设为 layout 的 tap 名,并应用
 `/mmds/config` 让 VMM 在该接口上提供元数据服务。VMM 在 sandbox 的 netns 内 exec
-(tap 就在那儿),所以 fc 档用 tap 替代 veth 的 netns 端 —— 没有 `bean0` 桥,上面的
+(tap 就在那儿),所以 fc 档用 tap 替代 veth 的 netns 端 —— 没有 `wizard0` 桥,上面的
 iptables 规则才是隔离 sandbox 彼此的手段。layout 为 nil(未配网络的节点)则保持此前
 「完全没有网卡」的行为,而不是让启动失败。
 
-## 6. beand ✅
+## 6. wizardd ✅
 
 ### 6.1 注入与启动 ✅
 
 > 本节描述**容器档注入**（bind mount + entrypoint override,随 P5 引入）;
 > fc 主路径的 agent 盘注入见 §3.1/§3.4。
 
-1. noded 发布目录 `/var/lib/bean/agent/<version>/beand`（静态编译，musl，≈8 MiB）
-2. OCI spec 增加只读 bind mount：`/var/lib/bean/agent/<ver>/beand → /.bean/agent`
-   以及 socket 目录 `/run/bean/<id>/ → /.bean/run/`（读写）
-3. entrypoint override 为 `/.bean/agent`；原 image 的 entrypoint/cmd/env/user/workdir
+1. noded 发布目录 `/var/lib/wizard/agent/<version>/wizardd`（静态编译，musl，≈8 MiB）
+2. OCI spec 增加只读 bind mount：`/var/lib/wizard/agent/<ver>/wizardd → /.wizard/agent`
+   以及 socket 目录 `/run/wizard/<id>/ → /.wizard/run/`（读写）
+3. entrypoint override 为 `/.wizard/agent`；原 image 的 entrypoint/cmd/env/user/workdir
    序列化进 spec annotation，由 agent 读取
-4. agent 启动即 listen unix socket `/.bean/run/agent.sock`（noded 从 host 侧
-   `/run/bean/<id>/agent.sock` 直连），上报 Ready
+4. agent 启动即 listen unix socket `/.wizard/run/agent.sock`（noded 从 host 侧
+   `/run/wizard/<id>/agent.sock` 直连），上报 Ready
 5. `autoStartCmd=true` 或收到 StartUserProcess 时，agent 按原 entrypoint 语义
    fork 用户进程（setuid 到镜像 USER、应用 env/workdir）
 
 版本升级：agent 随 noded 包发布，目录带版本号，运行中 sandbox 不受影响（旧版本目录保留至无引用）。
 
-路径冲突：`/.bean` 若与镜像内容冲突（极罕见），创建失败并明确报错，可配置备用挂载点。
+路径冲突：`/.wizard` 若与镜像内容冲突（极罕见），创建失败并明确报错，可配置备用挂载点。
 
 ### 6.2 PID1 职责 ✅
 
@@ -561,7 +561,7 @@ BYOC：客户节点出向连托管接入层即可（443,零证书配置）,身�
 
 
 ```
-1. 枚举本地实际状态：存活 firecracker 进程（jailer 目录 /run/bean/fc/<id>/ +
+1. 枚举本地实际状态：存活 firecracker 进程（jailer 目录 /run/wizard/fc/<id>/ +
    pidfile 规约,fc 档主路径）∪ containerd task（容器档,如启用）
 2. SyncState 拿控制面期望状态
 3. 三向对账：
@@ -571,7 +571,7 @@ BYOC：客户节点出向连托管接入层即可（443,零证书配置）,身�
 4. 全量上报，恢复心跳
 ```
 
-netns/veth/iptables 链均带 `bean-<id>` 命名规约，孤儿扫描按前缀比对存活 sandbox 集合。
+netns/veth/iptables 链均带 `wizard-<id>` 命名规约，孤儿扫描按前缀比对存活 sandbox 集合。
 
 ### 7.3 GC 触发器 ⚠️
 
@@ -587,11 +587,11 @@ netns/veth/iptables 链均带 `bean-<id>` 命名规约，孤儿扫描按前缀�
 ## 8. noded 自身可观测 ✅
 
 - Prometheus 端点 `--metrics <addr>` → `GET /metrics`（免鉴权,本地采集）;OTLP 导出后续包同一 registry：
-  - `bean_node_create_phase_seconds{phase,runtime}` 创建各阶段耗时直方图
+  - `wizard_node_create_phase_seconds{phase,runtime}` 创建各阶段耗时直方图
     （phase: runtime_create / agent_ready / total;后续补 image_pull / rootfs / network）
-  - `bean_node_creates_total{outcome,runtime}`、`bean_node_destroys_total{outcome,runtime}`
-  - `bean_node_idle_actions_total{action,outcome}` idle 回收动作
-  - `bean_node_sandboxes{state}`、`bean_node_requests_in_flight`（scrape 时重算）
+  - `wizard_node_creates_total{outcome,runtime}`、`wizard_node_destroys_total{outcome,runtime}`
+  - `wizard_node_idle_actions_total{action,outcome}` idle 回收动作
+  - `wizard_node_sandboxes{state}`、`wizard_node_requests_in_flight`（scrape 时重算）
   - 待补：缓存命中率、iptables 规则数、IPAM 使用率
 - per-sandbox 资源时序（cgroup/FC stats → OTLP,attributes 带 sandbox_id/labels）;
   agent 可选透传 sandbox 内应用 OTLP（localhost:4317 → vsock 转发）

@@ -6,7 +6,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/garysng/bean/internal/control/store"
+	"github.com/garysng/wizard/internal/control/store"
 )
 
 // writeFile puts content in a sandbox through the API, so a test's setup goes
@@ -101,8 +101,8 @@ func TestForkProducesUsableCopyAndLeavesSourceRunning(t *testing.T) {
 	// checkpoint is gone by now.
 	sb := out["sandboxes"].([]any)[0].(map[string]any)
 	labels := sb["labels"].(map[string]any)
-	if labels["bean.fork.source"] != srcID {
-		t.Errorf("fork source label = %v, want %s", labels["bean.fork.source"], srcID)
+	if labels["wizard.fork.source"] != srcID {
+		t.Errorf("fork source label = %v, want %s", labels["wizard.fork.source"], srcID)
 	}
 }
 

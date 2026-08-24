@@ -7,15 +7,15 @@
 # this checks -- and the gap between the two is exactly where a rootfs that mounts on
 # the host but cannot be booted would hide.
 #
-# Needs a KVM host with the node assets built, the overlaybd binaries, and bean's own
+# Needs a KVM host with the node assets built, the overlaybd binaries, and wizard's own
 # binaries in BIN. Starts and stops its own stack, and leaves nothing behind.
 set -uo pipefail
 
-BIN=${BIN:-/tmp/beantest/bin}
+BIN=${BIN:-/tmp/wizardtest/bin}
 STACK=${STACK:-$(dirname "$0")/dev-fc-stack.sh}
-RUN=${RUN:-/tmp/beanrun}
-export BEAN_BASE_URL=http://127.0.0.1:18080
-export BEAN_API_KEY=devkey
+RUN=${RUN:-/tmp/wizardrun}
+export WIZARD_BASE_URL=http://127.0.0.1:18080
+export WIZARD_API_KEY=devkey
 FAILED=0
 pass() { echo "PASS  $*"; }
 fail() { echo "FAIL  $*"; FAILED=1; }
@@ -52,7 +52,7 @@ echo "=== create a sandbox from a real registry image ==="
 # alpine rather than busybox: it has a real /etc/os-release to read back, and its
 # layer is large enough that a broken chain shows up as a mount failure.
 # First use converts the layer, which takes longer than the CLI default wait.
-SBX=$(timeout 120 "$BIN/bean" run --image alpine:3.20 --quiet 2>${TMPDIR:-/tmp}/obd-e2e-run.err)
+SBX=$(timeout 120 "$BIN/wizard" run --image alpine:3.20 --quiet 2>${TMPDIR:-/tmp}/obd-e2e-run.err)
 if [ -z "$SBX" ]; then
   fail "create failed"
   cat ${TMPDIR:-/tmp}/obd-e2e-run.err
@@ -63,7 +63,7 @@ fi
 pass "sandbox created: $SBX"
 
 echo "=== the guest booted from the overlaybd device ==="
-OUT=$("$BIN/bean" exec "$SBX" -- cat /etc/os-release 2>&1)
+OUT=$("$BIN/wizard" exec "$SBX" -- cat /etc/os-release 2>&1)
 if echo "$OUT" | grep -q "Alpine"; then
   pass "guest read its own rootfs: $(echo "$OUT" | grep -m1 PRETTY_NAME)"
 else
@@ -72,7 +72,7 @@ else
 fi
 
 # Writes have to land in the sandbox's own writable layer.
-if "$BIN/bean" exec "$SBX" -- sh -c 'echo written > /tmp/probe && cat /tmp/probe' 2>&1 |
+if "$BIN/wizard" exec "$SBX" -- sh -c 'echo written > /tmp/probe && cat /tmp/probe' 2>&1 |
      grep -q written; then
   pass "the writable layer accepts writes"
 else
@@ -81,7 +81,7 @@ fi
 
 echo "=== the device really is overlaybd ==="
 # Distinguishes this from a silent fall back to device-mapper: a TCMU-backed device
-# is an sd*, a dm one is /dev/mapper/bean-*.
+# is an sd*, a dm one is /dev/mapper/wizard-*.
 if ls /sys/kernel/config/target/core/user_999/ 2>/dev/null | grep -q .; then
   pass "a TCMU backstore exists for the running sandbox:"
   ls /sys/kernel/config/target/core/user_999/ | grep -v hba_ | head -3
@@ -92,7 +92,7 @@ fi
 echo "=== image config reached the guest (PR #48 on this backend) ==="
 # alpine declares no ENTRYPOINT, so PATH is the observable part: the guest's PATH
 # should be the image's, not the agent's fallback.
-PATHOUT=$("$BIN/bean" exec "$SBX" -- printenv PATH 2>&1)
+PATHOUT=$("$BIN/wizard" exec "$SBX" -- printenv PATH 2>&1)
 info "guest PATH: $PATHOUT"
 if echo "$PATHOUT" | grep -q "/usr/local/sbin"; then
   pass "the image's PATH is in the guest environment"
@@ -101,7 +101,7 @@ else
 fi
 
 echo "=== teardown releases the device ==="
-"$BIN/bean" kill "$SBX" >/dev/null 2>&1
+"$BIN/wizard" kill "$SBX" >/dev/null 2>&1
 sleep 2
 # grep -vc exits non-zero when it counts nothing, so `|| echo 0` would append a
 # second line rather than substitute one. Counted with grep -v into wc instead.

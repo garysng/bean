@@ -25,8 +25,8 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/metadata"
 
-	agentv1 "github.com/garysng/bean/internal/gen/bean/agent/v1"
-	"github.com/garysng/bean/internal/sbxtoken"
+	agentv1 "github.com/garysng/wizard/internal/gen/wizard/agent/v1"
+	"github.com/garysng/wizard/internal/sbxtoken"
 )
 
 func main() {

@@ -5,7 +5,7 @@ import (
 	"sync"
 	"sync/atomic"
 
-	"github.com/garysng/bean/internal/control/store"
+	"github.com/garysng/wizard/internal/control/store"
 )
 
 // eventBus fans lifecycle events out to live subscribers. Persistence is

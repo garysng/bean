@@ -33,7 +33,7 @@
 `src/jailer/src/chroot.rs` 确认。这是源码,不是对文档的转述。
 
 **chroot 布局。** `<chroot-base-dir>/<exec-file-name>/<id>/root`,默认 base 是 `/srv/jailer`
-(`env.rs:181-190`)。对 bean 来说会是 `/srv/jailer/firecracker/<sandbox-id>/root`。
+(`env.rs:181-190`)。对 wizard 来说会是 `/srv/jailer/firecracker/<sandbox-id>/root`。
 
 **二进制是被复制的,不是链接或 bind-mount。** `copy_exec_to_chroot`(`env.rs:490`)执行的是
 真正的 `fs::copy`,复制进 `<chroot_dir>/firecracker`。上游给出的理由是内存隔离:复制意味着
@@ -73,15 +73,15 @@ jail root(`.../<sandbox-id>/root`),cwd 就是那个 root。所以"相对于 cwd 
 
 ## 3. 真正的阻碍:三条不像它们看起来那样的路径 ⚠️
 
-chroot 破坏 bean 不是通过 cwd,而是通过**可达性**。在 chroot 下,一个路径要么在 jail 内解析
+chroot 破坏 wizard 不是通过 cwd,而是通过**可达性**。在 chroot 下,一个路径要么在 jail 内解析
 出来,要么根本解析不出来。今天有三样东西逃出了沙箱目录:
 
 **(a) 两个 drive 都是指向绝对目标的符号链接。** `PathOnHost` 是相对的
 (`fc_linux.go:477`、`484`),但这些名字指向的文件并不在本地:
 
 - `agent.ext4` 是 `os.Symlink(r.AgentDiskPath, ...)`(`fc_linux.go:309`)→
-  `/var/lib/bean/assets/agent.ext4`
-- `rootfs.img` 是 `os.Symlink("/dev/mapper/bean-<id>", ...)`
+  `/var/lib/wizard/assets/agent.ext4`
+- `rootfs.img` 是 `os.Symlink("/dev/mapper/wizard-<id>", ...)`
   (`image/devmapper_linux.go:157-162`)
 
 一个相对的**名字**,其**目标**是绝对的:没有 chroot 时解析正常,有 chroot 时就是断链。
@@ -90,10 +90,10 @@ major:minor 在里面 `mknod`,或者 bind-mount 进去。jailer 创建
 `/dev/kvm`、`/dev/net/tun`、`/dev/urandom` 和 `/dev/userfaultfd`,**别的什么都不建** ——
 `FOLDER_HIERARCHY` 恰好就是 `["/", "/dev", "/dev/net", "/run"]`(`env.rs:65`)。上游明确表示
 guest 资源是运维方的事:用户"必须为任何将通过 API 提供给 VM 的资源创建硬链接(或复制)"。
-**每沙箱的 dm 设备节点得由 bean 自己放进去,而这件事没有任何代码。**
+**每沙箱的 dm 设备节点得由 wizard 自己放进去,而这件事没有任何代码。**
 
 **(b) 内核路径是绝对的。** `KernelImagePath: r.KernelPath`(`fc_linux.go:461`)→
-`/var/lib/bean/assets/vmlinux`。在 jail 里不可达。需要硬链接或 bind mount 进去。
+`/var/lib/wizard/assets/vmlinux`。在 jail 里不可达。需要硬链接或 bind mount 进去。
 
 **(c) `SnapshotPath` 是绝对的。** `fc_lifecycle_linux.go:485` 传的是 `entry.StatePath`,
 它是共享 `.snapshots` 缓存下的 `filepath.Join(dir, snapshotStateFile)`
@@ -122,9 +122,9 @@ Firecracker 自己**从不打开**那个内存文件。所以内存镜像不需�
 干净地可组合,而且这是唯一一处不需要重新设计的地方。
 
 `Env::join_netns`(`env.rs:651`)打开 `--netns` 给出的路径,调用 `setns(fd, CLONE_NEWNET)`,
-然后关闭它。**jailer 加入一个已存在的命名空间;它从不创建。** bean 已经自己创建命名空间了
-(`ip netns add bean-<n>`,`setup_linux.go:100-126`),而 `ip netns add` 会在
-`/var/run/netns/bean-<n>` 放一个 handle,正是 `--netns` 想要的东西。两边都不用让步。
+然后关闭它。**jailer 加入一个已存在的命名空间;它从不创建。** wizard 已经自己创建命名空间了
+(`ip netns add wizard-<n>`,`setup_linux.go:100-126`),而 `ip netns add` 会在
+`/var/run/netns/wizard-<n>` 放一个 handle,正是 `--netns` 想要的东西。两边都不用让步。
 
 > **本节的历史注记。** 这份文档最初写道:运行时今天**从不进入 netns**,所以采用 jailer 才是
 > 真正把 VMM 挂到它命名空间上的东西,于是 #20 与 #21 是互补而非竞争关系。那个空缺后来由
@@ -132,7 +132,7 @@ Firecracker 自己**从不打开**那个内存文件。所以内存镜像不需�
 > 加 `Start`,因为 `setns` 是按线程生效的。所以"互补"这个结论仍然成立,但 jailer 不再是获得
 > 这个性质的**唯一**途径。
 
-`network.md` §4 担心的"命名空间组织方式必须改变"没有发生:tap 命名不受影响,`beantap0` 在新
+`network.md` §4 担心的"命名空间组织方式必须改变"没有发生:tap 命名不受影响,`wizardtap0` 在新
 命名空间里仍然是对的,`network_overrides` 仍然是一个没被用到的逃生口。注意 netns 的加入发生在
 chroot **之前**,所以 tap 设备是在已加入的命名空间里查找的,而 `/dev/net/tun` 是之后
 `mknod` 的 —— 这就是 jailer 要创建它的原因,上游也这么说:jailed 运行时"要使用多个 TAP 接口"
@@ -145,7 +145,7 @@ FC **1.16.0** 给 `SnapshotLoadParams` 加了 `vsock_override`(CHANGELOG,PR #532
 "在快照恢复时覆盖 vsock 设备的 UDS 路径。这对于用与创建快照时不同的 socket 路径来恢复快照
 很有用。"
 
-`docs/vsock.md` 把动机限定在恰好是 bean 的处境上:"在某些**不**使用 jailer 的环境中,恢复带
+`docs/vsock.md` 把动机限定在恰好是 wizard 的处境上:"在某些**不**使用 jailer 的环境中,恢复带
 vsock 设备的快照可能很困难",因为同一个 UDS 路径"无法被复用"。有一个值得记下的注意点:这个
 覆盖是**前缀** —— "恢复后的 VM 上所有连接都将以 `./v.sock.2` 作为前缀打开"。
 
@@ -157,7 +157,7 @@ vsock 设备的快照可能很困难",因为同一个 UDS 路径"无法被复用
    指向 `firecracker-ci/v1.11` 存储桶,而仓库里没有任何东西下载或钉住 Firecracker 二进制本身
    —— `dev-fc-stack.sh:96` 只是指向 `$ASSETS/firecracker` 并假定它在那儿。如果部署的二进制
    低于 1.16.0,`vsock_override` 就不存在。**要在 KVM 宿主上跑:
-   `/var/lib/bean/assets/firecracker --version`。** 这一点无法从 darwin 的 checkout 上确定。
+   `/var/lib/wizard/assets/firecracker --version`。** 这一点无法从 darwin 的 checkout 上确定。
 
 ## 7. 另一条路:cgroup + 凭据 + 设备白名单,不用 jailer 📐
 
@@ -217,7 +217,7 @@ Go 能直接做到其中一个真实的子集,而且值得精确说明是**哪�
 1. 在 KVM 宿主上 `firecracker --version`;判断 `vsock_override` 到底有没有。
 2. 把内核放进 jail(同文件系统就硬链接,否则 bind mount)。
 3. 把 agent 磁盘放进 jail(硬链接;它是共享只读的,所以很便宜)。
-4. **用 `/dev/mapper/bean-<id>` 的 major:minor 在 jail 内 `mknod` 出每沙箱的 dm 设备**,
+4. **用 `/dev/mapper/wizard-<id>` 的 major:minor 在 jail 内 `mknod` 出每沙箱的 dm 设备**,
    替掉那个符号链接。这一步没有任何原型,也是最可能出意外的一块。
 5. 决定 `.snapshots` 怎么进 jail,而**不能**给每个 jail 复制一份内存镜像,因为共享的只读
    `mmap` 正是 fork 便宜的原因。大概是把快照缓存目录做只读 bind mount。**未验证。**

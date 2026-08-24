@@ -8,7 +8,7 @@
 # specific to sockets, not to the mount.
 #
 # That rules out the transport the local tier uses. This probe tests the other one
-# bean already has: internal/node/dial.go's `netns:<path>|<host>:<port>`, whose
+# wizard already has: internal/node/dial.go's `netns:<path>|<host>:<port>`, whose
 # comment describes exactly this situation -- an address that only exists inside
 # one sandbox's network namespace. portforward.go:113 already dials that way for
 # proxied ports, so a pass here means the container tier needs no new transport.
@@ -22,7 +22,7 @@ set -uo pipefail
 
 RUNSC=${RUNSC:-runsc}
 WORK=${WORK:-/tmp/gvisor-probe}
-NS=${NS:-beanprobe}
+NS=${NS:-wizardprobe}
 HOSTIF=vbp0
 PEERIF=vbp1
 HOSTADDR=172.30.99.1/30

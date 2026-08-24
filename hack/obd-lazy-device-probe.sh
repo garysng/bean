@@ -8,14 +8,14 @@
 # file read on the host -- before blaming either side.
 set -uo pipefail
 
-BIN=${BIN:-/tmp/beantest/bin}
-IMAGE=${IMAGE:-beanreg.local:5443/alpine:3.20}
-LAYER_DIR=${LAYER_DIR:-/var/lib/bean/images/layers}
+BIN=${BIN:-/tmp/wizardtest/bin}
+IMAGE=${IMAGE:-wizardreg.local:5443/alpine:3.20}
+LAYER_DIR=${LAYER_DIR:-/var/lib/wizard/images/layers}
 STASH=${STASH:-/tmp/obd-probe-stash}
 MNT=${MNT:-/tmp/obd-probe-mnt}
 
-export BEAN_BASE_URL=${BEAN_BASE_URL:-http://127.0.0.1:18080}
-export BEAN_API_KEY=${BEAN_API_KEY:-devkey}
+export WIZARD_BASE_URL=${WIZARD_BASE_URL:-http://127.0.0.1:18080}
+export WIZARD_API_KEY=${WIZARD_API_KEY:-devkey}
 
 say() { printf '%s\n' "$*"; }
 
@@ -31,14 +31,14 @@ cleanup() {
 trap cleanup EXIT
 
 kill_all() {
-	for s in $("$BIN/bean" ls 2>/dev/null | awk '/^sbx_/ {print $1}'); do
-		"$BIN/bean" kill "$s" >/dev/null 2>&1
+	for s in $("$BIN/wizard" ls 2>/dev/null | awk '/^sbx_/ {print $1}'); do
+		"$BIN/wizard" kill "$s" >/dev/null 2>&1
 	done
 	sleep 2
 }
 
 say "== warm the image so it is published, then remove the local copy =="
-"$BIN/bean" run --image-ref "$IMAGE" --disk-mib 2048 >/dev/null 2>&1
+"$BIN/wizard" run --image-ref "$IMAGE" --disk-mib 2048 >/dev/null 2>&1
 kill_all
 mkdir -p "$STASH"
 moved=0
@@ -51,7 +51,7 @@ say "stashed $moved layer(s); local layers now: $(ls -1 "$LAYER_DIR"/*.obd 2>/de
 
 say ""
 say "== create with the layer absent =="
-SBX=$("$BIN/bean" run --image-ref "$IMAGE" --disk-mib 2048 2>&1 | awk '/^sbx_/ {print $1}')
+SBX=$("$BIN/wizard" run --image-ref "$IMAGE" --disk-mib 2048 2>&1 | awk '/^sbx_/ {print $1}')
 [ -n "$SBX" ] || { say "create failed"; exit 1; }
 say "sandbox: $SBX"
 say "local layers after create: $(ls -1 "$LAYER_DIR"/*.obd 2>/dev/null | wc -l) (0 means it was read remotely)"

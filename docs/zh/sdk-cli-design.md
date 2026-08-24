@@ -8,14 +8,14 @@
 - **代码生成** 📐 **未实现**:`proto → OpenAPI spec → 各语言 client` 这条管线不存在,
   也没有发布 OpenAPI spec。Python SDK 是**手写 httpx**,CLI 是手写 Go。
   这不一定要改 —— 手写的门面 API 目前比生成层更贴合用法 —— 但不该写成既成事实
-- 版本策略 📐:SDK 未发版,server 也不返回 `X-Bean-Api-Version`
+- 版本策略 📐:SDK 未发版,server 也不返回 `X-Wizard-Api-Version`
 
 ## 2. Python SDK（主 SDK，eval/rollout 侧）⚠️
 
-**当前真实覆盖面**(`sdk/python/bean/__init__.py`,单文件手写):
+**当前真实覆盖面**(`sdk/python/wizard/__init__.py`,单文件手写):
 
 ```
-✅ BeanClient / sandboxes.create|get|list / snapshots.list|get|delete
+✅ WizardClient / sandboxes.create|get|list / snapshots.list|get|delete
 ✅ Sandbox.exec / write_file / read_file / ls / pause / resume / kill
 ✅ Sandbox.snapshot(name, labels, keep_running, include_memory, base)
 ✅ Sandbox.events() / refresh() / context manager
@@ -23,26 +23,26 @@
    (`resumes_guest` 的含义是「从这份快照 restore 出的 sandbox 接着被采集的 guest 跑,
    而不是重新开机」—— 它是 restore 的性质,不是 resume 这个动词的)
 ✅ images.list|status|prewarm|prewarm_status
-✅ 错误分层:BeanAPIError / BeanConnectionError
+✅ 错误分层:WizardAPIError / WizardConnectionError
 
 📐 未实现:pty、exec_stream、ports.expose、volumes、fork、start、
-   set_lifecycle、files.upload_dir/download_dir、bean.aio(异步栈)、
-   bean.batch.run_batch
+   set_lifecycle、files.upload_dir/download_dir、wizard.aio(异步栈)、
+   wizard.batch.run_batch
 ```
 
 下面若出现上面「未实现」清单里的 API,那是**设计意图**而非当前能力 ——
 特别是 §2.3 把 `run_batch` 说成「SWE-bench 场景的一等入口」,它不存在。
 
-包名:`bean-sdk`（import `bean`）。依赖:`httpx`。
+包名:`wizard-sdk`（import `wizard`）。依赖:`httpx`。
 (原计划的 sync+async 双栈与 `websockets` 尚未引入)
 
 ### 2.1 核心接口 ⚠️
 
 ```python
-from bean import Sandbox, BeanClient
+from wizard import Sandbox, WizardClient
 
-client = BeanClient(api_key="bk_...", base_url="https://api.example.com")
-# 环境变量兜底：BEAN_API_KEY / BEAN_BASE_URL
+client = WizardClient(api_key="bk_...", base_url="https://api.example.com")
+# 环境变量兜底：WIZARD_API_KEY / WIZARD_BASE_URL
 
 # —— 生命周期 ——
 sbx = client.sandboxes.create(
@@ -109,15 +109,15 @@ children = sbx.fork(count=8)                               # 📐 上一行的�
 
 ### 2.2 async 双形态 📐
 
-`bean.aio` 镜像同构接口（`AsyncBeanClient` / `AsyncSandbox`），共享生成层与模型定义。rollout 高并发场景的主形态。
+`wizard.aio` 镜像同构接口（`AsyncWizardClient` / `AsyncSandbox`），共享生成层与模型定义。rollout 高并发场景的主形态。
 
 ### 2.3 eval 批量 helper 📐
 
-> `bean.batch.run_batch` **不存在**。下面是设计意图。
+> `wizard.batch.run_batch` **不存在**。下面是设计意图。
 
 
 ```python
-from bean.batch import run_batch
+from wizard.batch import run_batch
 
 results = run_batch(
     client,
@@ -137,7 +137,7 @@ results = run_batch(
 - 连接复用：单 client 内 httpx 连接池;WS 每会话一条
 - 重试：幂等 GET/DELETE 自动重试（指数退避 + jitter）;create 用 Idempotency-Key 安全重试
 - 超时分层:connect 5s / read 默认 30s / exec 跟随业务 timeout+10s
-- 错误映射:`BeanAPIError` 基类,按 code 派生 `SandboxNotFound`、`QuotaExceeded`、`NoCapacity`…
+- 错误映射:`WizardAPIError` 基类,按 code 派生 `SandboxNotFound`、`QuotaExceeded`、`NoCapacity`…
 - `Sandbox` 支持 context manager:`with client.sandboxes.create(...) as sbx:` 退出即销毁
 
 ## 3. TypeScript SDK 📐
@@ -146,12 +146,12 @@ results = run_batch(
 
 原设计:
 
-包名:`@bean/sdk`(npm org scope,避开被占的裸名)。运行时:Node 18+ / 浏览器（浏览器仅 sandbox token 模式，不放 API key）。
+包名:`@wizard/sdk`(npm org scope,避开被占的裸名)。运行时:Node 18+ / 浏览器（浏览器仅 sandbox token 模式，不放 API key）。
 
 ```typescript
-import { BeanClient } from "@bean/sdk";
+import { WizardClient } from "@wizard/sdk";
 
-const client = new BeanClient({ apiKey: process.env.BEAN_API_KEY });
+const client = new WizardClient({ apiKey: process.env.WIZARD_API_KEY });
 const sbx = await client.sandboxes.create({ image: "...", cpu: 2, memoryMiB: 4096 });
 
 const r = await sbx.exec("npm test", { cwd: "/app", timeoutSeconds: 300 });
@@ -166,13 +166,13 @@ await sbx.kill();
 - 与 Python 语义一一对应（方法名 camelCase 化），文档共享示例矩阵
 - WS 用原生 WebSocket（浏览器）/ `ws`（Node），PTY 前端可直接对接 xterm.js
 
-## 4. CLI（`bean`，Go）✅
+## 4. CLI（`wizard`，Go）✅
 
-与 noded 同 repo 同发版；cobra 框架;配置 `~/.config/bean/config.yaml`（多 profile：endpoint + key）。
+与 noded 同 repo 同发版；cobra 框架;配置 `~/.config/wizard/config.yaml`（多 profile：endpoint + key）。
 
 ### 4.1 命令面 ⚠️
 
-实际已实现(`bean --help`):
+实际已实现(`wizard --help`):
 
 ```
 run --image IMG | --snapshot SNAP     ls    exec SBX -- CMD...
@@ -189,27 +189,27 @@ template ls [--source built|converted] | template status ID|NAME | template prew
 **已实装**（`cli/cli.go`,与代码一致）：
 
 ```
-bean run (--image-ref IMG | --template ID|NAME | --snapshot SNAP)
+wizard run (--image-ref IMG | --template ID|NAME | --snapshot SNAP)
          [--label k=v] [--idle-timeout 300s] [--on-idle pause|delete]
-bean ls   [--label k=v]
-bean exec SBX -- CMD...
-bean cp   ./local sbx:SBX:/path  |  sbx:SBX:/path ./local
-bean logs SBX [--tail N]
-bean events SBX             # 历史;`-f [SBX] [--label k=v]` 跟随实时流(SSE)
-bean kill SBX [--force]
-bean pause SBX / bean resume SBX   # 冻住并唤回同一个 sandbox
-bean run --snapshot SNAP           # 从快照创建:每调一次产出一个新 sandbox
-bean build  --tag REF [--file Dockerfile] [CONTEXT]   # 平台上构建 template
-bean snapshot create SBX [--name N] [--no-keep-running]
-bean snapshot ls [--label k=v] / bean snapshot rm SNAP
-bean template ls [--source built|converted] | template status ID|NAME | template prewarm REF... [--replicas N]
-bean version
+wizard ls   [--label k=v]
+wizard exec SBX -- CMD...
+wizard cp   ./local sbx:SBX:/path  |  sbx:SBX:/path ./local
+wizard logs SBX [--tail N]
+wizard events SBX             # 历史;`-f [SBX] [--label k=v]` 跟随实时流(SSE)
+wizard kill SBX [--force]
+wizard pause SBX / wizard resume SBX   # 冻住并唤回同一个 sandbox
+wizard run --snapshot SNAP           # 从快照创建:每调一次产出一个新 sandbox
+wizard build  --tag REF [--file Dockerfile] [CONTEXT]   # 平台上构建 template
+wizard snapshot create SBX [--name N] [--no-keep-running]
+wizard snapshot ls [--label k=v] / wizard snapshot rm SNAP
+wizard template ls [--source built|converted] | template status ID|NAME | template prewarm REF... [--replicas N]
+wizard version
 ```
 
 **未实装**（保留为设计意图）：`attach`、`start`、`volume *`、`fork`、
 `port expose`、`config`、批量 `kill --label`、交互 PTY（`-i/-t`）。
 
-**为什么没有 `bean node ls`**：节点是平台的调度对象,不是用户的概念。
+**为什么没有 `wizard node ls`**：节点是平台的调度对象,不是用户的概念。
 e2b / Modal / Daytona 都不向用户暴露「我的 sandbox 落在哪台机器上」——
 一旦暴露,用户就会依赖它,调度器也就不能再自由迁移了。
 `/v1/nodes` 与 drain 保留为**运维 API,不进 CLI**。
@@ -223,19 +223,19 @@ e2b / Modal / Daytona 都不向用户暴露「我的 sandbox 落在哪台机器�
 - `--json` 下进度提示(如「uploading N KiB」)不输出 —— 混进流里会破坏解析
 - 退出码按「脚本该不该重试」区分:
   `0` 成功、`64` 不存在、`69` 网络不可达/无容量(**重试可能有用**)、
-  `70` 平台明确拒绝、`125` 用法错误。`bean exec` 透传远端 exit code
-- 环境变量：`BEAN_BASE_URL`、`BEAN_API_KEY`、`BEAN_TIMEOUT`（Go duration,默认 15m）
+  `70` 平台明确拒绝、`125` 用法错误。`wizard exec` 透传远端 exit code
+- 环境变量：`WIZARD_BASE_URL`、`WIZARD_API_KEY`、`WIZARD_TIMEOUT`（Go duration,默认 15m）
 
 **未实装**：TTY 自动着色、长操作 spinner 与阶段展示、`--no-wait`。
 
 ### 4.3 交互模式 📐
 
-`bean run -it IMAGE -- bash` / `bean exec -it SBX -- bash`：
+`wizard run -it IMAGE -- bash` / `wizard exec -it SBX -- bash`：
 
-- 本地终端 raw mode + WS PTY 帧对接，SIGWINCH → resize 帧，Ctrl-P Ctrl-Q detach（会话保留 60s 可 `bean attach SBX` 重连）
+- 本地终端 raw mode + WS PTY 帧对接，SIGWINCH → resize 帧，Ctrl-P Ctrl-Q detach（会话保留 60s 可 `wizard attach SBX` 重连）
 
 ## 5. 文档与示例 📐
 
 - OpenAPI spec 发布 + 托管 API reference
 - Quickstart 三件套：CLI 五分钟、Python eval 批量示例（SWE-bench 迷你复现）、TS Web demo（xterm.js 终端）
-- SDK 示例与 e2b 迁移对照表（`e2b.Sandbox.create` → `bean` 等价写法），降低已有用户切换成本
+- SDK 示例与 e2b 迁移对照表（`e2b.Sandbox.create` → `wizard` 等价写法），降低已有用户切换成本

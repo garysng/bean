@@ -205,11 +205,11 @@ func TestOpenInvalidPath(t *testing.T) {
 }
 
 func TestOpenReadOnlyWorksWhileTheWriterHoldsTheFile(t *testing.T) {
-	// The case bean-proxy needs: two processes, one writing and one reading. Calling
+	// The case wizard-proxy needs: two processes, one writing and one reading. Calling
 	// Open from the reader failed with "database is locked (SQLITE_BUSY)" and the
 	// proxy never started, because Open runs migrate() -- DDL against a file another
 	// process owns.
-	path := filepath.Join(t.TempDir(), "bean.db")
+	path := filepath.Join(t.TempDir(), "wizard.db")
 	writer, err := Open(path)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
@@ -280,7 +280,7 @@ func TestOpenSetsWALSoAReaderDoesNotBlockTheWriter(t *testing.T) {
 	// OpenReadOnly refuses a database that is not in WAL, so this pins the writer's
 	// side of that contract: without it the refusal would be correct and every
 	// deployment would hit it.
-	path := filepath.Join(t.TempDir(), "bean.db")
+	path := filepath.Join(t.TempDir(), "wizard.db")
 	st, err := Open(path)
 	if err != nil {
 		t.Fatalf("Open: %v", err)
@@ -293,7 +293,7 @@ func TestOpenSetsWALSoAReaderDoesNotBlockTheWriter(t *testing.T) {
 	}
 	if !strings.EqualFold(mode, "wal") {
 		t.Fatalf("journal_mode is %q, want wal: in rollback-journal mode a reader and "+
-			"the writer lock each other out, which presents as bean-proxy stalling "+
+			"the writer lock each other out, which presents as wizard-proxy stalling "+
 			"whenever a sandbox is created", mode)
 	}
 }
@@ -304,7 +304,7 @@ func TestOpenSetsWALSoAReaderDoesNotBlockTheWriter(t *testing.T) {
 // A mutex serialises every caller inside one Store, so no arrangement of goroutines
 // through a single handle could fail -- and a concurrency test that cannot fail proves
 // nothing. Two Store instances over one file are two callers the mutex cannot see,
-// which is exactly what two bean-api replicas are.
+// which is exactly what two wizard-api replicas are.
 //
 // Measured first, so the test is known to discriminate: two connections each doing an
 // unguarded read-then-write to the same row lost 194 of 200 updates. SQLite does not

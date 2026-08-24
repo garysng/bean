@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/garysng/bean/internal/control/store"
+	"github.com/garysng/wizard/internal/control/store"
 )
 
 // TestSnapshotRestoreEndToEnd is the flow the design exists for: set an

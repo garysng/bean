@@ -11,9 +11,9 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 
-	commonv1 "github.com/garysng/bean/internal/gen/bean/common/v1"
-	nodev1 "github.com/garysng/bean/internal/gen/bean/node/v1"
-	"github.com/garysng/bean/internal/node/runtime"
+	commonv1 "github.com/garysng/wizard/internal/gen/wizard/common/v1"
+	nodev1 "github.com/garysng/wizard/internal/gen/wizard/node/v1"
+	"github.com/garysng/wizard/internal/node/runtime"
 )
 
 // startNodeGRPC brings up SandboxService over a real socket.

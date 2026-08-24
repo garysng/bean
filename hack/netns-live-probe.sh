@@ -1,5 +1,5 @@
 #!/bin/bash
-# Verifies on a live kernel what the unit tests structurally cannot: that bean's
+# Verifies on a live kernel what the unit tests structurally cannot: that wizard's
 # rule ordering produces egress, that the denials actually deny, and that
 # teardown returns the host to exactly the state it was found in.
 #
@@ -7,7 +7,7 @@
 # then behaves as intended is a different claim, and this is the only thing that
 # can settle it. It matters most on a host whose FORWARD policy is DROP with no
 # general ACCEPT -- measured on 192.168.75.52, where Docker's ACCEPTs all match
-# on its own bridges and so do nothing for bean's veth. On such a host the
+# on its own bridges and so do nothing for wizard's veth. On such a host the
 # host-side ACCEPT is what makes egress work at all, and its position relative to
 # the DROPs is what makes the denials hold.
 #
@@ -18,7 +18,7 @@
 set -u
 
 IDX=9001
-NS="bean-probe-$IDX"
+NS="wizard-probe-$IDX"
 LINK="10.140.164.0/30"
 HOSTIP="10.140.164.1"
 NSIP="10.140.164.2"
@@ -83,7 +83,7 @@ done
 iptables -t nat -A POSTROUTING -s "$LINK" -o "$UPLINK" -j MASQUERADE
 
 echo
-echo "--- live FORWARD, bean's rules only, in kernel order ---"
+echo "--- live FORWARD, wizard's rules only, in kernel order ---"
 iptables -S FORWARD | grep -n "10.140.164"
 
 echo

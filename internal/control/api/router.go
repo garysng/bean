@@ -7,9 +7,9 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
-	nodev1 "github.com/garysng/bean/internal/gen/bean/node/v1"
-	"github.com/garysng/bean/internal/node"
-	"github.com/garysng/bean/internal/obs"
+	nodev1 "github.com/garysng/wizard/internal/gen/wizard/node/v1"
+	"github.com/garysng/wizard/internal/node"
+	"github.com/garysng/wizard/internal/obs"
 )
 
 // NodeResolver maps a node id to its data-plane address.

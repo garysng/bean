@@ -58,7 +58,7 @@ func TestCgroupWritesOnlyV2Filenames(t *testing.T) {
 		t.Fatalf("createCgroup: %v", err)
 	}
 
-	dir := filepath.Join(root, "bean-sb1")
+	dir := filepath.Join(root, "wizard-sb1")
 	// memory: 1024 MiB of guest RAM plus the VMM's own headroom.
 	wantMem := (1024 + vmmMemoryHeadroomMiB) << 20
 	for _, tc := range []struct{ file, want string }{
@@ -116,7 +116,7 @@ func TestCgroupV2WritesTheUnifiedFilenames(t *testing.T) {
 		t.Fatalf("createCgroup: %v", err)
 	}
 
-	dir := filepath.Join(root, "bean-sb2")
+	dir := filepath.Join(root, "wizard-sb2")
 	for _, tc := range []struct{ file, want string }{
 		{"memory.max", "805306368"},
 		{"memory.swap.max", "0"},
@@ -217,7 +217,7 @@ func TestCgroupRemoveLeavesNothingBehind(t *testing.T) {
 // on destroy: no caller holds a reference to it, so nothing can ever remove it.
 func TestCreateCgroupCleansUpAfterAFailedWrite(t *testing.T) {
 	root := fakeV2Tree(t)
-	dir := filepath.Join(root, "bean-sb-partial")
+	dir := filepath.Join(root, "wizard-sb-partial")
 	if err := os.MkdirAll(dir, 0o755); err != nil {
 		t.Fatal(err)
 	}
@@ -252,15 +252,15 @@ func TestCreateCgroupCleansUpAfterAFailedWrite(t *testing.T) {
 	}
 }
 
-// TestSweepOrphansRemovesOnlyBeansOwnGroups pins the boundary the startup sweep
+// TestSweepOrphansRemovesOnlyWizardsOwnGroups pins the boundary the startup sweep
 // depends on. The tree is shared with systemd, Docker and anything else on the
 // host, and removing one of theirs is not recoverable by restarting anything.
-func TestSweepOrphansRemovesOnlyBeansOwnGroups(t *testing.T) {
+func TestSweepOrphansRemovesOnlyWizardsOwnGroups(t *testing.T) {
 	root := fakeV2Tree(t)
 	h := newCgroupHost(root)
 
 	// The names a real unified tree is shared with. systemd's own slices sit right
-	// beside bean's groups in the same directory, which is what makes the prefix
+	// beside wizard's groups in the same directory, which is what makes the prefix
 	// check load-bearing rather than decorative.
 	strangers := []string{"docker", "system.slice", "kubepods"}
 	for _, s := range strangers {
@@ -281,12 +281,12 @@ func TestSweepOrphansRemovesOnlyBeansOwnGroups(t *testing.T) {
 	if inUse != 0 {
 		t.Errorf("%d directories reported in use; nothing here holds a process", inUse)
 	}
-	if _, err := os.Stat(filepath.Join(root, "bean-sb-old")); err == nil {
-		t.Error("bean-sb-old survived the sweep")
+	if _, err := os.Stat(filepath.Join(root, "wizard-sb-old")); err == nil {
+		t.Error("wizard-sb-old survived the sweep")
 	}
 	for _, s := range strangers {
 		if _, err := os.Stat(filepath.Join(root, s)); err != nil {
-			t.Errorf("the sweep removed %s, which is not bean's: %v", s, err)
+			t.Errorf("the sweep removed %s, which is not wizard's: %v", s, err)
 		}
 	}
 }
@@ -301,8 +301,8 @@ func TestCgroupNameRefusesPaths(t *testing.T) {
 		}
 	}
 	got, err := cgroupNameFor("sb-1")
-	if err != nil || got != "bean-sb-1" {
-		t.Errorf("cgroupNameFor(sb-1) = %q, %v; want bean-sb-1", got, err)
+	if err != nil || got != "wizard-sb-1" {
+		t.Errorf("cgroupNameFor(sb-1) = %q, %v; want wizard-sb-1", got, err)
 	}
 	// The inverse must agree with it, for the same reason
 	// image.SandboxIDFromDMName exists: the sweep decides what to remove from this
@@ -310,9 +310,9 @@ func TestCgroupNameRefusesPaths(t *testing.T) {
 	if id, ok := sandboxIDFromCgroupName(got); !ok || id != "sb-1" {
 		t.Errorf("sandboxIDFromCgroupName(%q) = %q, %v; want sb-1, true", got, id, ok)
 	}
-	for _, notOurs := range []string{"docker", "system.slice", "bean-", "beanx"} {
+	for _, notOurs := range []string{"docker", "system.slice", "wizard-", "wizardx"} {
 		if _, ok := sandboxIDFromCgroupName(notOurs); ok {
-			t.Errorf("sandboxIDFromCgroupName(%q) claimed it as bean's", notOurs)
+			t.Errorf("sandboxIDFromCgroupName(%q) claimed it as wizard's", notOurs)
 		}
 	}
 }

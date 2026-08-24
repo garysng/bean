@@ -17,7 +17,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/garysng/bean/internal/logging"
+	"github.com/garysng/wizard/internal/logging"
 )
 
 // OverlaybdProvider assembles a sandbox rootfs from overlaybd layers rather than
@@ -1013,7 +1013,7 @@ func (p *OverlaybdProvider) storedManifest(ctx context.Context, ref Reference) *
 	if digest == "" {
 		// A tag has to be resolved through the store's own pointer. This is the step
 		// that makes the store a source rather than a cache -- and the step that makes
-		// bean, not the upstream registry, the authority on what the tag means until the
+		// wizard, not the upstream registry, the authority on what the tag means until the
 		// next prewarm.
 		var err error
 		digest, err = p.Index.GetTag(ctx, ref)
@@ -1462,7 +1462,7 @@ func (p *OverlaybdProvider) storeLayer(ctx context.Context, digest string) (obdL
 // are refused here rather than serialised into a config where one of them would be
 // fetched from the other's prefix -- a wrong-data failure, not a visible one.
 //
-// In practice they agree: remote layers are either all from bean's object store or all
+// In practice they agree: remote layers are either all from wizard's object store or all
 // from one image's registry repository.
 func chainBlobURL(lowers []obdLayer) (string, error) {
 	url := ""

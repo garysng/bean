@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 # Probes what CPU masking a host actually supports.
 #
-# Every fact bean's CPU template code relies on was established by hand on one
+# Every fact wizard's CPU template code relies on was established by hand on one
 # AMD EPYC 7542, and none of it is documented anywhere authoritative: which of
 # Firecracker's built-in templates a given CPU accepts, how wide a custom bitmap
 # may be, and which features a mask really removes from a guest. On a different
@@ -15,11 +15,11 @@
 #   hack/cpu-template-probe.sh [--firecracker PATH] [--kernel PATH]
 #
 # Requires: firecracker binary, a guest kernel, /dev/kvm, curl, python3.
-# Read-only with respect to bean: it starts throwaway VMMs in a temp directory
-# and touches no bean state.
+# Read-only with respect to wizard: it starts throwaway VMMs in a temp directory
+# and touches no wizard state.
 set -uo pipefail
 
-FC_BIN="${FC_BIN:-/var/lib/bean/assets/firecracker}"
+FC_BIN="${FC_BIN:-/var/lib/wizard/assets/firecracker}"
 KERNEL="${KERNEL:-}"
 WORK="$(mktemp -d /tmp/cpu-probe.XXXXXX)"
 FAILED=0
@@ -60,7 +60,7 @@ require python3
 if [[ -z "$KERNEL" ]]; then
   # Boot probes need a kernel; the config probes do not. Pick the newest asset
   # rather than pinning a version that may have been replaced.
-  KERNEL="$(ls -1t /var/lib/bean/assets/vmlinux* 2>/dev/null | grep -v '\.config$' | head -1)"
+  KERNEL="$(ls -1t /var/lib/wizard/assets/vmlinux* 2>/dev/null | grep -v '\.config$' | head -1)"
 fi
 
 # start_vmm launches a throwaway VMM and sets VMM_SOCK to its API socket.
@@ -147,18 +147,18 @@ for T in T2 C3 T2S T2CL T2A; do
 done
 say ""
 if [[ -z "$BOOTABLE" ]]; then
-  say "  RESULT: no built-in template can start a VM here, which is why bean"
+  say "  RESULT: no built-in template can start a VM here, which is why wizard"
   say "  uses a custom /cpu-config template instead of a named one."
 else
   say "  RESULT: built-in templates usable here:$BOOTABLE"
-  say "  bean still uses a custom template — a built-in one ties portability"
+  say "  wizard still uses a custom template — a built-in one ties portability"
   say "  to whichever CPU models AWS chose to support."
 fi
 say ""
 
 say "custom template: widest accepted bitmap"
 hr
-say "  bean masks features through PUT /cpu-config, whose bitmap width is not"
+say "  wizard masks features through PUT /cpu-config, whose bitmap width is not"
 say "  documented. It is narrower than the 32-bit register on the reference"
 say "  host, which means the top bit cannot be masked at all — a fact worth"
 say "  re-deriving rather than assuming."
@@ -181,9 +181,9 @@ if (( widest == 0 )); then
   say "  RESULT: /cpu-config rejected every width — custom masking unavailable here."
   FAILED=1
 else
-  say "  RESULT: widest accepted bitmap is $widest bits (bean uses cpuBitmapWidth)."
+  say "  RESULT: widest accepted bitmap is $widest bits (wizard uses cpuBitmapWidth)."
   if (( widest != 31 )); then
-    say "  MISMATCH: bean's cpu_template.go hardcodes 31. Update cpuBitmapWidth"
+    say "  MISMATCH: wizard's cpu_template.go hardcodes 31. Update cpuBitmapWidth"
     say "  and its comment, then re-run the runtime tests."
     FAILED=1
   fi
@@ -197,7 +197,7 @@ say "  an unmasked boot against a masked one is what catches a bitmap that was"
 say "  accepted but aligned wrongly: it would mask real features, just not the"
 say "  intended ones."
 say ""
-say "  This compares the host's own flags against what bean's mask would remove."
+say "  This compares the host's own flags against what wizard's mask would remove."
 say "  It reads /proc/cpuinfo rather than booting a guest, so it says which"
 say "  masked features this host even has — masking one it lacks proves nothing,"
 say "  and a guest check that passes for that reason is a false positive."
@@ -226,12 +226,12 @@ print(f"  masked features it lacks:       {' '.join(absent) or '(none)'}")
 print(f"  must survive masking:           {' '.join(f for f in KEEP if f in flags)}")
 print()
 if not present:
-    print("  WARNING: this host has none of the features bean masks, so a guest")
+    print("  WARNING: this host has none of the features wizard masks, so a guest")
     print("  check here cannot tell a working mask from a broken one. Verify on")
     print("  a host with at least AVX before trusting --cpu-template.")
 else:
     print("  To confirm end to end, boot a sandbox under each setting and compare:")
-    print("    noded --cpu-template none      -> bean exec SBX -- grep -m1 flags /proc/cpuinfo")
+    print("    noded --cpu-template none      -> wizard exec SBX -- grep -m1 flags /proc/cpuinfo")
     print(f"      expect to see: {' '.join(present)}")
     print("    noded --cpu-template portable -> same command")
     print("      expect those gone, and sse2/xsave still present")
@@ -244,4 +244,4 @@ if (( FAILED )); then
   say "--cpu-template on this host."
   exit 70
 fi
-say "Probe complete. No contradictions with bean's recorded assumptions."
+say "Probe complete. No contradictions with wizard's recorded assumptions."

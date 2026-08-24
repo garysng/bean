@@ -49,7 +49,7 @@ const tokenBytes = 32
 // (every call rejected) that looks like a broken credential rather than a broken
 // name. Lowercase because gRPC normalises metadata keys, so a mixed-case constant
 // would read back differently than it was written.
-const MDKey = "x-bean-agent-token"
+const MDKey = "x-wizard-agent-token"
 
 // WithAgentToken attaches the credential to an outgoing call. Called by the node,
 // which holds the plaintext; an empty token is left off entirely so the agent sees

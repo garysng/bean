@@ -168,7 +168,7 @@ func TestConfigValidateAcceptsWorkableChains(t *testing.T) {
 				Lowers: []obdLayer{{
 					Digest: "sha256:aaa",
 					Size:   36352,
-					Dir:    "/var/lib/bean/images/layers/cache/sha256-aaa",
+					Dir:    "/var/lib/wizard/images/layers/cache/sha256-aaa",
 				}},
 				Upper: obdUpper{Data: "d", Index: "i"},
 			},

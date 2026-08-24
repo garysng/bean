@@ -5,8 +5,8 @@ import (
 	"os"
 	"testing"
 
-	"github.com/garysng/bean/internal/control/store"
-	"github.com/garysng/bean/internal/control/store/storetest"
+	"github.com/garysng/wizard/internal/control/store"
+	"github.com/garysng/wizard/internal/control/store/storetest"
 )
 
 // The Postgres store against the same conformance suite SQLite runs.
@@ -17,16 +17,16 @@ import (
 // acquires on a different engine, or that Reserve refuses to oversell when the row locks
 // behave differently. Only running the requirements does that.
 //
-// Skipped without BEAN_TEST_POSTGRES_DSN rather than spinning up a container, because a
+// Skipped without WIZARD_TEST_POSTGRES_DSN rather than spinning up a container, because a
 // test that silently starts Docker is a test that behaves differently on a laptop and in
 // CI. hack/postgres-conformance.sh brings one up and sets the variable.
 //
 // It also means the skip is honest: if this suite has never run against a real Postgres,
 // the output says so instead of reporting a pass earned by SQLite.
 func TestPostgresSatisfiesTheContract(t *testing.T) {
-	dsn := os.Getenv("BEAN_TEST_POSTGRES_DSN")
+	dsn := os.Getenv("WIZARD_TEST_POSTGRES_DSN")
 	if dsn == "" {
-		t.Skip("set BEAN_TEST_POSTGRES_DSN to run the contract against Postgres " +
+		t.Skip("set WIZARD_TEST_POSTGRES_DSN to run the contract against Postgres " +
 			"(see hack/postgres-conformance.sh)")
 	}
 

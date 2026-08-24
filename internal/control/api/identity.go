@@ -15,7 +15,7 @@ import (
 //
 // The assumption, stated plainly because everything below depends on it: the
 // fronting layer is trusted, and the header it sets is trusted exactly as far
-// as that layer is. Bean does not verify it and must not be exposed directly to
+// as that layer is. Wizard does not verify it and must not be exposed directly to
 // untrusted clients with an identity header enabled — a caller could then
 // simply name someone else. Enforcement is that layer's job; ours is to record
 // attribution and scope listings by it.
@@ -25,7 +25,7 @@ import (
 // OwnerFromHeader without touching any handler.
 
 // OwnerHeader is the default header carrying the caller's identity.
-const OwnerHeader = "X-Bean-Owner"
+const OwnerHeader = "X-Wizard-Owner"
 
 // IdentityFunc derives the owner an image should be attributed to. Returning
 // an empty string means unowned, which keeps a deployment that configures no
@@ -34,7 +34,7 @@ type IdentityFunc func(*http.Request) string
 
 // OwnerFromHeader reads the identity from a header, trimming whitespace. It is
 // the default because a reverse proxy or gateway can set a header without
-// speaking any bean-specific protocol.
+// speaking any wizard-specific protocol.
 func OwnerFromHeader(header string) IdentityFunc {
 	if header == "" {
 		header = OwnerHeader

@@ -1,7 +1,7 @@
 //go:build e2e
 
 // Package e2e runs the full stack as real processes: noded (local
-// runtime) + bean-api, exercised via REST and the bean CLI binary.
+// runtime) + wizard-api, exercised via REST and the wizard CLI binary.
 package e2e
 
 import (
@@ -34,7 +34,7 @@ var (
 
 func TestMain(m *testing.M) {
 	var err error
-	binDir, err = os.MkdirTemp("", "bean-e2e")
+	binDir, err = os.MkdirTemp("", "wizard-e2e")
 	if err != nil {
 		panic(err)
 	}
@@ -55,7 +55,7 @@ func TestMain(m *testing.M) {
 
 func build(name string) (string, error) {
 	out := filepath.Join(binDir, name)
-	cmd := exec.Command("go", "build", "-o", out, "github.com/garysng/bean/cmd/"+name)
+	cmd := exec.Command("go", "build", "-o", out, "github.com/garysng/wizard/cmd/"+name)
 	if b, err := cmd.CombinedOutput(); err != nil {
 		return "", fmt.Errorf("build %s: %s", name, b)
 	}
@@ -72,7 +72,7 @@ func freePort() (int, error) {
 }
 
 func setup() error {
-	agentBin, err := build("beand")
+	agentBin, err := build("wizardd")
 	if err != nil {
 		return err
 	}
@@ -80,11 +80,11 @@ func setup() error {
 	if err != nil {
 		return err
 	}
-	apiBin, err := build("bean-api")
+	apiBin, err := build("wizard-api")
 	if err != nil {
 		return err
 	}
-	cliBin, err = build("bean")
+	cliBin, err = build("wizard")
 	if err != nil {
 		return err
 	}
@@ -146,7 +146,7 @@ func setup() error {
 			}
 		}
 		if time.Now().After(deadline) {
-			return fmt.Errorf("bean-api not healthy")
+			return fmt.Errorf("wizard-api not healthy")
 		}
 		time.Sleep(100 * time.Millisecond)
 	}
@@ -324,7 +324,7 @@ func TestE2EIdleDelete(t *testing.T) {
 }
 
 func TestE2EViaCLI(t *testing.T) {
-	env := append(os.Environ(), "BEAN_BASE_URL="+apiURL, "BEAN_API_KEY="+apiKey)
+	env := append(os.Environ(), "WIZARD_BASE_URL="+apiURL, "WIZARD_API_KEY="+apiKey)
 	run := func(args ...string) (string, string, int) {
 		cmd := exec.Command(cliBin, args...)
 		cmd.Env = env

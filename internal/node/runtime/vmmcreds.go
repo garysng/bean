@@ -45,7 +45,7 @@ type vmmCreds struct {
 	// Groups are supplementary groups, which is how /dev/kvm is reached without
 	// changing its ownership: on every distribution checked it is root:kvm 0660,
 	// shared with libvirt and anything else using KVM on the host, so chowning it
-	// to bean's uid would be taking a host-wide device away from other users. The
+	// to wizard's uid would be taking a host-wide device away from other users. The
 	// group that already owns it is the right answer.
 	Groups []uint32
 	// NoFile caps open descriptors, NProc caps processes and threads. Zero leaves

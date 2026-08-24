@@ -4,7 +4,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/garysng/bean/internal/control/store"
+	"github.com/garysng/wizard/internal/control/store"
 )
 
 // The interface's purpose, demonstrated: a fake covering the 11 methods the scheduler

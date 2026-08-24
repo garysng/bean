@@ -110,13 +110,13 @@ type dialect interface {
 	// journalPragma is the statement that makes concurrent readers safe, or "" for an
 	// engine where they always are.
 	//
-	// SQLite needs WAL or a reader and the writer block each other; bean-proxy reads
+	// SQLite needs WAL or a reader and the writer block each other; wizard-proxy reads
 	// this database while the control plane writes it, so without WAL the proxy stalls
 	// on every create. Postgres needs nothing: MVCC means readers never block writers.
 	journalPragma() string
 }
 
-// sqliteDialect is the engine bean ships with.
+// sqliteDialect is the engine wizard ships with.
 type sqliteDialect struct{}
 
 func (sqliteDialect) name() string            { return "sqlite" }

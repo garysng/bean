@@ -5,7 +5,7 @@ import (
 	"sync"
 	"testing"
 
-	nodev1 "github.com/garysng/bean/internal/gen/bean/node/v1"
+	nodev1 "github.com/garysng/wizard/internal/gen/wizard/node/v1"
 )
 
 func i64(v int64) *int64      { return &v }

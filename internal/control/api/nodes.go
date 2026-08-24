@@ -4,8 +4,8 @@ import (
 	"encoding/json"
 	"net/http"
 
-	"github.com/garysng/bean/internal/control/store"
-	nodev1 "github.com/garysng/bean/internal/gen/bean/node/v1"
+	"github.com/garysng/wizard/internal/control/store"
+	nodev1 "github.com/garysng/wizard/internal/gen/wizard/node/v1"
 )
 
 // Node endpoints are the operational view of the cluster: what capacity

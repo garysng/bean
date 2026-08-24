@@ -14,21 +14,21 @@ import (
 	"testing"
 	"time"
 
-	agentv1 "github.com/garysng/bean/internal/gen/bean/agent/v1"
-	commonv1 "github.com/garysng/bean/internal/gen/bean/common/v1"
-	nodev1 "github.com/garysng/bean/internal/gen/bean/node/v1"
-	"github.com/garysng/bean/internal/node/runtime"
+	agentv1 "github.com/garysng/wizard/internal/gen/wizard/agent/v1"
+	commonv1 "github.com/garysng/wizard/internal/gen/wizard/common/v1"
+	nodev1 "github.com/garysng/wizard/internal/gen/wizard/node/v1"
+	"github.com/garysng/wizard/internal/node/runtime"
 )
 
 var agentBin string
 
 func TestMain(m *testing.M) {
-	dir, err := os.MkdirTemp("", "beand-bin")
+	dir, err := os.MkdirTemp("", "wizardd-bin")
 	if err != nil {
 		panic(err)
 	}
-	agentBin = filepath.Join(dir, "beand")
-	cmd := exec.Command("go", "build", "-o", agentBin, "github.com/garysng/bean/cmd/beand")
+	agentBin = filepath.Join(dir, "wizardd")
+	cmd := exec.Command("go", "build", "-o", agentBin, "github.com/garysng/wizard/cmd/wizardd")
 	if out, err := cmd.CombinedOutput(); err != nil {
 		panic("build agent: " + string(out))
 	}
@@ -338,11 +338,11 @@ func TestManagerMetricsRecordPhases(t *testing.T) {
 	}
 	out := b.String()
 	for _, want := range []string{
-		`bean_node_creates_total{outcome="success",runtime="local"} 1`,
+		`wizard_node_creates_total{outcome="success",runtime="local"} 1`,
 		`phase="runtime_create"`,
 		`phase="agent_ready"`,
 		`phase="total"`,
-		"bean_node_create_phase_seconds_count",
+		"wizard_node_create_phase_seconds_count",
 	} {
 		if !strings.Contains(out, want) {
 			t.Errorf("missing %q in:\n%s", want, out)
@@ -358,7 +358,7 @@ func TestManagerMetricsRecordFailedCreate(t *testing.T) {
 	}
 	var b strings.Builder
 	m.Metrics().WritePrometheus(&b)
-	if !strings.Contains(b.String(), `bean_node_creates_total{outcome="error",runtime="failing"} 1`) {
+	if !strings.Contains(b.String(), `wizard_node_creates_total{outcome="error",runtime="failing"} 1`) {
 		t.Errorf("failed create not counted:\n%s", b.String())
 	}
 }
@@ -377,14 +377,14 @@ func TestManagerRefreshGauges(t *testing.T) {
 	var b strings.Builder
 	m.Metrics().WritePrometheus(&b)
 	out := b.String()
-	if !strings.Contains(out, `bean_node_sandboxes{state="PAUSED"} 1`) {
+	if !strings.Contains(out, `wizard_node_sandboxes{state="PAUSED"} 1`) {
 		t.Errorf("paused gauge wrong:\n%s", out)
 	}
 	// States with nothing in them report zero rather than being absent.
-	if !strings.Contains(out, `bean_node_sandboxes{state="RUNNING"} 0`) {
+	if !strings.Contains(out, `wizard_node_sandboxes{state="RUNNING"} 0`) {
 		t.Errorf("running gauge not zeroed:\n%s", out)
 	}
-	if !strings.Contains(out, "bean_node_requests_in_flight 0") {
+	if !strings.Contains(out, "wizard_node_requests_in_flight 0") {
 		t.Errorf("in-flight gauge missing:\n%s", out)
 	}
 }
@@ -408,10 +408,10 @@ func TestManagerMetricsCountDestroyAndIdleActions(t *testing.T) {
 	var b strings.Builder
 	m.Metrics().WritePrometheus(&b)
 	out := b.String()
-	if !strings.Contains(out, `bean_node_idle_actions_total{action="delete",outcome="success"} 1`) {
+	if !strings.Contains(out, `wizard_node_idle_actions_total{action="delete",outcome="success"} 1`) {
 		t.Errorf("idle action not counted:\n%s", out)
 	}
-	if !strings.Contains(out, `bean_node_destroys_total{outcome="success",runtime="local"} 1`) {
+	if !strings.Contains(out, `wizard_node_destroys_total{outcome="success",runtime="local"} 1`) {
 		t.Errorf("destroy not counted:\n%s", out)
 	}
 }

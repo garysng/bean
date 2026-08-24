@@ -15,8 +15,8 @@ func TestMalformedNetnsTargetIsRejected(t *testing.T) {
 	for _, target := range []string{
 		"netns:",                      // nothing at all
 		"netns:|172.31.0.2:10001",     // no namespace
-		"netns:/var/run/netns/bean-0", // no address
-		"netns:/var/run/netns/bean-0|",
+		"netns:/var/run/netns/wizard-0", // no address
+		"netns:/var/run/netns/wizard-0|",
 	} {
 		conn, err := dialAgentAddr(context.Background(), target)
 		if err == nil {

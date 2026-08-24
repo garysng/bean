@@ -1,16 +1,16 @@
 #!/usr/bin/env bash
 # Builds the node-side assets the microVM tier needs: an agent disk holding
-# beand, and a base rootfs image.
+# wizardd, and a base rootfs image.
 #
 # These are node assets rather than build artefacts, which is why they live
-# under /var/lib/bean instead of the repo: the agent disk upgrades with the node
+# under /var/lib/wizard instead of the repo: the agent disk upgrades with the node
 # and every sandbox on the host shares one copy of it.
 #
 # Must run on the node (needs mkfs and loopback mounts).
 set -euo pipefail
 
-ASSETS=${ASSETS:-/var/lib/bean/assets}
-IMAGES=${IMAGES:-/var/lib/bean/images}
+ASSETS=${ASSETS:-/var/lib/wizard/assets}
+IMAGES=${IMAGES:-/var/lib/wizard/images}
 REPO=${REPO:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)}
 
 need_root() {
@@ -20,7 +20,7 @@ need_root() {
   fi
 }
 
-# build_agent_disk packs a statically linked beand into a small ext4 image.
+# build_agent_disk packs a statically linked wizardd into a small ext4 image.
 # Read-only and shared by every sandbox, so one copy serves the whole node.
 build_agent_disk() {
   local out="$ASSETS/agent.ext4"
@@ -28,21 +28,21 @@ build_agent_disk() {
   staging=$(mktemp -d)
   trap 'rm -rf "$staging"' RETURN
 
-  echo "building beand (static)"
+  echo "building wizardd (static)"
   ( cd "$REPO" && CGO_ENABLED=0 GOOS=linux GOARCH=amd64 \
-      go build -ldflags="-s -w" -o "$staging/beand" ./cmd/beand )
+      go build -ldflags="-s -w" -o "$staging/wizardd" ./cmd/wizardd )
 
   # 32 MiB leaves room for the agent plus a margin; the image is sparse, so
   # unused space costs nothing on disk.
   rm -f "$out"
   truncate -s 32M "$out"
-  mkfs.ext4 -q -F -L bean-agent "$out"
+  mkfs.ext4 -q -F -L wizard-agent "$out"
 
   local mnt
   mnt=$(mktemp -d)
   mount -o loop "$out" "$mnt"
-  mkdir -p "$mnt/bean"
-  install -m 0755 "$staging/beand" "$mnt/bean/beand"
+  mkdir -p "$mnt/wizard"
+  install -m 0755 "$staging/wizardd" "$mnt/wizard/wizardd"
 
   # The agent disk is the guest's root and is mounted read-only, so every
   # mountpoint the agent needs during early boot has to exist now: it cannot
@@ -96,7 +96,7 @@ PY
   # The guest mounts the agent disk itself, so the mountpoint must exist. The
   # pseudo-filesystem directories are likewise created here because the agent
   # mounts them before anything else runs.
-  mkdir -p "$mnt"/{bean,proc,sys,dev,tmp,run}
+  mkdir -p "$mnt"/{wizard,proc,sys,dev,tmp,run}
 
   umount "$mnt"
   rmdir "$mnt"

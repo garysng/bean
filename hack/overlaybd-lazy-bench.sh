@@ -22,34 +22,34 @@
 # environment, never a flag: a flag puts the secret key in the process command line,
 # visible to every local user.
 #
-# Usage: BEAN_S3_ENDPOINT=http://127.0.0.1:9000 BEAN_S3_ACCESS_KEY=... \
-#        BEAN_S3_SECRET_KEY=... overlaybd-lazy-bench.sh
+# Usage: WIZARD_S3_ENDPOINT=http://127.0.0.1:9000 WIZARD_S3_ACCESS_KEY=... \
+#        WIZARD_S3_SECRET_KEY=... overlaybd-lazy-bench.sh
 set -uo pipefail
 
-BIN=${BIN:-/tmp/beantest/bin}
+BIN=${BIN:-/tmp/wizardtest/bin}
 STACK=${STACK:-$(dirname "$0")/dev-fc-stack.sh}
-RUN=${RUN:-/tmp/beanrun}
+RUN=${RUN:-/tmp/wizardrun}
 IMAGES=${IMAGES:-"python:3.12-slim python:3.11-slim"}
 # Docker Hub resets connections on large blob fetches often enough to lose a run: one
 # arm of a measured comparison failing to network flake is a wasted 20 minutes, not a
 # result. The registry fetch already retries internally; this retries the whole
 # operation on top of it.
 ATTEMPTS=${ATTEMPTS:-3}
-IMAGE_DIR=/var/lib/bean/images
+IMAGE_DIR=/var/lib/wizard/images
 LAYER_DIR=$IMAGE_DIR/layers
 OBD_BUCKET=${OBD_BUCKET:-bean-obd-layers}
-export BEAN_BASE_URL=http://127.0.0.1:18080
-export BEAN_API_KEY=devkey
+export WIZARD_BASE_URL=http://127.0.0.1:18080
+export WIZARD_API_KEY=devkey
 
-: "${BEAN_S3_ENDPOINT:?set BEAN_S3_ENDPOINT for the published arm}"
-: "${BEAN_S3_ACCESS_KEY:?set BEAN_S3_ACCESS_KEY}"
-: "${BEAN_S3_SECRET_KEY:?set BEAN_S3_SECRET_KEY}"
+: "${WIZARD_S3_ENDPOINT:?set WIZARD_S3_ENDPOINT for the published arm}"
+: "${WIZARD_S3_ACCESS_KEY:?set WIZARD_S3_ACCESS_KEY}"
+: "${WIZARD_S3_SECRET_KEY:?set WIZARD_S3_SECRET_KEY}"
 
 OBD_FLAGS="--fc-overlaybd --fc-overlaybd-lazy-pull \
-  --s3-endpoint $BEAN_S3_ENDPOINT \
+  --s3-endpoint $WIZARD_S3_ENDPOINT \
   --s3-bucket $OBD_BUCKET \
   --s3-path-style \
-  --fc-overlaybd-read-url $BEAN_S3_ENDPOINT"
+  --fc-overlaybd-read-url $WIZARD_S3_ENDPOINT"
 
 cleanup() { BIN=$BIN bash "$STACK" stop >/dev/null 2>&1; }
 trap cleanup EXIT
@@ -68,18 +68,18 @@ start_stack() {  # start_stack <extra noded flags>
 time_create() {  # time_create <image>
   local img=$1 t0 t1 sbx
   t0=$(date +%s.%N)
-  sbx=$(timeout 300 "$BIN/bean" run --image "$img" --quiet 2>/dev/null)
+  sbx=$(timeout 300 "$BIN/wizard" run --image "$img" --quiet 2>/dev/null)
   t1=$(date +%s.%N)
   if [ -z "$sbx" ]; then echo FAILED; return 1; fi
-  "$BIN/bean" kill "$sbx" >/dev/null 2>&1
+  "$BIN/wizard" kill "$sbx" >/dev/null 2>&1
   echo "$t1 - $t0" | bc
 }
 
 prewarm_once() {  # prewarm_once <image>...
   local refs job
   refs=$(printf '"%s",' "$@" | sed 's/,$//')
-  job=$(curl -fsS -X POST "$BEAN_BASE_URL/v1/images/prewarm" \
-    -H "Authorization: Bearer $BEAN_API_KEY" -H 'Content-Type: application/json' \
+  job=$(curl -fsS -X POST "$WIZARD_BASE_URL/v1/images/prewarm" \
+    -H "Authorization: Bearer $WIZARD_API_KEY" -H 'Content-Type: application/json' \
     -d "{\"refs\":[$refs],\"targetNodes\":1}" | python3 -c \
     'import json,sys; print(json.load(sys.stdin).get("jobId",""))' 2>/dev/null)
   [ -n "$job" ] || { echo "  prewarm did not start"; return 1; }
@@ -87,8 +87,8 @@ prewarm_once() {  # prewarm_once <image>...
   # against a half-published image would measure a mix of levels 2 and 3.
   local i done_flag
   for i in $(seq 1 120); do
-    done_flag=$(curl -fsS "$BEAN_BASE_URL/v1/images/prewarm/$job" \
-      -H "Authorization: Bearer $BEAN_API_KEY" | python3 -c \
+    done_flag=$(curl -fsS "$WIZARD_BASE_URL/v1/images/prewarm/$job" \
+      -H "Authorization: Bearer $WIZARD_API_KEY" | python3 -c \
       'import json,sys; print(json.load(sys.stdin).get("done",False))' 2>/dev/null)
     [ "$done_flag" = "True" ] && return 0
     sleep 5

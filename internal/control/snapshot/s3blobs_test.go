@@ -8,33 +8,33 @@ import (
 	"os"
 	"testing"
 
-	"github.com/garysng/bean/internal/control/s3"
+	"github.com/garysng/wizard/internal/control/s3"
 )
 
 // S3Blobs is tested against a real object store: the interesting behaviour —
 // that an aborted upload publishes nothing, that a missing blob reports
 // ErrBlobNotFound — is behaviour of the server, not of this wrapper.
 //
-// Set BEAN_S3_ENDPOINT to enable; otherwise these skip.
+// Set WIZARD_S3_ENDPOINT to enable; otherwise these skip.
 func testS3Blobs(t *testing.T) Blobs {
 	t.Helper()
-	endpoint := os.Getenv("BEAN_S3_ENDPOINT")
+	endpoint := os.Getenv("WIZARD_S3_ENDPOINT")
 	if endpoint == "" {
-		t.Skip("BEAN_S3_ENDPOINT not set; skipping object-store snapshot test")
+		t.Skip("WIZARD_S3_ENDPOINT not set; skipping object-store snapshot test")
 	}
 	client, err := s3.New(s3.Config{
 		Endpoint:  endpoint,
 		Region:    "us-east-1",
-		AccessKey: os.Getenv("BEAN_S3_ACCESS_KEY"),
-		SecretKey: os.Getenv("BEAN_S3_SECRET_KEY"),
+		AccessKey: os.Getenv("WIZARD_S3_ACCESS_KEY"),
+		SecretKey: os.Getenv("WIZARD_S3_SECRET_KEY"),
 		PathStyle: true,
 	})
 	if err != nil {
 		t.Fatalf("s3 client: %v", err)
 	}
-	bucket := os.Getenv("BEAN_S3_TEST_BUCKET")
+	bucket := os.Getenv("WIZARD_S3_TEST_BUCKET")
 	if bucket == "" {
-		bucket = "bean-test"
+		bucket = "wizard-test"
 	}
 	blobs, err := NewS3Blobs(context.Background(), client, bucket)
 	if err != nil {

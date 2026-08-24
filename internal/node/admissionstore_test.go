@@ -6,7 +6,7 @@ import (
 	"path/filepath"
 	"testing"
 
-	nodev1 "github.com/garysng/bean/internal/gen/bean/node/v1"
+	nodev1 "github.com/garysng/wizard/internal/gen/wizard/node/v1"
 )
 
 // TestLoadAdmissionMissingFileDisables is the fresh-node case: no file means

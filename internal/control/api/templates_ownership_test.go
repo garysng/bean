@@ -5,8 +5,8 @@ import (
 	"net/url"
 	"testing"
 
-	"github.com/garysng/bean/internal/control/image"
-	"github.com/garysng/bean/internal/control/store"
+	"github.com/garysng/wizard/internal/control/image"
+	"github.com/garysng/wizard/internal/control/store"
 )
 
 // namesOf collects name->source from a /v1/templates response.

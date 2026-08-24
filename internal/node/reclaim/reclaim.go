@@ -14,8 +14,8 @@
 // recoverable by restarting anything. Two rules follow, and every decision below
 // is one of them applied:
 //
-//   - Only bean's own names and paths are visible here. A mapping without the
-//     bean- prefix, or a loop device backed by a file outside the directories
+//   - Only wizard's own names and paths are visible here. A mapping without the
+//     wizard- prefix, or a loop device backed by a file outside the directories
 //     this node owns, is not considered at all — not kept, not counted, not seen.
 //   - Uncertainty means reporting, not removing. A leak that is logged and
 //     counted costs disk until someone looks; a mapping removed from under a
@@ -42,9 +42,9 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/garysng/bean/internal/logging"
-	"github.com/garysng/bean/internal/node/image"
-	"github.com/garysng/bean/internal/obs"
+	"github.com/garysng/wizard/internal/logging"
+	"github.com/garysng/wizard/internal/node/image"
+	"github.com/garysng/wizard/internal/obs"
 )
 
 // LoopDevice is one loop device as the host reports it.
@@ -69,7 +69,7 @@ type LoopDevice struct {
 // it for real needs root, a spare kernel and a willingness to have a bug delete
 // the wrong mapping on the machine running the test.
 type Host interface {
-	// ListDMNames lists every device-mapper mapping on the host, bean's and
+	// ListDMNames lists every device-mapper mapping on the host, wizard's and
 	// everyone else's. Filtering is this package's job so that the filter is
 	// where the tests can reach it.
 	ListDMNames() ([]string, error)
@@ -116,7 +116,7 @@ type Report struct {
 	// Failed counts orphans that were identified but could not be removed.
 	// These are still on the host.
 	Failed map[string]int
-	// Kept counts resources matching bean's prefix that were left alone because
+	// Kept counts resources matching wizard's prefix that were left alone because
 	// they belong to a sandbox that is supposed to exist.
 	Kept map[string]int
 	// Suspect describes resources that look wrong but could not be shown to be
@@ -291,7 +291,7 @@ func (r *Reconciler) loops(expected map[string]bool, st *state, rep *Report) {
 		id, ok := sandboxIDForPath(r.BaseDir, dev.BackingFile)
 		if !ok {
 			// Backed by a file outside the directories this node owns, so it is
-			// not bean's: snapd, lxd and Docker all hold loop devices on these
+			// not wizard's: snapd, lxd and Docker all hold loop devices on these
 			// hosts.
 			continue
 		}
@@ -408,21 +408,21 @@ func (r *Reconciler) dirs(expected map[string]bool, st *state, rep *Report) {
 func (r *Reconciler) publish(rep Report) {
 	if r.Metrics != nil {
 		for _, kind := range []string{kindMapping, kindLoop, kindDir} {
-			r.Metrics.IncCounter("bean_node_reclaim_found_total",
+			r.Metrics.IncCounter("wizard_node_reclaim_found_total",
 				"Orphaned host resources found by startup reconciliation.",
 				map[string]string{"resource": kind}, float64(rep.Found[kind]))
-			r.Metrics.IncCounter("bean_node_reclaim_reclaimed_total",
+			r.Metrics.IncCounter("wizard_node_reclaim_reclaimed_total",
 				"Orphaned host resources reclaimed by startup reconciliation.",
 				map[string]string{"resource": kind}, float64(rep.Reclaimed[kind]))
-			r.Metrics.IncCounter("bean_node_reclaim_failures_total",
+			r.Metrics.IncCounter("wizard_node_reclaim_failures_total",
 				"Orphaned host resources that could not be reclaimed and are still held.",
 				map[string]string{"resource": kind}, float64(rep.Failed[kind]))
-			r.Metrics.SetGauge("bean_node_reclaim_in_use",
-				"Host resources matching bean's prefix left alone because a sandbox "+
+			r.Metrics.SetGauge("wizard_node_reclaim_in_use",
+				"Host resources matching wizard's prefix left alone because a sandbox "+
 					"is expected to be using them.",
 				map[string]string{"resource": kind}, float64(rep.Kept[kind]))
 		}
-		r.Metrics.SetGauge("bean_node_reclaim_suspect",
+		r.Metrics.SetGauge("wizard_node_reclaim_suspect",
 			"Host resources that looked wrong but could not be shown to be orphans, "+
 				"so were left in place. Needs a human.",
 			nil, float64(len(rep.Suspect)))
@@ -460,7 +460,7 @@ func isSandboxDirName(name string) bool {
 // This is the safety boundary for loop devices: nothing outside this directory
 // can be named by the return value, so nothing outside it can be detached. The
 // check is on the cleaned path rather than a string prefix, because "/var/lib/
-// bean/sandboxes/../../other" has the right prefix and the wrong location.
+// wizard/sandboxes/../../other" has the right prefix and the wrong location.
 func sandboxIDForPath(baseDir, path string) (string, bool) {
 	if baseDir == "" || path == "" {
 		return "", false

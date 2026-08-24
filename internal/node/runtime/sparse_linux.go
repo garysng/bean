@@ -25,7 +25,7 @@ import (
 // deliberately minimal: the file it describes is a block image with no internal
 // structure worth modelling.
 
-const sparseMagic = "BEANSPRS"
+const sparseMagic = "WIZARDSPRS"
 
 // sparseHeader precedes the extents. LogicalSize is the file's full size, which
 // restore needs in order to reproduce it at the right length.

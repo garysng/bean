@@ -27,11 +27,11 @@ import (
 // Attribute keys shared across components, for the same reason the log keys
 // are shared: a span attribute only groups if every process spells it alike.
 const (
-	AttrSandbox  = "bean.sandbox"
-	AttrNode     = "bean.node"
-	AttrSnapshot = "bean.snapshot"
-	AttrImage    = "bean.image"
-	AttrPhase    = "bean.phase"
+	AttrSandbox  = "wizard.sandbox"
+	AttrNode     = "wizard.node"
+	AttrSnapshot = "wizard.snapshot"
+	AttrImage    = "wizard.image"
+	AttrPhase    = "wizard.phase"
 )
 
 // TracingConfig describes where spans go.
@@ -39,7 +39,7 @@ type TracingConfig struct {
 	// Endpoint is an OTLP/gRPC collector, e.g. "localhost:4317". Empty
 	// disables tracing entirely.
 	Endpoint string
-	// Service names this process in the trace, e.g. "bean-api".
+	// Service names this process in the trace, e.g. "wizard-api".
 	Service string
 	// Version is reported as the service version.
 	Version string
@@ -116,7 +116,7 @@ func SetupTracing(ctx context.Context, cfg TracingConfig) (func(context.Context)
 
 // Tracer returns the tracer for a component.
 func Tracer(name string) trace.Tracer {
-	return otel.Tracer("github.com/garysng/bean/" + name)
+	return otel.Tracer("github.com/garysng/wizard/" + name)
 }
 
 // TraceIDFrom returns the trace id in a context as a hex string, or "".

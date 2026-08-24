@@ -4,7 +4,7 @@
 #
 # This is the verification that matters most for the reader: every other test builds its
 # input, which cannot catch the test's idea of the format and the reader's idea of it being
-# wrong in the same way. It has already earned its keep -- it found that bean's layers are
+# wrong in the same way. It has already earned its keep -- it found that wizard's layers are
 # tar-wrapped (so the payload is not at offset 0) and that both CRC variants in the reader
 # were wrong.
 #
@@ -27,24 +27,24 @@ mkdir -p "$WORK/content"
 say "== building a tar to apply =="
 # Recognisable content at more than one size, so the sealed layer has several extents and
 # a reader that mixes up an offset produces visibly wrong bytes rather than plausible ones.
-printf 'BEAN-PROBE-ALPHA\n' >"$WORK/content/alpha.txt"
-printf 'BEAN-PROBE-BETA\n' >"$WORK/content/beta.txt"
+printf 'WIZARD-PROBE-ALPHA\n' >"$WORK/content/alpha.txt"
+printf 'WIZARD-PROBE-BETA\n' >"$WORK/content/beta.txt"
 head -c 200000 /dev/urandom >"$WORK/content/blob.bin"
 mkdir -p "$WORK/content/nested/dir"
-printf 'BEAN-PROBE-NESTED\n' >"$WORK/content/nested/dir/gamma.txt"
+printf 'WIZARD-PROBE-NESTED\n' >"$WORK/content/nested/dir/gamma.txt"
 tar -C "$WORK/content" -cf "$WORK/layer.tar" .
 say "tar: $(stat -c %s "$WORK/layer.tar") bytes"
 
 say ""
 say "== creating a writable overlaybd layer (${SIZE_GB}GB virtual) =="
-# --mkfs because this is a base layer and so has to carry a filesystem. bean passes it for
+# --mkfs because this is a base layer and so has to carry a filesystem. wizard passes it for
 # the base and omits it for layers that sit over others, where formatting would write an
 # empty superblock over the filesystem they hold.
 "$BIN/overlaybd-create" --mkfs "$WORK/data" "$WORK/index" "$SIZE_GB"
 
 say ""
 say "== applying the tar into the layer =="
-# Exactly the config bean writes: empty lowers for a base layer, and no resultFile -- with
+# Exactly the config wizard writes: empty lowers for a base layer, and no resultFile -- with
 # one, overlaybd-apply segfaulted here.
 cat >"$WORK/apply.json" <<JSON
 {
@@ -57,7 +57,7 @@ say "applied; data now $(stat -c %s "$WORK/data") bytes"
 
 say ""
 say "== sealing with overlaybd-commit -z -t =="
-# The same flags bean uses: -z compresses to a ZFile so blocks are independently
+# The same flags wizard uses: -z compresses to a ZFile so blocks are independently
 # decompressable, -t wraps the result in a tar so it is a valid OCI blob.
 "$BIN/overlaybd-commit" -z -t "$WORK/data" "$WORK/index" "$WORK/sealed.lsmt"
 say "sealed: $(stat -c %s "$WORK/sealed.lsmt") bytes"

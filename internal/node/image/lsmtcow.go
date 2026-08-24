@@ -25,7 +25,7 @@ import (
 // 118 MiB for three python -slim images, and conversion CPU from a flat 2.2 s per
 // image to 1.37/0.49/0.44 s as the shared layer is reused.
 // fileBackendBlockSize is the granularity of copy-on-write ownership, shared by both
-// ublk backends. 4 KiB matches the page size and the filesystem block size in bean's
+// ublk backends. 4 KiB matches the page size and the filesystem block size in wizard's
 // images, so a guest write never straddles two blocks and forces a read-modify-write.
 //
 // Declared here rather than beside fileBackend because that file is linux-only, and

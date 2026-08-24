@@ -1,6 +1,6 @@
 # 术语表
 
-bean 用到的术语,一次定义清楚。凡是踩过坑的地方,定义里直接写明,而不是留给下一个人重新发现。
+wizard 用到的术语,一次定义清楚。凡是踩过坑的地方,定义里直接写明,而不是留给下一个人重新发现。
 
 **权威顺序依旧成立:代码 > `status.md` > `decisions.md` > 设计文档 > 本页。**
 若本页定义与它们冲突,以它们为准 —— 请告诉我们来修。
@@ -14,9 +14,9 @@ bean 用到的术语,一次定义清楚。凡是踩过坑的地方,定义里直�
 生命周期(见下面的动词)和一个 id(`sbx_...`)。
 
 **image(镜像)** —— 一个 OCI 注册表镜像引用(`python:3.12`、
-`registry/foo/bar:latest`),私有仓库时再带上认证。它是一个**创建时来源**,不是 bean
+`registry/foo/bar:latest`),私有仓库时再带上认证。它是一个**创建时来源**,不是 wizard
 存储的记录:节点拉取它并转换成 overlaybd,这次转换产出一个 *template*(见下)。"image"
-只指这个 OCI 来源;bean 存下来的可启动产物叫 template,从不叫 "image"。
+只指这个 OCI 来源;wizard 存下来的可启动产物叫 template,从不叫 "image"。
 
 **template(模板)** —— 一份可启动的 overlaybd 文件系统,沙箱从它 boot,由 Dockerfile
 `build` 或转换一个 OCI 镜像产出(`source` 区分二者)。一个 `tpl_...` 对象,以
@@ -113,7 +113,7 @@ checkpoint,源沙箱保持运行。机制已实现;还没有专门的 API 动词
 `fc` 是测得更充分的路径,所有实测数字都出自它。OCI 档服务 benchmark 负载(任意 OCI
 镜像、不需构建步骤),但没有 checkpoint 可供 fork。
 
-**bean-api** —— 控制面(一个进程):API 网关、调度器(放置在同进程内,所以放置与承诺是
+**wizard-api** —— 控制面(一个进程):API 网关、调度器(放置在同进程内,所以放置与承诺是
 同一个事务)、template 服务(build、OCI 转换,以及 template/snapshot 记录)。由 SQLite
 或 Postgres 支撑。
 
@@ -121,13 +121,13 @@ checkpoint,源沙箱保持运行。机制已实现;还没有专门的 API 动词
 overlaybd/TCMU)。节点这个包仍以 OCI 镜像命名 —— template 是控制面记录,节点处理的是它所
 转换的 OCI 镜像与 rootfs。
 
-**beand** —— 每个沙箱内的 PID 1,装在自己的只读磁盘上,所以用户镜像不需任何改动。它先建
+**wizardd** —— 每个沙箱内的 PID 1,装在自己的只读磁盘上,所以用户镜像不需任何改动。它先建
 挂载矩阵,再 pivot 进用户镜像。
 
-**bean-proxy** —— 端口流量进入沙箱的数据面路径:`{port}-{sandbox}` 直达该 guest 的那个
+**wizard-proxy** —— 端口流量进入沙箱的数据面路径:`{port}-{sandbox}` 直达该 guest 的那个
 端口,用户 server 或 agent 一视同仁。没有注册调用,没有宿主端口池。
 
-**bean** —— CLI。
+**wizard** —— CLI。
 
 ---
 

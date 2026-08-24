@@ -224,7 +224,7 @@ memory 文件是 `MAP_PRIVATE`(实测 guest 写 64MB 后宿主文件 md5 不变)
 一个 snapshot = 三部分，原子提交：
 
 ```
-s3://bean/snapshots/{snapId}/
+s3://wizard/snapshots/{snapId}/
 ├── manifest.json        # 元数据：源镜像 digest、isolation、resources、env、
 │                        #   agent 版本、创建时间、各部分校验和
 ├── checkpoint/          # 进程态：CRIU images（runc）或 gVisor save 文件（runsc）
@@ -306,7 +306,7 @@ POST /sandboxes { "snapshot": "snap_...", ... }
 一旦打开就安全了 —— unlink 一个已 mmap 的文件不影响读(实测验证,decisions §3.7),
 所以 `stage.Close()` 就释放 pin,不必等 VM 结束。
 
-上报为 `bean_node_snapshot_cache_bytes`,通过可选接口 `runtime.CacheReporter` ——
+上报为 `wizard_node_snapshot_cache_bytes`,通过可选接口 `runtime.CacheReporter` ——
 不占额度的空间至少要可见。
 
 ### 3.6 生命周期（两档共通）⚠️
@@ -398,7 +398,7 @@ fork 只是把「多次 restore」变成「一次派生 N 个」。
 | **CoW 层** | ❌ 每个新建 | 一写就分叉,这是 sandbox 的定义 |
 | **vsock UDS 路径** | ❌ 每个独立 | 路径相对于 sandbox 目录(vm-assembly §5) |
 | sandbox id / token | ❌ 每个独立 | 身份 |
-| dm 映射名 | ❌ 每个独立 | `bean-<id>`,flat namespace |
+| dm 映射名 | ❌ 每个独立 | `wizard-<id>`,flat namespace |
 
 `guestCID` 与 vsock port 可以都用常量,因为每个 VM 有自己的 vsock 命名空间
 (vm-assembly §7)—— 这一点让 fork 少一层分配。
@@ -461,8 +461,8 @@ POST   /v1/sandboxes/{id}/fork               ⚠️  无 API;机制就是上面�
 注意 `pause`/`resume` 作用在 `{id}` 上、还你同一个 sandbox,而从快照创建是
 `POST /v1/sandboxes` —— 一次创建 —— 还你另一个。URL 的形状已经说明了这件事。
 
-CLI:`bean snapshot create SBX [--name N] [--no-memory] [--base SNAP] [--no-keep-running]`,
-`bean snapshot ls|rm`,`bean run --snapshot SNAP`(每次调用从快照创建一个新 sandbox),
-`bean pause SBX` / `bean resume SBX`(同一个 sandbox)。没有 `bean fork`。
+CLI:`wizard snapshot create SBX [--name N] [--no-memory] [--base SNAP] [--no-keep-running]`,
+`wizard snapshot ls|rm`,`wizard run --snapshot SNAP`(每次调用从快照创建一个新 sandbox),
+`wizard pause SBX` / `wizard resume SBX`(同一个 sandbox)。没有 `wizard fork`。
 
 SDK 形态见 [sdk-cli-design.md](sdk-cli-design.md)。

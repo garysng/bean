@@ -23,19 +23,19 @@ const (
 	mnBootstrap = "boot_mn_token"
 )
 
-// TestE2EMultiNode runs a real multi-node stack: one bean-api in
+// TestE2EMultiNode runs a real multi-node stack: one wizard-api in
 // multi-node mode plus two noded processes that register themselves,
 // then verifies placement spread and that exec reaches the right node.
 func TestE2EMultiNode(t *testing.T) {
-	dir, err := os.MkdirTemp("", "bean-mn")
+	dir, err := os.MkdirTemp("", "wizard-mn")
 	if err != nil {
 		t.Fatal(err)
 	}
 	defer os.RemoveAll(dir)
 
-	agentBin := filepath.Join(binDir, "beand")
+	agentBin := filepath.Join(binDir, "wizardd")
 	nodedBin := filepath.Join(binDir, "noded")
-	apiBin := filepath.Join(binDir, "bean-api")
+	apiBin := filepath.Join(binDir, "wizard-api")
 	for _, b := range []string{agentBin, nodedBin, apiBin} {
 		if _, err := os.Stat(b); err != nil {
 			t.Fatalf("binary missing (TestMain should have built it): %s", b)

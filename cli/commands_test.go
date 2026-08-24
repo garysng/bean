@@ -15,7 +15,7 @@ import (
 	"time"
 )
 
-// stubAPI serves the subset of bean-api the CLI uses.
+// stubAPI serves the subset of wizard-api the CLI uses.
 func stubAPI(t *testing.T) (*httptest.Server, *[]string) {
 	t.Helper()
 	var seen []string
@@ -168,9 +168,9 @@ func stubAPI(t *testing.T) (*httptest.Server, *[]string) {
 
 func runCLI(t *testing.T, ts *httptest.Server, args ...string) (string, string, int) {
 	t.Helper()
-	t.Setenv("BEAN_BASE_URL", ts.URL)
-	t.Setenv("BEAN_API_KEY", "test-key")
-	t.Setenv("BEAN_TIMEOUT", "30s")
+	t.Setenv("WIZARD_BASE_URL", ts.URL)
+	t.Setenv("WIZARD_API_KEY", "test-key")
+	t.Setenv("WIZARD_TIMEOUT", "30s")
 	var out, errBuf bytes.Buffer
 	code := Run(args, &out, &errBuf)
 	return out.String(), errBuf.String(), code
@@ -359,7 +359,7 @@ func TestCmdCpValidation(t *testing.T) {
 
 func TestVersionAndEmptyArgs(t *testing.T) {
 	ts, _ := stubAPI(t)
-	if out, _, code := runCLI(t, ts, "version"); code != 0 || !strings.Contains(out, "bean") {
+	if out, _, code := runCLI(t, ts, "version"); code != 0 || !strings.Contains(out, "wizard") {
 		t.Errorf("code=%d out=%q", code, out)
 	}
 	if _, errStr, code := runCLI(t, ts); code != 125 || !strings.Contains(errStr, "usage") {
@@ -368,9 +368,9 @@ func TestVersionAndEmptyArgs(t *testing.T) {
 }
 
 func TestCLIUnreachableServer(t *testing.T) {
-	t.Setenv("BEAN_BASE_URL", "http://192.0.2.1:8080") // TEST-NET-1: unroutable
-	t.Setenv("BEAN_API_KEY", "k")
-	t.Setenv("BEAN_TIMEOUT", "1s") // fail fast instead of the 15m default
+	t.Setenv("WIZARD_BASE_URL", "http://192.0.2.1:8080") // TEST-NET-1: unroutable
+	t.Setenv("WIZARD_API_KEY", "k")
+	t.Setenv("WIZARD_TIMEOUT", "1s") // fail fast instead of the 15m default
 	var out, errBuf bytes.Buffer
 	code := Run([]string{"ls"}, &out, &errBuf)
 	if code == 0 {
@@ -379,11 +379,11 @@ func TestCLIUnreachableServer(t *testing.T) {
 }
 
 func TestClientTimeoutFromEnv(t *testing.T) {
-	t.Setenv("BEAN_TIMEOUT", "42s")
+	t.Setenv("WIZARD_TIMEOUT", "42s")
 	if got := NewClient("http://x", "k").HTTP.Timeout; got != 42*time.Second {
 		t.Errorf("timeout = %s, want 42s", got)
 	}
-	t.Setenv("BEAN_TIMEOUT", "garbage")
+	t.Setenv("WIZARD_TIMEOUT", "garbage")
 	if got := NewClient("http://x", "k").HTTP.Timeout; got != 15*time.Minute {
 		t.Errorf("invalid value should fall back to default, got %s", got)
 	}

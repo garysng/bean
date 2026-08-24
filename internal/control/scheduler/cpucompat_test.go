@@ -5,7 +5,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/garysng/bean/internal/control/store"
+	"github.com/garysng/wizard/internal/control/store"
 )
 
 func TestCheckCPUUnconstrainedAllowsAnything(t *testing.T) {

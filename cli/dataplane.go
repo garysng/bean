@@ -1,8 +1,8 @@
 // Data-plane client: sandbox operations that go straight to the agent through
-// bean-proxy, rather than relaying through bean-api.
+// wizard-proxy, rather than relaying through wizard-api.
 //
-// The relay path (bean-api -> noded's control gRPC -> agent) still exists and is
-// the fallback. This path reaches bean-proxy directly over Connect (connectrpc)
+// The relay path (wizard-api -> noded's control gRPC -> agent) still exists and is
+// the fallback. This path reaches wizard-proxy directly over Connect (connectrpc)
 // with a Host of "{port}-{sandbox}", which is how the proxy and the node's
 // forwarder route to a port inside a guest. It is the same transport the SDK
 // uses -- Connect over cleartext HTTP/2 -- so the CLI needs no gRPC stack. For
@@ -29,9 +29,9 @@ import (
 	"connectrpc.com/connect"
 	"golang.org/x/net/http2"
 
-	"github.com/garysng/bean/internal/gen/bean/agent/v1/agentv1connect"
-	commonv1 "github.com/garysng/bean/internal/gen/bean/common/v1"
-	"github.com/garysng/bean/internal/node/runtime"
+	"github.com/garysng/wizard/internal/gen/wizard/agent/v1/agentv1connect"
+	commonv1 "github.com/garysng/wizard/internal/gen/wizard/common/v1"
+	"github.com/garysng/wizard/internal/node/runtime"
 )
 
 // dataPlane holds what the CLI needs to reach a sandbox's agent through the
@@ -49,9 +49,9 @@ type dataPlane struct {
 
 // dataPlaneFor derives the data-plane target for a sandbox, or (nil, false) when
 // the client is not configured to use one -- in which case the caller falls back
-// to the bean-api relay path.
+// to the wizard-api relay path.
 //
-// BEAN_PROXY_URL is the opt-in: unset means "use the relay", so a single-node or
+// WIZARD_PROXY_URL is the opt-in: unset means "use the relay", so a single-node or
 // dev setup with no proxy is unaffected. The domain comes from the sandbox record
 // (its Domain field, surfaced by the server) so the client never assembles the
 // addressing convention itself.

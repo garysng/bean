@@ -141,7 +141,7 @@ func TestReserveHandsOutTheLowestFreeSlot(t *testing.T) {
 // The property the loop-device leak taught us: the host is the authority, because
 // a count in process memory does not survive a restart while the namespaces do.
 func TestReserveSkipsSlotsTheHostAlreadyHolds(t *testing.T) {
-	host := &fakeHost{names: []string{"bean-0", "bean-1", "bean-3"}}
+	host := &fakeHost{names: []string{"wizard-0", "wizard-1", "wizard-3"}}
 	a := NewAllocator("172.31.0.0/30", host)
 
 	l, err := a.Reserve("sbx_new")
@@ -158,7 +158,7 @@ func TestReserveIgnoresNamespacesThatAreNotOurs(t *testing.T) {
 	// A shared host runs other workloads. Counting their namespaces would shrink
 	// the pool for no reason, and a teardown matching them would destroy their
 	// networking.
-	host := &fakeHost{names: []string{"cni-1234", "docker-abc", "0", "bean-", "beanx-0"}}
+	host := &fakeHost{names: []string{"cni-1234", "docker-abc", "0", "wizard-", "wizardx-0"}}
 	a := NewAllocator("172.31.0.0/30", host)
 	l, err := a.Reserve("sbx_new")
 	if err != nil {
@@ -252,16 +252,16 @@ func TestIndexOfNetnsAcceptsOnlyOurOwnNames(t *testing.T) {
 		idx  int
 		ok   bool
 	}{
-		{"bean-0", 0, true},
-		{"bean-4095", 4095, true},
-		{"bean-4096", 0, false}, // above MaxIndex
-		{"bean--1", 0, false},   // negative
-		{"bean-", 0, false},     // no index
-		{"bean-abc", 0, false},  // not a number
-		{"beanx-0", 0, false},   // different prefix
+		{"wizard-0", 0, true},
+		{"wizard-4095", 4095, true},
+		{"wizard-4096", 0, false}, // above MaxIndex
+		{"wizard--1", 0, false},   // negative
+		{"wizard-", 0, false},     // no index
+		{"wizard-abc", 0, false},  // not a number
+		{"wizardx-0", 0, false},   // different prefix
 		{"cni-0", 0, false},     // another workload
 		{"0", 0, false},         // no prefix
-		{"bean-0-extra", 0, false},
+		{"wizard-0-extra", 0, false},
 	} {
 		idx, ok := indexOfNetns(tc.name)
 		if ok != tc.ok {

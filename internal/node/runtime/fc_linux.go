@@ -15,13 +15,13 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/garysng/bean/internal/logging"
-	"github.com/garysng/bean/internal/node/image"
-	"github.com/garysng/bean/internal/node/network"
-	"github.com/garysng/bean/internal/node/vsock"
+	"github.com/garysng/wizard/internal/logging"
+	"github.com/garysng/wizard/internal/node/image"
+	"github.com/garysng/wizard/internal/node/network"
+	"github.com/garysng/wizard/internal/node/vsock"
 )
 
-// agentVsockPort is the port beand listens on inside the guest. It is fixed
+// agentVsockPort is the port wizardd listens on inside the guest. It is fixed
 // rather than allocated: each VM has its own vsock namespace, so there is
 // nothing to collide with, and a constant keeps the guest's command line
 // independent of host state.
@@ -127,7 +127,7 @@ type FCRuntime struct {
 	FirecrackerBin string
 	// KernelPath is the guest kernel image, shared by every sandbox.
 	KernelPath string
-	// AgentDiskPath is a read-only image holding the beand binary, attached as
+	// AgentDiskPath is a read-only image holding the wizardd binary, attached as
 	// a second drive. Shipping the agent this way means it upgrades with the
 	// node rather than requiring every user image to embed it.
 	AgentDiskPath string
@@ -726,7 +726,7 @@ func (r *FCRuntime) startVMM(ctx context.Context, vm *fcVM, apiSocket string) er
 // chownRootfsDevice hands the sandbox's block device to the dropped uid.
 //
 // Separate from the sandbox directory walk because rootfs.img is a symlink to
-// /dev/mapper/bean-<id> and the walk does not follow symlinks -- deliberately, so
+// /dev/mapper/wizard-<id> and the walk does not follow symlinks -- deliberately, so
 // it cannot chown a shared asset or a device node by accident. This chowns the
 // device node itself, by resolving the link.
 //
@@ -789,7 +789,7 @@ func (r *FCRuntime) configureAndBoot(ctx context.Context, vm *fcVM, spec *Spec) 
 	// The agent disk boots as the root device and the user image is attached
 	// beside it. The kernel execs init from whatever it mounted as root, so
 	// putting the agent there is what keeps user images free of any obligation
-	// to embed beand or an init system: the agent pivots to the user rootfs
+	// to embed wizardd or an init system: the agent pivots to the user rootfs
 	// once it is running.
 	//
 	// Panic reboots are disabled so a crashed guest stays inspectable rather
@@ -818,7 +818,7 @@ func (r *FCRuntime) configureAndBoot(ctx context.Context, vm *fcVM, spec *Spec) 
 		console = "console=ttyS0"
 	}
 	bootArgs := fmt.Sprintf(
-		"%s reboot=k panic=-1 pci=off%s init=/bean/beand -- --listen %s --pivot %s%s",
+		"%s reboot=k panic=-1 pci=off%s init=/wizard/wizardd -- --listen %s --pivot %s%s",
 		console, guestIPBootArg(spec.Network), agentListenArg(spec), guestRootfsDevice,
 		GuestDNSBootArgs(r.GuestDNS))
 	if err := vm.client.put(ctx, "/boot-source", fcBootSource{

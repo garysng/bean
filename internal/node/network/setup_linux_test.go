@@ -228,13 +228,13 @@ func TestSetupCleansUpWhenARuleFails(t *testing.T) {
 }
 
 func TestListNamespacesReadsOnlyTheFirstField(t *testing.T) {
-	rec := &recorder{out: []byte("bean-0 (id: 1)\nbean-3\ndocker-thing (id: 2)\n")}
+	rec := &recorder{out: []byte("wizard-0 (id: 1)\nwizard-3\ndocker-thing (id: 2)\n")}
 	s := &LinuxSetup{Uplink: testUplink, Cmd: rec}
 	names, err := s.ListNamespaces()
 	if err != nil {
 		t.Fatal(err)
 	}
-	want := []string{"bean-0", "bean-3", "docker-thing"}
+	want := []string{"wizard-0", "wizard-3", "docker-thing"}
 	if len(names) != len(want) {
 		t.Fatalf("got %v, want %v", names, want)
 	}

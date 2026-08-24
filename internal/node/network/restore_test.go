@@ -119,7 +119,7 @@ func TestRestoreScriptShape(t *testing.T) {
 // Docker's rules -- every container on the machine would lose its networking.
 func TestRestoreAlwaysPassesNoflush(t *testing.T) {
 	for _, scope := range []Scope{ScopeHost, ScopeNetns} {
-		name, args := restoreArgs(scope, "bean-0")
+		name, args := restoreArgs(scope, "wizard-0")
 		line := name + " " + strings.Join(args, " ")
 		if !strings.Contains(line, "--noflush") {
 			t.Errorf("%s: no --noflush, which replaces the table and takes Docker's "+
@@ -131,7 +131,7 @@ func TestRestoreAlwaysPassesNoflush(t *testing.T) {
 		// A netns batch has to run inside the namespace; a host batch must not.
 		switch scope {
 		case ScopeNetns:
-			if !strings.HasPrefix(line, "ip netns exec bean-0 iptables-restore") {
+			if !strings.HasPrefix(line, "ip netns exec wizard-0 iptables-restore") {
 				t.Errorf("netns batch does not enter the namespace: %s", line)
 			}
 		case ScopeHost:
@@ -164,8 +164,8 @@ func planLayoutForTest() *Layout {
 	_, link, _ := net.ParseCIDR("10.0.0.0/30")
 	return &Layout{
 		Index:        0,
-		Netns:        "bean-0",
-		TapName:      "beantap0",
+		Netns:        "wizard-0",
+		TapName:      "wizardtap0",
 		GuestIP:      net.IPv4(172, 31, 0, 2),
 		GuestGateway: net.IPv4(172, 31, 0, 1),
 		GuestSubnet:  guest,

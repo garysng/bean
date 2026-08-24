@@ -9,10 +9,10 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/garysng/bean/internal/control/image"
-	"github.com/garysng/bean/internal/control/store"
-	nodev1 "github.com/garysng/bean/internal/gen/bean/node/v1"
-	"github.com/garysng/bean/internal/logging"
+	"github.com/garysng/wizard/internal/control/image"
+	"github.com/garysng/wizard/internal/control/store"
+	nodev1 "github.com/garysng/wizard/internal/gen/wizard/node/v1"
+	"github.com/garysng/wizard/internal/logging"
 )
 
 // Template endpoints. A template is a startable overlaybd artifact -- produced

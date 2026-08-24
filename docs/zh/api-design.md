@@ -1,6 +1,6 @@
 # API 与 Proxy 服务设计
 
-> 对应组件:`bean-api`（api-gateway,✅）、`bean-proxy`（进入 sandbox 的反向代理,✅）。
+> 对应组件:`wizard-api`（api-gateway,✅）、`wizard-proxy`（进入 sandbox 的反向代理,✅）。
 > 状态标注约定见 [architecture.md](architecture.md) §0。
 > 术语与状态机见 [architecture.md](architecture.md)。
 
@@ -17,7 +17,7 @@
 
 - `Authorization: Bearer bk_<keyid>_<secret>`
 - key 哈希存 Postgres；附带配额（并发 sandbox 数、CPU/mem 总量、卷容量、prewarm 权限）
-- **不做用户/租户体系**——bean 是集群内部服务,key 仅用于调用方识别、配额与
+- **不做用户/租户体系**——wizard 是集群内部服务,key 仅用于调用方识别、配额与
   审计归属;安全重心在集群内可靠性（托管 TLS + node token、凭证分层、隔离档）而非多租户
 
 ### 2.2 Sandbox 级短时凭证 📐
@@ -182,7 +182,7 @@ POST /sandboxes/{id}/files:downloadUrl {"path": "..."}    // 📐
 ### 3.4 Ports —— 没有注册步骤 ✅
 
 访问沙箱内的端口是通的,而且**不需要任何 API 调用**。端口写在 Host 头里
-(`{port}-{sandbox}`,见 §6),bean-proxy 转发过去。沙箱内有进程在听就能访问,
+(`{port}-{sandbox}`,见 §6),wizard-proxy 转发过去。沙箱内有进程在听就能访问,
 没有就返回 502。
 
 下面这套设计是先画的,**没有实现,而且是刻意不实现**（📐）:
@@ -246,7 +246,7 @@ GET    /registries                            → host/username/时间戳（无 
 DELETE /registries/{host}
 ```
 
-- 凭证 AES-256-GCM 加密后落库（`--secret-key` / `BEAN_SECRET_KEY`）,
+- 凭证 AES-256-GCM 加密后落库（`--secret-key` / `WIZARD_SECRET_KEY`）,
   数据库副本本身不足以拉取私有镜像;**无 master key 时端点拒绝而非明文存储**
 - 无凭证的 registry 按匿名拉取,公开镜像照常工作
 - host 归一化:`https://r.io/` 与 `r.io` 视为同一个;无 host 的 ref 默认
@@ -351,11 +351,11 @@ GET /sandboxes/{id}/logs?follow=false&tailLines=1000    // agent 环形缓冲 + 
 GET /nodes                                              // 运维面：节点列表、容量、能力
 POST /nodes/{id}/drain                                  // 运维面：cordon + drain 一个节点
 GET /metrics                                            // Prometheus 格式（免鉴权:本地采集,不含 sandbox 内容）
-    // bean_sandbox_creates_total{outcome}         创建结果计数
-    // bean_sandbox_create_duration_seconds{outcome}  端到端创建延迟直方图
-    // bean_exec_duration_seconds{outcome}         exec 往返延迟
-    // bean_sandboxes{state}                       各状态 sandbox 数（scrape 时按库重算）
-    // bean_events_total{type}  bean_event_subscribers
+    // wizard_sandbox_creates_total{outcome}         创建结果计数
+    // wizard_sandbox_create_duration_seconds{outcome}  端到端创建延迟直方图
+    // wizard_exec_duration_seconds{outcome}         exec 往返延迟
+    // wizard_sandboxes{state}                       各状态 sandbox 数（scrape 时按库重算）
+    // wizard_events_total{type}  wizard_event_subscribers
 ```
 
 **OTel 采集**：
@@ -363,7 +363,7 @@ GET /metrics                                            // Prometheus 格式（�
 > 当前状态:metrics 是 Prometheus 端点(已实装,与 trace 是两套东西);
 > logs 已字段化(`internal/logging`);**trace 已实装并实测** ——
 > `--otlp-endpoint` 开启,一次 create/exec 是一棵跨进程 span 树,
-> request id 即 trace id。响应头回 `X-Bean-Trace-Id`,
+> request id 即 trace id。响应头回 `X-Wizard-Trace-Id`,
 > 调用方报慢时可以直接给出要查的 trace。
 > per-sandbox 资源指标与 sandbox 内应用 OTLP 透传仍未实装。
 
@@ -377,7 +377,7 @@ GET /metrics                                            // Prometheus 格式（�
 ## 4. 内部 gRPC proto 草案 ✅
 
 ```protobuf
-// proto/bean/node/v1/node.proto —— control plane ↔ noded
+// proto/wizard/node/v1/node.proto —— control plane ↔ noded
 service NodeService {                                              // noded → control（出向）
   rpc Register(RegisterRequest) returns (RegisterResponse);        // 能力/资源画像上报
   rpc Heartbeat(stream HeartbeatRequest) returns (stream HeartbeatResponse);
@@ -410,7 +410,7 @@ service SandboxService {                       // noded 实现,control/gateway �
   rpc ForwardPort(stream PortFrame) returns (stream PortFrame);   // proxy 数据面
 }
 
-// proto/bean/agent/v1/agent.proto —— noded ↔ beand（fc 档 vsock 主路径 / 容器档 unix socket,P5）
+// proto/wizard/agent/v1/agent.proto —— noded ↔ wizardd（fc 档 vsock 主路径 / 容器档 unix socket,P5）
 service AgentService {
   rpc Exec(ExecRequest) returns (ExecResponse);
   rpc StreamExec(stream StreamExecFrame) returns (stream StreamExecFrame);
@@ -435,7 +435,7 @@ service AgentService {
 - `CreateSandboxRequest` 含完整 `SandboxSpec`（image ref、resources、isolation、
   network、agent 注入参数、S3 产物 presigned URL 束）
 - `ExecRequest/StreamExecFrame` 在 SandboxService 与 AgentService 中共享 message
-  定义（`proto/bean/common/v1/exec.proto`），noded 纯透传
+  定义（`proto/wizard/common/v1/exec.proto`），noded 纯透传
 
 ## 5. 控制流细节
 
@@ -501,15 +501,15 @@ noded → agent：vsock（fc 主路径;容器档 unix socket,P5）
 状态语义：PAUSED → 触发透明唤醒,请求阻塞至 resume（超过唤醒时限,默认 10s,
 才回 502 + Retry-After）;PULLING/STOPPING 等不可唤醒态 → 409 SANDBOX_NOT_RUNNING。
 
-## 6. bean-proxy（进入 sandbox 的反向代理）✅
+## 6. wizard-proxy（进入 sandbox 的反向代理）✅
 
-> 已建成:`cmd/bean-proxy`。在真机上端到端验证过 —— 用户的服务器与 agent 都经它到达,
+> 已建成:`cmd/wizard-proxy`。在真机上端到端验证过 —— 用户的服务器与 agent 都经它到达,
 > 未知沙箱 404,畸形 Host 400。
 
 ### 6.0 那两件事其实是一件 ⚠️
 
 本节原本把**端口暴露**(浏览器访问 sandbox 内的端口)和**数据面**
-([GitHub #27](https://github.com/garysng/bean/issues/27),把 exec 与文件流量移出控制面)
+([GitHub #27](https://github.com/garysng/wizard/issues/27),把 exec 与文件流量移出控制面)
 设计成两件事,并警告混淆两者已经导致过一次错误的方案。
 
 **那个警告对风险的判断是对的,对结论的判断是错的。** 它们是同一个机制,而让它们合并的
@@ -558,7 +558,7 @@ e2b 从另一个方向到了同一个形状:`packages/client-proxy` 把 sandbox 
 浏览器 → {sbxId}-{port}.{region}.sandbox.<domain>（DNS 直达该 region 的 proxy）
        → regional proxy：从 Host 解析 {port}-{sandbox}
        → 路由查询：GET /v1/sandboxes/{id} 取 nodeId,再查 /v1/nodes 取该节点的
-         转发地址（以 bean.io/sandbox-port-addr 发布）
+         转发地址（以 wizard.io/sandbox-port-addr 发布）
          （默认缓存 5s;--placement-cache）
        → HTTP 反代 → noded 内嵌 sandbox-proxy（节点侧反代）
        → 直连 sandbox IP:port（fc 档 tap IP / 容器档 veth IP,节点内路由）
@@ -579,7 +579,7 @@ e2b 从另一个方向到了同一个形状:`packages/client-proxy` 把 sandbox 
 
 ### 6.3 端口鉴权 📐
 
-**没有做,而且这是这条路径上唯一真正的缺口。** 今天任何能访问 bean-proxy 的东西,
+**没有做,而且这是这条路径上唯一真正的缺口。** 今天任何能访问 wizard-proxy 的东西,
 都能访问它能叫出名字的任意 sandbox 的任意端口。所以不能给 sandbox 一个
 它不希望调用方看到的端口。
 
@@ -587,11 +587,11 @@ e2b 从另一个方向到了同一个形状:`packages/client-proxy` 把 sandbox 
 
 | 跳 | 凭证 | 区分的是 |
 |---|---|---|
-| client → bean-proxy | 外部鉴权层要求什么就是什么（Traefik middleware） | 一个用户和另一个用户 —— **在 bean 之外** |
-| bean-proxy → noded | 集群的 node token | 集群和其他所有人 |
+| client → wizard-proxy | 外部鉴权层要求什么就是什么（Traefik middleware） | 一个用户和另一个用户 —— **在 wizard 之外** |
+| wizard-proxy → noded | 集群的 node token | 集群和其他所有人 |
 
-bean 是平台层底下的基础设施,用户身份属于那一层(architecture.md §2.1、
-security-and-startup.md A7)。bean 无法委托出去的是更底下那部分:一个越过平台层的调用方
+wizard 是平台层底下的基础设施,用户身份属于那一层(architecture.md §2.1、
+security-and-startup.md A7)。wizard 无法委托出去的是更底下那部分:一个越过平台层的调用方
 会拿到它被授权那个 sandbox 的*每一个*端口,而这正是 per-port 控制要修的东西。
 
 这里起草过的设计 —— `auth=public` / `auth=token` 配 sandbox 作用域的 JWT ——

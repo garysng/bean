@@ -20,9 +20,9 @@ import (
 // SQLite-only MAX that could not have worked. A statement nothing calls is a statement no
 // engine has ever parsed, and the dialect layer cannot tell the difference.
 func TestPostgresEveryMethodExecutes(t *testing.T) {
-	dsn := os.Getenv("BEAN_TEST_POSTGRES_DSN")
+	dsn := os.Getenv("WIZARD_TEST_POSTGRES_DSN")
 	if dsn == "" {
-		t.Skip("set BEAN_TEST_POSTGRES_DSN (see hack/postgres-conformance.sh)")
+		t.Skip("set WIZARD_TEST_POSTGRES_DSN (see hack/postgres-conformance.sh)")
 	}
 	s, err := OpenPostgres(dsn)
 	if err != nil {

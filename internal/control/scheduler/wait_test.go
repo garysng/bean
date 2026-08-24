@@ -7,14 +7,14 @@ import (
 	"testing"
 	"time"
 
-	"github.com/garysng/bean/internal/control/store"
+	"github.com/garysng/wizard/internal/control/store"
 )
 
 // waitFixture builds a scheduler over one node with the given capacity, which is
 // enough to exercise the queue: the decision under test is per-node.
 func waitFixture(t *testing.T, n *store.NodeRecord) (*Scheduler, *store.Store) {
 	t.Helper()
-	st, err := store.Open(t.TempDir() + "/bean.db")
+	st, err := store.Open(t.TempDir() + "/wizard.db")
 	if err != nil {
 		t.Fatal(err)
 	}

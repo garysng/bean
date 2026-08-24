@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Reports where the LSMT and ZFile headers sit inside a sealed overlaybd layer.
 
-bean seals every layer with `overlaybd-commit -z -t`, and -t wraps the result in a tar so
+wizard seals every layer with `overlaybd-commit -z -t`, and -t wraps the result in a tar so
 it is a valid OCI blob. That wrapper means the LSMT header is not at offset 0, which is
 what a reader written against the bare format assumes. This prints the real offsets so
 the reader can be corrected against them rather than against a guess.

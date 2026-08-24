@@ -1,6 +1,6 @@
 package runtime
 
-import "github.com/garysng/bean/internal/node/image"
+import "github.com/garysng/wizard/internal/node/image"
 
 // FCTierConfig describes a node's microVM tier. It is declared outside the
 // platform-specific files so noded parses the same flags everywhere and reports
@@ -19,7 +19,7 @@ type FCTierConfig struct {
 	// anonymously, which covers public images.
 	RegistryAuth image.CredentialSource
 	// BuildkitAddr enables image builds on this node, e.g.
-	// "unix:///run/bean/buildkitd.sock". Empty leaves builds disabled.
+	// "unix:///run/wizard/buildkitd.sock". Empty leaves builds disabled.
 	BuildkitAddr string
 	// BuildctlBin is the BuildKit client binary.
 	BuildctlBin string
@@ -144,7 +144,7 @@ type FCTierConfig struct {
 	// VMMMountNamespace gives the VMM a private mount namespace.
 	//
 	// Separate from the two above because its failure mode is worse and quieter:
-	// bean's rootfs is a device-mapper node under /dev rather than a file, so a guest
+	// wizard's rootfs is a device-mapper node under /dev rather than a file, so a guest
 	// that cannot resolve it finds no root device, and that appears only in the guest
 	// console. Left off until measured on real hardware.
 	VMMMountNamespace bool

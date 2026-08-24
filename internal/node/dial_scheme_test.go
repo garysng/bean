@@ -25,8 +25,8 @@ import (
 // namespace, which reads as a routing problem rather than a parsing one.
 func TestDialerReceivesTheAddressTheRuntimeChose(t *testing.T) {
 	for _, target := range []string{
-		"netns:/var/run/netns/bean-0|172.31.0.2:8111",
-		"unix:///run/bean/agent.sock",
+		"netns:/var/run/netns/wizard-0|172.31.0.2:8111",
+		"unix:///run/wizard/agent.sock",
 		"vsock:/tmp/vm.vsock:10001",
 		"127.0.0.1:9999",
 	} {

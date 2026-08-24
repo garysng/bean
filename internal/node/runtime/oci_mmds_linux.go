@@ -23,7 +23,7 @@ import (
 
 	"log/slog"
 
-	"github.com/garysng/bean/internal/logging"
+	"github.com/garysng/wizard/internal/logging"
 )
 
 // The agent requires a token on a TCP listener, and reads the expected hash from a
@@ -32,7 +32,7 @@ import (
 //
 // # Why not simply skip authentication
 //
-// Because the agent refuses to. cmd/beand/main.go derives the requirement from the
+// Because the agent refuses to. cmd/wizardd/main.go derives the requirement from the
 // transport rather than from a flag: any TCP listener demands a token, on the reasoning
 // that a TCP address is reachable *from inside the sandbox*, so the token is not
 // hardening but the only thing separating noded from the sandbox's own root. A flag
@@ -208,7 +208,7 @@ func (m *mmdsServer) handleDocument(w http.ResponseWriter, r *http.Request) {
 	}
 
 	w.Header().Set("Content-Type", "application/json")
-	// The field name is the agent's, not ours -- mmdsDoc in internal/beand decodes
+	// The field name is the agent's, not ours -- mmdsDoc in internal/wizardd decodes
 	// exactly this key, and a rename here would be a sandbox that never authenticates.
 	if err := json.NewEncoder(w).Encode(map[string]string{
 		"agentTokenHash": m.tokenHash,

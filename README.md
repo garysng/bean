@@ -1,6 +1,6 @@
 <div align="center">
 
-# 🫛 bean
+# 🫛 wizard
 
 **A sandbox platform for AI agents** — run untrusted code in hardware isolation:
 create it, exec into it, snapshot it, fan it out. Any OCI image, no template build step.
@@ -105,9 +105,9 @@ placing it and letting the guest misbehave afterwards. `--no-memory` trades
 resume for portability; `--base` stores only the pages written since its parent.
 
 ```bash
-bean snapshot create $SBX --name base
-bean snapshot create $SBX --name step1 --base snap_...   # 298 KB, not 15.5 MB
-bean run --snapshot snap_...
+wizard snapshot create $SBX --name base
+wizard snapshot create $SBX --name step1 --base snap_...   # 298 KB, not 15.5 MB
+wizard run --snapshot snap_...
 ```
 
 ### Networking
@@ -157,14 +157,14 @@ checkpoint fan out to many sandboxes without collisions.
   in-sandbox agent, arriving as one span tree per request
 - **Node-direct data plane** — `{port}-{sandbox}` in the Host reaches that port in
   that guest, whether it is a user's server or the agent. One mechanism rather than
-  two: no registration call, no host-port pool. With `BEAN_PROXY_URL` set, `exec`
+  two: no registration call, no host-port pool. With `WIZARD_PROXY_URL` set, `exec`
   and file transfer take this path straight to the agent instead of relaying
   through the control plane, with the node's forwarder injecting the per-sandbox
   token so the client never holds it; unset, they fall back to the gateway relay
 - **Warm snapshots** — prewarm produces a resumable base snapshot, so a create
   restores instead of booting, and the scheduler prefers nodes that can. Bounded on
   disk with LRU eviction
-- **Postgres** — `bean-api --postgres`, which is what allows more than one replica;
+- **Postgres** — `wizard-api --postgres`, which is what allows more than one replica;
   SQLite is one file and two replicas cannot share it. The requirements are run
   against a real Postgres 16 by `hack/postgres-conformance.sh`, and the store holds
   no mutex — atomicity is in the statements, so the database arbitrates
@@ -173,9 +173,9 @@ checkpoint fan out to many sandboxes without collisions.
 
 | feature | status |
 |---|---|
-| jailer chroot | 📐 The VMM drops to an unprivileged uid, runs in a per-sandbox cgroup, and has its own pid, mount and network namespaces by default. What jailer would add on top is a `chroot` and a device allowlist — [#20](https://github.com/garysng/bean/issues/20) phase 2, and probably not the right shape |
+| jailer chroot | 📐 The VMM drops to an unprivileged uid, runs in a per-sandbox cgroup, and has its own pid, mount and network namespaces by default. What jailer would add on top is a `chroot` and a device allowlist — [#20](https://github.com/garysng/wizard/issues/20) phase 2, and probably not the right shape |
 | Volumes | 📐 |
-| Per-port access control | 📐 Any port on a sandbox is reachable by anything that can reach bean-proxy — [#50](https://github.com/garysng/bean/issues/50) |
+| Per-port access control | 📐 Any port on a sandbox is reachable by anything that can reach wizard-proxy — [#50](https://github.com/garysng/wizard/issues/50) |
 | overlaybd | ⚠️ Wired in and measured on one host. **3.32x less disk** for three images sharing a base, and a shared layer converted once per node rather than once per image (0.49 s of CPU for the second image against 2.24 s). With layers published to an object store a create is **1.3 s against dm-snapshot's 14.3 s**; a *cold* create is unchanged, and cannot be improved — a gzipped tar has no block index to seek into, so the first encounter anywhere always converts. Opt-in via `--fc-overlaybd`; dm-snapshot remains the default. **Under 256 concurrent creates on a 128-core host it is 4.2x faster on rootfs setup** (3.809 s -> 0.908 s) and 1.9x on throughput (47.5 -> 88.0 creates/s), because dm-snapshot forks `losetup`/`dmsetup` per sandbox while overlaybd writes configfs. `commit` on this backend is unexercised, and the cross-node path has only been exercised on one machine. [docs/image-pipeline.md](docs/image-pipeline.md) §7 |
 
 ---
@@ -186,16 +186,16 @@ Needs a Linux host with `/dev/kvm`, root, and `dmsetup` / `losetup`. Go 1.26.
 
 ```bash
 make bin                           # five binaries into ./bin
-sudo hack/build-assets.sh          # kernel + agent disk + base image, into /var/lib/bean
+sudo hack/build-assets.sh          # kernel + agent disk + base image, into /var/lib/wizard
 
 # BIN is where the stack script looks for the binaries it starts
 sudo BIN=$PWD/bin hack/dev-fc-stack.sh start   # gateway on :18080, one node
 
 export PATH=$PWD/bin:$PATH
-export BEAN_BASE_URL=http://127.0.0.1:18080 BEAN_API_KEY=devkey
-SBX=$(bean run --image alpine:3.20 --quiet)
-bean exec $SBX -- sh -c 'echo hello'
-bean kill $SBX
+export WIZARD_BASE_URL=http://127.0.0.1:18080 WIZARD_API_KEY=devkey
+SBX=$(wizard run --image alpine:3.20 --quiet)
+wizard exec $SBX -- sh -c 'echo hello'
+wizard kill $SBX
 
 sudo BIN=$PWD/bin hack/dev-fc-stack.sh stop
 ```
@@ -225,7 +225,7 @@ no NIC" look identical from in there.
 ## Architecture
 
 ```
-  SDK / CLI ──REST──▶ bean-api ──gRPC──▶ noded ──vsock──▶ beand
+  SDK / CLI ──REST──▶ wizard-api ──gRPC──▶ noded ──vsock──▶ wizardd
                       │  scheduler        │  runtime         (PID 1 in guest)
                       │  image service    │  image provider
                       └─ SQLite           └─ Firecracker
@@ -233,13 +233,13 @@ no NIC" look identical from in there.
                          S3 (snapshot blobs)
 ```
 
-Five binaries: `bean` (CLI), `bean-api` (gateway, with the scheduler in-process
+Five binaries: `wizard` (CLI), `wizard-api` (gateway, with the scheduler in-process
 so placement and commitment happen in one transaction), `noded` (one per host),
-`bean-proxy` (data-plane port routing), and `beand` (PID 1 inside each sandbox,
+`wizard-proxy` (data-plane port routing), and `wizardd` (PID 1 inside each sandbox,
 shipped on its own read-only disk so user images need no modification).
 
 The same stack drawn as four bands — clients, control plane, nodes, sandbox —
-with `bean-proxy` on the data-plane path for port traffic and S3 backing the node:
+with `wizard-proxy` on the data-plane path for port traffic and S3 backing the node:
 
 ```mermaid
 ---
@@ -256,7 +256,7 @@ flowchart TB
     CLI["CLI"]
   end
 
-  subgraph CP["control plane · bean-api (one process)"]
+  subgraph CP["control plane · wizard-api (one process)"]
     direction LR
     API["api-gateway<br>auth · quota"]
     SCHED["scheduler<br>placement · leases"]
@@ -264,7 +264,7 @@ flowchart TB
     STORE[("state store<br>SQLite / PG")]
   end
 
-  PROXY["bean-proxy<br>port routing"]
+  PROXY["wizard-proxy<br>port routing"]
 
   subgraph NODED["noded · one per host"]
     direction LR
@@ -273,7 +273,7 @@ flowchart TB
   end
 
   subgraph SBX["sandbox"]
-    BEAND["beand (PID1)<br>+ user process"]
+    WIZARDD["wizardd (PID1)<br>+ user process"]
   end
 
   S3[("S3<br>blobs · artifacts · snapshots")]
@@ -284,7 +284,7 @@ flowchart TB
   SCHED <== commands / heartbeat ==> IMGSUB
   PROXY -. forward .-> IMGSUB
   IMGSUB --> RT
-  RT --> BEAND
+  RT --> WIZARDD
   IMGSUB -. range-read .-> S3
   RT -. snapshots .-> S3
 
@@ -294,7 +294,7 @@ flowchart TB
   classDef store fill:#F3E8FD,stroke:#A142F4,color:#111;
   class SDK,CLI client;
   class API,SCHED,IMGS control;
-  class PROXY,IMGSUB,RT,BEAND data;
+  class PROXY,IMGSUB,RT,WIZARDD data;
   class STORE,S3 store;
 ```
 
@@ -303,13 +303,13 @@ flowchart TB
 ```
 1. image provider assembles a rootfs block device
      shared read-only base (loop) + per-sandbox sparse CoW
-     → dm-snapshot → /dev/mapper/bean-<id>
+     → dm-snapshot → /dev/mapper/wizard-<id>
 2. network: a netns, a tap, a veth pair to the host, NAT and filter rules
 3. noded execs firecracker *inside that netns*
      virtio-blk: agent disk as root device, user image as /dev/vdb
      vsock for the agent, tap registered before InstanceStart
-     init=/bean/beand, with ip= so the kernel configures eth0
-4. beand as PID 1: mount matrix, then pivot into the user image
+     init=/wizard/wizardd, with ip= so the kernel configures eth0
+4. wizardd as PID 1: mount matrix, then pivot into the user image
 ```
 
 Four ordering constraints in there are load-bearing, and every one was found the

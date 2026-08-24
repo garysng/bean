@@ -13,12 +13,12 @@ func TestRedactDSNRemovesThePassword(t *testing.T) {
 	for _, tc := range []struct {
 		name, dsn, mustNotContain string
 	}{
-		{"url form", "postgres://bean:s3cret@db.internal:5432/bean", "s3cret"},
-		{"url with query", "postgres://bean:s3cret@db:5432/bean?sslmode=require", "s3cret"},
-		{"keyword form", "host=db user=bean password=s3cret dbname=bean", "s3cret"},
+		{"url form", "postgres://wizard:s3cret@db.internal:5432/wizard", "s3cret"},
+		{"url with query", "postgres://wizard:s3cret@db:5432/wizard?sslmode=require", "s3cret"},
+		{"keyword form", "host=db user=wizard password=s3cret dbname=wizard", "s3cret"},
 		// A password containing the characters a regex would trip over. This is the
 		// reason the keyword form is rewritten field by field.
-		{"awkward password", "host=db password=p@ss:w/rd=1 dbname=bean", "p@ss:w/rd=1"},
+		{"awkward password", "host=db password=p@ss:w/rd=1 dbname=wizard", "p@ss:w/rd=1"},
 	} {
 		got := redactDSN(tc.dsn)
 		if strings.Contains(got, tc.mustNotContain) {
@@ -36,8 +36,8 @@ func TestRedactDSNLeavesAPasswordlessDSNAlone(t *testing.T) {
 	// Common in development and with IAM auth. Mangling it would make an error message
 	// wrong for the configuration that has nothing to hide.
 	for _, dsn := range []string{
-		"postgres://bean@db.internal:5432/bean",
-		"host=db user=bean dbname=bean sslmode=disable",
+		"postgres://wizard@db.internal:5432/wizard",
+		"host=db user=wizard dbname=wizard sslmode=disable",
 	} {
 		if got := redactDSN(dsn); got != dsn {
 			t.Errorf("redactDSN(%q) = %q, want it unchanged", dsn, got)

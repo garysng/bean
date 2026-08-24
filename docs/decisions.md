@@ -144,7 +144,7 @@ purely to extract the rootfs member. The right fix is for the node to tell the c
 
 ### 2.4 Comparison against the three competitors
 
-| Dimension | e2b | agentenv | tensorlake | bean (today) |
+| Dimension | e2b | agentenv | tensorlake | wizard (today) |
 |---|---|---|---|---|
 | VMM | forked firecracker (private, added gdb feature) | upstream FC | not public | upstream FC 1.15.1 |
 | guest kernel | own config + patch, source from `amazonlinux/linux`, **no fork** | prebuilt (R2 site) | not public | **FC CI prebuilt + config checked in** |
@@ -306,7 +306,7 @@ but not "which layer did the 1.2 seconds go to". The latter needs parent-child r
 The very first tree measured produced a number nobody had known before:
 
 ```
-POST /v1/sandboxes            bean-api   1196.0ms
+POST /v1/sandboxes            wizard-api   1196.0ms
   CreateSandbox               noded      1110.2ms   ← 86ms gap
     runtime.Create            noded       324.2ms
     agent.WaitHealthy         noded       785.8ms
@@ -322,13 +322,13 @@ what it exposes is **the segment nobody thought to measure**.
 | e2b | OTel, `traceparent` throughout | agent emits spans (envd has an outbound path) |
 | agentenv | OTel | same |
 | tensorlake | in-house timing reporting | — |
-| **bean** | OTel + W3C traceparent | **adopts the trace id only, emits no spans** |
+| **wizard** | OTel + W3C traceparent | **adopts the trace id only, emits no spans** |
 
-**The difference between bean and e2b here is deliberate**: e2b's envd can reach a collector directly, whereas our
-beand has only one inbound vsock and no outbound path. Adding a reverse channel would either break
+**The difference between wizard and e2b here is deliberate**: e2b's envd can reach a collector directly, whereas our
+wizardd has only one inbound vsock and no outbound path. Adding a reverse channel would either break
 "zero inbound exposure" or require an OTLP relay inside noded — the latter is feasible but
-not the current bottleneck. So the choice is: beand adopts the caller's trace id and writes it into its own logs,
-and **deliberately does not link the OTel SDK**. `go list -deps ./cmd/beand` returns 12 OTel packages, and all
+not the current bottleneck. So the choice is: wizardd adopts the caller's trace id and writes it into its own logs,
+and **deliberately does not link the OTel SDK**. `go list -deps ./cmd/wizardd` returns 12 OTel packages, and all
 of them are the API and propagation side (`otel/trace`, `otel/propagation`, `otel/attribute`, `otel/baggage`,
 `otel/codes`, `otel/semconv` and their internals) — which is what parsing and forwarding a `traceparent` needs.
 Zero SDK packages and zero exporters. The reasoning is that the
@@ -395,7 +395,7 @@ and matching on model would erase the template's value.
 | e2b | CPU template pinned to a baseline, node pools grouped by CPU model |
 | agentenv | same; mainly single-node fork (16 child instances), cross-node relies on same-model pools |
 | tensorlake | disk deltas are the main selling point, memory snapshots limited to the same machine/same model |
-| **bean** | custom template + scheduler hard-filters on vendor/family, incompatible returns 409 |
+| **wizard** | custom template + scheduler hard-filters on vendor/family, incompatible returns 409 |
 
 ### Probe script
 

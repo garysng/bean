@@ -12,8 +12,8 @@
 #
 # Verify before building, not after.
 set -uo pipefail
-NS=bean-cwd-probe-$$
-WORK=$(mktemp -d /tmp/bean-cwd.XXXXXX)
+NS=wizard-cwd-probe-$$
+WORK=$(mktemp -d /tmp/wizard-cwd.XXXXXX)
 
 cleanup() {
   ip netns del "$NS" 2>/dev/null || true

@@ -41,7 +41,7 @@ type fileBackend struct {
 	size    int64
 
 	// blockSize is the granularity of ownership. 4 KiB matches the page size and the
-	// filesystem block size in bean's images, so a guest write never straddles two
+	// filesystem block size in wizard's images, so a guest write never straddles two
 	// blocks and forces a read-modify-write.
 	blockSize int64
 

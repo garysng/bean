@@ -18,8 +18,8 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
-	agentv1 "github.com/garysng/bean/internal/gen/bean/agent/v1"
-	"github.com/garysng/bean/internal/node/vsock"
+	agentv1 "github.com/garysng/wizard/internal/gen/wizard/agent/v1"
+	"github.com/garysng/wizard/internal/node/vsock"
 )
 
 func main() {

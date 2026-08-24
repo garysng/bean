@@ -24,7 +24,7 @@ flowchart LR
     CONV["转换<br>tar.gz &rarr; ext4"]
     BASE[("共享 base<br>只读 loop<br>每节点一份")]
     COW["每 sandbox CoW<br>稀疏 &middot; 约 44 KiB"]
-    DM["dm-snapshot<br>/dev/mapper/bean-&lt;id&gt;"]
+    DM["dm-snapshot<br>/dev/mapper/wizard-&lt;id&gt;"]
     CONV --> BASE
     BASE --> DM
     COW --> DM
@@ -56,7 +56,7 @@ flowchart LR
 
 ```
 PullingProvider          缺镜像时触发转换,并发去重
-  └── DevMapperProvider  共享只读 base + 每 sandbox CoW → /dev/mapper/bean-<id>
+  └── DevMapperProvider  共享只读 base + 每 sandbox CoW → /dev/mapper/wizard-<id>
       (或 FileProvider)  每 sandbox 全量拷贝,无 dm 依赖时兜底
 
 OverlaybdProvider        另一条路,--fc-overlaybd;层按 digest 共享(见 §7)
@@ -255,7 +255,7 @@ convert  FetchConfig(manifest.Config.Digest)  → Config{Env,Entrypoint,Cmd,Work
 create   Provider.Config(ref) → *Config    ┐
          spec.Cmd / spec.Env               ├→ MergeConfig → Process{Argv,Env,Workdir,User}
                                            ┘        │
-                                    StartUserProcessRequest → beand exec
+                                    StartUserProcessRequest → wizardd exec
 ```
 
 写进与 ref、digest 同一个 `.ref` 文件而非另开文件:这样一次原子写就发布了节点关于
@@ -304,7 +304,7 @@ Env 按 key 合并而非整体替换,理由同源:镜像的 `PATH` 和调用方�
 ### `User` 已记录但未生效 📐
 
 值存下来了、也到了 `Process`,但一切仍以 root 运行。它无法在其余字段生效的地方生效:
-beand 是 PID 1,降低自己的 uid 就会失去之后 exec 任何东西的能力——必须在子进程里做。
+wizardd 是 PID 1,降低自己的 uid 就会失去之后 exec 任何东西的能力——必须在子进程里做。
 而解析 `nobody` 这类名字还需要 guest 自己的 `/etc/passwd`,那要等 pivot 到镜像 rootfs
 之后才存在。所以这是一个独立改动,不是漏掉的一行。
 
@@ -433,7 +433,7 @@ daemon 日志里有 4 层从 `remotefs` 打开、块缓存 32 KiB —— 是按�
 没有任何东西可以 range-read;decisions §3.1 里实测的 7ms 挂载和 19.6% 传输量,对的是一个
 **已经转换并封装过**的 blob。
 
-补上这个缺口的是 bean 自己的对象存储,而不是 registry。`Prewarm` 转换镜像并把封装好的层
+补上这个缺口的是 wizard 自己的对象存储,而不是 registry。`Prewarm` 转换镜像并把封装好的层
 按 digest 发布;之后任何读同一存储的节点都会在级别 2 命中这些层并 range-read。所以封装形态
 确实被产出了 —— 只不过是由第一个执行 prewarm 的节点产出,而非某个集中式流水线。
 
@@ -592,12 +592,12 @@ in-flight 去重 —— 同一块被并发读只回源一次。
 
 ```
 blobs/<layer-digest>            封装好的层            由 overlaybd daemon 读
-manifests/<manifest-digest>     层清单 + OCI config   由 bean 读
-tags/<host>/<repo>/<tag>        → manifest digest     由 bean 读
+manifests/<manifest-digest>     层清单 + OCI config   由 wizard 读
+tags/<host>/<repo>/<tag>        → manifest digest     由 wizard 读
 ```
 
 注意读者不同,这也是它和 `BlobStore` 分成两个类型的原因。daemon **匿名**读 `blobs/`,
-这就是下面那条公开读策略的由来;`manifests/` 和 `tags/` 由 bean 自己带凭据读,没有这个要求。
+这就是下面那条公开读策略的由来;`manifests/` 和 `tags/` 由 wizard 自己带凭据读,没有这个要求。
 
 `tags/` 的 key 除了 tag 还包含 host 和 repository,因为脱离这两者 tag 毫无意义:
 Docker Hub 的 `python:3.12` 和某镜像站的 `python:3.12` 是两个恰好同名的不同镜像,
@@ -616,7 +616,7 @@ Docker Hub 的 `python:3.12` 和某镜像站的 `python:3.12` 是两个恰好同
 prewarm 是唯一的写入方,并且从不读自己写的答案。这是刻意的:一个从存储得到满足的 prewarm
 会变成一个「报告成功的空操作」,而上游 tag 移动后将永远不会被发现。
 
-**由此确立的语义值得明说:** 在下一次 prewarm 之前,「tag 意味着什么」的权威是 bean 的存储,
+**由此确立的语义值得明说:** 在下一次 prewarm 之前,「tag 意味着什么」的权威是 wizard 的存储,
 而不是上游 registry。这期间上游 tag 移动不会被察觉。对 sandbox 平台这是对的默认:
 一批 eval 跑到中途悄悄换成新的镜像内容,比跑一个稍旧的镜像糟糕得多 —— 可复现性优先于新鲜度。
 
@@ -665,7 +665,7 @@ mc anonymous set download <alias>/bean-obd-layers
 
 ### 两个不该由代码决定的设置
 
-`/etc/overlaybd/overlaybd.json` 属于 overlaybd 这个包 —— bean 读它
+`/etc/overlaybd/overlaybd.json` 属于 overlaybd 这个包 —— wizard 读它
 (builder 把它传给 `overlaybd-apply`),从不写它。其中两个默认值值得专门说:
 
 **`download.enable` 必须设成 `false`。** 默认是 `true` 且 `delay: 600`,
@@ -708,8 +708,8 @@ WWID,判定它们是同一个 LUN 的两条路径,于是合并 —— **把一�
 `mpatha`,设了的那个保持独立。
 
 **3. serial 必须只含十六进制字符。** 内核用 serial 里的**十六进制字符**构造 WWID,
-其余全部丢弃:`bean-aaa` 变成 `naa.6001405beaaaa000...`。所以 `bean-sbx-alpha` 和
-`bean-probe-2` 都归约成 `beabaa` —— 两个看起来唯一实际相撞的 serial,
+其余全部丢弃:`wizard-aaa` 变成 `naa.6001405beaaaa000...`。所以 `wizard-sbx-alpha` 和
+`wizard-probe-2` 都归约成 `beabaa` —— 两个看起来唯一实际相撞的 serial,
 也就是第 2 条那个坑,只是更难发现。`deviceSerial` 把 sandbox id 哈希成十六进制,
 而 `attachTCMU` 对非十六进制的 serial **直接拒绝**而不是替调用方净化,
 这样到内核的值就是调用方选的值。
@@ -741,10 +741,10 @@ multipathd 合并。
 
 **端到端** —— `hack/overlaybd-e2e.sh` 用 `--fc-overlaybd` 起一个真的全栈,
 **从 overlaybd 设备启动一个 sandbox**。在验证机(内核 5.15、TCMU、multipathd active、
-AMD EPYC 7542)上全部通过:节点选中 overlaybd 而非降级、`bean run --image alpine:3.20`
+AMD EPYC 7542)上全部通过:节点选中 overlaybd 而非降级、`wizard run --image alpine:3.20`
 成功、guest 从自己的 rootfs 读到 `PRETTY_NAME="Alpine Linux v3.20"`、写入落到可写层、
 运行中的 sandbox 有对应 TCMU backstore、镜像的 PATH 进了 guest 环境、
-`bean kill` 之后无 backstore 残留也无 multipath 设备。
+`wizard kill` 之后无 backstore 残留也无 multipath 设备。
 
 最后这层才是关键:宿主能挂载的设备和 guest 能从它启动是两个不同的断言,
 只有这一层能把这个缺口补上。

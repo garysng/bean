@@ -5,7 +5,7 @@ package runtime
 import (
 	"errors"
 
-	"github.com/garysng/bean/internal/node/image"
+	"github.com/garysng/wizard/internal/node/image"
 )
 
 // A container tier needs namespaces, cgroups and a block device mounted on the host,

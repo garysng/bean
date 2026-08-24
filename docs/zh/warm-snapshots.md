@@ -19,9 +19,9 @@
 `packages/orchestrator/pkg/template/build/` 下面**。面向用户的 gRPC handler 调的是
 `ResumeSandbox`。真 boot 只发生在构建模板的时候。
 
-他们的 `ResumeSandbox` 就是 bean 说的 **restore**:做 `PUT /snapshot/load` 并产出一个新
-沙箱。它不是 bean 语义下的 resume(解冻一个活进程的 vCPU),读他们代码时要留意这个借用的
-命名。本文全程使用 bean 的词汇 —— 见 [snapshot-resume.md](snapshot-resume.md) §0。
+他们的 `ResumeSandbox` 就是 wizard 说的 **restore**:做 `PUT /snapshot/load` 并产出一个新
+沙箱。它不是 wizard 语义下的 resume(解冻一个活进程的 vCPU),读他们代码时要留意这个借用的
+命名。本文全程使用 wizard 的词汇 —— 见 [snapshot-resume.md](snapshot-resume.md) §0。
 
 三个值得借鉴的细节:
 
@@ -76,7 +76,7 @@ prewarm 已经存在,而且本来就跨两边,所以问题不是"把活放哪边
 唯一真正新的东西是:上报的单位不再是一个裸的镜像引用。warm snapshot 只在兼容 CPU 上可用
 (见 §3),所以节点上报的是一个元组,而调度器已有的 `CPUConstraint` 过滤就是消费它的地方。
 这个元组里的 digest 那一半,正是镜像现在要上报 digest 的原因 —— 见
-`proto/bean/node/v1/node.proto` 里的 `UpdateNodeStatus`。
+`proto/wizard/node/v1/node.proto` 里的 `UpdateNodeStatus`。
 
 **prewarm 今天买不到什么,而这正是这个 feature 存在的全部理由。** 准备镜像文件消掉了拉取,
 但没消掉 boot:针对一个已完全预热的镜像做 create,仍然走 `configureAndBoot`,仍然要付那

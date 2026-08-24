@@ -1,6 +1,6 @@
 #!/bin/bash
-# Proves exec and file transfer work through bean-proxy -- the data plane -- rather
-# than relaying through bean-api, and that auth on that path still fails closed.
+# Proves exec and file transfer work through wizard-proxy -- the data plane -- rather
+# than relaying through wizard-api, and that auth on that path still fails closed.
 #
 # This is the one check that exercises the whole exec-via-proxy path end to end on
 # a real guest. Everything below it is unit-tested: the forwarder's token
@@ -32,7 +32,7 @@
 # sandbox it created and nothing else.
 set -u
 
-REPO=${REPO:-/root/bean}
+REPO=${REPO:-/root/wizard}
 IMAGE=${IMAGE:-busybox:1.35}
 GUEST_DNS=${GUEST_DNS:-223.5.5.5}
 GUEST_SUBNET=${GUEST_SUBNET:-172.31.0.0/30}
@@ -41,10 +41,10 @@ API_PORT=${API_PORT:-18080}
 PROXY_PORT=${PROXY_PORT:-17460}
 SANDBOX_DOMAIN=${SANDBOX_DOMAIN:-sandbox.local}
 API_KEY=${API_KEY:-devkey}
-ASSETS=${ASSETS:-/var/lib/bean/assets}
+ASSETS=${ASSETS:-/var/lib/wizard/assets}
 BIN=${BIN:-/tmp}
-RUN=${RUN:-/tmp/beanrun}
-BEAN="$BIN/bean"
+RUN=${RUN:-/tmp/wizardrun}
+WIZARD="$BIN/wizard"
 BASE="http://127.0.0.1:$API_PORT"
 
 SBX=""
@@ -65,7 +65,7 @@ check() {
 cleanup() {
   if [ -n "$SBX" ]; then
     note "killing the sandbox this probe created ($SBX)"
-    BEAN_PROXY_URL= "$BEAN" kill "$SBX" 2>&1 | tail -1 || true
+    WIZARD_PROXY_URL= "$WIZARD" kill "$SBX" 2>&1 | tail -1 || true
   fi
   if [ "$FAILED" -ne 0 ]; then
     echo
@@ -78,14 +78,14 @@ trap cleanup EXIT
 cd "$REPO" || exit 1
 
 note "building into $BIN"
-for c in bean bean-api noded bean-proxy; do
+for c in wizard wizard-api noded wizard-proxy; do
   go build -o "$BIN/$c" "./cmd/$c" >>/tmp/exec-via-proxy-build.log 2>&1 || {
     echo "build of $c failed:"
     tail -20 /tmp/exec-via-proxy-build.log
     exit 1
   }
 done
-echo "built: bean bean-api noded bean-proxy"
+echo "built: wizard wizard-api noded wizard-proxy"
 
 note "starting the stack with sandbox networking on"
 ASSETS="$ASSETS" \
@@ -100,15 +100,15 @@ grep -q 'sandbox networking on' "$RUN/noded.log" || {
   exit 1
 }
 
-export BEAN_API_KEY="$API_KEY"
-export BEAN_BASE_URL="$BASE"
+export WIZARD_API_KEY="$API_KEY"
+export WIZARD_BASE_URL="$BASE"
 
 note "creating a sandbox from $IMAGE"
-# No proxy for create: create is a control-plane call and stays on bean-api. The
+# No proxy for create: create is a control-plane call and stays on wizard-api. The
 # data-plane env is set only for the exec and cp calls below.
-RUN_OUT=$(BEAN_PROXY_URL= "$BEAN" run --image "$IMAGE" 2>&1)
+RUN_OUT=$(WIZARD_PROXY_URL= "$WIZARD" run --image "$IMAGE" 2>&1)
 SBX=$(printf '%s\n' "$RUN_OUT" | grep -oE 'sbx_[0-9a-f]{20}' | head -1)
-if [ -z "$SBX" ] || ! BEAN_PROXY_URL= "$BEAN" ls 2>/dev/null | grep -q "$SBX"; then
+if [ -z "$SBX" ] || ! WIZARD_PROXY_URL= "$WIZARD" ls 2>/dev/null | grep -q "$SBX"; then
   echo "run did not yield a usable sandbox id. output was:"
   printf '%s\n' "$RUN_OUT" | tail -5
   tail -20 "$RUN/noded.log"
@@ -117,19 +117,19 @@ if [ -z "$SBX" ] || ! BEAN_PROXY_URL= "$BEAN" ls 2>/dev/null | grep -q "$SBX"; t
 fi
 echo "sandbox: $SBX"
 
-# The create response should carry the domain we started bean-api with, since that
+# The create response should carry the domain we started wizard-api with, since that
 # is what the client builds the authority against.
-DOMAIN=$(BEAN_PROXY_URL= "$BEAN" ls --json 2>/dev/null \
+DOMAIN=$(WIZARD_PROXY_URL= "$WIZARD" ls --json 2>/dev/null \
   | grep -oE "\"domain\":\"[^\"]*\"" | head -1 | cut -d'"' -f4)
 check "create returns the sandbox domain" "$SANDBOX_DOMAIN" "${DOMAIN:-}" \
   "the record carries the data-plane domain the client addresses"
 
 # From here the data-plane env is on: exec and cp dial the proxy.
-export BEAN_PROXY_URL="127.0.0.1:$PROXY_PORT"
+export WIZARD_PROXY_URL="127.0.0.1:$PROXY_PORT"
 
 note "exec through the proxy"
 MARKER="hello-via-proxy-$$"
-OUT=$("$BEAN" exec "$SBX" -- sh -c "echo $MARKER" 2>/tmp/exec-via-proxy-exec.err)
+OUT=$("$WIZARD" exec "$SBX" -- sh -c "echo $MARKER" 2>/tmp/exec-via-proxy-exec.err)
 check "exec returns the guest's output" "$MARKER" "$(printf '%s' "$OUT" | tr -d '[:space:]')" \
   "AgentService/Exec answered through the proxy, token injected by the forwarder"
 if [ "$(printf '%s' "$OUT" | tr -d '[:space:]')" != "$MARKER" ]; then
@@ -141,10 +141,10 @@ SENT="round-trip-$$-$(date +%s)"
 LOCAL_IN=$(mktemp)
 LOCAL_OUT=$(mktemp)
 printf '%s' "$SENT" >"$LOCAL_IN"
-"$BEAN" cp "$LOCAL_IN" "sbx:$SBX:/tmp/probe.txt" >/dev/null 2>/tmp/exec-via-proxy-cp.err || {
+"$WIZARD" cp "$LOCAL_IN" "sbx:$SBX:/tmp/probe.txt" >/dev/null 2>/tmp/exec-via-proxy-cp.err || {
   echo "cp to sandbox failed:"; tail -3 /tmp/exec-via-proxy-cp.err
 }
-"$BEAN" cp "sbx:$SBX:/tmp/probe.txt" "$LOCAL_OUT" >/dev/null 2>>/tmp/exec-via-proxy-cp.err || {
+"$WIZARD" cp "sbx:$SBX:/tmp/probe.txt" "$LOCAL_OUT" >/dev/null 2>>/tmp/exec-via-proxy-cp.err || {
   echo "cp from sandbox failed:"; tail -3 /tmp/exec-via-proxy-cp.err
 }
 check "a file round-trips byte-for-byte" "$SENT" "$(cat "$LOCAL_OUT" 2>/dev/null)" \
@@ -167,17 +167,17 @@ note "fail-closed: a direct dial to the agent, bypassing the forwarder, is denie
 # The guest IP comes from the guest itself over the working exec path, so the
 # probe does not hardcode the /30 layout. The netns is the one noded logged for
 # this sandbox.
-GUEST_IP=$("$BEAN" exec "$SBX" -- sh -c \
+GUEST_IP=$("$WIZARD" exec "$SBX" -- sh -c \
   "ip -4 -o addr show | grep -v ' lo ' | awk '{print \$4}' | cut -d/ -f1" 2>/dev/null \
   | tr -d '[:space:]')
-NETNS=$(ip netns list 2>/dev/null | grep -oE "bean[-_][0-9a-zA-Z]*$SBX[0-9a-zA-Z]*" | head -1)
+NETNS=$(ip netns list 2>/dev/null | grep -oE "wizard[-_][0-9a-zA-Z]*$SBX[0-9a-zA-Z]*" | head -1)
 if [ -z "$NETNS" ]; then
-  NETNS=$(ip netns list 2>/dev/null | grep -i bean | head -1 | awk '{print $1}')
+  NETNS=$(ip netns list 2>/dev/null | grep -i wizard | head -1 | awk '{print $1}')
 fi
 if command -v grpcurl >/dev/null 2>&1 && [ -n "$GUEST_IP" ] && [ -n "$NETNS" ]; then
   if ip netns exec "$NETNS" grpcurl -plaintext -max-time 5 \
       -d "{\"sandbox_id\":\"$SBX\",\"cmd\":[\"echo\",\"leak\"]}" \
-      "$GUEST_IP:10001" bean.agent.v1.AgentService/Exec \
+      "$GUEST_IP:10001" wizard.agent.v1.AgentService/Exec \
       >/tmp/exec-via-proxy-uninjected.out 2>&1; then
     UNINJECTED="unexpected-success"
   else
@@ -193,7 +193,7 @@ else
   echo "SKIP  direct uninjected agent dial"
   echo "      needs grpcurl on the node, a resolvable guest IP (got '${GUEST_IP:-}')"
   echo "      and the sandbox netns (got '${NETNS:-}')"
-  echo "      the agent's fail-closed check is unit-tested in beand/auth.go regardless"
+  echo "      the agent's fail-closed check is unit-tested in wizardd/auth.go regardless"
 fi
 
 note "result"

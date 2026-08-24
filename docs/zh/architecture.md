@@ -1,4 +1,4 @@
-# Bean 技术架构设计
+# Wizard 技术架构设计
 
 > English: [../architecture.md](../architecture.md)
 
@@ -62,7 +62,7 @@ AI evaluation / agent rollout 场景（如 SWE-bench 类任务）的特点：
 (full / `--no-memory` / `--base` 增量三种,见 snapshot-resume.md)。
 
 **网络曾是最大空白,现已建成**(network.md):每个 sandbox 有独立 namespace、tap
-与出网,元数据网段与 RFC1918 默认拒绝,沙箱内的端口可以从节点外经 bean-proxy 到达。
+与出网,元数据网段与 RFC1918 默认拒绝,沙箱内的端口可以从节点外经 wizard-proxy 到达。
 全部在真实内核上验证过,包括那些拒绝规则。
 
 跨节点 sandbox 互通仍是非目标。真正缺的是**按端口的访问控制** —— 沙箱上的任何端口,
@@ -97,7 +97,7 @@ AI evaluation / agent rollout 场景（如 SWE-bench 类任务）的特点：
              │
         ┌────▼──────────────────────┐
         │ sandbox                    │  fc: microVM（vsock 通 agent）
-        │  └── beand (init/PID1)│  container: runc/runsc（其 netns 内的 TCP）
+        │  └── wizardd (init/PID1)│  container: runc/runsc（其 netns 内的 TCP）
         │      └── 用户进程           │  agent: exec/PTY/文件/端口转发
         └───────────────────────────┘
 
@@ -108,15 +108,15 @@ AI evaluation / agent rollout 场景（如 SWE-bench 类任务）的特点：
 
 | 组件 | 语言 | 职责 |
 |---|---|---|
-| `api-gateway` | Go | ✅ REST + gRPC API、鉴权、配额（端口反代由 bean-proxy 承担,可合部） |
-| `scheduler` | Go | 节点选择（镜像亲和 + 资源 bin-packing）、租约管理——**control plane 逻辑模块**（`internal/control/scheduler`,与 bean-api 同进程:调度决策与事务扣量、指令下发需原子完成;成为瓶颈或需选主时再拆） |
-| `image-service` | Go | 镜像元数据索引、格式转换编排、prewarm、S3 blob GC（control plane 逻辑模块，P0–P2 内嵌 bean-api） |
-| `bean-proxy` | Go | ✅ 进入 sandbox 的反向代理。从 Host 读 `{port}-{sandbox}`,查出沙箱所在节点后转发。用户暴露的端口和 agent 自己的接口走同一条路——端口暴露和数据面是一个机制而非两个。不做用户认证(外部层负责,见 A7),拒绝绑公网地址。TLS 与 DNS 属于托管层,不在 bean 内 |
+| `api-gateway` | Go | ✅ REST + gRPC API、鉴权、配额（端口反代由 wizard-proxy 承担,可合部） |
+| `scheduler` | Go | 节点选择（镜像亲和 + 资源 bin-packing）、租约管理——**control plane 逻辑模块**（`internal/control/scheduler`,与 wizard-api 同进程:调度决策与事务扣量、指令下发需原子完成;成为瓶颈或需选主时再拆） |
+| `image-service` | Go | 镜像元数据索引、格式转换编排、prewarm、S3 blob GC（control plane 逻辑模块，P0–P2 内嵌 wizard-api） |
+| `wizard-proxy` | Go | ✅ 进入 sandbox 的反向代理。从 Host 读 `{port}-{sandbox}`,查出沙箱所在节点后转发。用户暴露的端口和 agent 自己的接口走同一条路——端口暴露和数据面是一个机制而非两个。不做用户认证(外部层负责,见 A7),拒绝绑公网地址。TLS 与 DNS 属于托管层,不在 wizard 内 |
 | `noded` | Go | 节点 daemon：sandbox 生命周期、网络、镜像缓存、卷挂载、健康上报 |
-| `beand` | Go（静态编译） | sandbox 内 PID1：exec、PTY、文件读写、端口转发 |
+| `wizardd` | Go（静态编译） | sandbox 内 PID1：exec、PTY、文件读写、端口转发 |
 | `sdk-python` | Python | evaluation/rollout 侧主 SDK |
 | `sdk-ts` | TypeScript | Web/Node 侧 SDK |
-| `cli` | Go | `bean` 命令行：sandbox 管理、镜像预热、调试 |
+| `cli` | Go | `wizard` 命令行：sandbox 管理、镜像预热、调试 |
 
 ## 3. 核心设计决策
 
@@ -149,7 +149,7 @@ fc 主路径**不引入 containerd**（AgentENV 同款）：noded 直接驱动 o
 >
 > 具体的阻塞点是查证过的,不是推断:overlaybd 的 containerd snapshotter 要求镜像位于
 > registry 且 manifest 带 `containerd.io/snapshot/overlaybd/version` 注解,
-> 而 bean 发布到 S3 的是裸 blob 前缀,两者都没有。
+> 而 wizard 发布到 S3 的是裸 blob 前缀,两者都没有。
 
 原本的理由仍然成立,故保留:runc 生命周期与 overlayfs 组装不值得自研,
 纯 fc 节点可完全不装 containerd。runtime 抽象接口见 noded-design §3。
@@ -243,8 +243,8 @@ agent_ready       1.8s / 28 = 每次 0.06s
    而容器没有 guest 内核：tap 保持 DOWN，那个地址在任何地方都不存在。拨它得到
    「network is unreachable」，因为宿主把它按默认网关解析了。
 3. **runsc 需要 `--network=host`。** 它默认的用户态网络栈（netstack）接管了 veth，
-   于是 agent 打印 `beand listening` 而命名空间内 `ss` 看不到任何监听。安全代价见下。
-4. **agent 在 TCP 上强制要求 token，而 node 必须为它提供。** `cmd/beand` 把这个要求
+   于是 agent 打印 `wizardd listening` 而命名空间内 `ss` 看不到任何监听。安全代价见下。
+4. **agent 在 TCP 上强制要求 token，而 node 必须为它提供。** `cmd/wizardd` 把这个要求
    绑定在传输上而非某个 flag，因为 TCP 地址**从 sandbox 内部可达**。期望的 hash 来自
    169.254.169.254 上的 metadata service —— Firecracker 提供它，容器没有 ——
    所以这一档在命名空间内跑一个**每 sandbox 独立**的实现（`oci_mmds_linux.go`）。
@@ -272,7 +272,7 @@ FC 档**不是**嵌套容器（Kata 式 guest 内再跑 containerd），而是 r
 overlaybd 组装镜像块设备：base 层（lazy-pull S3）+ overlaybd 可写层，
   在宿主侧合成【单一块设备】（业界一致做法：e2b/AgentENV 均 host 侧组装）
   → virtio-blk 挂给 microVM（guest 见一块盘）+ agent 盘（只读，见 D5）
-  → guest 内 beand 作为 init：挂载 /proc /sys /dev 等（按 OCI 默认
+  → guest 内 wizardd 作为 init：挂载 /proc /sys /dev 等（按 OCI 默认
     mounts 复刻）、应用 image config（ENV/USER/WORKDIR/Entrypoint+Cmd）
     拉起用户进程
 ```
@@ -287,7 +287,7 @@ disk-diff 直接取宿主 overlaybd 可写层、guest 内零 union 复杂度。
   由平台统一打包提供（非宿主内核），对纯用户态 eval 负载无感。
   详见 noded-design.md fcRuntime 节
 - agent 通信走 vsock（transport 抽象；容器档同协议但走 netns 内的 TCP，见 D3）
-- 网络：tap 设备接入节点 bean0 桥，nftables 规则与容器档一致
+- 网络：tap 设备接入节点 wizard0 桥，nftables 规则与容器档一致
 - 该路线已被 AgentENV（Kimi K3 训练基础设施）在生产验证；实现参考其
   overlaybd+ublk 集成与 snapshot 设计
 
@@ -304,7 +304,7 @@ disk-diff 直接取宿主 overlaybd 可写层、guest 内零 union 复杂度。
 
 选 overlaybd（块级，DADI/阿里，AgentENV 已在 FC 场景验证）而非 Nydus（文件级）的关键原因：**块设备链路同时服务容器档（overlaybd-snapshotter → overlayfs）与 microVM 档（virtio-blk 直挂 guest），一条镜像链路通吃全部 runtime 档位**；Nydus 的文件系统语义进不了 microVM，FC 档需另走 virtiofs（FC 支持弱）。Nydus 保留为容器档备选。
 
-热状态（sandbox 元数据、租约、调度状态）落关系库,不进 S3。引擎由 `bean-api --postgres`
+热状态（sandbox 元数据、租约、调度状态）落关系库,不进 S3。引擎由 `wizard-api --postgres`
 是否给出决定:SQLite(`modernc.org/sqlite`,纯 Go 无 cgo,`SetMaxOpenConns(1)` 单写)
 适合单机;多副本控制面需要 Postgres —— SQLite 是一个文件,两个副本没法共享它。
 
@@ -322,7 +322,7 @@ eval 镜像任意、不可假设内含工具链。注入方式按档位：
 
 | 档 | 注入 | 通信 |
 |---|---|---|
-| fc（默认） | **agent 盘**：含 beand 的只读小盘（ext4）作为附加 virtio-blk，guest 内核 init=盘内 agent | vsock + gRPC |
+| fc（默认） | **agent 盘**：含 wizardd 的只读小盘（ext4）作为附加 virtio-blk，guest 内核 init=盘内 agent | vsock + gRPC |
 | 容器档 | overlaybd 设备挂成目录 + agent 作 PID1 | netns 内 TCP + gRPC |
 
 共同点：用户镜像零修改;原 entrypoint/cmd/env/user/workdir 序列化进 spec，
@@ -332,7 +332,7 @@ eval 镜像任意、不可假设内含工具链。注入方式按档位：
 ### D6. 网络：节点内 NAT，取裸金属/云 VM 最大公约数 📐
 
 > **已实现**(network.md、noded-design §5):每个 sandbox 有自己的 netns、tap 和出网,
-> 元数据段与 RFC1918 默认拒绝。注意实现形态与下面这张早期草图不同 —— 没有 `bean0` 桥、
+> 元数据段与 RFC1918 默认拒绝。注意实现形态与下面这张早期草图不同 —— 没有 `wizard0` 桥、
 > 没有节点子网,规则用 iptables 而非 nftables,详见 noded-design §5。
 
 ```
@@ -415,7 +415,7 @@ shared-fs 走宿主 NFS 而非 guest 内跑分布式 FS 客户端的原因：gue
 **控制面全局一份，数据面按 region 自治。** Region = 故障域 + 数据域 + 转发域：
 
 ```
-Global Control Plane（bean-api / scheduler / 关系库,镜像元数据全局 digest 索引）
+Global Control Plane（wizard-api / scheduler / 关系库,镜像元数据全局 digest 索引）
    │ 托管 gRPC 接入层(TLS)+node token,noded/proxy 出向连接
    ├── Region A：noded 节点池 + regional proxy ×N + region S3 backend
    └── Region B（BYOC）：客户节点 + 客户 S3,数据不出客户环境
@@ -531,30 +531,30 @@ RUNNING,restore 造出另一个。见 [snapshot-resume.md](snapshot-resume.md) �
   的 cgroup 里(内存上限、CPU 配额、pid 上限,`--fc-cgroups`),并默认拥有自己的
   pid、mount 与 network 命名空间。Firecracker 内置的 seccomp 叠在这些之上,而非替代它们
 - ❌ ~~jailer~~ 不再计划引入。上面的命名空间、cgroup 与 uid 下放都已具备,
-  jailer 额外带来的只是 `chroot` 和设备白名单 —— [#20](https://github.com/garysng/bean/issues/20)
+  jailer 额外带来的只是 `chroot` 和设备白名单 —— [#20](https://github.com/garysng/wizard/issues/20)
   phase 2,且大概不是对的形态。记为「已放弃」而不是「待做」,这样它不再被读成缺口
 - ✅ 容器档已实现(D3):`--runtime runsc|runc`
 - ⚠️ sandbox 之间的网络策略未实现。每个 sandbox **确实**有自己的命名空间、tap 与出网,
   且元数据网段与 RFC1918 默认拒绝(network.md) —— 缺的是**按端口的访问控制**,
-  所以能到 bean-proxy 的东西可以访问 sandbox 的任意端口([#50](https://github.com/garysng/bean/issues/50))
+  所以能到 wizard-proxy 的东西可以访问 sandbox 的任意端口([#50](https://github.com/garysng/wizard/issues/50))
 - ⚠️ 节点当前经环境变量拿 S3 凭证;presigned URL / STS 轮换未实现
 - API 鉴权：API key（调用方识别+配额;不做用户/租户体系——集群内部服务）
 
 ## 7. Repo 结构 ⚠️
 
 ```
-bean/
+wizard/
 ├── proto/                  ✅ gRPC 定义（single source of truth）
 ├── cmd/
-│   ├── bean/               ✅ CLI 入口
-│   ├── bean-api/           ✅ gateway（内嵌 scheduler / image / snapshot 模块）
+│   ├── wizard/               ✅ CLI 入口
+│   ├── wizard-api/           ✅ gateway（内嵌 scheduler / image / snapshot 模块）
 │   ├── noded/              ✅ node daemon
-│   ├── beand/              ✅ sandbox 内 agent
-│   └── bean-proxy/         ✅ 进入 sandbox 的反向代理(按 Host 路由)
+│   ├── wizardd/              ✅ sandbox 内 agent
+│   └── wizard-proxy/         ✅ 进入 sandbox 的反向代理(按 Host 路由)
 ├── internal/
 │   ├── control/            ✅ api / scheduler / store / snapshot / s3
 │   ├── node/               ✅ manager / runtime / image / vsock / network（每 sandbox netns + tap + NAT）
-│   ├── beand/              ✅ sandbox 内 daemon 实现
+│   ├── wizardd/              ✅ sandbox 内 daemon 实现
 │   ├── obs/                ✅ OTel tracing + gRPC 拦截器
 │   ├── logging/            ✅ slog 结构化日志
 │   └── gen/                ✅ protoc 产物

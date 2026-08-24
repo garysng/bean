@@ -9,8 +9,8 @@ import (
 
 	"google.golang.org/grpc"
 
-	nodev1 "github.com/garysng/bean/internal/gen/bean/node/v1"
-	"github.com/garysng/bean/internal/node/runtime"
+	nodev1 "github.com/garysng/wizard/internal/gen/wizard/node/v1"
+	"github.com/garysng/wizard/internal/node/runtime"
 )
 
 // fakeControlPlane is a minimal NodeService that records what nodes send.

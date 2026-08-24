@@ -10,12 +10,12 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	"github.com/garysng/bean/internal/control/s3"
-	agentv1 "github.com/garysng/bean/internal/gen/bean/agent/v1"
-	commonv1 "github.com/garysng/bean/internal/gen/bean/common/v1"
-	nodev1 "github.com/garysng/bean/internal/gen/bean/node/v1"
-	"github.com/garysng/bean/internal/node/image"
-	"github.com/garysng/bean/internal/node/runtime"
+	"github.com/garysng/wizard/internal/control/s3"
+	agentv1 "github.com/garysng/wizard/internal/gen/wizard/agent/v1"
+	commonv1 "github.com/garysng/wizard/internal/gen/wizard/common/v1"
+	nodev1 "github.com/garysng/wizard/internal/gen/wizard/node/v1"
+	"github.com/garysng/wizard/internal/node/image"
+	"github.com/garysng/wizard/internal/node/runtime"
 )
 
 // GRPCServer implements nodev1.SandboxServiceServer on top of Manager.

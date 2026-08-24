@@ -2,7 +2,7 @@
 
 > 中文版:[zh/api-design.md](zh/api-design.md)
 
-> Corresponding components: `bean-api` (api-gateway, ✅), `bean-proxy` (reverse proxy into sandboxes, ✅).
+> Corresponding components: `wizard-api` (api-gateway, ✅), `wizard-proxy` (reverse proxy into sandboxes, ✅).
 > The status-marker convention is defined in [architecture.md](architecture.md) §0.
 > Terminology and the state machine live in [architecture.md](architecture.md).
 
@@ -19,7 +19,7 @@
 
 - `Authorization: Bearer bk_<keyid>_<secret>`
 - The key hash is stored in Postgres, together with its quota (concurrent sandbox count, total CPU/mem, volume capacity, prewarm permission)
-- **No user/tenant system** — bean is an in-cluster internal service, and the key exists only to identify the caller, apply quota and attribute audit records; the security weight sits on in-cluster reliability (managed TLS + node token, credential tiering, isolation tiers) rather than on multi-tenancy
+- **No user/tenant system** — wizard is an in-cluster internal service, and the key exists only to identify the caller, apply quota and attribute audit records; the security weight sits on in-cluster reliability (managed TLS + node token, credential tiering, isolation tiers) rather than on multi-tenancy
 
 ### 2.2 Sandbox-scoped short-lived credential 📐
 
@@ -200,7 +200,7 @@ POST /sandboxes/{id}/files:downloadUrl {"path": "..."}    // 📐
 ### 3.4 Ports — no registration step ✅
 
 Reaching a port inside a sandbox works, and it takes **no API call at all**. The port
-travels in the Host header (`{port}-{sandbox}`, §6) and bean-proxy forwards to it. A
+travels in the Host header (`{port}-{sandbox}`, §6) and wizard-proxy forwards to it. A
 process listening in the sandbox is reachable; one that is not returns 502.
 
 The design below was drafted first and is **not** built, deliberately (📐):
@@ -276,7 +276,7 @@ DELETE /registries/{host}
 ```
 
 - Credentials are AES-256-GCM encrypted before hitting the database (`--secret-key` /
-  `BEAN_SECRET_KEY`), so a database copy on its own is not enough to pull a private image;
+  `WIZARD_SECRET_KEY`), so a database copy on its own is not enough to pull a private image;
   **with no master key the endpoint refuses rather than storing plaintext**
 - A registry with no credential is pulled anonymously, so public images keep working
 - Host normalisation: `https://r.io/` and `r.io` are treated as the same one; a ref with no
@@ -396,11 +396,11 @@ GET /sandboxes/{id}/logs?follow=false&tailLines=1000    // agent ring buffer + S
 GET /nodes                                              // operator surface: node list, capacity, capabilities
 POST /nodes/{id}/drain                                  // operator surface: cordon + drain a node
 GET /metrics                                            // Prometheus format (unauthenticated: local scrape, contains no sandbox content)
-    // bean_sandbox_creates_total{outcome}         creation outcome counter
-    // bean_sandbox_create_duration_seconds{outcome}  end-to-end creation latency histogram
-    // bean_exec_duration_seconds{outcome}         exec round-trip latency
-    // bean_sandboxes{state}                       sandbox count per state (recomputed from the DB at scrape time)
-    // bean_events_total{type}  bean_event_subscribers
+    // wizard_sandbox_creates_total{outcome}         creation outcome counter
+    // wizard_sandbox_create_duration_seconds{outcome}  end-to-end creation latency histogram
+    // wizard_exec_duration_seconds{outcome}         exec round-trip latency
+    // wizard_sandboxes{state}                       sandbox count per state (recomputed from the DB at scrape time)
+    // wizard_events_total{type}  wizard_event_subscribers
 ```
 
 **OTel collection**:
@@ -408,7 +408,7 @@ GET /metrics                                            // Prometheus format (un
 > Current status: metrics is a Prometheus endpoint (shipped, a separate thing from trace);
 > logs are structured (`internal/logging`); **trace is shipped and measured** —
 > enabled with `--otlp-endpoint`, one create/exec is a single cross-process span tree, and
-> the request id is the trace id. The response header carries `X-Bean-Trace-Id`, so when a
+> the request id is the trace id. The response header carries `X-Wizard-Trace-Id`, so when a
 > caller reports slowness you can hand them the exact trace to look at.
 > Per-sandbox resource metrics and OTLP pass-through for applications inside the sandbox
 > are both still unimplemented.
@@ -426,7 +426,7 @@ GET /metrics                                            // Prometheus format (un
 ## 4. Internal gRPC proto draft ✅
 
 ```protobuf
-// proto/bean/node/v1/node.proto —— control plane ↔ noded
+// proto/wizard/node/v1/node.proto —— control plane ↔ noded
 service NodeService {                                              // noded → control (outbound)
   rpc Register(RegisterRequest) returns (RegisterResponse);        // capability/resource profile report
   rpc Heartbeat(stream HeartbeatRequest) returns (stream HeartbeatResponse);
@@ -461,7 +461,7 @@ service SandboxService {                       // implemented by noded; control/
   rpc ForwardPort(stream PortFrame) returns (stream PortFrame);   // proxy data plane
 }
 
-// proto/bean/agent/v1/agent.proto —— noded ↔ beand (fc tier over vsock as the main path / container tier over a unix socket, P5)
+// proto/wizard/agent/v1/agent.proto —— noded ↔ wizardd (fc tier over vsock as the main path / container tier over a unix socket, P5)
 service AgentService {
   rpc Exec(ExecRequest) returns (ExecResponse);
   rpc StreamExec(stream StreamExecFrame) returns (stream StreamExecFrame);
@@ -487,7 +487,7 @@ Key message field conventions:
 - `CreateSandboxRequest` carries the complete `SandboxSpec` (image ref, resources,
   isolation, network, agent injection parameters, the bundle of S3 artifact presigned URLs)
 - `ExecRequest/StreamExecFrame` share one message definition between SandboxService and
-  AgentService (`proto/bean/common/v1/exec.proto`); noded is a pure pass-through
+  AgentService (`proto/wizard/common/v1/exec.proto`); noded is a pure pass-through
 
 ## 5. Control Flow Details
 
@@ -570,15 +570,15 @@ State semantics: PAUSED → triggers a transparent wake, and the request blocks 
 (only past the wake deadline, 10s by default, does it return 502 + Retry-After);
 unwakeable states such as PULLING/STOPPING → 409 SANDBOX_NOT_RUNNING.
 
-## 6. bean-proxy (reverse proxy into sandboxes) ✅
+## 6. wizard-proxy (reverse proxy into sandboxes) ✅
 
-> Built: `cmd/bean-proxy`. Verified end to end on hardware -- a user's server and the
+> Built: `cmd/wizard-proxy`. Verified end to end on hardware -- a user's server and the
 > agent both reached through it, an unknown sandbox 404, a malformed Host 400.
 
 ### 6.0 The two things turned out to be one ⚠️
 
 This section originally designed **port exposure** (a browser reaching a port inside a
-sandbox) as separate from the **data plane** ([GitHub #27](https://github.com/garysng/bean/issues/27),
+sandbox) as separate from the **data plane** ([GitHub #27](https://github.com/garysng/wizard/issues/27),
 moving exec and file traffic off the control plane), and warned that conflating them had
 already produced one wrong plan.
 
@@ -635,7 +635,7 @@ A standalone stateless service, co-deployable with the gateway or scaled horizon
 browser → {sbxId}-{port}.{region}.sandbox.<domain> (DNS lands directly on that region's proxy)
         → regional proxy: parse Host for {port}-{sandbox}
         → route lookup: GET /v1/sandboxes/{id} for nodeId, then /v1/nodes for that
-          node's forwarding address (published as bean.io/sandbox-port-addr)
+          node's forwarding address (published as wizard.io/sandbox-port-addr)
           (cached 5s by default; --placement-cache)
         → HTTP reverse proxy → sandbox-proxy embedded in noded (node-side reverse proxy)
         → direct to sandbox IP:port (fc tier tap IP / container tier veth IP, routed inside the node)
@@ -663,18 +663,18 @@ browser → {sbxId}-{port}.{region}.sandbox.<domain> (DNS lands directly on that
 ### 6.3 Port authentication 📐
 
 **Not built, and this is the one real gap in the route.** Today anything that can reach
-bean-proxy can reach any sandbox it can name, on any port. So a sandbox must not be given
+wizard-proxy can reach any sandbox it can name, on any port. So a sandbox must not be given
 a port it would not want its caller to see.
 
 What exists instead is two credentials, neither of which is a user:
 
 | Hop | Credential | Distinguishes |
 |---|---|---|
-| client → bean-proxy | whatever the external auth layer requires (Traefik middleware) | one user from another — **outside bean** |
-| bean-proxy → noded | the cluster's node token | the cluster from everyone else |
+| client → wizard-proxy | whatever the external auth layer requires (Traefik middleware) | one user from another — **outside wizard** |
+| wizard-proxy → noded | the cluster's node token | the cluster from everyone else |
 
-bean is the infrastructure underneath a platform layer, and user identity is that layer's
-(architecture.md §2.1, security-and-startup.md A7). What bean cannot delegate is the part
+wizard is the infrastructure underneath a platform layer, and user identity is that layer's
+(architecture.md §2.1, security-and-startup.md A7). What wizard cannot delegate is the part
 below: a caller who gets past the platform layer reaches *every* port of the sandbox they
 were authorised for, and that is what per-port control would fix.
 

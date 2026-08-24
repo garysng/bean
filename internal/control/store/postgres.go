@@ -19,12 +19,12 @@ import (
 //
 // Why this matters beyond running somewhere else: SQLite is one file, so two
 // control-plane replicas cannot share it, and that is the actual limit on running more
-// than one bean-api. The interfaces and the conformance suite came first for that
+// than one wizard-api. The interfaces and the conformance suite came first for that
 // reason -- an engine swap under methods whose atomicity lived in a process mutex would
 // have promised multi-replica safety while delivering lost updates.
 //
 // dsn is a libpq connection string or URL, e.g.
-// "postgres://bean:secret@db.internal:5432/bean?sslmode=require".
+// "postgres://wizard:secret@db.internal:5432/wizard?sslmode=require".
 func OpenPostgres(dsn string) (*Store, error) {
 	db, err := sql.Open("postgres", dsn)
 	if err != nil {

@@ -11,7 +11,7 @@ import (
 // A remote-backed device answers every read a guest can issue, or says which one it cannot.
 //
 // The bug this exists for: a guest booted from a lazily-pulled layer, mounted its root, ran
-// beand, and then failed with `EXT4-fs error (device vdb): __ext4_find_entry: reading
+// wizardd, and then failed with `EXT4-fs error (device vdb): __ext4_find_entry: reading
 // directory lblock 0` and virtio `I/O error`. The superblock read fine and the device was the
 // right size, so the failure was not the format or the geometry -- it was a *particular* read
 // returning an error where the local path returns bytes.

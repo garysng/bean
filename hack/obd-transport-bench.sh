@@ -24,7 +24,7 @@
 # Usage: obd-transport-bench.sh [--steps "4 16 60"] [--image REF]
 set -uo pipefail
 
-BIN=${BIN:-/tmp/beantest/bin}
+BIN=${BIN:-/tmp/wizardtest/bin}
 STACK=${STACK:-$(dirname "$0")/dev-fc-stack.sh}
 STRESS=${STRESS:-$(dirname "$0")/stress-fc.sh}
 IMAGE=${IMAGE:-alpine:3.20}
@@ -45,8 +45,8 @@ export NODE_CPU=${NODE_CPU:-$((MAX_STEP * 2))}
 export NODE_MEM_MIB=${NODE_MEM_MIB:-$((MAX_STEP * 1024))}
 export NODE_DISK_MIB=${NODE_DISK_MIB:-$((MAX_STEP * DISK_MIB * 2))}
 
-export BEAN_BASE_URL=${BEAN_BASE_URL:-http://127.0.0.1:18080}
-export BEAN_API_KEY=${BEAN_API_KEY:-devkey}
+export WIZARD_BASE_URL=${WIZARD_BASE_URL:-http://127.0.0.1:18080}
+export WIZARD_API_KEY=${WIZARD_API_KEY:-devkey}
 
 while [ $# -gt 0 ]; do
 	case "$1" in
@@ -83,14 +83,14 @@ trap cleanup EXIT
 # already decomposed -- timing the same things from outside would measure the CLI too.
 phase() {
 	local name=$1
-	# The series is bean_node_create_phase_seconds_{sum,count} with phase *and* runtime
+	# The series is wizard_node_create_phase_seconds_{sum,count} with phase *and* runtime
 	# labels, so it is matched by substring rather than by an exact key. Constructing the
 	# exact label set is what made the first version print n/a for every phase while the
 	# metrics were there all along.
 	curl -s "$METRICS_URL" 2>/dev/null |
 		awk -v n="phase=\"$name\"" '
-			index($1, "bean_node_create_phase_seconds_sum")   && index($1, n) { s = $2 }
-			index($1, "bean_node_create_phase_seconds_count") && index($1, n) { c = $2 }
+			index($1, "wizard_node_create_phase_seconds_sum")   && index($1, n) { s = $2 }
+			index($1, "wizard_node_create_phase_seconds_count") && index($1, n) { c = $2 }
 			END { if (c > 0) printf "%.3fs over %d", s / c, c; else print "n/a" }'
 }
 
@@ -182,15 +182,15 @@ say "image:     $IMAGE"
 say "steps:     $STEPS"
 say "disk req:  ${DISK_MIB}MiB"
 
-# The blob store is passed to noded explicitly. The dev stack exports BEAN_S3_* for
-# bean-api only, so noded reads no endpoint from the environment and comes up with
+# The blob store is passed to noded explicitly. The dev stack exports WIZARD_S3_* for
+# wizard-api only, so noded reads no endpoint from the environment and comes up with
 # blobStore=none -- and then a create that resolves a published template fails with
 # "snapshot filesystem needs an object store", which reads like a broken node rather than
 # a store that was never configured.
 S3=${S3_ENDPOINT:-http://127.0.0.1:9000}
 S3_ARGS="--s3-endpoint $S3 --s3-bucket ${S3_BUCKET:-bean-obd-layers}"
-export BEAN_S3_ACCESS_KEY=${BEAN_S3_ACCESS_KEY:-beanadmin}
-export BEAN_S3_SECRET_KEY=${BEAN_S3_SECRET_KEY:-beansecret123}
+export WIZARD_S3_ACCESS_KEY=${WIZARD_S3_ACCESS_KEY:-wizardadmin}
+export WIZARD_S3_SECRET_KEY=${WIZARD_S3_SECRET_KEY:-wizardsecret123}
 
 run_transport tcmu "--fc-overlaybd $S3_ARGS"
 run_transport ublk "--fc-overlaybd --fc-ublk $S3_ARGS"

@@ -11,7 +11,7 @@
 # and the third is the one that would be a disaster to get wrong:
 #
 #   1. --noflush leaves existing rules alone (no -F of the table)
-#   2. -I position semantics survive, since bean's DROP rules must precede its ACCEPT
+#   2. -I position semantics survive, since wizard's DROP rules must precede its ACCEPT
 #   3. an unrelated writer's rules -- Docker's -- are still present afterwards
 #
 # Nothing here is left behind: every rule this adds is removed, and the probe refuses
@@ -20,7 +20,7 @@
 # Usage: iptables-restore-probe.sh
 set -uo pipefail
 
-CHAIN=BEANPROBE
+CHAIN=WIZARDPROBE
 pass() { printf '  PASS  %s\n' "$1"; }
 fail() { printf '  FAIL  %s\n' "$1"; FAILED=1; }
 FAILED=0
@@ -48,7 +48,7 @@ echo "  seeded $before pre-existing rules"
 ##### 1. --noflush preserves what is there
 echo
 echo "### 1. --noflush leaves existing rules alone"
-# The rules bean would add: DROPs inserted at the front, an ACCEPT appended.
+# The rules wizard would add: DROPs inserted at the front, an ACCEPT appended.
 iptables-restore -w 5 --noflush <<EOF
 *filter
 -I $CHAIN 1 -s 172.31.0.0/30 -d 192.168.0.0/16 -j DROP
@@ -77,7 +77,7 @@ fi
 ##### 2. insert position is preserved
 echo
 echo "### 2. -I puts the DROPs before the ACCEPT"
-# This is the ordering bean's egress policy depends on: a packet to a private range
+# This is the ordering wizard's egress policy depends on: a packet to a private range
 # must hit a DROP before reaching the blanket ACCEPT. If restore reordered them the
 # rules would still all be present and the policy would silently not apply.
 order=$(iptables -w 5 -t filter -S "$CHAIN" | grep "172.31.0.0/30" | \

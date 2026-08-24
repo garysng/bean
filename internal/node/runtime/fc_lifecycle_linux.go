@@ -18,8 +18,8 @@ import (
 
 	"golang.org/x/sys/unix"
 
-	"github.com/garysng/bean/internal/node/image"
-	"github.com/garysng/bean/internal/obs"
+	"github.com/garysng/wizard/internal/node/image"
+	"github.com/garysng/wizard/internal/obs"
 )
 
 // Pause freezes the guest's vCPUs. Memory stays resident, so resume is
@@ -548,7 +548,7 @@ func (r *FCRuntime) loadSnapshot(ctx context.Context, vm *fcVM, spec *Spec, stag
 	//
 	// NetworkOverrides is left empty on purpose, and spec.Network is not consulted
 	// here. The interface came back with the machine state, attached to the host
-	// device name it was created with, and that name is beantap0 in every
+	// device name it was created with, and that name is wizardtap0 in every
 	// namespace -- so the snapshot is already pointing at the right device in this
 	// sandbox's namespace. An override would restate what is already true, and
 	// sending one would imply this path needs to know the tap name, which is the

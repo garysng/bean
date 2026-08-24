@@ -6,7 +6,7 @@ import "testing"
 // decides what to destroy from SandboxIDFromDMName, so a name DMName produces and
 // the inverse does not recognise would leak that mapping forever.
 func TestDMNameRoundTrips(t *testing.T) {
-	for _, id := range []string{"sbx_a", "sbx-with-dashes", "sbx.dots", "bean-nested"} {
+	for _, id := range []string{"sbx_a", "sbx-with-dashes", "sbx.dots", "wizard-nested"} {
 		got, ok := SandboxIDFromDMName(DMName(id))
 		if !ok || got != id {
 			t.Errorf("round trip of %q = %q,%v", id, got, ok)
@@ -22,11 +22,11 @@ func TestSandboxIDFromDMNameRejectsForeignNames(t *testing.T) {
 		"docker-253:1-pool",
 		"nexus-pod-7f3a",
 		"vg0-lv_root",
-		"nexus-bean-sbx_x",
-		"Bean-sbx_a",
+		"nexus-wizard-sbx_x",
+		"Wizard-sbx_a",
 		// The bare prefix names no sandbox, so it must not yield an empty id that
 		// an expected-set lookup would then miss.
-		"bean-",
+		"wizard-",
 		"",
 	} {
 		if id, ok := SandboxIDFromDMName(name); ok {

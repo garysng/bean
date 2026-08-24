@@ -10,7 +10,7 @@ Usage: phase-delta.py before.txt after.txt
 """
 import sys
 
-PREFIX = "bean_node_create_phase_seconds"
+PREFIX = "wizard_node_create_phase_seconds"
 
 
 def load(path):

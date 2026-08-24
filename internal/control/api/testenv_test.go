@@ -16,15 +16,15 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
-	"github.com/garysng/bean/internal/control/image"
-	"github.com/garysng/bean/internal/control/scheduler"
-	"github.com/garysng/bean/internal/control/secret"
-	"github.com/garysng/bean/internal/control/s3"
-	"github.com/garysng/bean/internal/control/snapshot"
-	"github.com/garysng/bean/internal/control/store"
-	nodev1 "github.com/garysng/bean/internal/gen/bean/node/v1"
-	"github.com/garysng/bean/internal/node"
-	"github.com/garysng/bean/internal/node/runtime"
+	"github.com/garysng/wizard/internal/control/image"
+	"github.com/garysng/wizard/internal/control/scheduler"
+	"github.com/garysng/wizard/internal/control/secret"
+	"github.com/garysng/wizard/internal/control/s3"
+	"github.com/garysng/wizard/internal/control/snapshot"
+	"github.com/garysng/wizard/internal/control/store"
+	nodev1 "github.com/garysng/wizard/internal/gen/wizard/node/v1"
+	"github.com/garysng/wizard/internal/node"
+	"github.com/garysng/wizard/internal/node/runtime"
 )
 
 const testKey = "bk_test_secret"
@@ -35,14 +35,14 @@ const testKey = "bk_test_secret"
 var agentBin string
 
 func TestMain(m *testing.M) {
-	dir, err := os.MkdirTemp("", "bean-beand-bin")
+	dir, err := os.MkdirTemp("", "wizard-wizardd-bin")
 	if err != nil {
 		panic(err)
 	}
-	agentBin = filepath.Join(dir, "beand")
+	agentBin = filepath.Join(dir, "wizardd")
 	if out, err := exec.Command("go", "build", "-o", agentBin,
-		"github.com/garysng/bean/cmd/beand").CombinedOutput(); err != nil {
-		panic("build beand: " + string(out))
+		"github.com/garysng/wizard/cmd/wizardd").CombinedOutput(); err != nil {
+		panic("build wizardd: " + string(out))
 	}
 	code := m.Run()
 	os.RemoveAll(dir)
@@ -122,7 +122,7 @@ func startEnv(t *testing.T, opts envOpts) *testEnv {
 	}
 
 	dir := t.TempDir()
-	st, err := store.Open(filepath.Join(dir, "bean.db"))
+	st, err := store.Open(filepath.Join(dir, "wizard.db"))
 	if err != nil {
 		t.Fatal(err)
 	}

@@ -11,7 +11,7 @@
 
 ## 0. 问题
 
-四个二进制是 `bean`(CLI)、`bean-api`、`noded`、`beand`。build 没有自己的节点 —— 那它在
+四个二进制是 `wizard`(CLI)、`wizard-api`、`noded`、`wizardd`。build 没有自己的节点 —— 那它在
 哪跑,又该在哪跑?今天 build **在 noded 内部**执行,和服务 `create`/`exec` 的是同一个进程,
 在 sandbox 旁边驱动一个 `buildkitd`。问题是:这种耦合是否该拆成一个独立的 build 服务。
 
@@ -21,7 +21,7 @@
 ## 1. 今天 build 怎么跑
 
 ```
-CLI/SDK ──► bean-api (build.go) ──gRPC 流──► noded ──► buildctl ──► buildkitd
+CLI/SDK ──► wizard-api (build.go) ──gRPC 流──► noded ──► buildctl ──► buildkitd
                 │ pickBuilder                 │ ImageBuilder            │
                 │ (label 优先,否则任意)       │ (每节点可选)            │
                 └─ 镜像标记 BUILDING           └─ 产物:node-local ImageDir 里的扁平 ext4
@@ -60,7 +60,7 @@ CLI/SDK ──► bean-api (build.go) ──gRPC 流──► noded ──► bu
 
 ## 3. 分发机制已经存在 —— 只是服务于别的镜像
 
-bean 已经在节点间分发*导入的*镜像,build 只是还没走这条路:
+wizard 已经在节点间分发*导入的*镜像,build 只是还没走这条路:
 
 - **S3 blob store**:`obdblobstore.go` 把 sealed overlaybd layer 按 OCI digest 为 key 推进
   S3 兼容 bucket(`:141`),overlaybd 守护进程匿名 range 读(`:166`)。seal 能力也已存在
@@ -76,26 +76,26 @@ build 产物只是没走它 —— 停在了本地 ext4。补上这个缺口用�
 
 ## 3.5 第二个、独立的问题:日志流
 
-暴露 build 老化的不止分发。build 日志今天走**双重中转** —— noded 经 gRPC 把日志推给 bean-api,
-bean-api 缓冲后再回吐给客户端 —— 而这个缓冲是**进程本地内存**:
+暴露 build 老化的不止分发。build 日志今天走**双重中转** —— noded 经 gRPC 把日志推给 wizard-api,
+wizard-api 缓冲后再回吐给客户端 —— 而这个缓冲是**进程本地内存**:
 
 - `s.builds` 是一个用 mutex 保护的 `map[string]*buildLog`(`buildlog.go:42-49`),上限 4 MiB、
   30 分钟,从不落 DB 或 S3。noded 也不留存 —— 每帧流一次、什么都不留(`node/buildlog.go:9-16`)。
-- **这是真实的多副本裂缝。** bean-api 对着 Postgres 跑多副本。一次 build 落在副本 A,它的日志
+- **这是真实的多副本裂缝。** wizard-api 对着 Postgres 跑多副本。一次 build 落在副本 A,它的日志
   缓冲在 A 的内存里;客户端把 `GET .../build/logs?ref=` 或 `POST .../build/cancel?ref=` 打到
   副本 B,`s.builds.get(ref)` 查的是 B 自己的 map,miss,返回 404(`build.go:295`、`:364`)——
   尽管镜像的*状态*在 Postgres 里从任一副本都可见。日志和取消是一个本该水平扩展的系统里的副本
   本地状态,进程重启还会丢。
 
 **能不能不中转、走 node-direct?** 本次盘点纠正了一个常见误解:exec 和文件传输今天*也*经
-bean-api 中转(`cli.go:321` → `handleExec` → `router.Client`),尽管 README 暗示不是 —— 所以
-build 在这点上并不特殊。真正 node-direct 的数据面(bean-proxy 和 noded 的 `PortForwarder`)
+wizard-api 中转(`cli.go:321` → `handleExec` → `router.Client`),尽管 README 暗示不是 —— 所以
+build 在这点上并不特殊。真正 node-direct 的数据面(wizard-proxy 和 noded 的 `PortForwarder`)
 完全按 **sandbox id** 寻址(`ParseSandboxHost` 拒绝空 sandbox 段;`TargetFor` 查 `m.sandboxes`),
 而 build 没有 sandbox —— 它跑的是 buildkitd。noded 侧也**没有按 ref 的 build 日志端点**,只有
 那个一次性、不留存的 `BuildImage` stream。
 
 所以 node-direct 化的 build 日志需要两样新东西:①一个 noded 侧按 build-ref 留存、可重连的端点;
-②一个不是 sandbox id 的寻址 key。两条数据面里,**bean-proxy 的模型更贴合** —— 它已经在做
+②一个不是 sandbox id 的寻址 key。两条数据面里,**wizard-proxy 的模型更贴合** —— 它已经在做
 "id → node 地址 → node 上的端点",所以增量是把 id 空间从 sandbox 扩到 `build-{ref}`,而不是
 从零造一条 client→noded 直连。但注意顺序:**多副本裂缝是正确性 bug**,本身就值得修(比如按 ref
 做 sticky routing,或共享/DB 支撑的日志),与日志是否走 node-direct 无关。
@@ -125,8 +125,8 @@ build 在这点上并不特殊。真正 node-direct 的数据面(bean-proxy 和 
 - **利**:复用一切;没有新服务要运维;`pickBuilder` 和 label 机制已存在。
 - **弊**:仍是 noded 二进制及其假设;构建节点上的资源隔离是粗粒度(整节点),不是每 build。
 
-**形态 B —— 独立 build 服务(大步)。** 一个 `bean-build` 服务(或某个二进制的一种模式),它
-拥有 buildkitd、暴露 build RPC、只写 blob store —— 从不写本地 `ImageDir`。bean-api 的
+**形态 B —— 独立 build 服务(大步)。** 一个 `wizard-build` 服务(或某个二进制的一种模式),它
+拥有 buildkitd、暴露 build RPC、只写 blob store —— 从不写本地 `ImageDir`。wizard-api 的
 `pickBuilder` 变成"路由到 build 服务"。
 
 - **利**:build 容量独立于 sandbox 容量扩缩;干净的资源与故障隔离;buildkitd 不再是每 noded 依赖。

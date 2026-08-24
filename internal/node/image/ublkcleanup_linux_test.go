@@ -18,8 +18,8 @@ import (
 // Guarded by an environment variable so it cannot run by accident: on a shared host it
 // would delete devices belonging to something else.
 func TestUblkReclaimOrphans(t *testing.T) {
-	if os.Getenv("BEAN_UBLK_RECLAIM") == "" {
-		t.Skip("set BEAN_UBLK_RECLAIM=1 to delete every ublk device on this host")
+	if os.Getenv("WIZARD_UBLK_RECLAIM") == "" {
+		t.Skip("set WIZARD_UBLK_RECLAIM=1 to delete every ublk device on this host")
 	}
 	c, err := openUblkControl()
 	if err != nil {

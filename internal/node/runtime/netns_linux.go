@@ -19,7 +19,7 @@ import (
 // be in that namespace or the device name it is handed does not resolve: the
 // tap is not a path, it is a name looked up in the caller's netns. Launching
 // Firecracker from the host namespace and then telling it to attach to
-// "beantap0" asks it for a device that does not exist there, and the whole
+// "wizardtap0" asks it for a device that does not exist there, and the whole
 // networking stack is dead while every request-level assertion still passes.
 
 // netnsHandleDir is where "ip netns add" leaves a bind-mounted handle to the

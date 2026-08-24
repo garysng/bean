@@ -10,7 +10,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/garysng/bean/internal/node/network"
+	"github.com/garysng/wizard/internal/node/network"
 )
 
 // Nothing else checks this at compile time, and the mismatch it catches is not
@@ -47,8 +47,8 @@ func TestBundleJoinsTheNodesNetworkNamespace(t *testing.T) {
 	}
 	if err := writeBundleConfig(dir, bundleConfig{
 		RootfsDir: rootfs,
-		Args:      []string{"/.bean/beand", "--listen", "0.0.0.0:8111"},
-		NetnsPath: "/var/run/netns/bean-7",
+		Args:      []string{"/.wizard/wizardd", "--listen", "0.0.0.0:8111"},
+		NetnsPath: "/var/run/netns/wizard-7",
 	}); err != nil {
 		t.Fatalf("writeBundleConfig: %v", err)
 	}
@@ -67,7 +67,7 @@ func TestBundleJoinsTheNodesNetworkNamespace(t *testing.T) {
 	if !found {
 		t.Fatal("no network namespace in the spec")
 	}
-	if netPath != "/var/run/netns/bean-7" {
+	if netPath != "/var/run/netns/wizard-7" {
 		t.Errorf("network namespace path = %q, want the node's namespace", netPath)
 	}
 }
@@ -82,8 +82,8 @@ func TestBundleRootPathIsRelative(t *testing.T) {
 	}
 	if err := writeBundleConfig(dir, bundleConfig{
 		RootfsDir: rootfs,
-		Args:      []string{"/.bean/beand"},
-		NetnsPath: "/var/run/netns/bean-1",
+		Args:      []string{"/.wizard/wizardd"},
+		NetnsPath: "/var/run/netns/wizard-1",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -107,8 +107,8 @@ func TestBundleDropsTheCapabilitiesThatMatter(t *testing.T) {
 	}
 	if err := writeBundleConfig(dir, bundleConfig{
 		RootfsDir: rootfs,
-		Args:      []string{"/.bean/beand"},
-		NetnsPath: "/var/run/netns/bean-1",
+		Args:      []string{"/.wizard/wizardd"},
+		NetnsPath: "/var/run/netns/wizard-1",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -145,8 +145,8 @@ func TestBundleOmitsResourcesWhenUnbounded(t *testing.T) {
 	}
 	if err := writeBundleConfig(dir, bundleConfig{
 		RootfsDir: rootfs,
-		Args:      []string{"/.bean/beand"},
-		NetnsPath: "/var/run/netns/bean-1",
+		Args:      []string{"/.wizard/wizardd"},
+		NetnsPath: "/var/run/netns/wizard-1",
 	}); err != nil {
 		t.Fatal(err)
 	}
@@ -163,8 +163,8 @@ func TestBundleOmitsResourcesWhenUnbounded(t *testing.T) {
 	}
 	if err := writeBundleConfig(dir2, bundleConfig{
 		RootfsDir: rootfs2,
-		Args:      []string{"/.bean/beand"},
-		NetnsPath: "/var/run/netns/bean-1",
+		Args:      []string{"/.wizard/wizardd"},
+		NetnsPath: "/var/run/netns/wizard-1",
 		MemoryMiB: 512,
 		CPU:       2,
 	}); err != nil {

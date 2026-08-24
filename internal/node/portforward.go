@@ -15,9 +15,9 @@ import (
 
 	"golang.org/x/net/http2"
 
-	"github.com/garysng/bean/internal/logging"
-	"github.com/garysng/bean/internal/node/runtime"
-	"github.com/garysng/bean/internal/sbxtoken"
+	"github.com/garysng/wizard/internal/logging"
+	"github.com/garysng/wizard/internal/node/runtime"
+	"github.com/garysng/wizard/internal/sbxtoken"
 )
 
 // This file reaches a port inside a sandbox from outside the node.

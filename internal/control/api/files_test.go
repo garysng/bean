@@ -71,7 +71,7 @@ func TestWriteFileAcceptsMoreThanTheOldInlineCap(t *testing.T) {
 // read, which passed against a buffering implementation because io.ReadAll consumed
 // the gate too. The second blocked the body forever and polled for the file to appear
 // on the node -- and that one cannot work either, for a better reason: the agent writes
-// to a temp file and renames it atomically on completion (internal/beand/server.go),
+// to a temp file and renames it atomically on completion (internal/wizardd/server.go),
 // specifically so a mid-stream failure never leaves a truncated file. So no file can
 // exist while the upload is in flight, by design.
 //

@@ -27,7 +27,7 @@ flowchart LR
     CONV["convert<br>tar.gz &rarr; ext4"]
     BASE[("shared base<br>read-only loop<br>one per node")]
     COW["per-sandbox CoW<br>sparse &middot; ~44 KiB"]
-    DM["dm-snapshot<br>/dev/mapper/bean-&lt;id&gt;"]
+    DM["dm-snapshot<br>/dev/mapper/wizard-&lt;id&gt;"]
     CONV --> BASE
     BASE --> DM
     COW --> DM
@@ -60,7 +60,7 @@ steps, plus where the 2m45s cold start goes.
 
 ```
 PullingProvider          triggers conversion on a cache miss, deduplicates concurrency
-  └── DevMapperProvider  shared read-only base + one CoW per sandbox → /dev/mapper/bean-<id>
+  └── DevMapperProvider  shared read-only base + one CoW per sandbox → /dev/mapper/wizard-<id>
       (or FileProvider)  a full copy per sandbox, the fallback when dm is unavailable
 
 OverlaybdProvider        alternative, --fc-overlaybd; layers shared by digest (section 7)
@@ -280,7 +280,7 @@ convert  FetchConfig(manifest.Config.Digest)  → Config{Env,Entrypoint,Cmd,Work
 create   Provider.Config(ref) → *Config    ┐
          spec.Cmd / spec.Env               ├→ MergeConfig → Process{Argv,Env,Workdir,User}
                                            ┘        │
-                                    StartUserProcessRequest → beand exec
+                                    StartUserProcessRequest → wizardd exec
 ```
 
 Recorded in the same `.ref` file as the reference and digest rather than a second file, so
@@ -331,7 +331,7 @@ the two matters: an empty `Config` would claim the image genuinely declares no e
 ### `User` is recorded but not enforced 📐
 
 The value is stored and reaches `Process`, and everything runs as root regardless. It cannot be
-applied where the rest of this is applied: beand is PID 1, so lowering its own uid would cost it
+applied where the rest of this is applied: wizardd is PID 1, so lowering its own uid would cost it
 the ability to exec anything afterwards — it has to happen in the child. Resolving a name like
 `nobody` also needs the guest's `/etc/passwd`, which only exists after the pivot to the image's
 rootfs. So this is a separate change rather than a missing line.
@@ -485,7 +485,7 @@ So **lazy pull is a property of the blob, not of the node's flags**. A node fed 
 gzipped registry layers has nothing to range-read, and the measured 7 ms mount and 19.6%
 transfer in decisions §3.1 were against a blob that had been converted and sealed first.
 
-What closes that gap is bean's own object store rather than the registry. `Prewarm`
+What closes that gap is wizard's own object store rather than the registry. `Prewarm`
 converts an image and publishes its sealed layers under their digests; any node reading the
 same store then resolves those layers at level 2 and range-reads them. So the sealed form
 does get produced — just by the first node to prewarm, not by a central pipeline.
@@ -669,13 +669,13 @@ Three prefixes, and the last two are what close that gap:
 
 ```
 blobs/<layer-digest>            the sealed layer            read by the overlaybd daemon
-manifests/<manifest-digest>     layer list + OCI config     read by bean
-tags/<host>/<repo>/<tag>        → manifest digest           read by bean
+manifests/<manifest-digest>     layer list + OCI config     read by wizard
+tags/<host>/<repo>/<tag>        → manifest digest           read by wizard
 ```
 
 Note the readers differ, and that is why this is a separate type from `BlobStore`. The
 daemon reads `blobs/` **anonymously**, which forces the public-read policy described below.
-`manifests/` and `tags/` are read by bean itself with credentials, so they carry no such
+`manifests/` and `tags/` are read by wizard itself with credentials, so they carry no such
 requirement.
 
 `tags/` is keyed by host and repository as well as tag, because a tag means nothing without
@@ -696,7 +696,7 @@ Prewarm is the only writer, and it never reads its own answer. That is deliberat
 prewarm satisfied from the store would be a no-op reporting success, and a moved tag would
 never be picked up at all.
 
-**The semantic this establishes, which is worth being explicit about:** bean's store — not
+**The semantic this establishes, which is worth being explicit about:** wizard's store — not
 the upstream registry — is the authority for what a tag means, until the next prewarm. An
 upstream tag that moves is not noticed in between. For a sandbox platform that is the right
 default: a batch of evals half-way through silently picking up new image contents is worse
@@ -756,7 +756,7 @@ bucket.
 
 ### Two settings that are not the code's to choose
 
-`/etc/overlaybd/overlaybd.json` belongs to the overlaybd package — bean reads it (the
+`/etc/overlaybd/overlaybd.json` belongs to the overlaybd package — wizard reads it (the
 builder passes it to `overlaybd-apply`) and never writes it. Two of its defaults matter
 enough to state:
 
@@ -806,8 +806,8 @@ mounted or mount point busy". Reproduced live: a serial-less device was merged i
 `mpatha` while a serialled one stayed distinct.
 
 **3. The serial must be hex digits only.** The kernel builds the WWID from the
-*hex-digit characters* of the serial and discards the rest: `bean-aaa` became
-`naa.6001405beaaaa000...`. So `bean-sbx-alpha` and `bean-probe-2` both reduce to `beabaa`
+*hex-digit characters* of the serial and discards the rest: `wizard-aaa` became
+`naa.6001405beaaaa000...`. So `wizard-sbx-alpha` and `wizard-probe-2` both reduce to `beabaa`
 — two serials that look unique and collide, which is constraint 2 all over again but
 harder to see. `deviceSerial` hashes the sandbox id into hex, and `attachTCMU` **refuses**
 a non-hex serial rather than sanitising one, so the value that reaches the kernel is the
@@ -845,10 +845,10 @@ merge is reproduced live on a serial-less device.
 **End to end** — `hack/overlaybd-e2e.sh` starts a real stack with `--fc-overlaybd` and
 **boots a sandbox from an overlaybd device**. On the verification host (kernel 5.15,
 TCMU, multipathd active, AMD EPYC 7542) all of the following passed: the node selects
-overlaybd rather than falling back, `bean run --image alpine:3.20` succeeds, the guest
+overlaybd rather than falling back, `wizard run --image alpine:3.20` succeeds, the guest
 reads `PRETTY_NAME="Alpine Linux v3.20"` from its own rootfs, writes land in the
 writable layer, a TCMU backstore exists for the running sandbox, the image's PATH is in
-the guest environment, and `bean kill` leaves no backstore and no multipath device.
+the guest environment, and `wizard kill` leaves no backstore and no multipath device.
 
 That last one is the level that matters: a device the host can mount is not the same
 claim as a guest that boots from it, and only this closes the gap.

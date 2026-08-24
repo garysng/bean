@@ -5,12 +5,12 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/garysng/bean/internal/obs"
+	"github.com/garysng/wizard/internal/obs"
 )
 
 const (
-	testBase   = "/var/lib/bean/sandboxes"
-	testImages = "/var/lib/bean/images"
+	testBase   = "/var/lib/wizard/sandboxes"
+	testImages = "/var/lib/wizard/images"
 )
 
 // fakeHost stands in for dmsetup and losetup. Removals are recorded rather than
@@ -100,7 +100,7 @@ func contains(list []string, want string) bool {
 // plane no longer expects the sandbox. All three must go, in that order.
 func TestReclaimsFullOrphanStack(t *testing.T) {
 	h := &fakeHost{
-		mappings: []string{"bean-sbx_dead"},
+		mappings: []string{"wizard-sbx_dead"},
 		loops:    []LoopDevice{{Name: "/dev/loop15", BackingFile: cowOf("sbx_dead"), Deleted: true}},
 		dirs:     []string{"sbx_dead"},
 	}
@@ -109,7 +109,7 @@ func TestReclaimsFullOrphanStack(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	if !contains(h.removedDM, "bean-sbx_dead") {
+	if !contains(h.removedDM, "wizard-sbx_dead") {
 		t.Errorf("mapping not removed: %v", h.removedDM)
 	}
 	if !contains(h.detachedLoop, "/dev/loop15") {
@@ -131,7 +131,7 @@ func TestReclaimsFullOrphanStack(t *testing.T) {
 // only thing standing between it and a destroyed filesystem is the expected set.
 func TestLeavesExpectedSandboxAlone(t *testing.T) {
 	h := &fakeHost{
-		mappings: []string{"bean-sbx_live"},
+		mappings: []string{"wizard-sbx_live"},
 		loops:    []LoopDevice{{Name: "/dev/loop3", BackingFile: cowOf("sbx_live")}},
 		dirs:     []string{"sbx_live"},
 	}
@@ -154,7 +154,7 @@ func TestLeavesExpectedSandboxAlone(t *testing.T) {
 }
 
 // TestIgnoresForeignResources covers the shared-host case. These names and paths
-// are taken from what actually runs alongside bean: Docker's thin pools, nexus
+// are taken from what actually runs alongside wizard: Docker's thin pools, nexus
 // pods and snapd's loop-mounted images.
 func TestIgnoresForeignResources(t *testing.T) {
 	h := &fakeHost{
@@ -162,14 +162,14 @@ func TestIgnoresForeignResources(t *testing.T) {
 			"docker-253:1-pool",
 			"nexus-pod-7f3a",
 			"vg0-lv_root",
-			// Close enough to be dangerous: contains bean's prefix but does not
+			// Close enough to be dangerous: contains wizard's prefix but does not
 			// start with it.
-			"nexus-bean-sbx_x",
+			"nexus-wizard-sbx_x",
 		},
 		loops: []LoopDevice{
 			{Name: "/dev/loop0", BackingFile: "/var/lib/snapd/snaps/core22.snap"},
 			{Name: "/dev/loop1", BackingFile: "/var/lib/docker/devicemapper/data"},
-			// A deleted file outside bean's directories is still not bean's to
+			// A deleted file outside wizard's directories is still not wizard's to
 			// reclaim, however obviously leaked it looks.
 			{Name: "/dev/loop2", BackingFile: "/tmp/someone-else.img", Deleted: true},
 			// Path traversal that shares BaseDir's textual prefix.
@@ -223,10 +223,10 @@ func TestLeavesBaseImageLoopAttached(t *testing.T) {
 // detaching it would corrupt whatever the mapping is serving.
 func TestKeepsLoopWhoseMappingSurvived(t *testing.T) {
 	h := &fakeHost{
-		mappings: []string{"bean-sbx_busy"},
+		mappings: []string{"wizard-sbx_busy"},
 		loops:    []LoopDevice{{Name: "/dev/loop9", BackingFile: cowOf("sbx_busy")}},
 		dirs:     []string{"sbx_busy"},
-		busy:     map[string]bool{"bean-sbx_busy": true},
+		busy:     map[string]bool{"wizard-sbx_busy": true},
 	}
 	rep, err := newReconciler(h).Run(expect())
 	if err != nil {
@@ -276,7 +276,7 @@ func TestUnreadableMappingListStopsEverything(t *testing.T) {
 // but the device still serves a guest that is supposed to be running.
 func TestReportsDeletedFileUnderLiveSandbox(t *testing.T) {
 	h := &fakeHost{
-		mappings: []string{"bean-sbx_live"},
+		mappings: []string{"wizard-sbx_live"},
 		loops:    []LoopDevice{{Name: "/dev/loop5", BackingFile: cowOf("sbx_live"), Deleted: true}},
 		dirs:     []string{"sbx_live"},
 	}
@@ -419,7 +419,7 @@ func TestSandboxIDForPath(t *testing.T) {
 		{testBase, "", false},
 		// Escapes BaseDir while sharing its prefix.
 		{testBase + "/../evil/cow.img", "", false},
-		{"/var/lib/bean/sandboxes-other/sbx_c/cow.img", "", false},
+		{"/var/lib/wizard/sandboxes-other/sbx_c/cow.img", "", false},
 		// Escapes from inside a plausible sandbox directory. losetup reports the
 		// path it was attached with, which need not be clean, so the check has to
 		// resolve the traversal rather than trust the leading component.

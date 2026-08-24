@@ -27,7 +27,7 @@ func TestPublicBindsAreRefused(t *testing.T) {
 }
 
 func TestPrivateAndLoopbackBindsAreAllowed(t *testing.T) {
-	// A private address has to be permitted: that is where bean-proxy reaches this
+	// A private address has to be permitted: that is where wizard-proxy reaches this
 	// port in a real deployment, and requiring loopback would make multi-node
 	// impossible.
 	for _, addr := range []string{

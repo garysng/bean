@@ -1,19 +1,19 @@
 //go:build e2e
 
 // Build-log e2e. Unlike the sandbox e2e, this stands up its own S3-wired stack
-// (bean-api + a build-capable noded) so it can prove the properties the S3
+// (wizard-api + a build-capable noded) so it can prove the properties the S3
 // build-log refactor (docs/build-logs-s3.md, Step A) is about:
 //
 //  1. the node uploads a build's output to a dedicated S3 logs bucket, laid out
 //     as buildlogs/<key>/NNNNNN chunks + a manifest;
-//  2. a SECOND bean-api replica — one that never handled the build — serves
+//  2. a SECOND wizard-api replica — one that never handled the build — serves
 //     GET /logs by reading that bucket plus the shared store, so a logs request
 //     that lands on any replica no longer 404s; and
 //  3. POST /cancel on that other replica resolves the build's node from the
 //     store record and calls the node's CancelBuild, stopping the build.
 //
 // It needs a real S3-compatible server and a buildkitd, so it SKIPS unless
-// BEAN_S3_ENDPOINT is set (mirroring internal/control/s3's integration tests),
+// WIZARD_S3_ENDPOINT is set (mirroring internal/control/s3's integration tests),
 // keeping `make test-e2e` green on hosts without that infrastructure.
 package e2e
 
@@ -32,7 +32,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/garysng/bean/internal/control/s3"
+	"github.com/garysng/wizard/internal/control/s3"
 )
 
 func envDefault(name, def string) string {
@@ -48,16 +48,16 @@ func envDefault(name, def string) string {
 // hand-rolled client produces.
 func requireS3(t *testing.T) (endpoint, region, bucket string) {
 	t.Helper()
-	endpoint = os.Getenv("BEAN_S3_ENDPOINT")
+	endpoint = os.Getenv("WIZARD_S3_ENDPOINT")
 	if endpoint == "" {
-		t.Skip("BEAN_S3_ENDPOINT not set; skipping build-log e2e")
+		t.Skip("WIZARD_S3_ENDPOINT not set; skipping build-log e2e")
 	}
-	region = envDefault("BEAN_S3_REGION", "us-east-1")
-	bucket = envDefault("BEAN_S3_LOGS_BUCKET", "bean-build-logs-e2e")
+	region = envDefault("WIZARD_S3_REGION", "us-east-1")
+	bucket = envDefault("WIZARD_S3_LOGS_BUCKET", "wizard-build-logs-e2e")
 	return
 }
 
-// buildCluster is a bean-api (replica "a", the one the node connects to) plus a
+// buildCluster is a wizard-api (replica "a", the one the node connects to) plus a
 // build-capable noded, all sharing one store DB and one S3 logs bucket. More
 // replicas that share the same DB+bucket are spawned with newReplica.
 type buildCluster struct {
@@ -81,7 +81,7 @@ type buildCluster struct {
 
 	apiBin   string
 	nodedBin string
-	beandBin string
+	wizarddBin string
 
 	nodeGRPC int // the port the node dials; replica "a" owns it
 	replicas []*replica
@@ -106,24 +106,24 @@ func newBuildCluster(t *testing.T) *buildCluster {
 		endpoint: endpoint,
 		region:   region,
 		bucket:   bucket,
-		buildkit: envDefault("BEAN_BUILDKIT_ADDR", "unix:///run/bean/buildkitd.sock"),
+		buildkit: envDefault("WIZARD_BUILDKIT_ADDR", "unix:///run/wizard/buildkitd.sock"),
 		// Docker Hub is unreachable from the .75 KVM host; the daocloud mirror
 		// serves library images. Override for a host with direct Hub access.
-		baseImg:  envDefault("BEAN_E2E_BASE_IMAGE", "docker.m.daocloud.io/library/busybox"),
-		fcBin:    envDefault("BEAN_FC_BIN", "/var/lib/bean/assets/firecracker"),
-		kernel:   envDefault("BEAN_FC_KERNEL", "/var/lib/bean/assets/vmlinux-6.1.175"),
-		agentDisk: envDefault("BEAN_FC_AGENT_DISK", "/var/lib/bean/assets/agent.ext4"),
+		baseImg:  envDefault("WIZARD_E2E_BASE_IMAGE", "docker.m.daocloud.io/library/busybox"),
+		fcBin:    envDefault("WIZARD_FC_BIN", "/var/lib/wizard/assets/firecracker"),
+		kernel:   envDefault("WIZARD_FC_KERNEL", "/var/lib/wizard/assets/vmlinux-6.1.175"),
+		agentDisk: envDefault("WIZARD_FC_AGENT_DISK", "/var/lib/wizard/assets/agent.ext4"),
 	}
 	c.db = filepath.Join(c.dir, "cluster.db")
 
 	var err error
-	if c.apiBin, err = build("bean-api"); err != nil {
+	if c.apiBin, err = build("wizard-api"); err != nil {
 		t.Fatal(err)
 	}
 	if c.nodedBin, err = build("noded"); err != nil {
 		t.Fatal(err)
 	}
-	if c.beandBin, err = build("beand"); err != nil {
+	if c.wizarddBin, err = build("wizardd"); err != nil {
 		t.Fatal(err)
 	}
 
@@ -134,8 +134,8 @@ func newBuildCluster(t *testing.T) *buildCluster {
 	c.s3c, err = s3.New(s3.Config{
 		Endpoint:  endpoint,
 		Region:    region,
-		AccessKey: os.Getenv("BEAN_S3_ACCESS_KEY"),
-		SecretKey: os.Getenv("BEAN_S3_SECRET_KEY"),
+		AccessKey: os.Getenv("WIZARD_S3_ACCESS_KEY"),
+		SecretKey: os.Getenv("WIZARD_S3_SECRET_KEY"),
 		PathStyle: true,
 	})
 	if err != nil {
@@ -161,7 +161,7 @@ func newBuildCluster(t *testing.T) *buildCluster {
 		"--firecracker-bin", c.fcBin,
 		"--kernel", c.kernel,
 		"--agent-disk", c.agentDisk,
-		"--agent-bin", c.beandBin,
+		"--agent-bin", c.wizarddBin,
 		"--base-dir", filepath.Join(c.dir, "sandboxes"),
 		"--image-dir", filepath.Join(c.dir, "images"),
 		"--node-token", nodeToken,
@@ -189,7 +189,7 @@ func newBuildCluster(t *testing.T) *buildCluster {
 	return c
 }
 
-// startReplica launches a bean-api sharing this cluster's DB and logs bucket.
+// startReplica launches a wizard-api sharing this cluster's DB and logs bucket.
 // The first one owns nodeGRPC (the node connects to it); later ones get an
 // unused node-grpc port, so they carry no node yet still serve /logs and
 // /cancel from the shared store + bucket — exactly the multi-replica case.
@@ -205,7 +205,7 @@ func (c *buildCluster) startReplica() *replica {
 	return r
 }
 
-// spawnReplica launches one bean-api on the given ports and waits for it to be
+// spawnReplica launches one wizard-api on the given ports and waits for it to be
 // healthy. Split from startReplica so restart can relaunch on the SAME ports --
 // which is what a real restart is, and what lets the node (which dials the
 // control-plane port) reconnect to the replacement.
@@ -225,7 +225,7 @@ func (c *buildCluster) spawnReplica(httpPort, nodeGRPC int) *replica {
 	cmd.Env = os.Environ()
 	cmd.Stdout, cmd.Stderr = os.Stderr, os.Stderr
 	if err := cmd.Start(); err != nil {
-		c.t.Fatalf("start bean-api: %v", err)
+		c.t.Fatalf("start wizard-api: %v", err)
 	}
 	r := &replica{
 		url:      fmt.Sprintf("http://127.0.0.1:%d", httpPort),
@@ -240,7 +240,7 @@ func (c *buildCluster) spawnReplica(httpPort, nodeGRPC int) *replica {
 func (c *buildCluster) newReplica() *replica { return c.startReplica() }
 
 // restart kills a replica and brings up a replacement on the same ports,
-// simulating a bean-api process restart. The build it was polling keeps running
+// simulating a wizard-api process restart. The build it was polling keeps running
 // on the node (node-owned context); the replacement's ReconcileBuilds must
 // re-attach and drive the template to a terminal state.
 func (c *buildCluster) restart(r *replica) *replica {
@@ -440,10 +440,10 @@ func TestBuildLogsLandInS3(t *testing.T) {
 	primary := c.replicas[0]
 	tag := uniqueTag("blog-land")
 
-	startBuild(t, primary.url, tag, c.dockerfile("BEANMARK", 5))
+	startBuild(t, primary.url, tag, c.dockerfile("WIZARDMARK", 5))
 	body := followLogs(t, primary.url, tag, 180*time.Second)
 
-	if !strings.Contains(body, "BEANMARK") {
+	if !strings.Contains(body, "WIZARDMARK") {
 		t.Fatalf("log body missing marker; got:\n%s", body)
 	}
 
@@ -480,7 +480,7 @@ func TestBuildLogsLandInS3(t *testing.T) {
 }
 
 // TestBuildLogsServedFromOtherReplica proves the multi-replica read fix: a
-// second bean-api — which never handled the build and has no node attached —
+// second wizard-api — which never handled the build and has no node attached —
 // serves the build's logs by reading the shared store + bucket, where the old
 // in-memory buildTracker would have returned BUILD_NOT_FOUND.
 func TestBuildLogsServedFromOtherReplica(t *testing.T) {
@@ -558,7 +558,7 @@ func TestBuildCancelFromOtherReplica(t *testing.T) {
 }
 
 // TestBuildSurvivesReplicaRestart proves the Step B property: a build runs under
-// the node's own context, so killing the bean-api that started it does not stop
+// the node's own context, so killing the wizard-api that started it does not stop
 // the build, and the restarted replica's ReconcileBuilds re-attaches by polling
 // the node and drives the template to READY. Under the old stream model the
 // build's lifeline was the originating call's context, so a restart mid-build

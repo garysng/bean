@@ -1,15 +1,15 @@
 coverage.out
-bean.db
+wizard.db
 *.test
 
 # Binaries a stray `go build` or a test drops in the repo root. Named rather than
 # globbed: the directories under cmd/ share these names, and a pattern would hide
 # their source too.
-/beand
+/wizardd
 /noded
-/bean-api
-/bean-proxy
-/bean
+/wizard-api
+/wizard-proxy
+/wizard
 
 # `make bin` output
 /bin/

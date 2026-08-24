@@ -9,27 +9,27 @@ import (
 	"google.golang.org/grpc"
 	"google.golang.org/grpc/credentials/insecure"
 
-	nodev1 "github.com/garysng/bean/internal/gen/bean/node/v1"
-	"github.com/garysng/bean/internal/logging"
-	"github.com/garysng/bean/internal/node/reclaim"
+	nodev1 "github.com/garysng/wizard/internal/gen/wizard/node/v1"
+	"github.com/garysng/wizard/internal/logging"
+	"github.com/garysng/wizard/internal/node/reclaim"
 )
 
 // LabelAdvertiseAddr carries a node's data-plane address through
 // registration labels.
-const LabelAdvertiseAddr = "bean.io/advertise-addr"
+const LabelAdvertiseAddr = "wizard.io/advertise-addr"
 
 // LabelSandboxPortAddr carries the address of a node's Host-routed forwarding port.
 //
 // Separate from LabelAdvertiseAddr because they are different services on different
 // ports: that one is the gRPC control interface the scheduler drives, this one is the
-// HTTP path into a sandbox. bean-proxy needs this one, and reusing the other would
+// HTTP path into a sandbox. wizard-proxy needs this one, and reusing the other would
 // point browser traffic at a gRPC listener.
 //
 // Absent when a node was started without --sandbox-port-listen, which is a node that
 // cannot serve port exposure at all. A caller has to treat absence as "not available
 // here" rather than assume a default port: a guessed port either refuses the
 // connection or belongs to something else entirely.
-const LabelSandboxPortAddr = "bean.io/sandbox-port-addr"
+const LabelSandboxPortAddr = "wizard.io/sandbox-port-addr"
 
 // Registrar keeps a node registered with the control plane: it registers
 // once, then maintains the heartbeat stream and reconciles on restart.

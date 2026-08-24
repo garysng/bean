@@ -14,7 +14,7 @@ import (
 )
 
 // LocalRuntime runs each sandbox as a host process tree: the real
-// beand binary confined to a per-sandbox root dir. It is the
+// wizardd binary confined to a per-sandbox root dir. It is the
 // dev/CI runtime (darwin/linux, no KVM needed) and exercises the exact
 // same agent gRPC surface as the fc tier.
 type LocalRuntime struct {

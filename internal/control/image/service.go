@@ -21,7 +21,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/garysng/bean/internal/control/store"
+	"github.com/garysng/wizard/internal/control/store"
 )
 
 // ErrInvalidRef reports a malformed image reference.

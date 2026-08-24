@@ -62,7 +62,7 @@ func isolateVMM(cmd *exec.Cmd, opts VMMIsolation) {
 		// out. e2b spells the same thing `mount --make-rprivate /` inside its
 		// unshare'd shell; Unshareflags is Go asking the kernel for it directly.
 		//
-		// Verified on a guest, not just on the flags: bean's rootfs is a
+		// Verified on a guest, not just on the flags: wizard's rootfs is a
 		// device-mapper node under /dev, and the concern was that it would stop being
 		// openable in here. It does not. See VMMIsolation.MountNamespace.
 		cmd.SysProcAttr.Cloneflags |= syscall.CLONE_NEWNS

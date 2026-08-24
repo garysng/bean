@@ -12,10 +12,10 @@ import (
 	"google.golang.org/grpc/credentials/insecure"
 	"google.golang.org/grpc/status"
 
-	"github.com/garysng/bean/internal/control/scheduler"
-	"github.com/garysng/bean/internal/control/store"
-	nodev1 "github.com/garysng/bean/internal/gen/bean/node/v1"
-	"github.com/garysng/bean/internal/node"
+	"github.com/garysng/wizard/internal/control/scheduler"
+	"github.com/garysng/wizard/internal/control/store"
+	nodev1 "github.com/garysng/wizard/internal/gen/wizard/node/v1"
+	"github.com/garysng/wizard/internal/node"
 )
 
 type stubLister struct{ specs []*nodev1.SandboxSpec }

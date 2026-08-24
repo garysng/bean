@@ -9,13 +9,13 @@ import (
 
 	"google.golang.org/grpc"
 
-	agentv1 "github.com/garysng/bean/internal/gen/bean/agent/v1"
-	commonv1 "github.com/garysng/bean/internal/gen/bean/common/v1"
-	"github.com/garysng/bean/internal/node/runtime"
+	agentv1 "github.com/garysng/wizard/internal/gen/wizard/agent/v1"
+	commonv1 "github.com/garysng/wizard/internal/gen/wizard/common/v1"
+	"github.com/garysng/wizard/internal/node/runtime"
 )
 
 // newDNSTestManager builds a manager whose agents are told to configure a
-// resolver. It runs the real beand binary, so it exercises the actual boot
+// resolver. It runs the real wizardd binary, so it exercises the actual boot
 // ordering rather than a call to WriteResolvConf in isolation -- which is the
 // only way the "before the listener" claim can be tested at all.
 func newDNSTestManager(t *testing.T, guestDNS string) *Manager {

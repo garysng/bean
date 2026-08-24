@@ -16,11 +16,11 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 
-	"github.com/garysng/bean/internal/control/scheduler"
-	"github.com/garysng/bean/internal/control/store"
-	nodev1 "github.com/garysng/bean/internal/gen/bean/node/v1"
-	"github.com/garysng/bean/internal/logging"
-	"github.com/garysng/bean/internal/node"
+	"github.com/garysng/wizard/internal/control/scheduler"
+	"github.com/garysng/wizard/internal/control/store"
+	nodev1 "github.com/garysng/wizard/internal/gen/wizard/node/v1"
+	"github.com/garysng/wizard/internal/logging"
+	"github.com/garysng/wizard/internal/node"
 )
 
 // SandboxLister supplies the expected sandbox set for a node (SyncState).

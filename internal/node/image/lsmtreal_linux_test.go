@@ -19,11 +19,11 @@ import (
 // Gated on a path rather than skipped silently: producing the fixture needs the overlaybd
 // binaries and root, so it cannot run in CI, and a test that quietly skips everywhere is
 // indistinguishable from one that does not exist. Produce it with
-// `hack/obd-seal-a-layer.sh` and point BEAN_SEALED_LAYER at the result.
+// `hack/obd-seal-a-layer.sh` and point WIZARD_SEALED_LAYER at the result.
 func TestOpenRealSealedLayer(t *testing.T) {
-	path := os.Getenv("BEAN_SEALED_LAYER")
+	path := os.Getenv("WIZARD_SEALED_LAYER")
 	if path == "" {
-		t.Skip("set BEAN_SEALED_LAYER to a layer sealed by overlaybd-commit " +
+		t.Skip("set WIZARD_SEALED_LAYER to a layer sealed by overlaybd-commit " +
 			"(hack/obd-seal-a-layer.sh produces one)")
 	}
 
@@ -83,9 +83,9 @@ func TestOpenRealSealedLayer(t *testing.T) {
 // remote path mangles an offset anywhere -- the tar walk, the chunk arithmetic, a ZFile block
 // boundary -- this is where it shows, with no kernel or guest involved.
 func TestOpenRealSealedLayerOverRangeRequests(t *testing.T) {
-	path := os.Getenv("BEAN_SEALED_LAYER")
+	path := os.Getenv("WIZARD_SEALED_LAYER")
 	if path == "" {
-		t.Skip("set BEAN_SEALED_LAYER to a layer sealed by overlaybd-commit " +
+		t.Skip("set WIZARD_SEALED_LAYER to a layer sealed by overlaybd-commit " +
 			"(hack/obd-seal-a-layer.sh produces one)")
 	}
 	raw, err := os.ReadFile(path)
@@ -157,9 +157,9 @@ func readFullAt(r interface {
 // boundaries shows, and it is the read pattern that produced
 // `EXT4-fs error: __ext4_find_entry: reading directory lblock 0` on hardware.
 func TestRealLayerRemoteAndLocalAgree(t *testing.T) {
-	path := os.Getenv("BEAN_SEALED_LAYER")
+	path := os.Getenv("WIZARD_SEALED_LAYER")
 	if path == "" {
-		t.Skip("set BEAN_SEALED_LAYER to a layer sealed by overlaybd-commit")
+		t.Skip("set WIZARD_SEALED_LAYER to a layer sealed by overlaybd-commit")
 	}
 	raw, err := os.ReadFile(path)
 	if err != nil {

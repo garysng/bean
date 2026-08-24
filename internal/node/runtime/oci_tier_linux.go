@@ -8,7 +8,7 @@ import (
 	"os"
 	"strings"
 
-	"github.com/garysng/bean/internal/node/image"
+	"github.com/garysng/wizard/internal/node/image"
 )
 
 // NewOCITier assembles the container runtime and the rootfs provider it needs.
@@ -60,7 +60,7 @@ func NewOCITier(cfg OCITierConfig) (Runtime, error) {
 	// runsc defaults to --network=sandbox, which implements TCP/IP in its own userspace
 	// stack (netstack): it takes over the veth, so a listener inside the sandbox is not
 	// visible to the host's stack on that interface. Measured -- with the default, the
-	// agent logged "beand listening addr=tcp:0.0.0.0:8111" while `ss -ltn` in the
+	// agent logged "wizardd listening addr=tcp:0.0.0.0:8111" while `ss -ltn` in the
 	// namespace showed zero listeners and the node got "network is unreachable"; with
 	// --network=host the same listener appeared in the namespace and was reachable
 	// three ways (from inside, from 127.0.0.1, and from the host).

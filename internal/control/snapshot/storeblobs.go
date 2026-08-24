@@ -6,7 +6,7 @@ import (
 	"fmt"
 	"io"
 
-	"github.com/garysng/bean/internal/control/s3"
+	"github.com/garysng/wizard/internal/control/s3"
 )
 
 // storeBlobs implements Blobs over the unified s3.ObjectStore, applying the

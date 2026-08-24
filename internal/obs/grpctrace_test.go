@@ -156,7 +156,7 @@ func TestSetupWithEndpointBuildsResource(t *testing.T) {
 	// The exporter connects lazily, so an address with nothing behind it still
 	// exercises resource construction and provider setup without a collector.
 	shutdown, err := SetupTracing(context.Background(), TracingConfig{
-		Endpoint: "127.0.0.1:1", Service: "bean-test", Version: "v0", Insecure: true,
+		Endpoint: "127.0.0.1:1", Service: "wizard-test", Version: "v0", Insecure: true,
 	})
 	if err != nil {
 		t.Fatalf("setup with an endpoint: %v", err)

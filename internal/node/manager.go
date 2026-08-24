@@ -18,15 +18,15 @@ import (
 	"google.golang.org/grpc/backoff"
 	"google.golang.org/grpc/credentials/insecure"
 
-	agentv1 "github.com/garysng/bean/internal/gen/bean/agent/v1"
-	commonv1 "github.com/garysng/bean/internal/gen/bean/common/v1"
-	nodev1 "github.com/garysng/bean/internal/gen/bean/node/v1"
-	"github.com/garysng/bean/internal/logging"
-	"github.com/garysng/bean/internal/node/image"
-	"github.com/garysng/bean/internal/node/network"
-	"github.com/garysng/bean/internal/node/runtime"
-	"github.com/garysng/bean/internal/obs"
-	"github.com/garysng/bean/internal/sbxtoken"
+	agentv1 "github.com/garysng/wizard/internal/gen/wizard/agent/v1"
+	commonv1 "github.com/garysng/wizard/internal/gen/wizard/common/v1"
+	nodev1 "github.com/garysng/wizard/internal/gen/wizard/node/v1"
+	"github.com/garysng/wizard/internal/logging"
+	"github.com/garysng/wizard/internal/node/image"
+	"github.com/garysng/wizard/internal/node/network"
+	"github.com/garysng/wizard/internal/node/runtime"
+	"github.com/garysng/wizard/internal/obs"
+	"github.com/garysng/wizard/internal/sbxtoken"
 )
 
 // Provisioner assigns and removes one sandbox's networking.
@@ -172,7 +172,7 @@ func (m *Manager) kick() {
 // drift: someone adds a phase, updates the metric, and the trace keeps a gap
 // that looks like idle time.
 func (m *Manager) observePhase(ctx context.Context, phase string, d time.Duration) {
-	m.metrics.ObserveDuration("bean_node_create_phase_seconds",
+	m.metrics.ObserveDuration("wizard_node_create_phase_seconds",
 		"Sandbox create latency by phase.",
 		map[string]string{"phase": phase, "runtime": m.rt.Name()}, d)
 	trace.SpanFromContext(ctx).AddEvent("phase."+phase,
@@ -210,7 +210,7 @@ func (m *Manager) Create(ctx context.Context, spec *nodev1.SandboxSpec) (sb *San
 	// includes things the scheduler never accounted for — base images, the snapshot
 	// cache, anything else sharing the volume.
 	if err := m.diskGuard().Admit(); err != nil {
-		m.metrics.IncCounter("bean_node_creates_refused_total",
+		m.metrics.IncCounter("wizard_node_creates_refused_total",
 			"Creates refused to protect running sandboxes.",
 			map[string]string{"reason": "disk_pressure"}, 1)
 		return nil, err
@@ -220,7 +220,7 @@ func (m *Manager) Create(ctx context.Context, spec *nodev1.SandboxSpec) (sb *San
 	// the OOM killer reaping running sandboxes. Before the slot is reserved, so a
 	// refused create leaves nothing to clean up.
 	if err := m.memGuard().Admit(); err != nil {
-		m.metrics.IncCounter("bean_node_creates_refused_total",
+		m.metrics.IncCounter("wizard_node_creates_refused_total",
 			"Creates refused to protect running sandboxes.",
 			map[string]string{"reason": "mem_pressure"}, 1)
 		return nil, err
@@ -241,7 +241,7 @@ func (m *Manager) Create(ctx context.Context, spec *nodev1.SandboxSpec) (sb *San
 	createStart := time.Now()
 	outcome := "error"
 	defer func() {
-		m.metrics.IncCounter("bean_node_creates_total",
+		m.metrics.IncCounter("wizard_node_creates_total",
 			"Sandbox creates handled by this node.",
 			map[string]string{"outcome": outcome, "runtime": m.rt.Name()}, 1)
 		m.observePhase(ctx, "total", time.Since(createStart))
@@ -365,7 +365,7 @@ func (m *Manager) startUserProcess(ctx context.Context, conn *grpc.ClientConn, s
 
 	// Argv is sent as Cmd with Entrypoint empty rather than split back apart: the
 	// merge has already applied the rule that distinguishes them, and the agent
-	// concatenates the two in the same order (beand/server.go). Splitting here would
+	// concatenates the two in the same order (wizardd/server.go). Splitting here would
 	// mean two places had to agree on where the boundary fell.
 	_, err = agentv1.NewAgentServiceClient(conn).StartUserProcess(ctx,
 		&agentv1.StartUserProcessRequest{
@@ -619,7 +619,7 @@ func (m *Manager) Destroy(ctx context.Context, id string, force bool) error {
 	m.releaseNetwork(id)
 	m.observePhase(ctx, "destroy_network", time.Since(netStart))
 
-	m.metrics.IncCounter("bean_node_destroys_total", "Sandbox destroys handled by this node.",
+	m.metrics.IncCounter("wizard_node_destroys_total", "Sandbox destroys handled by this node.",
 		map[string]string{"outcome": boolOutcome(err == nil), "runtime": m.rt.Name()}, 1)
 	// The record is gone regardless of the runtime's outcome, so the node holds
 	// less now; report it. Kicked even on a runtime error, matching the
@@ -737,7 +737,7 @@ func (m *Manager) Snapshot(ctx context.Context, id string, w io.Writer,
 	start := time.Now()
 	res, err := m.rt.Checkpoint(ctx, id, w, opts)
 	m.observePhase(ctx, "checkpoint", time.Since(start))
-	m.metrics.IncCounter("bean_node_snapshots_total",
+	m.metrics.IncCounter("wizard_node_snapshots_total",
 		"Snapshots taken on this node.",
 		map[string]string{"outcome": boolOutcome(err == nil), "runtime": m.rt.Name()}, 1)
 
@@ -881,7 +881,7 @@ func (m *Manager) BuildImage(ctx context.Context, req runtime.BuildRequest) (run
 	start := time.Now()
 	res, err := builder.BuildImage(ctx, req)
 	m.observePhase(ctx, "image_build", time.Since(start))
-	m.metrics.IncCounter("bean_node_image_builds_total",
+	m.metrics.IncCounter("wizard_node_image_builds_total",
 		"Image builds on this node.",
 		map[string]string{"outcome": buildOutcome(ctx, err), "runtime": m.rt.Name()}, 1)
 	return res, err
@@ -933,7 +933,7 @@ func (m *Manager) PrewarmImage(ctx context.Context, imageRef string) error {
 	start := time.Now()
 	err := warmer.PrewarmImage(ctx, imageRef)
 	m.observePhase(ctx, "image_prewarm", time.Since(start))
-	m.metrics.IncCounter("bean_node_image_prewarms_total",
+	m.metrics.IncCounter("wizard_node_image_prewarms_total",
 		"Image prewarm attempts on this node.",
 		map[string]string{"outcome": boolOutcome(err == nil), "runtime": m.rt.Name()}, 1)
 	if err != nil {
@@ -1061,7 +1061,7 @@ func (m *Manager) createOrRestoreWarm(ctx context.Context, rspec *runtime.Spec,
 
 	layer, release, hit := warmer.WarmLookup(imageRef)
 	if !hit {
-		m.metrics.IncCounter("bean_node_warm_lookups_total",
+		m.metrics.IncCounter("wizard_node_warm_lookups_total",
 			"Warm snapshot lookups on create.",
 			map[string]string{"outcome": "miss", "runtime": m.rt.Name()}, 1)
 		return m.rt.Create(ctx, rspec)
@@ -1092,12 +1092,12 @@ func (m *Manager) createOrRestoreWarm(ctx context.Context, rspec *runtime.Spec,
 		slog.Warn("warm snapshot did not restore; booting instead",
 			logging.KeyImage, imageRef, logging.KeySnapshot, layer.ID,
 			logging.KeyError, err)
-		m.metrics.IncCounter("bean_node_warm_lookups_total",
+		m.metrics.IncCounter("wizard_node_warm_lookups_total",
 			"Warm snapshot lookups on create.",
 			map[string]string{"outcome": "restore_failed", "runtime": m.rt.Name()}, 1)
 		return m.rt.Create(ctx, rspec)
 	}
-	m.metrics.IncCounter("bean_node_warm_lookups_total",
+	m.metrics.IncCounter("wizard_node_warm_lookups_total",
 		"Warm snapshot lookups on create.",
 		map[string]string{"outcome": "hit", "runtime": m.rt.Name()}, 1)
 	return handle, nil
@@ -1198,7 +1198,7 @@ func (m *Manager) ForkSandbox(ctx context.Context, spec *nodev1.SandboxSpec,
 	start := time.Now()
 	outcome := "error"
 	defer func() {
-		m.metrics.IncCounter("bean_node_restores_total",
+		m.metrics.IncCounter("wizard_node_restores_total",
 			"Sandbox restores handled by this node.",
 			map[string]string{"outcome": outcome, "runtime": m.rt.Name()}, 1)
 		m.observePhase(ctx, "restore", time.Since(start))
@@ -1211,7 +1211,7 @@ func (m *Manager) ForkSandbox(ctx context.Context, spec *nodev1.SandboxSpec,
 	// sandboxes derived from one checkpoint all come back holding the identical
 	// guest address, and what keeps that from colliding is each one sitting in a
 	// namespace of its own. Skipping this would leave a restored guest looking for
-	// beantap0 in the host namespace, where either nothing answers or -- worse --
+	// wizardtap0 in the host namespace, where either nothing answers or -- worse --
 	// another sandbox's tap does.
 	if m.Net != nil {
 		layout, err := m.Net.Provision(spec.SandboxId)
@@ -1539,7 +1539,7 @@ func (m *Manager) sweepIdle() {
 			err = m.Pause(ctx, a.id)
 		}
 		cancel()
-		m.metrics.IncCounter("bean_node_idle_actions_total",
+		m.metrics.IncCounter("wizard_node_idle_actions_total",
 			"Sandboxes acted on by the idle sweep.",
 			map[string]string{"action": a.onIdle, "outcome": boolOutcome(err == nil)}, 1)
 		if err != nil {
@@ -1571,10 +1571,10 @@ func (m *Manager) RefreshGauges() {
 		}
 	}
 	for st, n := range counts {
-		m.metrics.SetGauge("bean_node_sandboxes", "Sandboxes on this node by state.",
+		m.metrics.SetGauge("wizard_node_sandboxes", "Sandboxes on this node by state.",
 			map[string]string{"state": st}, n)
 	}
-	m.metrics.SetGauge("bean_node_requests_in_flight",
+	m.metrics.SetGauge("wizard_node_requests_in_flight",
 		"Data-plane requests currently in flight across sandboxes.", nil, inFlight)
 
 	// Reported because this space is not committed to anything, so it is the one
@@ -1582,7 +1582,7 @@ func (m *Manager) RefreshGauges() {
 	// measured 4.6 GB accumulated on a development node before it was bounded.
 	if reporter, ok := m.rt.(runtime.CacheReporter); ok {
 		if used, err := reporter.SnapshotCacheBytes(); err == nil {
-			m.metrics.SetGauge("bean_node_snapshot_cache_bytes",
+			m.metrics.SetGauge("wizard_node_snapshot_cache_bytes",
 				"Disk held by unpacked snapshots, which no commitment covers.",
 				nil, float64(used))
 		}
@@ -1594,10 +1594,10 @@ func (m *Manager) RefreshGauges() {
 	// published.
 	if disk := m.diskGuard(); disk.Path != "" {
 		if stats, err := disk.Stat(); err == nil {
-			m.metrics.SetGauge("bean_node_disk_free_bytes",
+			m.metrics.SetGauge("wizard_node_disk_free_bytes",
 				"Free space on the sandbox filesystem, excluding the root reserve.",
 				nil, float64(stats.FreeBytes))
-			m.metrics.SetGauge("bean_node_disk_used_bytes",
+			m.metrics.SetGauge("wizard_node_disk_used_bytes",
 				"Allocated blocks on the sandbox filesystem, which is what sparse "+
 					"layers actually cost.", nil, float64(stats.UsedBytes))
 		}

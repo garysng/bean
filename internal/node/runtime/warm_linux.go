@@ -9,7 +9,7 @@ import (
 	"log/slog"
 	"os"
 
-	"github.com/garysng/bean/internal/logging"
+	"github.com/garysng/wizard/internal/logging"
 )
 
 // FCRuntime's half of warm snapshots: deriving the key for an image, looking one

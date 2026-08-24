@@ -97,7 +97,7 @@ a v1 host. This is not a preference for the newer interface:
   feature was built for: overcommitted memory for untrusted evaluation workloads. On v1
   "limits are in place" would be untrue in the dimension that matters most, which is worse
   than not supporting v1 at all. v2 spells it `memory.swap.max` and needs no boot parameter;
-  bean sets it to 0.
+  wizard sets it to 0.
 - The requirement is not an exotic ask. systemd has defaulted to the unified hierarchy since
   v243, so **Ubuntu 22.04+, Debian 11+, RHEL 9+** and anything newer are already v2. (Ubuntu
   20.04 is v1 — it patched the default back until 21.10 — so a 20.04 host does not meet the

@@ -16,7 +16,7 @@ import (
 // varied, a pinned buffer instead of a Go pointer -- while the ring is proven correct by a
 // nop whose user_data round-trips and an SQE verified at 128 bytes with cmd at offset 48.
 // That combination suggests GET_FEATURES may not be wired on this kernel build; it is the
-// newest of these commands. ADD_DEV is the one bean needs and the one every ublk server
+// newest of these commands. ADD_DEV is the one wizard needs and the one every ublk server
 // issues first, so it is the better probe.
 //
 // The device is deleted before returning. A leaked ublk device holds a minor number and a

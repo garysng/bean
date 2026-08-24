@@ -22,7 +22,7 @@ config:
 flowchart TB
   subgraph SHARED["共享准备 &middot; 两条路都走"]
     direction TB
-    PREP["image.Prepare<br>/dev/mapper/bean-&lt;id&gt;<br>(restore: CoW 在此回填 &middot; 约束 A)"]
+    PREP["image.Prepare<br>/dev/mapper/wizard-&lt;id&gt;<br>(restore: CoW 在此回填 &middot; 约束 A)"]
     EXEC["在 netns 内 exec firecracker<br>cwd = sandbox 目录"]
     WAIT["waitAPIReady<br>轮询 API socket"]
     PREP --> EXEC --> WAIT
@@ -45,7 +45,7 @@ flowchart TB
     LOAD["PUT /snapshot/load<br>Uffd backend &middot; ResumeVM"]
   end
 
-  GB["guest 启动<br>beand PID1 pivot 进用户 rootfs"]
+  GB["guest 启动<br>wizardd PID1 pivot 进用户 rootfs"]
   GR["guest 恢复运行<br>缺页时按需供页"]
 
   WAIT --> BRANCH
@@ -68,7 +68,7 @@ flowchart TB
 下面带编号的全序是冷启动主干;restore 复用共享准备,把 PUT 序列换成单个 `/snapshot/load`。
 
 ```
-① image.Prepare        组出 /dev/mapper/bean-<id>(共享 base + 每 sandbox CoW)
+① image.Prepare        组出 /dev/mapper/wizard-<id>(共享 base + 每 sandbox CoW)
                        restore 时:CoW 必须在此步之内回填 ← 顺序约束 A
 ② os.Symlink           把 agent 盘链进 sandbox 目录
 ③ exec firecracker     cwd = sandbox 目录 ← 相对路径的前提
@@ -134,11 +134,11 @@ if cfg := cpuConfigFor(r.CPUTemplate); cfg != nil {
 ```
 
 内核从它挂成 root 的那个设备上 exec init。把 agent 放在那里,**用户镜像就不承担
-任何义务** —— 不用内嵌 `beand`、不用有 init 系统、不用改 entrypoint。
+任何义务** —— 不用内嵌 `wizardd`、不用有 init 系统、不用改 entrypoint。
 agent 起来之后自己 pivot 到 `/dev/vdb`:
 
 ```
-init=/bean/beand -- --listen vsock:1024 --pivot /dev/vdb
+init=/wizard/wizardd -- --listen vsock:1024 --pivot /dev/vdb
 ```
 
 **顺序决定命名**:Firecracker 按注册顺序给 `vda`/`vdb`,而 `--pivot /dev/vdb`
@@ -169,7 +169,7 @@ cmd.Dir = vm.dir
 ## 6. cmdline 的每一项 ✅
 
 ```
-console=ttyS0 loglevel=3 reboot=k panic=-1 pci=off ip=... init=/bean/beand -- --listen tcp:0.0.0.0:10001 --pivot /dev/vdb
+console=ttyS0 loglevel=3 reboot=k panic=-1 pci=off ip=... init=/wizard/wizardd -- --listen tcp:0.0.0.0:10001 --pivot /dev/vdb
 ```
 
 | 参数 | 作用 | 依据 |
@@ -178,8 +178,8 @@ console=ttyS0 loglevel=3 reboot=k panic=-1 pci=off ip=... init=/bean/beand -- --
 | `reboot=k` | 用 keyboard reset | FC 无 ACPI,这是最小可用的 reset 方式 |
 | `panic=-1` | panic 不重启 | 崩掉的 guest 保持可检查,不进重启循环 |
 | `pci=off` | 跳过 PCI 枚举 | FC 没有 PCI 总线,枚举纯属浪费 |
-| `init=/bean/beand` | agent 作 PID 1 | 见 §4 |
-| `--` 之后 | 传给 beand 的参数 | 内核把 `--` 后的部分原样交给 init |
+| `init=/wizard/wizardd` | agent 作 PID 1 | 见 §4 |
+| `--` 之后 | 传给 wizardd 的参数 | 内核把 `--` 后的部分原样交给 init |
 
 **console 取舍是怎么解决的**:原本的推理 —— 失败的 boot 没有别的证据来源,
 所以这个能力不能丢,但不该每次 boot 都付 493ms —— 是对的,但从中得出的结论错了。
@@ -282,9 +282,9 @@ Firecracker 启动到创建 API socket 之间有个窗口,这期间发请求得�
 
 补上这块的通常做法叫 jailer,而「直接加 jailer」并不成立,值得说清原因:jailer 的
 `pivot_root` 要求把设备节点 **mknod** 进每 sandbox 的 jail,因为设备节点无法用符号链接进
-chroot —— 而 bean 的 rootfs 正是一个 device-mapper 节点。e2b 不做这些也拿到了命名空间那一半:
+chroot —— 而 wizard 的 rootfs 正是一个 device-mapper 节点。e2b 不做这些也拿到了命名空间那一半:
 `unshare` 一个 mount 命名空间,再用 tmpfs 加符号链接,这在 chroot 里行不通而在命名空间里可行。
-bean 已经有 e2b 那样拿到的命名空间隔离,只是用 clone flags 而非包装进程实现(见 §12)。
+wizard 已经有 e2b 那样拿到的命名空间隔离,只是用 clone flags 而非包装进程实现(见 §12)。
 
 ## 12. 不用包装进程做隔离 ✅
 
@@ -302,9 +302,9 @@ unshare -pfm --kill-child -- bash -c "mount --make-rprivate / && ... && ip netns
 这种安排的失败模式很具体:**destroy 报成功而 microVM 还在跑**,
 占着调度器已经许给别人的内存。
 
-bean 改成在 fork 期间向内核索取同样的命名空间:
+wizard 改成在 fork 期间向内核索取同样的命名空间:
 
-| | e2b | bean |
+| | e2b | wizard |
 |---|---|---|
 | pid 命名空间 | `unshare -p` | `Cloneflags: CLONE_NEWPID` |
 | mount 命名空间 | `unshare -m` + `mount --make-rprivate /` | `Cloneflags` + `Unshareflags: CLONE_NEWNS` |
@@ -323,7 +323,7 @@ clone flags 于是在那次 fork 期间生效,这就是两者能同时成立的�
 而 pid 1 会忽略自己没装处理器的信号。可捕获的信号恰好会在 sandbox 最需要死掉的时候被丢弃。
 
 三个开关**默认都开**:`--fc-pid-namespace`、`--fc-kill-on-exit`、`--fc-mount-namespace`。
-被压着最久的是 mount 命名空间,当时预期 bean 的 device-mapper rootfs 在里面会打不开;
+被压着最久的是 mount 命名空间,当时预期 wizard 的 device-mapper rootfs 在里面会打不开;
 那个预期是错的,起来的 guest 同时拥有可用的 `eth0` 和自己的 mnt / pid / net 命名空间。
 它之所以必须用 guest 而不是靠检查来验证:VMM 解析不到 rootfs 时什么都不报,
 只表现为一次没走完的启动。

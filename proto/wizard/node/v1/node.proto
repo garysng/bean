@@ -1,0 +1,631 @@
+syntax = "proto3";
+
+package wizard.node.v1;
+
+import "wizard/common/v1/exec.proto";
+
+option go_package = "github.com/garysng/wizard/internal/gen/wizard/node/v1;nodev1";
+
+// NodeService: wizardd -> control plane (outbound).
+service NodeService {
+  rpc Register(RegisterRequest) returns (RegisterResponse);
+  rpc Heartbeat(stream HeartbeatRequest) returns (stream HeartbeatResponse);
+  rpc SyncState(SyncStateRequest) returns (SyncStateResponse);
+  // UpdateNodeStatus carries what a node *holds and can do*, as opposed to how
+  // it is currently doing -- which is Heartbeat's job.
+  //
+  // The two are separate because they have nothing in common but a destination.
+  // A heartbeat renews a lease: small, fixed size, every few seconds. This
+  // carries lists whose size grows with the node's caches and which barely
+  // change between reports. Carrying them on the heartbeat meant an eval-scale
+  // node with thousands of images re-sent, re-serialised and re-wrote an
+  // unchanged map every few seconds. The cache in
+  // internal/node/image/cached.go exists specifically to blunt the cost of
+  // rescanning for that, which is a design smell rather than an optimisation.
+  //
+  // Sent when something changes, plus a periodic full report so a dropped one
+  // cannot leave the control plane permanently stale. Staleness costs affinity
+  // accuracy and warm-snapshot hit rate, never correctness: a miss boots, which
+  // is what a node without the entry does anyway.
+  rpc UpdateNodeStatus(UpdateNodeStatusRequest) returns (UpdateNodeStatusResponse);
+}
+
+// SandboxService: implemented by wizardd; control plane / gateway call it
+// directly (push). On NAT'd nodes the calls are multiplexed over the
+// node's outbound CommandChannel.
+service SandboxService {
+  rpc CreateSandbox(CreateSandboxRequest) returns (CreateSandboxResponse);
+  rpc DestroySandbox(DestroySandboxRequest) returns (DestroySandboxResponse);
+  rpc PauseSandbox(PauseSandboxRequest) returns (PauseSandboxResponse);
+  rpc ResumeSandbox(ResumeSandboxRequest) returns (ResumeSandboxResponse);
+  rpc GetSandbox(GetSandboxRequest) returns (GetSandboxResponse);
+  // SnapshotSandbox streams a checkpoint out of the node. The sandbox is
+  // frozen for the duration and returned to its prior state afterwards.
+  rpc SnapshotSandbox(SnapshotSandboxRequest) returns (stream SnapshotChunk);
+  // RestoreSandbox creates a sandbox from a checkpoint stream. The first
+  // frame carries the spec; the rest is checkpoint data. A node that already
+  // holds the checkpoint unpacked answers without reading the data frames, so
+  // the sender must tolerate the stream being cut short.
+  rpc RestoreSandbox(stream RestoreSandboxFrame) returns (RestoreSandboxResponse);
+  rpc StartUserProcess(StartUserProcessNodeRequest) returns (StartUserProcessNodeResponse);
+  // PrewarmImage makes an image ready on the node without creating a sandbox.
+  // A first pull can take minutes — longer than a create should block — so the
+  // control plane warms images before placing work that needs them.
+  rpc PrewarmImage(PrewarmImageRequest) returns (PrewarmImageResponse);
+  // StartBuild builds a base image from a Dockerfile. The build runs on the
+  // node, where BuildKit and the image cache already are.
+  //
+  // It returns as soon as the build is registered and running, not when it
+  // finishes: the build runs under a node-owned context (registered by tag),
+  // not under this call's context, so it survives the caller -- a control-plane
+  // replica may restart, or a follower may come and go, without killing the
+  // build. Progress is read from the shared log store (any replica), the
+  // outcome is polled via GetBuildStatus, and the build is stopped via
+  // CancelBuild. This replaced the old BuildImage server stream, whose context
+  // was the build's lifeline and so tied a build's life to one caller's.
+  rpc StartBuild(BuildImageRequest) returns (StartBuildResponse);
+  // GetBuildStatus reports whether a build (addressed by tag) is still running,
+  // succeeded (with its result), or failed (with a reason). The control plane
+  // polls this after StartBuild until a terminal phase, then writes the
+  // authoritative template state. An unknown tag reports BUILD_UNKNOWN rather
+  // than an error, so a poll that races registration or a restart is harmless.
+  rpc GetBuildStatus(GetBuildStatusRequest) returns (GetBuildStatusResponse);
+  // CancelBuild stops a build running on this node, addressed by its tag.
+  //
+  // It exists because a build no longer belongs to whoever holds the BuildImage
+  // stream: the node writes the log to shared storage itself, so any control-plane
+  // replica can follow a build, and any replica must therefore be able to stop one
+  // it did not start. The node keeps a registry of in-flight builds keyed by tag
+  // and cancels the matching one's context, which kills buildctl -- the same
+  // mechanism aborting the stream used to trigger. Cancelling an unknown or
+  // already-finished tag is not an error, so a racing double-cancel is harmless.
+  rpc CancelBuild(CancelBuildRequest) returns (CancelBuildResponse);
+  // ConfigureAdmission updates the node's local admission thresholds (the disk
+  // floor and memory ceiling that DiskGuard/MemGuard enforce on Create) at
+  // runtime, so an operator can tighten or loosen a node without restarting it.
+  //
+  // It lives on SandboxService because that is wizard's only control-plane->node
+  // channel; the startup flags remain the initial default, and the control plane
+  // re-pushes the current config after a node registers or reconnects so a
+  // restarted node converges back to it rather than reverting to its flags. Only
+  // the fields present in the AdmissionConfig are changed; an absent field leaves
+  // that threshold as it was.
+  rpc ConfigureAdmission(ConfigureAdmissionRequest) returns (ConfigureAdmissionResponse);
+  // Data plane passthrough to AgentService.
+  rpc Exec(wizard.common.v1.ExecRequest) returns (wizard.common.v1.ExecResponse);
+  rpc StreamExec(stream wizard.common.v1.StreamExecFrame) returns (stream wizard.common.v1.StreamExecFrame);
+  rpc ReadFile(wizard.common.v1.ReadFileRequest) returns (stream wizard.common.v1.FileChunk);
+  rpc WriteFile(stream wizard.common.v1.WriteFileFrame) returns (wizard.common.v1.WriteFileResponse);
+  rpc DeleteFile(wizard.common.v1.DeleteFileRequest) returns (wizard.common.v1.DeleteFileResponse);
+  rpc ListDir(wizard.common.v1.ListDirRequest) returns (wizard.common.v1.ListDirResponse);
+  rpc GetLogs(wizard.common.v1.GetLogsRequest) returns (stream wizard.common.v1.LogChunk);
+}
+
+message RegisterRequest {
+  string bootstrap_token = 1;
+  string node_id = 2;
+  string region = 3;
+  map<string, string> labels = 4;
+  NodeCapabilities capabilities = 5;
+  NodeResources resources = 6;
+}
+
+message RegisterResponse {
+  string node_token = 1;
+  int64 heartbeat_interval_seconds = 2;
+}
+
+message NodeCapabilities {
+  repeated string runtimes = 1; // e.g. ["fc"], ["fc","runc"]
+}
+
+message NodeResources {
+  double cpu_allocatable = 1;
+  int64 memory_allocatable_mib = 2;
+  int64 disk_sandboxes_mib = 3;
+  int32 gpu_count = 4;
+  // cpu_vendor and cpu_family constrain where a memory snapshot taken on this
+  // node can be restored: a guest kernel branches on both for errata handling
+  // and MSR access, and no CPU template can hide them. The model is
+  // deliberately absent — masking instruction-set features is what makes a
+  // snapshot portable across models, so matching on model would defeat it.
+  string cpu_vendor = 5;
+  int32 cpu_family = 6;
+  // cpu_template is the masking policy this node boots guests under ("none" or
+  // "portable"). A memory snapshot is only portable across CPU generations if
+  // it was taken under a template, so restore has to know which one produced it.
+  string cpu_template = 7;
+  // max_creates is how many creates this node will have in flight at once. Zero
+  // leaves the control plane's default, which is what a node built before this
+  // field existed reports.
+  //
+  // Reported by the node rather than configured centrally because the quantity is
+  // a local physical fact: how many guests can boot at once without slowing each
+  // other down, which follows from cores, KVM and disk. The control plane's view
+  // of a node's CPU has already been multiplied by --overcommit-cpu, so deriving
+  // this from it would fold an oversubscription factor into a concurrency limit.
+  //
+  // It bounds a transient, not a capability: unlike CPU or memory, in-flight
+  // creates drain on their own. The scheduler treats exhaustion as a reason to
+  // wait rather than to refuse -- see scheduler.worthWaiting -- so this being too
+  // low costs latency under burst, not failures, provided --create-wait is set.
+  int32 max_creates = 8;
+}
+
+message HeartbeatRequest {
+  // A heartbeat renews a lease and does nothing else. It is small, fixed size,
+  // and sent every few seconds, so it carries only the identity the control
+  // plane authenticates and renews `last_heartbeat` against.
+  //
+  // What the node holds and how full it is (disk_used, the sandbox set) moved to
+  // UpdateNodeStatus: those are consumed off the control plane's own view, not
+  // the liveness signal, and coupling them to the heartbeat meant a report could
+  // stall the lease. Field numbers 3 (sandboxes), 4 (usage) and 5 (cached_images)
+  // are retired and not reused.
+  string node_id = 1;
+  string node_token = 2;
+  reserved 3, 4, 5;
+  reserved "sandboxes", "usage", "cached_images";
+}
+
+// CachedImage is one image a node holds.
+message CachedImage {
+  // size_bytes is the apparent size of the prepared image file.
+  int64 size_bytes = 1;
+  // digest is the manifest digest the reference resolved to when it was
+  // prepared, or empty for an image with no manifest -- a build's output or a
+  // commit of a sandbox's filesystem.
+  //
+  // Reported because it is the only identity that survives a tag moving, and it
+  // is the key a warm snapshot has to be found by: a tag is not enough, since
+  // serving a snapshot captured from the image a tag used to name is a silent
+  // failure -- the wrong environment restores successfully.
+  string digest = 2;
+  // warm reports that this node holds a warm snapshot for this image, so a create
+  // placed here restores instead of booting a kernel. Measured, that is 0.13 s of
+  // host CPU against 0.62 s -- and since throughput is CPU-bound, the difference
+  // is a placement decision worth making rather than a detail.
+  //
+  // A bool on the image rather than a separate list of warm keys, because the
+  // node has already resolved the parts the scheduler cannot. A warm snapshot is
+  // keyed on (digest, CPU vendor, family, template); a node only ever warms for
+  // its own CPU, and a sandbox placed on it runs on that CPU, so the CPU half is
+  // satisfied by construction. Reporting the tuple instead would make the
+  // scheduler join a ref to a digest to a CPU to answer a question the node has
+  // already answered.
+  //
+  // False is not "cannot be warmed" -- it means "not warm here, now". An image
+  // with no digest can never be warm, one that has not been prewarmed is not warm
+  // yet, and a node whose bundle was evicted stops reporting it. All three read as
+  // false and all three place normally, because a miss boots.
+  bool warm = 3;
+}
+
+// ImageInventory is the set of images a node holds.
+//
+// Always the node's complete set, never a delta. A delta protocol would need
+// both sides to agree on a base version and to recover when they did not, for a
+// message of a few hundred bytes per image; sending the whole set makes a
+// dropped report self-correcting.
+message ImageInventory {
+  map<string, CachedImage> images = 1;
+}
+
+message UpdateNodeStatusRequest {
+  string node_id = 1;
+  string node_token = 2;
+
+  // Each category is optional, and an absent one means "unchanged" rather than
+  // "empty". That distinction is why these are messages rather than bare maps:
+  // a node reporting only what moved must not be read as a node that has
+  // dropped everything else. Getting it wrong in the obvious direction would
+  // clear the control plane's view of a node's images every time an unrelated
+  // category was reported, which shows up as image affinity that works only
+  // sometimes.
+  //
+  // Adding a category is a new optional field here rather than a new RPC, so
+  // this stays the single path for "what this node holds".
+  optional ImageInventory images = 3;
+
+  // usage is how full the node is right now -- disk actually occupied by sandbox
+  // filesystems. It rode the heartbeat until it was found to be consumed only by
+  // the read-only /nodes view, never by placement (which uses the commitment
+  // ledger), so it belongs on the change-driven report, not the lease signal.
+  // The node sends it on every status report -- both the event-triggered ones
+  // (a create or destroy moved the figure) and the periodic floor -- so the
+  // operational view refreshes within seconds of a change rather than at the
+  // heartbeat cadence.
+  optional NodeUsage usage = 4;
+}
+
+message UpdateNodeStatusResponse {}
+
+message NodeUsage {
+  // disk_used_mib is the sandbox filesystem's real occupancy, measured (not
+  // summed from nominal requests): the sparse layer behind a 20 GiB request
+  // holds kilobytes, so summing requests would overstate the node by orders of
+  // magnitude. It is the only usage figure anything reads.
+  //
+  // cpu_committed (1) and memory_committed_mib (2) are retired: the control
+  // plane derives commitment from its own placement ledger, so a node-reported
+  // figure had no consumer. Field numbers are not reused.
+  reserved 1, 2;
+  reserved "cpu_committed", "memory_committed_mib";
+  int64 disk_used_mib = 3;
+
+  // cpu_used_percent and mem_used_percent are the node's REAL load, measured on
+  // the machine (cpu from /proc/stat deltas, mem from /proc/meminfo
+  // MemAvailable), not summed from what sandboxes were promised. Unlike the
+  // retired committed figures, these have a consumer: the scheduler scores them
+  // as a soft preference so placement can avoid a node that is actually hot even
+  // when its commitment ledger still shows headroom. They are advisory and lag
+  // reality, so they inform score, never the feasibility gate (which stays on
+  // the commitment ledger for oversell-safety across replicas). 0 means the node
+  // does not measure it yet.
+  double cpu_used_percent = 4;
+  double mem_used_percent = 5;
+}
+
+// AdmissionConfig is the node-local admission policy the guards enforce on
+// Create. Every field is optional so a partial push changes only what it names
+// and leaves the rest -- the control plane can raise the memory ceiling without
+// having to restate the disk floor. An absent AdmissionConfig (or all-absent
+// fields) is a no-op.
+message AdmissionConfig {
+  // Disk floor: refuse a create while free space on the sandbox filesystem is
+  // below the larger of these two. Mirrors --min-free-disk-mib /
+  // --min-free-disk-percent. 0 for either disables that half.
+  optional int64 min_free_disk_mib = 1;
+  optional double min_free_disk_percent = 2;
+  // Memory ceiling: refuse a create while real memory usage is at or above this
+  // percent. Mirrors --max-mem-percent. 0 disables.
+  optional double max_mem_percent = 3;
+}
+
+message ConfigureAdmissionRequest {
+  string node_id = 1;
+  string node_token = 2;
+  AdmissionConfig config = 3;
+}
+
+message ConfigureAdmissionResponse {}
+
+message HeartbeatResponse {
+  bool lease_ok = 1;
+  string renewed_node_token = 2; // empty = keep current
+}
+
+message SyncStateRequest {
+  string node_id = 1;
+  string node_token = 2;
+}
+
+message SyncStateResponse {
+  repeated SandboxSpec expected = 1;
+}
+
+message SandboxSpec {
+  // snapshot_id is set only when restoring. Every sandbox restored from one
+  // checkpoint unpacks to the same bytes, so a node caches the unpacked form
+  // under this id rather than repeating the work per restore. Empty means
+  // "unpack from the stream", which keeps a restore self-contained.
+  string snapshot_id = 14;
+
+  // snapshot_chain lists the memory checkpoints a restore must replay, ordered
+  // base-first with snapshot_id last. Empty means snapshot_id is self-contained.
+  //
+  // This now carries only the guest-memory diff chain. The filesystem is resolved
+  // from fs_manifest_digest as a shared overlaybd layer chain, not streamed, so a
+  // memoryless restore sends no bundle data at all.
+  //
+  // The chain is declared here rather than discovered from the stream because the
+  // node has to create one reader per layer before reading any of them: each
+  // layer is its own gzip stream, and a reader handed the concatenation would
+  // stop at the first layer's end. Knowing the count up front also means a
+  // restore fails on a chain the node cannot serve instead of part way through
+  // assembling one.
+  repeated string snapshot_chain = 15;
+
+  // fs_manifest_digest names the snapshot's filesystem as an overlaybd layer
+  // chain in the shared store. The node resolves it through the image index the
+  // same way it resolves an image tag, assembling the chain as read-only lowers
+  // with a fresh writable on top -- no filesystem bytes travel in the restore
+  // stream. Empty means a non-overlaybd restore (local tier) that still carries
+  // its filesystem in the bundle.
+  string fs_manifest_digest = 16;
+
+  string sandbox_id = 1;
+  string image = 2;
+  double cpu = 3;
+  int64 memory_mib = 4;
+  int64 disk_mib = 5;
+  map<string, string> env = 6;
+  repeated string cmd = 7;          // override image CMD; empty = keep image config
+  bool auto_start_cmd = 8;
+  Lifecycle lifecycle = 9;
+  map<string, string> labels = 10;
+  string network_policy = 11;
+  string runtime = 12;              // internal tier: fc|runc|runsc; empty = node default
+  string request_id = 13;
+
+  // publish_conversion asks the node to publish what it converts from `image`
+  // to the shared store and report the coordinates back, so the control plane
+  // can record a reusable template. Set only when `image` is a first-seen OCI
+  // reference the platform wants cached cluster-wide -- not for a create from an
+  // already-converted template (whose chain is published) nor a restore (which
+  // converts nothing). It moves the publish cost onto this first create so every
+  // later create of the reference, on any node, skips the conversion.
+  bool publish_conversion = 17;
+}
+
+message Lifecycle {
+  // 0 = unset (never idle out); -0 semantics avoided: use has_idle_timeout.
+  bool has_idle_timeout = 1;
+  int64 idle_timeout_seconds = 2;
+  string on_idle = 3; // pause|delete
+}
+
+message SandboxStatus {
+  string sandbox_id = 1;
+  string state = 2; // PENDING..RUNNING|PAUSED|STOPPED|FAILED
+  string reason = 3;
+  int64 started_at_unix = 4;
+  int64 last_activity_unix = 5;
+}
+
+message CreateSandboxRequest {
+  SandboxSpec spec = 1;
+}
+
+message CreateSandboxResponse {
+  SandboxStatus status = 1;
+
+  // conversion reports what a cold start from an OCI image reference converted
+  // and published, so the control plane can record a reusable template and a
+  // later create of the same reference -- on any node reading the same store --
+  // skips the pull and conversion. Absent when the create resolved from a
+  // snapshot or an already-converted filesystem, which convert nothing.
+  ImageConversion conversion = 2;
+}
+
+// ImageConversion carries the coordinates a cold OCI create resolved, so the
+// control plane can turn a first-seen reference into a shared template. It is
+// the create-path counterpart of BuildImageResponse's artifact fields.
+message ImageConversion {
+  // overlaybd_ref names the published overlaybd artifact in the shared layer
+  // store -- the filesystem manifest digest a later create resolves from.
+  // Empty when the node published nothing (no object store configured, or the
+  // upload was declined), in which case the conversion stayed node-local and no
+  // template is recorded.
+  string overlaybd_ref = 1;
+  // oci_digest is the OCI content digest the reference resolved to, node-side.
+  // It completes the conversion-cache key so a later create with the same
+  // reference reuses this template. Empty leaves the template's OCI source
+  // unset.
+  string oci_digest = 2;
+  // size_bytes is the published chain's size, for cache accounting.
+  int64 size_bytes = 3;
+  // layer_digests is the published layer chain, base first.
+  repeated string layer_digests = 4;
+  // config is the converted image's configuration, so the control plane records
+  // the ENV/ENTRYPOINT/CMD/WORKDIR on the template a create can reuse. Nil when
+  // the image declared none.
+  ImageConfig config = 5;
+}
+
+message DestroySandboxRequest {
+  string sandbox_id = 1;
+  bool force = 2;
+}
+
+message DestroySandboxResponse {}
+
+message PauseSandboxRequest {
+  string sandbox_id = 1;
+}
+
+message PauseSandboxResponse {}
+
+message ResumeSandboxRequest {
+  string sandbox_id = 1;
+}
+
+message ResumeSandboxResponse {}
+
+message GetSandboxRequest {
+  string sandbox_id = 1;
+}
+
+message GetSandboxResponse {
+  SandboxStatus status = 1;
+}
+
+message SnapshotSandboxRequest {
+  string sandbox_id = 1;
+  // include_memory captures guest memory so a restore resumes the running
+  // guest. It costs portability: guest memory records what the CPU it booted on
+  // offered, and vendor/family cannot be masked away, so such a snapshot only
+  // restores on a compatible CPU. Without memory the snapshot is a filesystem
+  // and restores anywhere, but the guest boots fresh.
+  //
+  // Defaulting to false would silently change what existing callers get, so the
+  // gateway sends this explicitly and treats absent as true.
+  bool include_memory = 2;
+
+  // diff captures only the guest memory written since the sandbox started or was
+  // restored. The result is not restorable alone — it is layered onto the chain
+  // it descends from — so the caller must record which snapshot it was taken
+  // against.
+  //
+  // The node refuses rather than falling back to a full capture when the guest
+  // booted without dirty-page tracking, which cannot be turned on after the
+  // fact. A silent fallback would return a bundle costing exactly what the
+  // caller was trying to avoid.
+  bool diff = 3;
+}
+
+message SnapshotChunk {
+  oneof chunk {
+    // data carries the memory + vmstate bundle bytes. The filesystem no longer
+    // travels here: it is sealed into a shared overlaybd layer and published to
+    // the blob store, and only its manifest identity comes back, in result.
+    bytes data = 1;
+    // result is the terminal frame, sent once after the last data chunk. It names
+    // the snapshot's filesystem as an overlaybd layer chain the store now holds,
+    // so control records the manifest rather than a copy of the bytes.
+    SnapshotResult result = 2;
+  }
+}
+
+// SnapshotResult identifies a snapshot's filesystem as a published overlaybd
+// layer chain. The chain shares the base image's layer digests, so the store
+// holds one copy of those layers and only the snapshot's own top layer is new.
+message SnapshotResult {
+  // fs_manifest_digest keys the StoredManifest a restore resolves the chain from,
+  // exactly as an image tag resolves to its manifest.
+  string fs_manifest_digest = 1;
+  // fs_layer_digests is the chain base-first, for provenance and layer accounting.
+  repeated string fs_layer_digests = 2;
+  // fs_size_bytes is the sealed size of the snapshot's own top layer, not the
+  // whole chain: the shared base layers are already accounted to the image.
+  int64 fs_size_bytes = 3;
+}
+
+message RestoreSandboxFrame {
+  oneof frame {
+    SandboxSpec spec = 1;
+    // data carries the memory bundles back to back, in the order SandboxSpec's
+    // snapshot_chain declares. The node splits them at the boundaries the chain
+    // implies rather than at markers in the stream, so the sender does not have to
+    // know each bundle's size in advance — it is copying from object storage.
+    // Filesystem layers are not streamed here; they resolve from
+    // fs_manifest_digest.
+    bytes data = 2;
+    // layer_end closes the current memory bundle and moves to the next in the
+    // chain. It is a boundary marker rather than a length because the sender
+    // learns a bundle's size only by finishing it.
+    bool layer_end = 3;
+  }
+}
+
+message RestoreSandboxResponse {
+  SandboxStatus status = 1;
+  int64 bytes_restored = 2;
+}
+
+message StartUserProcessNodeRequest {
+  string sandbox_id = 1;
+}
+
+message StartUserProcessNodeResponse {
+  int64 pid = 1;
+}
+
+message PrewarmImageRequest {
+  string image = 1;
+}
+
+message PrewarmImageResponse {
+  // ready is true once the image can be used without a further pull.
+  bool ready = 1;
+}
+
+message BuildImageRequest {
+  string tag = 1;
+  // dockerfile is the file's content, carried inline so a caller need not ship
+  // a file just to run a few commands.
+  string dockerfile = 2;
+  // context_tar is the build context for COPY and ADD; empty is valid.
+  bytes context_tar = 3;
+  map<string, string> build_args = 4;
+  int64 size_mib = 5;
+}
+
+// ImageConfig is the OCI configuration a template carries -- the ENV, ENTRYPOINT,
+// CMD, WORKDIR and USER a sandbox inherits at start. The node recovers it (from a
+// build's OCI export, or from the converted image's config blob) and reports it so
+// the control plane records it on the template, which is what lets a create honour
+// it and a `template status` show it.
+message ImageConfig {
+  repeated string env = 1;
+  repeated string entrypoint = 2;
+  repeated string cmd = 3;
+  string working_dir = 4;
+  string user = 5;
+}
+
+message BuildImageResponse {
+  string image_ref = 1;
+  // overlaybd_ref names the published artifact in the shared layer store, so a
+  // node that did not build the image can start from it. Empty when the node has
+  // no object store configured: the build still succeeds as a node-local .ext4,
+  // which is the historical single-node behaviour.
+  string overlaybd_ref = 2;
+  // size_bytes is the sealed layer's length, which a remote create range-reads
+  // against; a wrong value reads past the end.
+  int64 size_bytes = 3;
+  // layer_digests is the sealed layer chain, base first. A build produces a
+  // single base layer today, but the field is a list so a future layered build
+  // reports its chain without a proto change.
+  repeated string layer_digests = 4;
+  // config is the image configuration recovered from the build's OCI export, so
+  // the control plane records the Dockerfile's ENV/ENTRYPOINT/CMD/WORKDIR on the
+  // template. Nil when the build declared none.
+  ImageConfig config = 5;
+}
+
+// StartBuildResponse acknowledges that a build was registered and is running.
+// build_id echoes the tag the build runs under (builds are keyed by tag, so
+// there is no separate id); it is informational -- the caller already knows the
+// tag it sent, and follows the build by that tag via GetBuildStatus/CancelBuild.
+message StartBuildResponse {
+  string build_id = 1;
+}
+
+// GetBuildStatusRequest names the build to report on by its tag, the same key
+// StartBuild registered it under.
+message GetBuildStatusRequest {
+  string tag = 1;
+}
+
+// BuildPhase is where a build is in its lifecycle, as the node's build registry
+// sees it. The control plane maps SUCCEEDED/FAILED onto the authoritative
+// template state; RUNNING and UNKNOWN mean "keep polling".
+enum BuildPhase {
+  // BUILD_UNKNOWN: no build with this tag is known to the node -- it never
+  // started here, already finished and aged out of the registry, or the poll
+  // raced registration. Not terminal: the caller keeps polling (a live build it
+  // just started will appear) until its own deadline.
+  BUILD_UNKNOWN = 0;
+  // BUILD_RUNNING: registered and building. result and reason are unset.
+  BUILD_RUNNING = 1;
+  // BUILD_SUCCEEDED: finished successfully; result carries the coordinates.
+  BUILD_SUCCEEDED = 2;
+  // BUILD_FAILED: finished with an error; reason carries a human-readable cause.
+  BUILD_FAILED = 3;
+}
+
+// GetBuildStatusResponse reports a build's current phase, plus the result on
+// success or a reason on failure. It reuses BuildImageResponse for the result
+// so the success coordinates are described in exactly one place.
+message GetBuildStatusResponse {
+  BuildPhase phase = 1;
+  // result is set only when phase == BUILD_SUCCEEDED.
+  BuildImageResponse result = 2;
+  // reason is set only when phase == BUILD_FAILED: a human-readable cause,
+  // the same text the template's failure reason records.
+  string reason = 3;
+}
+
+// CancelBuildRequest names the build to stop by its tag, the same key BuildImage
+// runs under.
+message CancelBuildRequest {
+  string tag = 1;
+}
+
+// CancelBuildResponse reports whether a matching build was found and cancelled.
+// A false found is not an error: the build already finished, or ran on a
+// different node, and the caller wanted it stopped either way.
+message CancelBuildResponse {
+  bool found = 1;
+}

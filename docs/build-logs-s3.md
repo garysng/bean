@@ -9,9 +9,9 @@
 > in-memory `buildTracker` was removed. **Step B severed the result-carrying
 > stream:** the node's `BuildImage` server stream is gone, replaced by a
 > fire-and-forget `StartBuild` plus a polled `GetBuildStatus` (the node runs the
-> build under its own context and caches the outcome), and bean-api's
+> build under its own context and caches the outcome), and wizard-api's
 > `ReconcileBuilds` re-attaches to in-flight builds on restart. A build now
-> survives a bean-api restart. **KVM-host e2e (§14) passed — all 4 tests green
+> survives a wizard-api restart. **KVM-host e2e (§14) passed — all 4 tests green
 > on real hardware (2026-08-15)**, satisfying the binding rule; unit tests pass
 > too. The status-marker convention is defined in
 > [architecture.md](architecture.md) §0.
@@ -27,24 +27,24 @@ build runs detached on a node while the caller follows two endpoints:
 - `POST /v1/templates/build/cancel?ref=` — stops the build
 
 Both are backed today by `buildTracker`: an in-memory `map[ref]*buildLog` on
-**one** bean-api process, holding a 4 MiB ring buffer per build and a
+**one** wizard-api process, holding a 4 MiB ring buffer per build and a
 `context.CancelFunc` that kills the build. The node streams log frames up the
 `BuildImage` gRPC stream; `drainBuildStream` copies each frame into the ring
 buffer; `handleBuildLogs` reads back out of it. It works, single-replica. It has
-three defects the moment there is more than one bean-api, or a restart:
+three defects the moment there is more than one wizard-api, or a restart:
 
 1. **Multi-replica 404.** The `/logs` and `/cancel` requests can land on any
    replica, but the buffer and the `CancelFunc` live only on the replica that
    handled `/build`. Every other replica answers `BUILD_NOT_FOUND` for a build
    that is running fine. (`docs/build-service.md` §3.5 already names this.)
-2. **Restart loss.** The buffer is memory. Restart bean-api mid-build and the
+2. **Restart loss.** The buffer is memory. Restart wizard-api mid-build and the
    log is gone; `/cancel` can no longer reach the build (the `CancelFunc` died
    with the process) even though the build itself keeps running on the node.
-3. **Double relay.** Every log byte travels node → bean-api (gRPC) → client,
-   and is buffered whole in bean-api's RAM in between, bounded only by the 4 MiB
+3. **Double relay.** Every log byte travels node → wizard-api (gRPC) → client,
+   and is buffered whole in wizard-api's RAM in between, bounded only by the 4 MiB
    window that then *drops* earlier output ("log truncated" in `handleBuildLogs`).
 
-The fix is to stop making bean-api the log's home. bean-api should hold **no**
+The fix is to stop making wizard-api the log's home. wizard-api should hold **no**
 build state; it should be a stateless reader over a durable store, so any
 replica serves any build's logs and a restart loses nothing.
 
@@ -69,26 +69,26 @@ target:
 The lesson is the **three-way split**: logs in a log store, status in the
 database, cancel owned by the node. The control plane keeps nothing per-build.
 
-bean adopts the split. It does **not** adopt Loki: bean already has a
+wizard adopts the split. It does **not** adopt Loki: wizard already has a
 first-class object-store contract (`s3.ObjectStore`) backing snapshot blobs and
 overlaybd layers, with `GetRange`/`Head` and a dev `DirStore`. A build log is an
 append-only byte stream addressed by offset — exactly what that contract serves,
 and range reads are what `/logs?follow` needs. Adding Loki would be a second
 storage system to run, secure and reason about for a payload the object store
-already fits. So bean's log store **is S3**, in a dedicated bucket.
+already fits. So wizard's log store **is S3**, in a dedicated bucket.
 
 ## 3. Decisions (user, 2026-08-15)
 
 1. **noded uploads directly.** The node that runs the build writes the log
-   chunks to S3 itself — not bean-api relaying them. This removes the double
+   chunks to S3 itself — not wizard-api relaying them. This removes the double
    relay (§1.3) and, combined with decision 2, decouples the build's lifetime
-   from any bean-api connection. Cost: noded needs write credentials for the
+   from any wizard-api connection. Cost: noded needs write credentials for the
    logs bucket (§9).
 2. **Cancel track lands with it.** Cancellation moves to the node in the same
    change, not a later one: persist the builder's `nodeId`, hold the cancel
    handle on the node, add a node `CancelBuild` RPC (§8).
 3. **Dedicated bucket.** Build logs go in their own S3 bucket (e.g.
-   `bean-build-logs`), separate from the blobs/overlaybd bucket — different
+   `wizard-build-logs`), separate from the blobs/overlaybd bucket — different
    lifetime (logs expire; layers are content-addressed and kept), different
    retention policy, and a smaller credential blast radius for the node
    (§9).
@@ -99,7 +99,7 @@ already fits. So bean's log store **is S3**, in a dedicated bucket.
 ## 4. Architecture
 
 ```
-  bean build ──POST /build──▶ bean-api ──StartBuild──▶ noded  (owns the build)
+  wizard build ──POST /build──▶ wizard-api ──StartBuild──▶ noded  (owns the build)
                                  │                        │
                                  │                        ├─▶ buildctl / buildkitd
                                  │                        │
@@ -109,22 +109,22 @@ already fits. So bean's log store **is S3**, in a dedicated bucket.
                           store.Template                        ▲
                           {State, NodeID, BuildID}              │
                                  ▲                              │
-  bean build --follow ──GET /logs──▶ any bean-api replica ──────┘ (GetRange/Head)
-  bean build cancel ────POST /cancel─▶ any replica ──CancelBuild──▶ owning noded
+  wizard build --follow ──GET /logs──▶ any wizard-api replica ──────┘ (GetRange/Head)
+  wizard build cancel ────POST /cancel─▶ any replica ──CancelBuild──▶ owning noded
 ```
 
-Three stores, no per-build state in bean-api:
+Three stores, no per-build state in wizard-api:
 
-- **Logs → S3** (dedicated bucket), written by noded, read by any bean-api
+- **Logs → S3** (dedicated bucket), written by noded, read by any wizard-api
   replica over `GetRange`/`Head`.
 - **Status → `store.Template`** (`State`, `Reason`, plus `NodeID`, `BuildID`
   which already exist on the record). The store is the single source of truth
   for "is this build done, and how did it end".
-- **Cancel → the owning node.** bean-api resolves `Template.NodeID` and sends
+- **Cancel → the owning node.** wizard-api resolves `Template.NodeID` and sends
   `CancelBuild(ref)`; the node cancels the build it is running.
 
 Because the build runs under a node-owned context (registered in a node cancel
-registry, not tied to a bean-api stream), it **survives a bean-api restart** and
+registry, not tied to a wizard-api stream), it **survives a wizard-api restart** and
 any replica can follow or cancel it. That is the property the current design
 lacks.
 
@@ -147,7 +147,7 @@ buildlogs/<key>/manifest      small JSON: {seq, done, failed, reason, updatedAt}
   collision-free, and stable — a clean single path segment. `refToFilename` is
   today unexported in `internal/node/image`; this design lifts the sanitizer
   into a small shared helper (e.g. `internal/control/s3.BuildLogKey(ref)` or a
-  `buildkey` package) so **the writer (noded) and the reader (bean-api) derive
+  `buildkey` package) so **the writer (noded) and the reader (wizard-api) derive
   the identical key** without either importing the other's package.
 
 - **Chunks are immutable and append-only by sequence.** A chunk is written once,
@@ -170,7 +170,7 @@ sequence upward until `ErrNotFound`, or reads `manifest.seq`. `LIST` is an extra
 permission and a slower, eventually-consistent call; sequential `Head` is the
 same primitive lazy-pull already relies on.
 
-## 6. Read path (bean-api, stateless)
+## 6. Read path (wizard-api, stateless)
 
 `handleBuildLogs` no longer touches `buildTracker`. It becomes:
 
@@ -178,7 +178,7 @@ same primitive lazy-pull already relies on.
    (`Source != TemplateBuilt`) → `400`.
 2. Read chunks from the logs `ObjectStore` in sequence order, streaming each to
    the client as chunked `text/plain` (unchanged content type and framing — a
-   `curl` and `bean build --follow` still consume it without a parser).
+   `curl` and `wizard build --follow` still consume it without a parser).
 3. **Offset.** The client's byte offset maps to (chunk index, intra-chunk
    offset); the reader `Head`s to learn chunk sizes and `GetRange`s the tail of
    the first partial chunk, then whole chunks after. This is offset-addressed
@@ -214,21 +214,21 @@ an **S3 chunk writer**:
 - On completion it writes the terminal `manifest` (`done`, `failed`, `reason`)
   and flushes any tail.
 - The 40-line tail buffer (`buildLogTailLines`) that names the failing step in
-  the build **error** stays — it reaches bean-api by a different route (the RPC
+  the build **error** stays — it reaches wizard-api by a different route (the RPC
   result/error) and is what makes a failure legible without fetching the log.
 
 The gRPC log frames (`BuildImageEvent.log`) are **no longer needed for
-durability**. Options, decided in §8: either drop them (node uploads, bean-api
+durability**. Options, decided in §8: either drop them (node uploads, wizard-api
 never sees log bytes) or keep them as a best-effort live tail. The design drops
 them — one writer of the log, one reader path, no double relay.
 
 ## 8. Cancel track and the RPC reshape
 
-Two decisions collide here productively: **noded uploads** (so bean-api need not
-hold the log stream) and **cancel is node-owned** (so bean-api need not hold the
-`CancelFunc`). Together they mean bean-api holds **nothing** per build, which in
+Two decisions collide here productively: **noded uploads** (so wizard-api need not
+hold the log stream) and **cancel is node-owned** (so wizard-api need not hold the
+`CancelFunc`). Together they mean wizard-api holds **nothing** per build, which in
 turn means the `BuildImage` server-stream — whose entire job was to carry log
-frames to bean-api and whose `ctx` was the cancel mechanism — has no job left.
+frames to wizard-api and whose `ctx` was the cancel mechanism — has no job left.
 So the node build RPC is reshaped:
 
 - **`StartBuild(BuildImageRequest) → StartBuildResponse{buildId}`** — returns
@@ -236,31 +236,31 @@ So the node build RPC is reshaped:
   finishes. The node runs the build in its own goroutine under a node-owned
   `context` (derived from `context.Background()`, **not** the RPC's ctx), stored
   in a **per-node build registry** keyed by ref (mirrors E2B's
-  `buildInfo`/`buildCache`). This is what makes the build outlive any bean-api
+  `buildInfo`/`buildCache`). This is what makes the build outlive any wizard-api
   connection.
 - **`CancelBuild(ref) → CancelBuildResponse`** — looks up the ref in the
   registry and cancels its context, which kills `buildctl` exactly as the
   detached-ctx cancel does today. Cancelling an unknown/finished ref is not an
   error (idempotent), matching the object-store `Delete` convention.
-- **Terminal result — bean-api polls the node.** Someone must still flip
+- **Terminal result — wizard-api polls the node.** Someone must still flip
   `store.Template` to READY/FAILED with the artifact coordinates
   (`overlaybd_ref`, `size_bytes`, `layer_digests`, `config`). The node caches its
   build's outcome in the registry and exposes **`GetBuildStatus(ref) →
-  {phase, result, reason}`**; bean-api's per-build goroutine polls it once a
+  {phase, result, reason}`**; wizard-api's per-build goroutine polls it once a
   second until a terminal phase, then does `MarkReady` / `MarkFailed`. The write
-  of authoritative status stays control-side (the store is bean-api's); the node
+  of authoritative status stays control-side (the store is wizard-api's); the node
   only reports. This is **exactly what E2B does** — its API calls a
   fire-and-forget `TemplateCreate`, then a background `PollBuildStatus` tickers
   the node's `GetStatus` every second and writes Postgres on the control side
   (`packages/api/internal/template-manager/{create_template,template_status}.go`).
   It is also the smaller change: it needs **zero** changes to `nodesvc` — no
-  `image.Service` injection, no node→control result RPC, no ack — because bean-api
+  `image.Service` injection, no node→control result RPC, no ack — because wizard-api
   already holds `s.images` and the control→node `SandboxServiceClient`.
   - (rejected) node pushes a `ReportBuildResult` up the heartbeat. The node does
     have an authenticated heartbeat, so this is feasible, but it is not what E2B
     does, needs a reconciler for missed pushes anyway, and couples `nodesvc` to
     the template store. Deferred as an optional latency fast-path (§9-adjacent).
-- **Restart reconcile.** A restarted bean-api must re-attach to in-flight
+- **Restart reconcile.** A restarted wizard-api must re-attach to in-flight
   builds: on startup `ReconcileBuilds` lists `store.Template` in `BUILDING` and,
   for each, resumes `pollBuild(NodeID, ref)` under a fresh `maxBuildDuration`
   bound (a template with no `NodeID` is failed — no node owns it). Same poll loop
@@ -281,13 +281,13 @@ one big cut:
 - **Step A — logs to S3, cancel to node, keep the stream.** noded uploads log
   chunks to S3 (§7); `/logs` reads from S3 (§6); add the node cancel registry +
   `CancelBuild`; persist `NodeID`; `/cancel` calls the node. Keep the
-  `BuildImage` server-stream as the *result carrier* only (bean-api still waits
+  `BuildImage` server-stream as the *result carrier* only (wizard-api still waits
   on it for the result frame and does `MarkReady`). This already fixes the
   multi-replica 404, the restart loss for **logs**, and the double relay — and
   is fully testable.
 - **Step B — sever the stream (done).** Replaced the held `BuildImage` stream
   with a fire-and-forget `StartBuild` + a polled `GetBuildStatus` + the
-  `ReconcileBuilds` restart reconciler, so a bean-api restart no longer owes a
+  `ReconcileBuilds` restart reconciler, so a wizard-api restart no longer owes a
   status write it could miss — the build runs under the node's own context and
   the replacement re-attaches by polling. This is full E2B-shaped decoupling.
 
@@ -299,8 +299,8 @@ one big cut:
 noded uploading means noded needs **write** credentials for the logs bucket.
 Rules from [s3-storage.md](s3-storage.md) §6 hold:
 
-- **Secrets come from env vars, never flags** — `BEAN_S3_ACCESS_KEY` /
-  `BEAN_S3_SECRET_KEY` (flags leak via `/proc/<pid>/cmdline` and `ps`). The
+- **Secrets come from env vars, never flags** — `WIZARD_S3_ACCESS_KEY` /
+  `WIZARD_S3_SECRET_KEY` (flags leak via `/proc/<pid>/cmdline` and `ps`). The
   endpoint/region/bucket may be flags. noded already loads S3 creds this way for
   the layer store (`cmd/noded/main.go:717`), so the logs bucket reuses the
   pattern — one `s3.Client`, a second `NewBucketStore` over the logs bucket
@@ -314,7 +314,7 @@ Rules from [s3-storage.md](s3-storage.md) §6 hold:
   long-lived S3 credentials; STS rotation and presigned-URL upload are not yet
   implemented. This design *adds a second bucket the node writes*, so it widens
   that debt slightly and should be called out when STS lands — the eventual
-  shape is bean-api minting a short-lived presigned PUT (or STS session) scoped
+  shape is wizard-api minting a short-lived presigned PUT (or STS session) scoped
   to `buildlogs/<key>/*` and handing it to the node, so the node never holds a
   standing logs credential. Out of scope here; noted so it is not forgotten.
 
@@ -327,12 +327,12 @@ on the logs bucket, operator-configured (e.g. expire `buildlogs/` objects after
 N days). The dedicated bucket (§3.3) is what makes this clean: the rule applies
 to the whole bucket without touching the content-addressed layer blobs, which
 must **never** expire. Dev/CI use `DirStore` and simply keep everything (or a
-cron prunes the dir); there is no lifecycle daemon in bean.
+cron prunes the dir); there is no lifecycle daemon in wizard.
 
 ## 11. Config
 
-- **bean-api**: `--s3-logs-bucket` (or `BEAN_S3_LOGS_BUCKET`), default e.g.
-  `bean-build-logs`. When set with the existing `--s3-endpoint`, bean-api builds
+- **wizard-api**: `--s3-logs-bucket` (or `WIZARD_S3_LOGS_BUCKET`), default e.g.
+  `wizard-build-logs`. When set with the existing `--s3-endpoint`, wizard-api builds
   a second `NewBucketStore` for reads. Unset → `DirStore` under a logs dir for
   dev, mirroring how blobs fall back (`snapshot.NewDirBlobs`).
 - **noded**: the same logs bucket name (flag/env), so the node builds a
@@ -345,7 +345,7 @@ cron prunes the dir); there is no lifecycle daemon in bean.
 
 | Today (`buildlog.go` / `build.go`) | Becomes |
 |---|---|
-| `buildTracker map[ref]*buildLog` (in-mem) | **deleted** — no per-build state in bean-api |
+| `buildTracker map[ref]*buildLog` (in-mem) | **deleted** — no per-build state in wizard-api |
 | 4 MiB ring buffer + `maxBuildLogBytes` | S3 chunk objects, no window, no drop |
 | `buildLogRetention` (30 min, in-proc) | S3 bucket lifecycle rule (§10) |
 | `changed` channel (no-poll follow) | `Head`/`manifest` short-poll in `/logs` |
@@ -375,9 +375,9 @@ the multi-replica crack) to point at this doc.
 Unit tests (S3 chunking against `DirStore`, key-derivation parity between writer
 and reader, offset/follow reader logic) are necessary but **not sufficient** —
 every phase is verified on the `.75` KVM host (see the storage-convergence
-binding rule; `docs/bean-75` host quirks: buildctl on PATH,
+binding rule; `docs/wizard-75` host quirks: buildctl on PATH,
 `docker.m.daocloud.io` mirror, `vhost_vsock`). The e2e lives in
-`tests/e2e/buildlogs_test.go` (build tag `e2e`, skips unless `BEAN_S3_ENDPOINT`
+`tests/e2e/buildlogs_test.go` (build tag `e2e`, skips unless `WIZARD_S3_ENDPOINT`
 is set) and is run via `hack/buildlogs-e2e.sh <creds-env-file>`. The harness runs
 its node with `--runtime fc` (plus the firecracker/kernel/agent-disk assets), not
 `--runtime local`: only the fc tier implements `runtime.ImageBuilder`
@@ -390,13 +390,13 @@ The e2e proof:
 1. Build a template on the KVM host with a real `--s3-logs-bucket` (MinIO).
    Confirm chunk objects land at `buildlogs/<key>/NNNNNN` and `manifest`
    advances. (`TestBuildLogsLandInS3`)
-2. Follow the log from a **second** bean-api replica: output is continuous, no
+2. Follow the log from a **second** wizard-api replica: output is continuous, no
    `BUILD_NOT_FOUND`, no `[log truncated]` gap. This is the multi-replica read
    fix, proven. (`TestBuildLogsServedFromOtherReplica`)
-3. `bean build cancel` from a replica that did not start the build: the build
+3. `wizard build cancel` from a replica that did not start the build: the build
    stops (buildctl dies on the node), `store.Template` goes `FAILED`, the ref
    frees for a retry. (`TestBuildCancelFromOtherReplica`)
-4. **Kill the bean-api that started a build, mid-build, and bring up a
+4. **Kill the wizard-api that started a build, mid-build, and bring up a
    replacement on the same ports: the build keeps running on the node and the
    replacement's `ReconcileBuilds` drives the template to `READY` with the real
    `overlaybd_ref`/`layer_digests`.** This is the Step B restart-survival

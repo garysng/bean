@@ -6,8 +6,8 @@
 # anyway -- page cache is warm, the image file is local, the device-mapper base is
 # already set up. So this asserts on the *counters* that say which path ran:
 #
-#   bean_node_warm_lookups_total{outcome="hit"}    a create restored
-#   bean_node_warm_lookups_total{outcome="miss"}   a create booted
+#   wizard_node_warm_lookups_total{outcome="hit"}    a create restored
+#   wizard_node_warm_lookups_total{outcome="miss"}   a create booted
 #
 # and separately on host CPU, because CPU-seconds are what bounds throughput and
 # they are the thing a warm snapshot removes. Wall-clock latency is reported but is
@@ -17,7 +17,7 @@
 # this host belong to other work.
 set -u
 
-REPO=${REPO:-/root/bean-net}
+REPO=${REPO:-/root/wizard-net}
 # The image must have a digest recorded in its sidecar, or it cannot be warmed at
 # all and every check below passes vacuously -- which is exactly what happened on
 # the first run of this probe against busybox:1.35, converted before digests were
@@ -26,13 +26,13 @@ REPO=${REPO:-/root/bean-net}
 # the local name it is registered under.
 IMAGE=${IMAGE:-busybox:1.35}
 PROBE_TAG=${PROBE_TAG:-}
-ASSETS=${ASSETS:-/var/lib/bean/assets}
+ASSETS=${ASSETS:-/var/lib/wizard/assets}
 API_PORT=${API_PORT:-18080}
 METRICS_PORT=${METRICS_PORT:-17444}
 API_KEY=${API_KEY:-devkey}
 BIN=${BIN:-/tmp}
-RUN=${RUN:-/tmp/beanrun}
-BEAN="$BIN/bean"
+RUN=${RUN:-/tmp/wizardrun}
+WIZARD="$BIN/wizard"
 
 CREATED=()
 FAILED=0
@@ -53,7 +53,7 @@ cleanup() {
   if [ ${#CREATED[@]} -gt 0 ]; then
     note "killing the ${#CREATED[@]} sandbox(es) this probe created"
     for s in "${CREATED[@]}"; do
-      "$BEAN" kill "$s" >/dev/null 2>&1 || true
+      "$WIZARD" kill "$s" >/dev/null 2>&1 || true
     done
   fi
 }
@@ -67,7 +67,7 @@ counter() {
   local v
   v=$(curl -sf "http://127.0.0.1:$METRICS_PORT/metrics" 2>/dev/null \
     | awk -v o="outcome=\"$outcome\"" \
-        '$0 ~ /^bean_node_warm_lookups_total/ && $0 ~ o {print $2; f=1}
+        '$0 ~ /^wizard_node_warm_lookups_total/ && $0 ~ o {print $2; f=1}
          END {if (!f) print 0}' | head -1)
   echo "${v:-0}"
 }
@@ -100,7 +100,7 @@ cpu_seconds() {
 cd "$REPO" || exit 1
 
 note "building"
-for c in bean bean-api noded; do
+for c in wizard wizard-api noded; do
   go build -o "$BIN/$c" "./cmd/$c" || exit 1
 done
 
@@ -112,7 +112,7 @@ done
 # that a prewarm rebuilds in seconds, unlike the snapshot cache next door, which
 # holds the node's copy of user checkpoints.
 note "clearing warm bundles so the first create is genuinely a miss"
-WARM_DIR=${WARM_DIR:-/var/lib/bean/sandboxes/.warm}
+WARM_DIR=${WARM_DIR:-/var/lib/wizard/sandboxes/.warm}
 if [ -d "$WARM_DIR" ]; then
   found=$(find "$WARM_DIR" -maxdepth 1 -name '*.warm' | wc -l)
   find "$WARM_DIR" -maxdepth 1 -name '*.warm' -delete
@@ -136,8 +136,8 @@ grep -q 'warm snapshots on' "$RUN/noded.log" || {
 }
 echo "noded reports: $(grep 'warm snapshots on' "$RUN/noded.log" | tail -1)"
 
-export BEAN_API_KEY="$API_KEY"
-export BEAN_BASE_URL="http://127.0.0.1:$API_PORT"
+export WIZARD_API_KEY="$API_KEY"
+export WIZARD_BASE_URL="http://127.0.0.1:$API_PORT"
 
 # An image with no digest in its sidecar cannot be warmed, and the checks below
 # would then all pass while proving nothing. Verified here rather than assumed,
@@ -145,7 +145,7 @@ export BEAN_BASE_URL="http://127.0.0.1:$API_PORT"
 note "confirming the image has a digest, without which it cannot be warmed"
 sidecar_has_digest() {
   local ref=$1
-  for f in /var/lib/bean/images/*.ref; do
+  for f in /var/lib/wizard/images/*.ref; do
     [ -f "$f" ] || continue
     if grep -q "\"ref\":\"$ref\"" "$f" 2>/dev/null; then
       grep -q '"digest"' "$f" && return 0
@@ -162,7 +162,7 @@ if [ -z "$PROBE_TAG" ]; then
   else
     echo "$IMAGE has no digest (converted before digests were recorded, or built)."
     echo "Looking for any image that does, since a fresh conversion needs a registry."
-    PROBE_TAG=$(for f in /var/lib/bean/images/*.ref; do
+    PROBE_TAG=$(for f in /var/lib/wizard/images/*.ref; do
       grep -l '"digest"' "$f" 2>/dev/null >/dev/null && \
         sed -n 's/.*"ref":"\([^"]*\)".*/\1/p' "$f"
     done | head -1)
@@ -181,7 +181,7 @@ echo "probing with: $IMAGE"
 # run creates a sandbox and records it for cleanup. Echoes the id.
 run_sandbox() {
   local out id
-  out=$("$BEAN" run --image "$IMAGE" 2>&1)
+  out=$("$WIZARD" run --image "$IMAGE" 2>&1)
   id=$(printf '%s\n' "$out" | grep -oE 'sbx_[0-9a-f]{20}' | head -1)
   if [ -z "$id" ]; then
     printf '%s\n' "$out" | tail -3 >&2
@@ -235,7 +235,7 @@ if ! grep -q 'warm snapshot stored' "$RUN/noded.log"; then
   FAILED=$((FAILED + 1))
   exit 1
 fi
-ls -la /var/lib/bean/sandboxes/.warm/ 2>/dev/null | tail -3
+ls -la /var/lib/wizard/sandboxes/.warm/ 2>/dev/null | tail -3
 
 note "second create: a warm snapshot exists, so this must restore"
 miss_before=$(counter miss)
@@ -257,7 +257,7 @@ check "the second create was not a miss" "0" \
   "the lookup found the bundle"
 
 note "the guest a warm create produced has to be usable"
-if out=$("$BEAN" exec "$second" -- sh -c 'echo warm-guest-ok' 2>&1); then
+if out=$("$WIZARD" exec "$second" -- sh -c 'echo warm-guest-ok' 2>&1); then
   check "the restored guest runs commands" "warm-guest-ok" \
     "$(echo "$out" | tr -d '[:space:]')" \
     "a restored guest is a working sandbox, not just a fast one"

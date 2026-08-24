@@ -21,10 +21,10 @@ set -uo pipefail
 
 RUNS=${RUNS:-3}
 IMAGE=${IMAGE:-alpine:3.20}
-BASE_URL=${BEAN_BASE_URL:-http://127.0.0.1:18080}
-API_KEY=${BEAN_API_KEY:-devkey}
-BEAN=${BEAN:-/tmp/bean}
-SBXDIR=${SBXDIR:-/var/lib/bean/sandboxes}
+BASE_URL=${WIZARD_BASE_URL:-http://127.0.0.1:18080}
+API_KEY=${WIZARD_API_KEY:-devkey}
+WIZARD=${WIZARD:-/tmp/wizard}
+SBXDIR=${SBXDIR:-/var/lib/wizard/sandboxes}
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -34,11 +34,11 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-export BEAN_BASE_URL="$BASE_URL" BEAN_API_KEY="$API_KEY"
+export WIZARD_BASE_URL="$BASE_URL" WIZARD_API_KEY="$API_KEY"
 say() { printf '%s\n' "$*"; }
 hr() { printf -- '------------------------------------------------------------\n'; }
 
-[[ -x "$BEAN" ]] || { say "bean CLI not executable: $BEAN"; exit 69; }
+[[ -x "$WIZARD" ]] || { say "wizard CLI not executable: $WIZARD"; exit 69; }
 
 say "This needs the node started with --debug-console, otherwise the guest emits"
 say "no kernel log and there is nothing to read timestamps from."
@@ -92,7 +92,7 @@ for line in open(sys.argv[1], errors='replace'):
             or 'Freeing unused kernel' in msg
             or 'Kernel command line' in msg and False):
         init_at = t
-    if agent_at is None and ('beand' in msg or 'bean' in msg.lower()):
+    if agent_at is None and ('wizardd' in msg or 'wizard' in msg.lower()):
         agent_at = t
 
 if first is None:
@@ -124,6 +124,6 @@ say "Either way the conclusion for task #44 holds: not booting at all removes"
 say "both parts, which is what e2b does (real boot only at template-build time)."
 
 for sbx in "${ids[@]}"; do
-  "$BEAN" kill "$sbx" >/dev/null 2>&1 &
+  "$WIZARD" kill "$sbx" >/dev/null 2>&1 &
 done
 wait

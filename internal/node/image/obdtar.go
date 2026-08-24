@@ -8,7 +8,7 @@ import (
 	"strings"
 )
 
-// A layer bean seals is wrapped in a tar, so its payload does not start at offset 0.
+// A layer wizard seals is wrapped in a tar, so its payload does not start at offset 0.
 //
 // `overlaybd-commit -z -t` is what produces every layer this node writes: -z compresses
 // the data to a ZFile, and -t wraps the result in a tar so the file is a valid OCI blob
@@ -53,7 +53,7 @@ func (s *sectionReaderAt) ReadAt(p []byte, off int64) (int, error) {
 // along with its length.
 //
 // A file that is not a tar is returned unchanged, so a layer sealed without -t still
-// works: the wrapper is a property of how bean seals, not of the format, and a reader
+// works: the wrapper is a property of how wizard seals, not of the format, and a reader
 // that required it would refuse a hand-sealed layer.
 func openSealedLayerPayload(src io.ReaderAt, fileSize int64) (io.ReaderAt, int64, error) {
 	base, size, err := findSealedPayload(src, fileSize)

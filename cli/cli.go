@@ -1,4 +1,4 @@
-// Package cli implements the bean CLI against the REST API.
+// Package cli implements the wizard CLI against the REST API.
 package cli
 
 import (
@@ -20,7 +20,7 @@ import (
 	"time"
 )
 
-// Client is a minimal REST client for bean-api.
+// Client is a minimal REST client for wizard-api.
 type Client struct {
 	BaseURL string
 	APIKey  string
@@ -29,9 +29,9 @@ type Client struct {
 
 func NewClient(baseURL, apiKey string) *Client {
 	timeout := 15 * time.Minute
-	// BEAN_TIMEOUT accepts a Go duration (e.g. "30s"); mainly for tests and
+	// WIZARD_TIMEOUT accepts a Go duration (e.g. "30s"); mainly for tests and
 	// scripted use where a hung endpoint should fail fast.
-	if v := os.Getenv("BEAN_TIMEOUT"); v != "" {
+	if v := os.Getenv("WIZARD_TIMEOUT"); v != "" {
 		if d, err := time.ParseDuration(v); err == nil && d > 0 {
 			timeout = d
 		}
@@ -102,8 +102,8 @@ func Run(args []string, stdout, stderr io.Writer) int {
 		fmt.Fprintln(stderr, usage)
 		return ExitUsage
 	}
-	baseURL := envOr("BEAN_BASE_URL", "http://127.0.0.1:8080")
-	apiKey := os.Getenv("BEAN_API_KEY")
+	baseURL := envOr("WIZARD_BASE_URL", "http://127.0.0.1:8080")
+	apiKey := os.Getenv("WIZARD_API_KEY")
 	c := NewClient(baseURL, apiKey)
 
 	cmd, rest := args[0], args[1:]
@@ -136,7 +136,7 @@ func Run(args []string, stdout, stderr io.Writer) int {
 	case "template":
 		err = cmdTemplate(c, rest, stdout)
 	case "version":
-		fmt.Fprintln(stdout, "bean CLI (dev)")
+		fmt.Fprintln(stdout, "wizard CLI (dev)")
 	default:
 		fmt.Fprintln(stderr, usage)
 		return ExitUsage
@@ -148,7 +148,7 @@ func Run(args []string, stdout, stderr io.Writer) int {
 	return ExitOK
 }
 
-const usage = `usage: bean <command> [args]
+const usage = `usage: wizard <command> [args]
 commands:
   run (--image-ref IMG | --template ID|NAME | --snapshot SNAP) [--label k=v]
       [--idle-timeout 300s] [--on-idle pause|kill]
@@ -178,9 +178,9 @@ commands:
 output: --json for machine-readable output, --quiet for identifiers only
 exit:   0 ok, 64 not found, 69 unavailable (retry may help), 70 failed,
         125 usage error
-env:    BEAN_BASE_URL (default http://127.0.0.1:8080), BEAN_API_KEY
-        BEAN_PROXY_URL routes exec and cp through bean-proxy (data plane);
-        unset uses the bean-api relay`
+env:    WIZARD_BASE_URL (default http://127.0.0.1:8080), WIZARD_API_KEY
+        WIZARD_PROXY_URL routes exec and cp through wizard-proxy (data plane);
+        unset uses the wizard-api relay`
 
 func envOr(k, def string) string {
 	if v := os.Getenv(k); v != "" {
@@ -316,17 +316,17 @@ func cmdLs(c *Client, args []string, stdout io.Writer) error {
 func cmdExec(c *Client, args []string, stdout, stderr io.Writer) int {
 	_, pos := parseFlags(args)
 	if len(pos) < 2 {
-		fmt.Fprintln(stderr, "usage: bean exec SBX -- CMD...")
+		fmt.Fprintln(stderr, "usage: wizard exec SBX -- CMD...")
 		return ExitUsage
 	}
 	id, cmd := pos[0], pos[1:]
 
-	// Data-plane path: when BEAN_PROXY_URL is set, exec goes straight to the
-	// agent through bean-proxy, and the relay through bean-api is skipped. The
+	// Data-plane path: when WIZARD_PROXY_URL is set, exec goes straight to the
+	// agent through wizard-proxy, and the relay through wizard-api is skipped. The
 	// sandbox record carries the domain the authority is built against, so a GET
 	// resolves it before dialling. A relay-path fallback covers an unset proxy or
 	// a sandbox with no domain (a dev/single-node deployment).
-	if dp, ok := dataPlaneFor(os.Getenv("BEAN_PROXY_URL"), ""); ok {
+	if dp, ok := dataPlaneFor(os.Getenv("WIZARD_PROXY_URL"), ""); ok {
 		res, err := c.execViaDataPlane(dp, id, cmd)
 		if err != nil {
 			fmt.Fprintln(stderr, "error:", err)
@@ -361,7 +361,7 @@ func cmdExec(c *Client, args []string, stdout, stderr io.Writer) int {
 func cmdKill(c *Client, args []string, stdout io.Writer) error {
 	flags, pos := parseFlags(args)
 	if len(pos) < 1 {
-		return usagef("usage: bean kill SBX")
+		return usagef("usage: wizard kill SBX")
 	}
 	path := "/v1/sandboxes/" + pos[0]
 	if flags["force"] == "true" {
@@ -376,7 +376,7 @@ func cmdKill(c *Client, args []string, stdout io.Writer) error {
 func cmdSimplePost(c *Client, args []string, action string) error {
 	_, pos := parseFlags(args)
 	if len(pos) < 1 {
-		return usagef("usage: bean %s SBX", action)
+		return usagef("usage: wizard %s SBX", action)
 	}
 	return c.doJSON("POST", "/v1/sandboxes/"+pos[0]+"/"+action, nil, nil)
 }
@@ -384,7 +384,7 @@ func cmdSimplePost(c *Client, args []string, action string) error {
 func cmdLogs(c *Client, args []string, stdout io.Writer) error {
 	flags, pos := parseFlags(args)
 	if len(pos) < 1 {
-		return usagef("usage: bean logs SBX")
+		return usagef("usage: wizard logs SBX")
 	}
 	path := "/v1/sandboxes/" + pos[0] + "/logs"
 	if t := flags["tail"]; t != "" {
@@ -427,7 +427,7 @@ func cmdBuild(c *Client, args []string, stdout io.Writer) error {
 	p := newPrinter(stdout, flags)
 	tag := flags["tag"]
 	if tag == "" {
-		return usagef("usage: bean build --tag REF [--file Dockerfile] [CONTEXT_DIR]")
+		return usagef("usage: wizard build --tag REF [--file Dockerfile] [CONTEXT_DIR]")
 	}
 
 	dockerfile := flags["file"]
@@ -472,7 +472,7 @@ func cmdBuild(c *Client, args []string, stdout io.Writer) error {
 	// --follow prints the build's output and waits for it. It is opt-in rather
 	// than the default because the accepted response is the contract a script
 	// depends on, and because Ctrl-C on a followed build stops watching without
-	// stopping the build — `bean build cancel` is what stops it.
+	// stopping the build — `wizard build cancel` is what stops it.
 	if flags["follow"] == "true" || flags["f"] == "true" {
 		if err := p.result(out.Template, field{"state", out.State}); err != nil {
 			return err
@@ -485,7 +485,7 @@ func cmdBuild(c *Client, args []string, stdout io.Writer) error {
 	}
 	// A build takes minutes, so the next step is worth naming — but only for a
 	// person: a script already knows what it is going to poll.
-	p.note("follow with: bean build logs %s", out.Template)
+	p.note("follow with: wizard build logs %s", out.Template)
 	return nil
 }
 
@@ -522,7 +522,7 @@ func streamBuildLogs(c *Client, ref string, stdout io.Writer) error {
 			return rerr
 		}
 	}
-	// A failed build has to exit non-zero, or `bean build --follow && deploy`
+	// A failed build has to exit non-zero, or `wizard build --follow && deploy`
 	// would deploy from an image that was never produced. The outcome is in the
 	// body because the status line was sent before it was known.
 	if strings.Contains(tail.String(), "\nbuild failed:") {
@@ -536,7 +536,7 @@ func streamBuildLogs(c *Client, ref string, stdout io.Writer) error {
 // asking for a running build's logs is asking to watch it.
 func cmdBuildLogs(c *Client, _ map[string]string, pos []string, stdout io.Writer) error {
 	if len(pos) < 1 {
-		return usagef("usage: bean build logs REF")
+		return usagef("usage: wizard build logs REF")
 	}
 	return streamBuildLogs(c, pos[0], stdout)
 }
@@ -544,7 +544,7 @@ func cmdBuildLogs(c *Client, _ map[string]string, pos []string, stdout io.Writer
 // cmdBuildCancel stops a running build.
 func cmdBuildCancel(c *Client, flags map[string]string, pos []string, stdout io.Writer) error {
 	if len(pos) < 1 {
-		return usagef("usage: bean build cancel REF")
+		return usagef("usage: wizard build cancel REF")
 	}
 	var out struct {
 		Template string `json:"template"`
@@ -704,7 +704,7 @@ func loadDockerignore(dir string) (func(string) bool, error) {
 func cmdFork(c *Client, args []string, stdout io.Writer) error {
 	flags, pos := parseFlags(args)
 	if len(pos) == 0 {
-		return usagef("usage: bean fork SBX [--count N] [--label k=v]")
+		return usagef("usage: wizard fork SBX [--count N] [--label k=v]")
 	}
 	body := map[string]any{}
 	if n := flags["count"]; n != "" {
@@ -761,12 +761,12 @@ func cmdFork(c *Client, args []string, stdout io.Writer) error {
 func cmdSnapshot(c *Client, args []string, stdout io.Writer) error {
 	flags, pos := parseFlags(args)
 	if len(pos) == 0 {
-		return usagef("usage: bean snapshot create SBX | ls | rm SNAP")
+		return usagef("usage: wizard snapshot create SBX | ls | rm SNAP")
 	}
 	switch pos[0] {
 	case "create":
 		if len(pos) < 2 {
-			return usagef("usage: bean snapshot create SBX [--name N] [--base SNAP]")
+			return usagef("usage: wizard snapshot create SBX [--name N] [--base SNAP]")
 		}
 		body := map[string]any{"name": flags["name"]}
 		// keepRunning defaults true; --no-keep-running stops the source once
@@ -868,7 +868,7 @@ func cmdSnapshot(c *Client, args []string, stdout io.Writer) error {
 
 	case "rm":
 		if len(pos) < 2 {
-			return usagef("usage: bean snapshot rm SNAP")
+			return usagef("usage: wizard snapshot rm SNAP")
 		}
 		if err := c.doJSON("DELETE", "/v1/snapshots/"+pos[1], nil, nil); err != nil {
 			return err
@@ -884,7 +884,7 @@ func cmdSnapshot(c *Client, args []string, stdout io.Writer) error {
 func cmdTemplate(c *Client, args []string, stdout io.Writer) error {
 	flags, pos := parseFlags(args)
 	if len(pos) == 0 {
-		return usagef("usage: bean template ls [--source built|converted] | " +
+		return usagef("usage: wizard template ls [--source built|converted] | " +
 			"status ID|NAME | rm ID|NAME | prewarm REF...")
 	}
 	switch pos[0] {
@@ -924,7 +924,7 @@ func cmdTemplate(c *Client, args []string, stdout io.Writer) error {
 
 	case "status":
 		if len(pos) < 2 {
-			return usagef("usage: bean template status ID|NAME")
+			return usagef("usage: wizard template status ID|NAME")
 		}
 		var out map[string]any
 		if err := c.doJSON("GET", "/v1/templates/status?"+templateQuery(pos[1]), nil, &out); err != nil {
@@ -945,7 +945,7 @@ func cmdTemplate(c *Client, args []string, stdout io.Writer) error {
 
 	case "rm":
 		if len(pos) < 2 {
-			return usagef("usage: bean template rm ID|NAME")
+			return usagef("usage: wizard template rm ID|NAME")
 		}
 		if err := c.doJSON("DELETE", "/v1/templates?"+templateQuery(pos[1]), nil, nil); err != nil {
 			return err
@@ -954,7 +954,7 @@ func cmdTemplate(c *Client, args []string, stdout io.Writer) error {
 
 	case "prewarm":
 		if len(pos) < 2 {
-			return usagef("usage: bean template prewarm REF... [--replicas N]")
+			return usagef("usage: wizard template prewarm REF... [--replicas N]")
 		}
 		body := map[string]any{"refs": pos[1:]}
 		// How widely to warm an image is a capacity decision a caller can act
@@ -1073,12 +1073,12 @@ func streamEvents(c *Client, sandbox, label string, stdout io.Writer) error {
 func cmdCp(c *Client, args []string, stdout io.Writer) error {
 	flags, pos := parseFlags(args)
 	if len(pos) != 2 {
-		return usagef("usage: bean cp SRC DST")
+		return usagef("usage: wizard cp SRC DST")
 	}
 	src, dst := pos[0], pos[1]
 	// Data-plane path when configured: file transfer goes straight to the agent
-	// through the proxy, mirroring exec. Unset BEAN_PROXY_URL keeps the REST relay.
-	dp, dataPlane := dataPlaneFor(os.Getenv("BEAN_PROXY_URL"), "")
+	// through the proxy, mirroring exec. Unset WIZARD_PROXY_URL keeps the REST relay.
+	dp, dataPlane := dataPlaneFor(os.Getenv("WIZARD_PROXY_URL"), "")
 	switch {
 	case strings.HasPrefix(dst, "sbx:"):
 		id, remote, err := splitSbxPath(dst)
@@ -1170,7 +1170,7 @@ func cmdEvents(c *Client, args []string, stdout io.Writer) error {
 		return streamEvents(c, sandbox, flags["label"], stdout)
 	}
 	if len(pos) < 1 {
-		return usagef("usage: bean events SBX [-f] [--label k=v]")
+		return usagef("usage: wizard events SBX [-f] [--label k=v]")
 	}
 	var out struct {
 		Events []struct {

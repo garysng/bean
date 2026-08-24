@@ -13,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/garysng/bean/internal/node/network"
+	"github.com/garysng/wizard/internal/node/network"
 )
 
 // What these tests are guarding is which network namespace the VMM process ends
@@ -220,7 +220,7 @@ func TestStartVMMEntersTheSandboxNamespace(t *testing.T) {
 		t.Skip("iproute2 not available")
 	}
 
-	ns := "bean-test-" + strconv.Itoa(os.Getpid())
+	ns := "wizard-test-" + strconv.Itoa(os.Getpid())
 	if out, err := exec.Command("ip", "netns", "add", ns).CombinedOutput(); err != nil {
 		t.Skipf("ip netns add: %v: %s", err, out)
 	}

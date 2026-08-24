@@ -10,7 +10,7 @@ Sandbox networking is **implemented and shipped**: per-sandbox netns + address p
 layers of MASQUERADE + FORWARD DROP + DNS, with rule counters verified on a live guest
 (status.md marks "Sandbox networking ✅ / Port exposure ✅"). SWE-bench-class tasks need
 `pip install` / `git clone`, so this was never an optimisation that could be sequenced later —
-it was the gap that made bean unusable, and it is now closed. Only a few refinements remain
+it was the gap that made wizard unusable, and it is now closed. Only a few refinements remain
 (MTU tuning, bandwidth limiting via tc, IPv6, conntrack limits — see §8).
 
 The core of this document is not "how to create a tap", which is three `ip` commands. The core
@@ -51,17 +51,17 @@ at restore — the same logic as using the constant vsock CID 3
 **Taps with the same name can coexist in different netns** (the premise this whole scheme rests on):
 
 ```
-ip netns exec bean-probe-a ip tuntap add name beantap0 mode tap
-ip netns exec bean-probe-b ip tuntap add name beantap0 mode tap
-→ beantap0  DOWN  da:b8:ae:9e:9e:93     (netns a)
-→ beantap0  DOWN  82:7d:d5:94:bb:cf     (netns b)
+ip netns exec wizard-probe-a ip tuntap add name wizardtap0 mode tap
+ip netns exec wizard-probe-b ip tuntap add name wizardtap0 mode tap
+→ wizardtap0  DOWN  da:b8:ae:9e:9e:93     (netns a)
+→ wizardtap0  DOWN  82:7d:d5:94:bb:cf     (netns b)
 ```
 
 **Entering a netns does not change the working directory** (`hack/netns-cwd-probe.sh`):
 
 ```
-outside netns: /tmp/bean-cwd-check
-inside netns:  /tmp/bean-cwd-check
+outside netns: /tmp/wizard-cwd-check
+inside netns:  /tmp/wizard-cwd-check
 ```
 
 The second one matters more than it sounds: **snapshot portability depends entirely on
@@ -76,8 +76,8 @@ Inside the guest (identical for every sandbox, so a snapshot can move anywhere)
   eth0    172.31.0.2/30
   default via 172.31.0.1
 
-Inside the netns (one netns per sandbox, named bean-<sandboxID>)
-  beantap0  172.31.0.1/30        ← the guest's gateway
+Inside the netns (one netns per sandbox, named wizard-<sandboxID>)
+  wizardtap0  172.31.0.1/30        ← the guest's gateway
   veth-in   10.<a>.<b>.2/30      ← unique per sandbox
   default via 10.<a>.<b>.1
 
@@ -131,7 +131,7 @@ two sandboxes collide.
 So the pool **maintains no authoritative state of its own** and instead rebuilds from the host:
 
 ```go
-// On startup: list netns with the bean- prefix, parse out the index, mark it occupied
+// On startup: list netns with the wizard- prefix, parse out the index, mark it occupied
 // On allocation: take the first free index
 // On release: delete the netns (the veth goes with it), clear the NAT rules
 ```
@@ -140,7 +140,7 @@ So the pool **maintains no authoritative state of its own** and instead rebuilds
 report what it holds ([image-pipeline.md](image-pipeline.md) §1). A ledger in the control plane
 or in memory will diverge from reality either way.
 
-After a restart it **takes over rather than cleans up**: an existing `bean-<id>` netns may be
+After a restart it **takes over rather than cleans up**: an existing `wizard-<id>` netns may be
 serving a sandbox that was already running before the restart. Deciding what is an orphan means
 comparing against the control plane's `SyncState` desired set, which belongs to host resource
 reconciliation (GitHub #17) and is out of scope here.
@@ -151,10 +151,10 @@ reconciliation (GitHub #17) and is out of scope here.
 fc_lifecycle_linux.go:519) exists for exactly this:
 
 ```json
-"network_overrides": [{"iface_id": "eth0", "host_dev_name": "beantap0"}]
+"network_overrides": [{"iface_id": "eth0", "host_dev_name": "wizardtap0"}]
 ```
 
-**In our scheme the restore path keys on the tap name being identical**: the tap is `beantap0`
+**In our scheme the restore path keys on the tap name being identical**: the tap is `wizardtap0`
 in every netns, so the name recorded in the snapshot is already right in the new netns and the
 override normally does not have to fire. That is a direct benefit of the "same-named taps
 coexisting across netns" property.
@@ -240,7 +240,7 @@ a host-port pool to allocate from — another pool to rebuild after a restart, w
 what this design was trying not to add. Entering the namespace needs neither: the guest address
 is identical in every sandbox, and the namespace is what disambiguates.
 
-The route is `bean-proxy` → noded's forwarding port → the namespace → `172.31.0.2:{port}`, with
+The route is `wizard-proxy` → noded's forwarding port → the namespace → `172.31.0.2:{port}`, with
 `{port}` read from the Host header. See api-design.md §6.
 
 ## 5a. What MASQUERADE reaches that it must not ✅
@@ -293,8 +293,8 @@ Two consequences worth stating rather than discovering:
   locally-delivered and forwarded packets; AgentENV keeps FORWARD but writes `-o vpeer` on every
   rule so the rules are honest about their scope. See
   [competitive-analysis.md](competitive-analysis.md) §2a. Adopting the prerouting hook would remove
-  bean's dependence on the netns rule being the only thing between a guest and the node, and is
-  tracked as hardening on [#21](https://github.com/garysng/bean/issues/21).
+  wizard's dependence on the netns rule being the only thing between a guest and the node, and is
+  tracked as hardening on [#21](https://github.com/garysng/wizard/issues/21).
 
 IPv6 is not addressed here. If the uplink has IPv6, the equivalent metadata address
 (`fd00:ec2::254`) is reachable and these v4 rules say nothing about it. Either the guest gets no

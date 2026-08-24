@@ -20,19 +20,19 @@ import (
 
 	"google.golang.org/grpc"
 
-	"github.com/garysng/bean/internal/beand"
-	"github.com/garysng/bean/internal/control/s3"
-	nodev1 "github.com/garysng/bean/internal/gen/bean/node/v1"
+	"github.com/garysng/wizard/internal/wizardd"
+	"github.com/garysng/wizard/internal/control/s3"
+	nodev1 "github.com/garysng/wizard/internal/gen/wizard/node/v1"
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
 
-	"github.com/garysng/bean/internal/logging"
-	"github.com/garysng/bean/internal/node"
-	"github.com/garysng/bean/internal/node/image"
-	"github.com/garysng/bean/internal/node/network"
-	"github.com/garysng/bean/internal/node/reclaim"
-	"github.com/garysng/bean/internal/node/runtime"
-	"github.com/garysng/bean/internal/obs"
+	"github.com/garysng/wizard/internal/logging"
+	"github.com/garysng/wizard/internal/node"
+	"github.com/garysng/wizard/internal/node/image"
+	"github.com/garysng/wizard/internal/node/network"
+	"github.com/garysng/wizard/internal/node/reclaim"
+	"github.com/garysng/wizard/internal/node/runtime"
+	"github.com/garysng/wizard/internal/obs"
 )
 
 var version = "dev"
@@ -48,15 +48,15 @@ func main() {
 		"port the agent listens on inside a container sandbox. The same port in every "+
 			"sandbox, which is safe because each has its own network namespace -- the same "+
 			"reason the fc tier reuses one guest IP everywhere")
-	agentBin := flag.String("agent-bin", "beand", "path to beand binary (local runtime)")
-	baseDir := flag.String("base-dir", "/var/lib/bean/sandboxes", "sandbox base directory")
-	nodeToken := flag.String("node-token", os.Getenv("BEAN_NODE_TOKEN"),
+	agentBin := flag.String("agent-bin", "wizardd", "path to wizardd binary (local runtime)")
+	baseDir := flag.String("base-dir", "/var/lib/wizard/sandboxes", "sandbox base directory")
+	nodeToken := flag.String("node-token", os.Getenv("WIZARD_NODE_TOKEN"),
 		"shared token required from callers (empty = no auth, loopback dev only)")
 	controlPlane := flag.String("control-plane", "",
 		"NodeService address; set to register with a control plane (multi-node mode)")
 	nodeID := flag.String("node-id", "", "node id (default: derived from listen address)")
 	region := flag.String("region", "local", "region this node belongs to")
-	bootstrapToken := flag.String("bootstrap-token", os.Getenv("BEAN_BOOTSTRAP_TOKEN"),
+	bootstrapToken := flag.String("bootstrap-token", os.Getenv("WIZARD_BOOTSTRAP_TOKEN"),
 		"token presented when registering")
 	advertise := flag.String("advertise", "", "address the control plane should dial (default: --listen)")
 	cpuAlloc := flag.Float64("cpu", 4, "allocatable vCPU advertised to the scheduler")
@@ -70,18 +70,18 @@ func main() {
 			"and any port a user's process listens on. Empty disables it. Callers must "+
 			"present --node-token, the same secret the gRPC surface requires; what it "+
 			"does not do is distinguish one user from another, so it is reached by "+
-			"bean-proxy rather than by users directly, and a public bind is refused")
+			"wizard-proxy rather than by users directly, and a public bind is refused")
 	fcBin := flag.String("firecracker-bin", "firecracker", "Firecracker binary (fc runtime)")
-	fcKernel := flag.String("kernel", "/var/lib/bean/assets/vmlinux",
+	fcKernel := flag.String("kernel", "/var/lib/wizard/assets/vmlinux",
 		"guest kernel image (fc runtime)")
 	fcAgentDisk := flag.String("agent-disk", "",
-		"read-only image holding beand, attached to every microVM (fc runtime)")
-	imageDir := flag.String("image-dir", "/var/lib/bean/images",
+		"read-only image holding wizardd, attached to every microVM (fc runtime)")
+	imageDir := flag.String("image-dir", "/var/lib/wizard/images",
 		"prepared base images (fc runtime)")
 	defaultDiskMiB := flag.Int64("default-disk-mib", 2048,
 		"sandbox rootfs size when the spec does not bound it (fc runtime)")
 	buildkitAddr := flag.String("buildkit-addr", "",
-		"buildkitd address enabling image builds on this node, e.g. unix:///run/bean/buildkitd.sock")
+		"buildkitd address enabling image builds on this node, e.g. unix:///run/wizard/buildkitd.sock")
 	buildctlBin := flag.String("buildctl-bin", "buildctl", "BuildKit client binary")
 	guestDNS := flag.String("guest-dns", "",
 		"resolver the in-guest agent writes into /etc/resolv.conf. Empty leaves "+
@@ -141,7 +141,7 @@ func main() {
 		"give each sandbox's VMM a private mount namespace, so mounts it makes do "+
 			"not reach the host and the host's later mounts do not reach it (fc "+
 			"runtime). On by default, but verified on a guest rather than assumed: "+
-			"bean's rootfs is a device-mapper node under /dev rather than a file, and "+
+			"wizard's rootfs is a device-mapper node under /dev rather than a file, and "+
 			"the concern was that it would stop being openable in here. It does not. "+
 			"Pass =false to turn it off")
 	fcCgroups := flag.Bool("fc-cgroups", false,
@@ -221,24 +221,24 @@ func main() {
 		"directory holding the overlaybd binaries (overlaybd-create, -apply, "+
 			"-commit). Empty resolves them on PATH")
 	s3Endpoint := flag.String("s3-endpoint",
-		os.Getenv("BEAN_S3_ENDPOINT"),
-		"S3-compatible endpoint this node's artifact store uses (or BEAN_S3_ENDPOINT). "+
+		os.Getenv("WIZARD_S3_ENDPOINT"),
+		"S3-compatible endpoint this node's artifact store uses (or WIZARD_S3_ENDPOINT). "+
 			"It holds published overlaybd layers -- both converted OCI layers and "+
 			"built images, which are sealed as overlaybd layers too. This is what "+
 			"makes --fc-overlaybd-lazy-pull work: a layer is published under its "+
 			"digest once and every later create reading the same store skips the "+
 			"conversion, including on other nodes. Credentials come from "+
-			"BEAN_S3_ACCESS_KEY and BEAN_S3_SECRET_KEY, never a flag, so the secret "+
+			"WIZARD_S3_ACCESS_KEY and WIZARD_S3_SECRET_KEY, never a flag, so the secret "+
 			"does not appear in the process command line")
 	s3Bucket := flag.String("s3-bucket", "bean-obd-layers",
 		"bucket holding the node's published layers")
 	s3LogsBucket := flag.String("s3-logs-bucket",
-		envOr("BEAN_S3_LOGS_BUCKET", "bean-build-logs"),
-		"bucket the node uploads build logs to (or BEAN_S3_LOGS_BUCKET). It is "+
+		envOr("WIZARD_S3_LOGS_BUCKET", "wizard-build-logs"),
+		"bucket the node uploads build logs to (or WIZARD_S3_LOGS_BUCKET). It is "+
 			"separate from --s3-bucket because logs and layers have different "+
 			"lifetimes: logs expire under a bucket lifecycle rule, layers are "+
 			"content-addressed and kept. Reached through --s3-endpoint with the "+
-			"same BEAN_S3_ACCESS_KEY/BEAN_S3_SECRET_KEY. Empty, or no --s3-endpoint, "+
+			"same WIZARD_S3_ACCESS_KEY/WIZARD_S3_SECRET_KEY. Empty, or no --s3-endpoint, "+
 			"leaves builds working with their logs written to a local directory "+
 			"(dev) and unreadable across nodes")
 	s3Region := flag.String("s3-region", "us-east-1",
@@ -268,7 +268,7 @@ func main() {
 		"log guest writes so checkpoints can capture only what changed; must be on "+
 			"from boot, so a guest started without it can never produce an "+
 			"incremental snapshot (fc runtime)")
-	admissionConfig := flag.String("admission-config", "/var/lib/bean/noded/admission.json",
+	admissionConfig := flag.String("admission-config", "/var/lib/wizard/noded/admission.json",
 		"path to the admission threshold file (disk floor, memory ceiling). The node "+
 			"owns it: it is read at startup and rewritten when the control plane retunes "+
 			"a threshold via ConfigureAdmission, so the last policy set survives a "+
@@ -296,7 +296,7 @@ func main() {
 			"creation says nothing about whether it earns its space (fc runtime)")
 	logFormat := flag.String("log-format", "text", "log format: text|json")
 	logLevel := flag.String("log-level", "info", "log level: debug|info|warn|error")
-	otlpEndpoint := flag.String("otlp-endpoint", os.Getenv("BEAN_OTLP_ENDPOINT"),
+	otlpEndpoint := flag.String("otlp-endpoint", os.Getenv("WIZARD_OTLP_ENDPOINT"),
 		"OTLP/gRPC collector for traces, e.g. localhost:4317 (empty = tracing off)")
 	flag.Parse()
 
@@ -317,7 +317,7 @@ func main() {
 	}()
 
 	if *nodeToken == "" && !isLoopback(*listen) {
-		log.Fatalf("refusing to listen on %s without --node-token (or BEAN_NODE_TOKEN)", *listen)
+		log.Fatalf("refusing to listen on %s without --node-token (or WIZARD_NODE_TOKEN)", *listen)
 	}
 
 	// The forwarding port requires the node token, but that distinguishes the cluster
@@ -337,13 +337,13 @@ func main() {
 	// And never on a public address, token or not. A shared cluster secret is not
 	// something to expose to the internet, and the failure is silent -- the port
 	// works perfectly bound to 0.0.0.0, and nothing surfaces until someone else is on
-	// the network. A private address is permitted because that is where bean-proxy
+	// the network. A private address is permitted because that is where wizard-proxy
 	// reaches it in a real deployment; requiring loopback would rule out multi-node.
 	if *sandboxPortAddr != "" && isPubliclyRoutable(*sandboxPortAddr) {
 		log.Fatalf("refusing to serve --sandbox-port-listen on %s: it grants access "+
 			"to every sandbox on this node and applies no user authorization, so it "+
 			"must not be reachable from a public network. Bind it to loopback or a "+
-			"private address and put bean-proxy in front", *sandboxPortAddr)
+			"private address and put wizard-proxy in front", *sandboxPortAddr)
 	}
 
 	// A misspelled template must stop the node rather than fall back to none:
@@ -430,7 +430,7 @@ func main() {
 	// That misconfiguration has to stop the node it was typed on, not travel into
 	// every sandbox the node then admits.
 	if *guestDNS != "" {
-		if err := beand.ValidateResolver(*guestDNS); err != nil {
+		if err := wizardd.ValidateResolver(*guestDNS); err != nil {
 			log.Fatalf("--guest-dns: %v", err)
 		}
 	}
@@ -787,8 +787,8 @@ func overlaybdBlobStore(endpoint, bucket, readURL, region string, pathStyle bool
 	client, err := s3.New(s3.Config{
 		Endpoint:  endpoint,
 		Region:    region,
-		AccessKey: os.Getenv("BEAN_S3_ACCESS_KEY"),
-		SecretKey: os.Getenv("BEAN_S3_SECRET_KEY"),
+		AccessKey: os.Getenv("WIZARD_S3_ACCESS_KEY"),
+		SecretKey: os.Getenv("WIZARD_S3_SECRET_KEY"),
 		PathStyle: pathStyle,
 	})
 	if err != nil {
@@ -858,8 +858,8 @@ func buildLogsStore(endpoint, bucket, region string, pathStyle bool, localDir st
 	client, err := s3.New(s3.Config{
 		Endpoint:  endpoint,
 		Region:    region,
-		AccessKey: os.Getenv("BEAN_S3_ACCESS_KEY"),
-		SecretKey: os.Getenv("BEAN_S3_SECRET_KEY"),
+		AccessKey: os.Getenv("WIZARD_S3_ACCESS_KEY"),
+		SecretKey: os.Getenv("WIZARD_S3_SECRET_KEY"),
 		PathStyle: pathStyle,
 	})
 	if err != nil {

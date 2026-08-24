@@ -25,7 +25,7 @@ config:
 flowchart TB
   subgraph SHARED["shared prep &middot; both paths"]
     direction TB
-    PREP["image.Prepare<br>/dev/mapper/bean-&lt;id&gt;<br>(restore: backfill CoW here &middot; constraint A)"]
+    PREP["image.Prepare<br>/dev/mapper/wizard-&lt;id&gt;<br>(restore: backfill CoW here &middot; constraint A)"]
     EXEC["exec firecracker in netns<br>cwd = sandbox dir"]
     WAIT["waitAPIReady<br>poll API socket"]
     PREP --> EXEC --> WAIT
@@ -48,7 +48,7 @@ flowchart TB
     LOAD["PUT /snapshot/load<br>Uffd backend &middot; ResumeVM"]
   end
 
-  GB["guest boots<br>beand PID1 pivots to user rootfs"]
+  GB["guest boots<br>wizardd PID1 pivots to user rootfs"]
   GR["guest resumes<br>pages faulted in on demand"]
 
   WAIT --> BRANCH
@@ -72,7 +72,7 @@ The numbered order below is the cold-boot spine; restore reuses the shared prep 
 the PUT sequence for a single `/snapshot/load`.
 
 ```
-① image.Prepare        assemble /dev/mapper/bean-<id> (shared base + per-sandbox CoW)
+① image.Prepare        assemble /dev/mapper/wizard-<id> (shared base + per-sandbox CoW)
                        on restore: the CoW must be backfilled within this step ← ordering constraint A
 ② os.Symlink           link the agent disk into the sandbox directory
 ③ exec firecracker     cwd = the sandbox directory ← the premise for relative paths
@@ -146,11 +146,11 @@ stored in the snapshot**. So:
 ```
 
 The kernel execs init from whichever device it mounted as root. Putting the agent there means
-**the user image carries no obligations at all** — no embedded `beand`, no init system, no
+**the user image carries no obligations at all** — no embedded `wizardd`, no init system, no
 modified entrypoint. Once up, the agent pivots to `/dev/vdb` itself:
 
 ```
-init=/bean/beand -- --listen vsock:1024 --pivot /dev/vdb
+init=/wizard/wizardd -- --listen vsock:1024 --pivot /dev/vdb
 ```
 
 **Order determines the naming**: Firecracker assigns `vda`/`vdb` in registration order, and
@@ -186,7 +186,7 @@ path-rewriting logic.
 ## 6. Every item in the cmdline ✅
 
 ```
-console=ttyS0 loglevel=3 reboot=k panic=-1 pci=off ip=... init=/bean/beand -- --listen tcp:0.0.0.0:10001 --pivot /dev/vdb
+console=ttyS0 loglevel=3 reboot=k panic=-1 pci=off ip=... init=/wizard/wizardd -- --listen tcp:0.0.0.0:10001 --pivot /dev/vdb
 ```
 
 | Parameter | Purpose | Basis |
@@ -195,8 +195,8 @@ console=ttyS0 loglevel=3 reboot=k panic=-1 pci=off ip=... init=/bean/beand -- --
 | `reboot=k` | use keyboard reset | FC has no ACPI, and this is the minimal usable reset method |
 | `panic=-1` | do not reboot on panic | A crashed guest stays inspectable instead of entering a reboot loop |
 | `pci=off` | skip PCI enumeration | FC has no PCI bus, so enumeration is pure waste |
-| `init=/bean/beand` | the agent as PID 1 | See §4 |
-| everything after `--` | arguments passed to beand | The kernel hands the part after `--` to init verbatim |
+| `init=/wizard/wizardd` | the agent as PID 1 | See §4 |
+| everything after `--` | arguments passed to wizardd | The kernel hands the part after `--` to init verbatim |
 
 **How the console trade-off was resolved.** The original reasoning — a failed boot has no other
 source of evidence, so the capability cannot be given up, but should not cost 493ms per boot —
@@ -313,12 +313,12 @@ VMM still sees the host's mount namespace, so it can read whatever that uid can 
 
 The usual name for the missing piece is jailer, and it is worth saying why that is not
 simply "add jailer". jailer's `pivot_root` requires **mknod'ing** device nodes into a
-per-sandbox jail, because device nodes cannot be symlinked into a chroot -- and bean's
+per-sandbox jail, because device nodes cannot be symlinked into a chroot -- and wizard's
 rootfs is a device-mapper node. e2b gets the namespace half without any of that, by
 `unshare`ing a mount namespace and using tmpfs plus symlinks, which work where a chroot
-would not. bean already has the namespace isolation e2b gets that way, applied as clone
+would not. wizard already has the namespace isolation e2b gets that way, applied as clone
 flags instead of a wrapper process (see §12); the private mount namespace is
-`--fc-mount-namespace`, and it is **now on by default** — holding it back assumed bean's
+`--fc-mount-namespace`, and it is **now on by default** — holding it back assumed wizard's
 device-mapper rootfs would stop being openable inside one, and a booted guest showed
 otherwise.
 
@@ -340,9 +340,9 @@ execs in place or forks. The failure that arrangement risks is specific: **a des
 that reports success while the microVM keeps running**, holding memory the scheduler
 has already handed to something else.
 
-bean asks the kernel for the same namespaces during the fork instead:
+wizard asks the kernel for the same namespaces during the fork instead:
 
-| | e2b | bean |
+| | e2b | wizard |
 |---|---|---|
 | pid namespace | `unshare -p` | `Cloneflags: CLONE_NEWPID` |
 | mount namespace | `unshare -m` + `mount --make-rprivate /` | `Cloneflags` + `Unshareflags: CLONE_NEWNS` |
@@ -364,7 +364,7 @@ exactly when the sandbox most needs to die.
 
 All three are **on by default** — `--fc-pid-namespace`, `--fc-kill-on-exit` and
 `--fc-mount-namespace`. The mount namespace was the one held back, on the expectation that
-bean's device-mapper rootfs would stop being openable inside one; that was wrong, and a booted
+wizard's device-mapper rootfs would stop being openable inside one; that was wrong, and a booted
 guest has a working `eth0` and its own mnt, pid and net namespaces at once. The reason it needed
 a guest rather than an inspection is that a rootfs the VMM cannot resolve reports nothing except
 a boot that did not finish.

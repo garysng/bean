@@ -17,7 +17,7 @@
   那是传输层的限制而不是内核的(见 [status.md](status.md))
 - ⚠️ **P0 里说的 jailer 没做**:noded 直接 exec firecracker
 - ✅ **P0/P1 里说的网络已做完**,而它曾是最大的空白:每沙箱 namespace、tap、
-  NAT 出网,元数据网段与 RFC1918 默认拒绝,沙箱内端口可从节点外经 bean-proxy 到达。
+  NAT 出网,元数据网段与 RFC1918 默认拒绝,沙箱内端口可从节点外经 wizard-proxy 到达。
   在真实内核上验证过,包括拒绝规则。跨节点 sandbox 互通仍是非目标
 - 📐 **未做**:volume、按端口的访问控制、TypeScript SDK
 
@@ -33,9 +33,9 @@
 - guest 内核 + agent 盘构建（先手工构建,流水线 P2）
 - `noded`：overlaybd ublk 直驱（先预转换镜像全量本地,lazy-pull P2）、
   jailer+FC 进程管理、agent 盘注入、tap/bridge/NAT 基础网络
-- `beand`：init 挂载矩阵、vsock gRPC、image config 复刻拉起、同步 exec、
+- `wizardd`：init 挂载矩阵、vsock gRPC、image config 复刻拉起、同步 exec、
   文件读写、僵尸回收
-- `bean-api` 最小实现：POST/GET/DELETE sandboxes、exec、files（单节点直连，无调度器）
+- `wizard-api` 最小实现：POST/GET/DELETE sandboxes、exec、files（单节点直连，无调度器）
 - state：先 SQLite/内存（Postgres 接口抽象好）
 
 **验收**
@@ -81,7 +81,7 @@ curl DELETE → 资源清零（FC 进程/tap/TCMU 设备/挂载无残留）
 **范围**
 
 - WS 流式 exec + PTY（会话重连）、CLI 交互模式（run -it / attach）
-- bean-proxy（regional）：通配域名 TLS、端口暴露（反代直连 sandbox IP）、sandbox token 鉴权、PAUSED 透明唤醒
+- wizard-proxy（regional）：通配域名 TLS、端口暴露（反代直连 sandbox IP）、sandbox token 鉴权、PAUSED 透明唤醒
 - pause/resume（fc PauseVM）+ PAUSED 透明唤醒
 - lifecycle 自动化：idle 检测（noded 本地）、onIdle pause/delete、PAUSED 请求透明唤醒
 - fc 档 snapshot 本节点路径（memory+disk → S3）

@@ -18,10 +18,10 @@ import (
 // named in it.
 //
 // The generated spec is deliberately close to what runc's own `spec` subcommand
-// produces, so a difference in behaviour points at bean rather than at an unusual
+// produces, so a difference in behaviour points at wizard rather than at an unusual
 // configuration.
 
-// ociSpec is the subset of the OCI runtime spec bean sets. Fields it does not set are
+// ociSpec is the subset of the OCI runtime spec wizard sets. Fields it does not set are
 // omitted rather than written empty, so the config reads as "these are the choices
 // made" instead of burying them in defaults.
 type ociSpec struct {
@@ -91,7 +91,7 @@ type ociLinux struct {
 type ociNamespace struct {
 	Type string `json:"type"`
 	// Path joins an existing namespace instead of creating one. This is what makes
-	// the network namespace bean's rather than the runtime's -- the node created it,
+	// the network namespace wizard's rather than the runtime's -- the node created it,
 	// holds the host end of the veth, and dials the agent through it.
 	Path string `json:"path,omitempty"`
 }
@@ -286,7 +286,7 @@ func defaultMounts(agentDir string) []ociMount {
 		// rbind rather than bind, so anything mounted underneath comes with it. rw
 		// because the agent writes here and the node reads what it wrote.
 		m = append(m, ociMount{
-			Destination: "/run/bean", Type: "bind", Source: agentDir,
+			Destination: "/run/wizard", Type: "bind", Source: agentDir,
 			Options: []string{"rbind", "rw", "nosuid", "nodev"},
 		})
 	}

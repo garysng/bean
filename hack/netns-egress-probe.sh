@@ -38,10 +38,10 @@ hr() { printf -- '------------------------------------------------------------\n
 
 [[ $EUID -eq 0 ]] || { say "needs root"; exit 77; }
 
-NS="bean-probe-$INDEX"
-TAP="beantap0"
-VETH_HOST="bean-veth$INDEX"
-VETH_NS="bean-vpeer$INDEX"
+NS="wizard-probe-$INDEX"
+TAP="wizardtap0"
+VETH_HOST="wizard-veth$INDEX"
+VETH_NS="wizard-vpeer$INDEX"
 
 # Guest side is identical for every sandbox: that is the whole point, since a
 # restored snapshot comes back with the address it had.

@@ -18,7 +18,7 @@ func TestExitCodeDistinguishesRetryableFailures(t *testing.T) {
 		want int
 	}{
 		{"success", nil, ExitOK},
-		{"usage", usagef("usage: bean run --image IMG"), ExitUsage},
+		{"usage", usagef("usage: wizard run --image IMG"), ExitUsage},
 		{"unreachable gateway", &transportError{err: errors.New("connection refused")},
 			ExitUnavailable},
 		{"missing sandbox", &apiError{Code: "SANDBOX_NOT_FOUND", Status: http.StatusNotFound},

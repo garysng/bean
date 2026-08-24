@@ -7,8 +7,8 @@ import (
 	"net"
 	"time"
 
-	"github.com/garysng/bean/internal/node/image"
-	"github.com/garysng/bean/internal/node/network"
+	"github.com/garysng/wizard/internal/node/image"
+	"github.com/garysng/wizard/internal/node/network"
 )
 
 // AgentGuestPort is the TCP port the agent listens on inside a networked guest.

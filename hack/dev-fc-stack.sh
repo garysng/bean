@@ -6,8 +6,8 @@
 # Must run on a KVM host with the node assets built (see build-assets.sh).
 set -euo pipefail
 
-RUN=${RUN:-/tmp/beanrun}
-ASSETS=${ASSETS:-/var/lib/bean/assets}
+RUN=${RUN:-/tmp/wizardrun}
+ASSETS=${ASSETS:-/var/lib/wizard/assets}
 # Firecracker's own CI kernel, which is the one their guest_configs are tested
 # against and ships its .config alongside it. Measured ~90ms faster to a
 # reachable agent than the 6.1.175 build we started with, whose config was
@@ -95,9 +95,9 @@ BOOTSTRAP_TOKEN=${BOOTSTRAP_TOKEN:-btok}
 
 case "${1:-start}" in
 stop)
-  pkill -f "$BIN/bean-api" 2>/dev/null || true
+  pkill -f "$BIN/wizard-api" 2>/dev/null || true
   pkill -f "$BIN/noded" 2>/dev/null || true
-  pkill -f "$BIN/bean-proxy" 2>/dev/null || true
+  pkill -f "$BIN/wizard-proxy" 2>/dev/null || true
   echo "stopped"
   exit 0
   ;;
@@ -105,38 +105,38 @@ start) ;;
 *) echo "usage: $0 [start|stop]" >&2; exit 1 ;;
 esac
 
-pkill -f "$BIN/bean-api" 2>/dev/null || true
+pkill -f "$BIN/wizard-api" 2>/dev/null || true
 pkill -f "$BIN/noded" 2>/dev/null || true
-pkill -f "$BIN/bean-proxy" 2>/dev/null || true
+pkill -f "$BIN/wizard-proxy" 2>/dev/null || true
 sleep 1
 
 mkdir -p "$RUN"
 # A fresh database each run: this is a development stack, and carrying over
 # records that point at sandboxes from a previous run is only confusing.
-rm -f "$RUN/bean.db"
+rm -f "$RUN/wizard.db"
 
 # Colon-less defaults for the same reason as BUILDKIT_ADDR above: the gateway treats
 # an unreachable S3 endpoint as fatal and falls back to a local snapshot directory
-# only when no endpoint is set at all, so BEAN_S3_ENDPOINT= has to mean "no object
+# only when no endpoint is set at all, so WIZARD_S3_ENDPOINT= has to mean "no object
 # The state store. SQLite by default because it needs nothing running, and Postgres
-# when BEAN_POSTGRES_DSN is set.
+# when WIZARD_POSTGRES_DSN is set.
 #
 # This existed only as --db until a stress run made the gap visible: the engine that
-# allows more than one bean-api replica had no way to be exercised by the script that
+# allows more than one wizard-api replica had no way to be exercised by the script that
 # drives load at it, so every measurement was taken against the single-writer engine
 # whether or not that was the intent. A flag nothing can select is a flag nothing tests.
-if [ -n "${BEAN_POSTGRES_DSN:-}" ]; then
-  STORE_FLAG="--postgres ${BEAN_POSTGRES_DSN}"
+if [ -n "${WIZARD_POSTGRES_DSN:-}" ]; then
+  STORE_FLAG="--postgres ${WIZARD_POSTGRES_DSN}"
   echo "state store: postgres"
 else
-  STORE_FLAG="--db $RUN/bean.db"
+  STORE_FLAG="--db $RUN/wizard.db"
 fi
 
 # storage" rather than being replaced by the default.
-BEAN_S3_ENDPOINT=${BEAN_S3_ENDPOINT-http://127.0.0.1:9000} \
-BEAN_S3_ACCESS_KEY=${BEAN_S3_ACCESS_KEY-beanadmin} \
-BEAN_S3_SECRET_KEY=${BEAN_S3_SECRET_KEY-beansecret123} \
-nohup "$BIN/bean-api" \
+WIZARD_S3_ENDPOINT=${WIZARD_S3_ENDPOINT-http://127.0.0.1:9000} \
+WIZARD_S3_ACCESS_KEY=${WIZARD_S3_ACCESS_KEY-wizardadmin} \
+WIZARD_S3_SECRET_KEY=${WIZARD_S3_SECRET_KEY-wizardsecret123} \
+nohup "$BIN/wizard-api" \
   --listen 127.0.0.1:$API_PORT \
   --node-grpc 127.0.0.1:$NODE_GRPC_PORT \
   $STORE_FLAG \
@@ -165,21 +165,21 @@ nohup "$BIN/noded" \
   --firecracker-bin "$ASSETS/firecracker" \
   --kernel "$KERNEL" \
   --agent-disk "$ASSETS/agent.ext4" \
-  --base-dir /var/lib/bean/sandboxes \
-  --image-dir /var/lib/bean/images \
+  --base-dir /var/lib/wizard/sandboxes \
+  --image-dir /var/lib/wizard/images \
   --cpu "$NODE_CPU" --memory-mib "$NODE_MEM_MIB" --disk-mib "$NODE_DISK_MIB" \
   --labels tier=fc \
   --metrics "127.0.0.1:$NODE_METRICS_PORT" \
   --sandbox-port-listen "127.0.0.1:$SANDBOX_PORT_PORT" \
-  --buildkit-addr "${BUILDKIT_ADDR-unix:///run/bean/buildkitd.sock}" \
+  --buildkit-addr "${BUILDKIT_ADDR-unix:///run/wizard/buildkitd.sock}" \
   ${NODED_FLAGS:-} \
   >"$RUN/noded.log" 2>&1 &
 
-# bean-proxy is what a client reaches a sandbox's ports through. Started
+# wizard-proxy is what a client reaches a sandbox's ports through. Started
 # unconditionally, even without GUEST_SUBNET: with no networking it answers that the
 # sandbox has no interface, which is a truthful answer and a better one than a
 # connection refused that looks like the proxy being absent.
-nohup "$BIN/bean-proxy" \
+nohup "$BIN/wizard-proxy" \
   --listen 127.0.0.1:$PROXY_PORT \
   --control-plane "http://127.0.0.1:$API_PORT" \
   --api-key "$API_KEY" \

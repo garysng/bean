@@ -4,8 +4,8 @@ import (
 	"context"
 	"testing"
 
-	nodev1 "github.com/garysng/bean/internal/gen/bean/node/v1"
-	"github.com/garysng/bean/internal/sbxtoken"
+	nodev1 "github.com/garysng/wizard/internal/gen/wizard/node/v1"
+	"github.com/garysng/wizard/internal/sbxtoken"
 )
 
 // The token is minted by the manager, hashed into the runtime spec, and presented

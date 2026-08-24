@@ -58,7 +58,7 @@ type obdConfig struct {
 //
 // The consequence of the URL being config-level is that **every remote layer in one
 // chain must come from the same prefix**. That holds here because remote layers are
-// either all from bean's object store or all from one image's registry repository, but
+// either all from wizard's object store or all from one image's registry repository, but
 // it is a constraint of overlaybd's config rather than a choice.
 type obdLayer struct {
 	// File is a local path to the layer blob. Empty means fetch it by digest.
@@ -294,6 +294,6 @@ func hexSerial(serial string) string {
 // practical concern.
 func deviceSerial(sandboxID string) string {
 	a := shortHash(sandboxID)
-	b := shortHash("bean-serial-" + sandboxID)
+	b := shortHash("wizard-serial-" + sandboxID)
 	return fmt.Sprintf("%08s%08s", a, b)
 }

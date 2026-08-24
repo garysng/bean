@@ -9,7 +9,7 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/garysng/bean/internal/node/image"
+	"github.com/garysng/wizard/internal/node/image"
 )
 
 // LinuxHost inspects and modifies the host with dmsetup and losetup, the same
@@ -68,7 +68,7 @@ func (h *LinuxHost) RemoveDM(name string) error {
 		// Belt and braces. The caller already filters by prefix; this makes a
 		// future caller that forgets fail loudly rather than remove a stranger's
 		// mapping.
-		return fmt.Errorf("reclaim: refusing to remove mapping %q: not bean's", name)
+		return fmt.Errorf("reclaim: refusing to remove mapping %q: not wizard's", name)
 	}
 	err := run("dmsetup", "remove", "--retry", name)
 	if err != nil && dmAlreadyGone(err) {

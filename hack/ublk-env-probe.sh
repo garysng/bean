@@ -44,8 +44,8 @@ for b in overlaybd-create overlaybd-commit overlaybd-apply; do
 done
 
 say ""
-say "== bean source =="
-for d in /root/bean-src /root/src/bean /opt/bean /srv/bean /root/go/src/github.com/garysng/bean; do
+say "== wizard source =="
+for d in /root/wizard-src /root/src/wizard /opt/wizard /srv/wizard /root/go/src/github.com/garysng/wizard; do
 	if [ -f "$d/go.mod" ]; then
 		say "found: $d"
 	fi
@@ -53,14 +53,14 @@ done
 say "go: $(command -v go >/dev/null 2>&1 && go version || echo absent)"
 
 say ""
-say "== bean assets =="
-if [ -d /var/lib/bean/assets ]; then
-	ls -1 /var/lib/bean/assets 2>/dev/null | head -10
+say "== wizard assets =="
+if [ -d /var/lib/wizard/assets ]; then
+	ls -1 /var/lib/wizard/assets 2>/dev/null | head -10
 else
-	say "/var/lib/bean/assets absent"
+	say "/var/lib/wizard/assets absent"
 fi
 
 say ""
 say "== stale state =="
 say "D-state processes: $(ps -eo stat= | grep -c '^D' || true)"
-say "bean dm mappings:  $(dmsetup ls 2>/dev/null | grep -c bean || true)"
+say "wizard dm mappings:  $(dmsetup ls 2>/dev/null | grep -c wizard || true)"

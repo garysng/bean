@@ -1,4 +1,4 @@
-module github.com/garysng/bean
+module github.com/garysng/wizard
 
 go 1.26.1
 

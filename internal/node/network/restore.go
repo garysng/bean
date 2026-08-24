@@ -30,7 +30,7 @@ import (
 //
 // Verified rather than assumed (hack/iptables-restore-probe.sh, against a private
 // chain so the check could not damage anything): --noflush leaves existing rules
-// alone, and -I position semantics survive -- which matters because bean's DROP rules
+// alone, and -I position semantics survive -- which matters because wizard's DROP rules
 // must precede its blanket ACCEPT or egress policy silently does not apply.
 
 // iptablesLockWaitSeconds bounds how long an iptables invocation waits for the xtables

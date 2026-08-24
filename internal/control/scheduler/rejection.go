@@ -5,7 +5,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/garysng/bean/internal/control/store"
+	"github.com/garysng/wizard/internal/control/store"
 )
 
 // A rejection that says only "no node fits" is close to useless when several

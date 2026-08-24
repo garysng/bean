@@ -1,6 +1,6 @@
 <div align="center">
 
-# 🫛 bean
+# 🫛 wizard
 
 **面向 AI agent 的 sandbox 平台** —— 在硬件隔离里跑不可信代码:创建、exec 进去、打快照、成批克隆。
 任意 OCI 镜像,不需要模板构建步骤。
@@ -100,9 +100,9 @@ Guest 内存记录了它启动时那颗 CPU 提供的东西,而 vendor 与 famil
 "放弃恢复运行"换可移植性;`--base` 只存相对父快照写过的页。
 
 ```bash
-bean snapshot create $SBX --name base
-bean snapshot create $SBX --name step1 --base snap_...   # 298 KB,而非 15.5 MB
-bean run --snapshot snap_...
+wizard snapshot create $SBX --name base
+wizard snapshot create $SBX --name step1 --base snap_...   # 298 KB,而非 15.5 MB
+wizard run --snapshot snap_...
 ```
 
 ### 网络
@@ -144,11 +144,11 @@ bean run --snapshot snap_...
   每个请求汇成一棵 span 树
 - **节点直连数据平面** —— Host 里的 `{port}-{sandbox}` 直达该 guest 的那个端口,
   无论它是用户的 server 还是 agent。一套机制而非两套:没有注册调用、没有宿主端口池。
-  设了 `BEAN_PROXY_URL` 时,`exec` 和文件传输走这条路直达 agent、不再经控制面中转,
+  设了 `WIZARD_PROXY_URL` 时,`exec` 和文件传输走这条路直达 agent、不再经控制面中转,
   由节点的 forwarder 注入 per-sandbox token,所以 client 从不持有它;未设时回退网关中转
 - **Warm snapshot** —— prewarm 产出一份可 resume 的基础快照,于是 create 变成 restore
   而不是 boot,调度器也会优先选能做到这点的节点。磁盘上有上限,按 LRU 淘汰
-- **Postgres** —— `bean-api --postgres`,这正是支持多副本的前提;SQLite 是单文件,
+- **Postgres** —— `wizard-api --postgres`,这正是支持多副本的前提;SQLite 是单文件,
   两个副本无法共享。需求由 `hack/postgres-conformance.sh` 对真实 Postgres 16 跑通,
   store 不持有 mutex —— 原子性在语句里,由数据库仲裁
 
@@ -156,9 +156,9 @@ bean run --snapshot snap_...
 
 | 功能 | 状态 |
 |---|---|
-| jailer chroot | 📐 VMM 已降到非 root uid、跑在每沙箱 cgroup 里,默认也有自己的 pid、mount、network 命名空间。jailer 在此之上还能加的是一个 `chroot` 和设备白名单 —— [#20](https://github.com/garysng/bean/issues/20) 第二阶段,而且未必是对的形态 |
+| jailer chroot | 📐 VMM 已降到非 root uid、跑在每沙箱 cgroup 里,默认也有自己的 pid、mount、network 命名空间。jailer 在此之上还能加的是一个 `chroot` 和设备白名单 —— [#20](https://github.com/garysng/wizard/issues/20) 第二阶段,而且未必是对的形态 |
 | 卷 | 📐 |
-| 按端口访问控制 | 📐 沙箱上任何端口,只要能到达 bean-proxy 就能访问 —— [#50](https://github.com/garysng/bean/issues/50) |
+| 按端口访问控制 | 📐 沙箱上任何端口,只要能到达 wizard-proxy 就能访问 —— [#50](https://github.com/garysng/wizard/issues/50) |
 | overlaybd | ⚠️ 已接入,在一台宿主上实测过。三个镜像共享一个 base 时**磁盘少 3.32 倍**,共享层每节点只转换一次而非每镜像一次(第二个镜像 0.49 s CPU,对比 2.24 s)。层发布到对象存储后,create 是 **1.3 s,对比 dm-snapshot 的 14.3 s**;*冷* create 不变,也无法改进 —— gzip tar 没有块索引可 seek,所以任何地方首次遇到都要转换。用 `--fc-overlaybd` 开启,dm-snapshot 仍是默认。**128 核机器 256 并发 create 下 rootfs 组装快 4.2 倍**(3.809 s → 0.908 s)、吞吐快 1.9 倍(47.5 → 88.0 creates/s),因为 dm-snapshot 每沙箱 fork `losetup`/`dmsetup` 而 overlaybd 只写 configfs。这个后端上的 `commit` 未经检验,跨节点路径也只在一台机器上跑过。[docs/image-pipeline.md](docs/image-pipeline.md) §7 |
 
 ---
@@ -169,16 +169,16 @@ bean run --snapshot snap_...
 
 ```bash
 make bin                           # 五个二进制产出到 ./bin
-sudo hack/build-assets.sh          # 内核 + agent 磁盘 + 基础镜像,装到 /var/lib/bean
+sudo hack/build-assets.sh          # 内核 + agent 磁盘 + 基础镜像,装到 /var/lib/wizard
 
 # BIN 就是启动脚本去找二进制的位置
 sudo BIN=$PWD/bin hack/dev-fc-stack.sh start   # gateway 在 :18080,一个节点
 
 export PATH=$PWD/bin:$PATH
-export BEAN_BASE_URL=http://127.0.0.1:18080 BEAN_API_KEY=devkey
-SBX=$(bean run --image alpine:3.20 --quiet)
-bean exec $SBX -- sh -c 'echo hello'
-bean kill $SBX
+export WIZARD_BASE_URL=http://127.0.0.1:18080 WIZARD_API_KEY=devkey
+SBX=$(wizard run --image alpine:3.20 --quiet)
+wizard exec $SBX -- sh -c 'echo hello'
+wizard kill $SBX
 
 sudo BIN=$PWD/bin hack/dev-fc-stack.sh stop
 ```
@@ -206,7 +206,7 @@ NODED_FLAGS="--guest-subnet 172.31.0.0/30 --uplink eth0 --guest-dns 223.5.5.5" \
 ## 架构
 
 ```
-  SDK / CLI ──REST──▶ bean-api ──gRPC──▶ noded ──vsock──▶ beand
+  SDK / CLI ──REST──▶ wizard-api ──gRPC──▶ noded ──vsock──▶ wizardd
                       │  调度器            │  运行时          (guest 内 PID 1)
                       │  镜像服务          │  image provider
                       └─ SQLite           └─ Firecracker
@@ -214,11 +214,11 @@ NODED_FLAGS="--guest-subnet 172.31.0.0/30 --uplink eth0 --guest-dns 223.5.5.5" \
                          S3(快照 blob)
 ```
 
-五个二进制:`bean`(CLI)、`bean-api`(gateway,调度器在同进程内,这样放置与承诺发生在
-同一个事务里)、`noded`(每宿主一个)、`bean-proxy`(数据面端口路由)、`beand`(每个沙箱内的
+五个二进制:`wizard`(CLI)、`wizard-api`(gateway,调度器在同进程内,这样放置与承诺发生在
+同一个事务里)、`noded`(每宿主一个)、`wizard-proxy`(数据面端口路由)、`wizardd`(每个沙箱内的
 PID 1,装在自己的只读磁盘上,所以用户镜像不需要任何改动)。
 
-同一套栈画成四条带 —— 客户端、控制面、节点、沙箱 —— `bean-proxy` 在端口流量的数据面路径上,
+同一套栈画成四条带 —— 客户端、控制面、节点、沙箱 —— `wizard-proxy` 在端口流量的数据面路径上,
 S3 支撑节点:
 
 ```mermaid
@@ -236,7 +236,7 @@ flowchart TB
     CLI["CLI"]
   end
 
-  subgraph CP["control plane · bean-api (one process)"]
+  subgraph CP["control plane · wizard-api (one process)"]
     direction LR
     API["api-gateway<br>auth · quota"]
     SCHED["scheduler<br>placement · leases"]
@@ -244,7 +244,7 @@ flowchart TB
     STORE[("state store<br>SQLite / PG")]
   end
 
-  PROXY["bean-proxy<br>port routing"]
+  PROXY["wizard-proxy<br>port routing"]
 
   subgraph NODED["noded · one per host"]
     direction LR
@@ -253,7 +253,7 @@ flowchart TB
   end
 
   subgraph SBX["sandbox"]
-    BEAND["beand (PID1)<br>+ user process"]
+    WIZARDD["wizardd (PID1)<br>+ user process"]
   end
 
   S3[("S3<br>blobs · artifacts · snapshots")]
@@ -264,7 +264,7 @@ flowchart TB
   SCHED <== commands / heartbeat ==> IMGSUB
   PROXY -. forward .-> IMGSUB
   IMGSUB --> RT
-  RT --> BEAND
+  RT --> WIZARDD
   IMGSUB -. range-read .-> S3
   RT -. snapshots .-> S3
 
@@ -274,7 +274,7 @@ flowchart TB
   classDef store fill:#F3E8FD,stroke:#A142F4,color:#111;
   class SDK,CLI client;
   class API,SCHED,IMGS control;
-  class PROXY,IMGSUB,RT,BEAND data;
+  class PROXY,IMGSUB,RT,WIZARDD data;
   class STORE,S3 store;
 ```
 
@@ -283,13 +283,13 @@ flowchart TB
 ```
 1. image provider 组装 rootfs 块设备
      共享只读基础层(loop)+ 每沙箱稀疏 CoW
-     → dm-snapshot → /dev/mapper/bean-<id>
+     → dm-snapshot → /dev/mapper/wizard-<id>
 2. 网络:一个 netns、一个 tap、一对到宿主的 veth、NAT 与过滤规则
 3. noded 在那个 netns 里 exec firecracker
      virtio-blk:agent 磁盘作根设备,用户镜像作 /dev/vdb
      agent 用 vsock;tap 必须在 InstanceStart 之前注册
-     init=/bean/beand,并带 ip= 让内核自己配好 eth0
-4. beand 作为 PID 1:先建挂载矩阵,再 pivot 进用户镜像
+     init=/wizard/wizardd,并带 ip= 让内核自己配好 eth0
+4. wizardd 作为 PID 1:先建挂载矩阵,再 pivot 进用户镜像
 ```
 
 其中有四个顺序约束是承重的,而且每一个都是踩出来的:

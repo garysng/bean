@@ -4,7 +4,7 @@
 #
 # This decides how much margin a low-disk admission watermark needs. dm-thin has
 # two documented behaviours (queue_if_no_space hangs the guest, error_if_no_space
-# returns EIO) but bean uses a sparse file on ext4, where the failure happens in
+# returns EIO) but wizard uses a sparse file on ext4, where the failure happens in
 # the write path rather than at the device layer. Nobody has measured which of
 # those two shapes it takes, and the difference matters: a guest that hangs
 # forever is a much worse outcome than one that gets an error, and it argues for a
@@ -17,8 +17,8 @@
 set -uo pipefail
 
 SIZE_MIB=${SIZE_MIB:-64}
-WORK=$(mktemp -d /tmp/bean-enospc.XXXXXX)
-NAME="bean-enospc-probe-$$"
+WORK=$(mktemp -d /tmp/wizard-enospc.XXXXXX)
+NAME="wizard-enospc-probe-$$"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in

@@ -99,7 +99,7 @@ func (f *urlRangeFetcher) FetchRange(ctx context.Context, p []byte, off int64) e
 
 // registryRangeFetcher reads byte ranges of a registry blob over HTTP.
 //
-// This is what makes lazy pull possible on the ublk route: bean reads the layer itself
+// This is what makes lazy pull possible on the ublk route: wizard reads the layer itself
 // there, so it needs the range client the overlaybd daemon already had. It reuses
 // Registry.do, which carries the token exchange and the per-host credentials -- the
 // alternative was a second HTTP path with its own idea of authentication, and two of those

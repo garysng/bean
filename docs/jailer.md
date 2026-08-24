@@ -35,7 +35,7 @@ Verified by reading `src/jailer/src/env.rs` and `src/jailer/src/chroot.rs` on
 `firecracker-microvm/firecracker@main`. This is source, not documentation paraphrase.
 
 **Chroot layout.** `<chroot-base-dir>/<exec-file-name>/<id>/root`, default base `/srv/jailer`
-(`env.rs:181-190`). For bean that would be `/srv/jailer/firecracker/<sandbox-id>/root`.
+(`env.rs:181-190`). For wizard that would be `/srv/jailer/firecracker/<sandbox-id>/root`.
 
 **The binary is copied, not linked or bind-mounted.** `copy_exec_to_chroot` (`env.rs:490`)
 does a real `fs::copy` into `<chroot_dir>/firecracker`. Upstream's stated reason is memory
@@ -85,14 +85,14 @@ absolute. §3 shows that inference is where the real problem is, and it is not a
 
 ## 3. The actual blocker: three paths that are not what they look like ⚠️
 
-The chroot breaks bean not through cwd but through **reachability**. Under chroot, a path
+The chroot breaks wizard not through cwd but through **reachability**. Under chroot, a path
 resolves inside the jail or not at all. Three things currently escape the sandbox directory:
 
 **(a) Both drives are symlinks to absolute targets.** `PathOnHost` is relative
 (`fc_linux.go:477`, `484`) but the files those names refer to are not local:
 
-- `agent.ext4` is `os.Symlink(r.AgentDiskPath, ...)` (`fc_linux.go:309`) → `/var/lib/bean/assets/agent.ext4`
-- `rootfs.img` is `os.Symlink("/dev/mapper/bean-<id>", ...)` (`image/devmapper_linux.go:157-162`)
+- `agent.ext4` is `os.Symlink(r.AgentDiskPath, ...)` (`fc_linux.go:309`) → `/var/lib/wizard/assets/agent.ext4`
+- `rootfs.img` is `os.Symlink("/dev/mapper/wizard-<id>", ...)` (`image/devmapper_linux.go:157-162`)
 
 A relative *name* whose *target* is absolute resolves fine with no chroot and dangles inside one.
 The dm device is worse than the agent disk: a device node cannot be symlinked into a jail at all,
@@ -101,10 +101,10 @@ it has to be `mknod`'d there with the right major:minor, or bind-mounted. Jailer
 `FOLDER_HIERARCHY` is exactly `["/", "/dev", "/dev/net", "/run"]` (`env.rs:65`). Upstream is
 explicit that guest resources are the operator's job: the user "must create hard links for (or
 copy) any resources which will be provided to the VM via the API." **The per-sandbox dm device
-node is bean's to place, and there is no code for it.**
+node is wizard's to place, and there is no code for it.**
 
 **(b) The kernel path is absolute.** `KernelImagePath: r.KernelPath` (`fc_linux.go:461`) →
-`/var/lib/bean/assets/vmlinux`. Unreachable in a jail. Needs a hardlink or bind mount in.
+`/var/lib/wizard/assets/vmlinux`. Unreachable in a jail. Needs a hardlink or bind mount in.
 
 **(c) `SnapshotPath` is absolute.** `fc_lifecycle_linux.go:485` passes `entry.StatePath`, which
 is `filepath.Join(dir, snapshotStateFile)` under the shared `.snapshots` cache
@@ -145,8 +145,8 @@ They compose cleanly, and this is the one place where no redesign is needed.
 
 `Env::join_netns` (`env.rs:651`) opens the path given to `--netns`, calls
 `setns(fd, CLONE_NEWNET)`, closes it. **jailer joins an existing namespace; it never creates
-one.** bean already creates namespaces itself (`ip netns add bean-<n>`,
-`setup_linux.go:100-126`), and `ip netns add` puts a handle at `/var/run/netns/bean-<n>`, which
+one.** wizard already creates namespaces itself (`ip netns add wizard-<n>`,
+`setup_linux.go:100-126`), and `ip netns add` puts a handle at `/var/run/netns/wizard-<n>`, which
 is exactly what `--netns` wants. Neither has to give.
 
 The runtime **already enters the netns today** via `setns` (`netns_linux.go`, and the join at
@@ -155,7 +155,7 @@ let jailer perform that same join (it opens the `--netns` path and calls `setns`
 and #21 are complementary rather than competing.
 
 The `network.md` §4 worry about namespace organisation having to change does not materialise:
-tap naming is unaffected, `beantap0` is still right in the new namespace, and `network_overrides`
+tap naming is unaffected, `wizardtap0` is still right in the new namespace, and `network_overrides`
 stays an unused escape hatch. Note the netns join happens **before** the chroot, so the tap
 device is looked up in the joined namespace and `/dev/net/tun` is `mknod`'d after — that is why
 jailer creates it, and upstream says so: required "to use multiple TAP interfaces when running
@@ -169,7 +169,7 @@ description: "Overrides the vsock device's UDS path on snapshot restore. This is
 restoring a snapshot with a different socket path than the one used when the snapshot was
 created."
 
-`docs/vsock.md` scopes the motivation to precisely bean's situation: "In certain environments
+`docs/vsock.md` scopes the motivation to precisely wizard's situation: "In certain environments
 where the jailer is **not** used, restoring snapshots with vsock devices may be difficult"
 because the same UDS path "cannot be multiplexed." Caveat worth recording: the override is a
 **prefix** — "All connections on the restored VM will then be opened with `./v.sock.2` as a
@@ -183,7 +183,7 @@ is **version-dependent and now false**. Two corrections follow:
    pins the *kernel* to the `firecracker-ci/v1.11` bucket, and nothing in the repo downloads or
    pins the Firecracker binary at all — `dev-fc-stack.sh:96` just points at
    `$ASSETS/firecracker` and assumes it is there. If the deployed binary is < 1.16.0,
-   `vsock_override` does not exist. **Run on the KVM host: `/var/lib/bean/assets/firecracker
+   `vsock_override` does not exist. **Run on the KVM host: `/var/lib/wizard/assets/firecracker
    --version`.** This cannot be established from a darwin checkout.
 
 ## 7. The alternative: cgroup + credential + device allowlist, no jailer 📐
@@ -258,7 +258,7 @@ content of adopting it and is not written yet:
 2. Place the kernel in the jail (hardlink if same filesystem, else bind mount).
 3. Place the agent disk in the jail (hardlink; it is shared and read-only, so this is cheap).
 4. **`mknod` the per-sandbox dm device inside the jail** with the major:minor of
-   `/dev/mapper/bean-<id>`, replacing the symlink. This has no prototype and is the piece most
+   `/dev/mapper/wizard-<id>`, replacing the symlink. This has no prototype and is the piece most
    likely to surprise.
 5. Decide how `.snapshots` reaches the jail *without* per-jail copies of the memory image, since
    the shared read-only `mmap` is what makes fork cheap. Probably a read-only bind mount of the
@@ -279,11 +279,11 @@ settled.
 
 ```sh
 # 1. Which FC is deployed — decides whether vsock_override exists at all.
-/var/lib/bean/assets/firecracker --version
+/var/lib/wizard/assets/firecracker --version
 
 # 2. Does the dm device work inside a jail at all? The single riskiest unknown.
 #    Compare major:minor inside and out.
-stat -c '%t:%T' /dev/mapper/bean-<id>
+stat -c '%t:%T' /dev/mapper/wizard-<id>
 #    then mknod it into the jail root and boot a sandbox from it.
 
 # 3. Cost of the per-create binary copy, against a 234ms runtime_create.

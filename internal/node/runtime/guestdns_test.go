@@ -26,7 +26,7 @@ func TestGuestDNSBootArgsAppendsFlag(t *testing.T) {
 // TestLocalRuntimeOmitsGuestDNSWhenUnset is the same promise on the dev tier:
 // the agent is spawned with the arguments it had before this flag existed.
 func TestLocalRuntimeOmitsGuestDNSWhenUnset(t *testing.T) {
-	r := NewLocalRuntime("beand", t.TempDir())
+	r := NewLocalRuntime("wizardd", t.TempDir())
 	args := r.agentArgs("/tmp/a.sock", "/tmp/root")
 	for _, a := range args {
 		if a == "--guest-dns" {
@@ -37,7 +37,7 @@ func TestLocalRuntimeOmitsGuestDNSWhenUnset(t *testing.T) {
 }
 
 func TestLocalRuntimePassesGuestDNS(t *testing.T) {
-	r := NewLocalRuntime("beand", t.TempDir())
+	r := NewLocalRuntime("wizardd", t.TempDir())
 	r.GuestDNS = "10.0.0.53"
 	args := r.agentArgs("/tmp/a.sock", "/tmp/root")
 

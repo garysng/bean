@@ -10,11 +10,11 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/garysng/bean/internal/control/scheduler"
-	"github.com/garysng/bean/internal/control/snapshot"
-	"github.com/garysng/bean/internal/control/store"
-	nodev1 "github.com/garysng/bean/internal/gen/bean/node/v1"
-	"github.com/garysng/bean/internal/logging"
+	"github.com/garysng/wizard/internal/control/scheduler"
+	"github.com/garysng/wizard/internal/control/snapshot"
+	"github.com/garysng/wizard/internal/control/store"
+	nodev1 "github.com/garysng/wizard/internal/gen/wizard/node/v1"
+	"github.com/garysng/wizard/internal/logging"
 )
 
 // Snapshot endpoints. A snapshot captures a sandbox so it can be recreated

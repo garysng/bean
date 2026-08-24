@@ -28,7 +28,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/garysng/bean/internal/control/store"
+	"github.com/garysng/wizard/internal/control/store"
 )
 
 // Store is the slice of the store this suite exercises. Narrow on purpose: these are

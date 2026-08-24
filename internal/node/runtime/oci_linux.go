@@ -15,9 +15,9 @@ import (
 	"sync"
 	"time"
 
-	"github.com/garysng/bean/internal/logging"
-	"github.com/garysng/bean/internal/node/image"
-	"github.com/garysng/bean/internal/node/network"
+	"github.com/garysng/wizard/internal/logging"
+	"github.com/garysng/wizard/internal/node/image"
+	"github.com/garysng/wizard/internal/node/network"
 
 	"log/slog"
 )
@@ -137,7 +137,7 @@ func (r *OCIRuntime) Available() error {
 		return errors.New("runtime: no agent binary configured")
 	}
 	// Resolved through PATH, not stat'ed directly: --agent-bin defaults to the bare
-	// name "beand", which is what the local tier passes to exec and which resolves
+	// name "wizardd", which is what the local tier passes to exec and which resolves
 	// fine there. Stat'ing it rejected a node whose agent was simply on PATH.
 	//
 	// The resolved path is kept, because the copy into each sandbox's rootfs reads the
@@ -167,7 +167,7 @@ func (r *OCIRuntime) Create(ctx context.Context, spec *Spec) (h *Handle, err err
 	//
 	// GuestIP is what a microVM's guest kernel configures on the tap device, and a
 	// container has no guest kernel: the tap stays DOWN and that address exists
-	// nowhere. Measured -- the namespace held 172.31.0.1/30 on a DOWN beantap0 and
+	// nowhere. Measured -- the namespace held 172.31.0.1/30 on a DOWN wizardtap0 and
 	// 10.0.0.2/30 on an UP veth, while the node dialled 172.31.0.2 and got "network is
 	// unreachable" because the host resolved it through the default gateway.
 	//
@@ -219,7 +219,7 @@ func (r *OCIRuntime) Create(ctx context.Context, spec *Spec) (h *Handle, err err
 
 	// The agent goes into the rootfs rather than being bind-mounted, so a node binary
 	// replaced during an upgrade does not change what running sandboxes execute.
-	agentInGuest := "/.bean/beand"
+	agentInGuest := "/.wizard/wizardd"
 	agentSrc := r.agentPath
 	if agentSrc == "" {
 		// Available normally fills this in. A runtime constructed directly in a test
@@ -419,7 +419,7 @@ var ErrCheckpointUnsupported = errors.New("runtime: this tier cannot checkpoint"
 //
 // Doing it would mean CRIU, which is a substantial piece of work with its own
 // constraints, and it would not buy what checkpointing buys on the fc tier. Warm
-// snapshots are bean's main throughput lever -- a boot costs about 5 CPU-seconds
+// snapshots are wizard's main throughput lever -- a boot costs about 5 CPU-seconds
 // against a restore's near-zero -- and that lever belongs to the microVM tier. This
 // tier exists for what fc cannot do (GPU, no-KVM nodes), not as a substitute for it.
 func (r *OCIRuntime) Checkpoint(ctx context.Context, id string, w io.Writer, opts CheckpointOptions) (CheckpointResult, error) {

@@ -13,8 +13,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/garysng/bean/internal/node/image"
-	"github.com/garysng/bean/internal/node/network"
+	"github.com/garysng/wizard/internal/node/image"
+	"github.com/garysng/wizard/internal/node/network"
 )
 
 // The tests below drive configureAndBoot against a stand-in for Firecracker's API
@@ -383,10 +383,10 @@ func TestBootArgsPutTheAddressBeforeTheSeparator(t *testing.T) {
 // without them. That is a weaker guard than the rest of the package and it is the
 // only place the wiring is observable: the alternative is asserting on a log line.
 func TestNewFCTierPassesTheResolverToTheRuntime(t *testing.T) {
-	fcBin := os.Getenv("BEAN_TEST_FC_BIN")
-	kernel := os.Getenv("BEAN_TEST_KERNEL")
+	fcBin := os.Getenv("WIZARD_TEST_FC_BIN")
+	kernel := os.Getenv("WIZARD_TEST_KERNEL")
 	if fcBin == "" || kernel == "" {
-		t.Skip("set BEAN_TEST_FC_BIN and BEAN_TEST_KERNEL to check the tier wiring")
+		t.Skip("set WIZARD_TEST_FC_BIN and WIZARD_TEST_KERNEL to check the tier wiring")
 	}
 	if _, err := os.Stat("/dev/kvm"); err != nil {
 		t.Skipf("no /dev/kvm: %v", err)

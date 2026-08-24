@@ -132,7 +132,7 @@ type Manifest struct {
 	// Digest is the manifest's own digest, which is the image's identity.
 	Digest string `json:"-"`
 	// storedConfig is the already-parsed configuration, set when this manifest came
-	// from somewhere that had it -- bean's object store rather than a registry.
+	// from somewhere that had it -- wizard's object store rather than a registry.
 	//
 	// Unexported and never serialised: it is not part of an OCI manifest, only a way to
 	// carry an answer already obtained. A manifest resolved offline has no config

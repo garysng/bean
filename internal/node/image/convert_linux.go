@@ -277,7 +277,7 @@ func clearDir(dir string) error {
 // rather than in the guest because the image is mounted read-write only during
 // conversion, and a minimal image may not have them.
 func prepareGuestDirs(root string) error {
-	for _, dir := range []string{"bean", "proc", "sys", "dev", "tmp", "run"} {
+	for _, dir := range []string{"wizard", "proc", "sys", "dev", "tmp", "run"} {
 		if err := os.MkdirAll(filepath.Join(root, dir), 0o755); err != nil {
 			return fmt.Errorf("image: create guest dir %s: %w", dir, err)
 		}

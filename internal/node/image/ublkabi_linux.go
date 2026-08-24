@@ -7,7 +7,7 @@ import "unsafe"
 // The ublk ABI, transcribed from include/uapi/linux/ublk_cmd.h.
 //
 // Written out here rather than pulled from a binding library because there is no
-// maintained Go one, and the surface bean needs is small: add a device, set its
+// maintained Go one, and the surface wizard needs is small: add a device, set its
 // parameters, start it, stop it, delete it. The risk in transcribing a uapi header is
 // getting an encoding wrong and having the kernel reject a command with EINVAL, which
 // names nothing -- so every constant below is derived by the same arithmetic the header
@@ -68,7 +68,7 @@ func ublkCmdR(nr uintptr) uint32 {
 	return ioc(iocRead, 'u', nr, unsafe.Sizeof(ublksrvCtrlCmd{}))
 }
 
-// The control commands bean uses, each with the direction ublk_cmd.h gives it. The nr
+// The control commands wizard uses, each with the direction ublk_cmd.h gives it. The nr
 // values are from the header; the full command word is computed, not written down.
 var (
 	ublkCmdGetQueueAffinity = ublkCmdR(0x01)  // _IOR
@@ -83,7 +83,7 @@ var (
 	ublkCmdUpdateSize       = ublkCmdWR(0x15) // _IOWR
 )
 
-// Feature bits from ublk_cmd.h. Only the ones bean checks are listed: a flag nobody
+// Feature bits from ublk_cmd.h. Only the ones wizard checks are listed: a flag nobody
 // reads is a flag nobody keeps correct.
 const (
 	// ublkFUserCopy has the driver copy data through the daemon's buffers rather than

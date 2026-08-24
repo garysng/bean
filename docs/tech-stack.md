@@ -5,7 +5,7 @@
 > Section status convention: [architecture.md](architecture.md) §0.
 > **Authority order: code > [status.md](status.md) > [decisions.md](decisions.md) > design docs.**
 
-This is a survey of every technology `bean` depends on, what it does here, and
+This is a survey of every technology `wizard` depends on, what it does here, and
 what was rejected to get to it. Where a choice has measured data behind it the
 number is quoted; where it is a judgment call with no measurement, it says so
 rather than borrowing authority it does not have.
@@ -65,7 +65,7 @@ deprivileged user.
 
 **A third tier exists and is not isolation at all.** `LocalRuntime`
 (`internal/node/runtime/local.go`) runs the sandbox as a host process tree with
-the real `beand` binary confined to a directory. It exists so that development
+the real `wizardd` binary confined to a directory. It exists so that development
 and CI on macOS exercise the same agent gRPC surface without KVM. It is not a
 security boundary and is not offered to callers as one.
 
@@ -501,7 +501,7 @@ changes.
 ### 4.2 Boot arguments ✅
 
 ```
-quiet reboot=k panic=-1 pci=off init=/bean/beand -- --listen vsock:1024 --pivot /dev/vdb
+quiet reboot=k panic=-1 pci=off init=/wizard/wizardd -- --listen vsock:1024 --pivot /dev/vdb
 ```
 
 `quiet` is the measured one. **Dropping the serial console saves 493 ms (41 %)**:
@@ -526,7 +526,7 @@ including the agent's log line carrying the trace id, is invisible.
 
 ### 4.3 The agent as PID 1 on its own disk ✅
 
-`beand` is a statically linked Go binary (`CGO_ENABLED=0`, `-ldflags="-s -w"`) on
+`wizardd` is a statically linked Go binary (`CGO_ENABLED=0`, `-ldflags="-s -w"`) on
 a 32 MiB read-only ext4 image, attached as the guest's **root** device:
 
 ```
@@ -536,7 +536,7 @@ a 32 MiB read-only ext4 image, attached as the guest's **root** device:
 
 The kernel execs init from whatever it mounted as root, so putting the agent
 there means **the user image carries no obligation whatsoever** — no embedded
-`beand`, no init system, no modified entrypoint. The agent then pivots to
+`wizardd`, no init system, no modified entrypoint. The agent then pivots to
 `/dev/vdb` itself. That is the whole of "zero image conversion" on the agent side.
 
 **Firecracker names drives in attachment order** and `--pivot /dev/vdb` is
@@ -581,11 +581,11 @@ container tier, which is why transport is abstracted rather than assumed
 
 ## 5. Language and runtime: Go ✅
 
-Four binaries, one language: `bean` (CLI), `bean-api` (gateway with scheduler,
-image and snapshot modules embedded), `noded` (node daemon), `beand`
+Four binaries, one language: `wizard` (CLI), `wizard-api` (gateway with scheduler,
+image and snapshot modules embedded), `noded` (node daemon), `wizardd`
 (in-sandbox agent). Go 1.26.1.
 
-The reasons are specific rather than general. `beand` ships on a disk attached to
+The reasons are specific rather than general. `wizardd` ships on a disk attached to
 **every** microVM, so its size is paid per boot and a static binary with no libc
 dependency is exactly what that requires — `CGO_ENABLED=0` makes it work on any
 guest image, glibc or musl. The node daemon is I/O-concurrency-heavy: many
@@ -681,7 +681,7 @@ Today that is `modernc.org/sqlite`: **pure Go, no cgo**, which matters because
 `CGO_ENABLED=0` is a requirement elsewhere in the build and a cgo SQLite would
 split the toolchain story. `SetMaxOpenConns(1)` enforces the single writer.
 
-Postgres is now a flag rather than a project: `bean-api --postgres <dsn>`. That is
+Postgres is now a flag rather than a project: `wizard-api --postgres <dsn>`. That is
 what allows more than one replica, since SQLite is a single file two replicas
 cannot share.
 
@@ -876,7 +876,7 @@ missing link in supply-chain defence.
 
 ### BuildKit for builds ✅
 
-`bean build` shells out to `buildctl` against a `buildkitd` socket. The reasoning
+`wizard build` shells out to `buildctl` against a `buildkitd` socket. The reasoning
 is stated in the code: COPY and ADD semantics, multi-stage builds, ARG
 interpolation, build caching, `.dockerignore` and heredocs add up to months of
 work and would still be an incomplete imitation. e2b and Daytona reach the same
@@ -911,7 +911,7 @@ exist **between** processes, so no single process's logs contain them.
 The first tree measured produced a number nobody had:
 
 ```
-POST /v1/sandboxes            bean-api   1196.0ms
+POST /v1/sandboxes            wizard-api   1196.0ms
   CreateSandbox               noded      1110.2ms   ← 86ms gap
     runtime.Create            noded       324.2ms
     agent.WaitHealthy         noded       785.8ms
@@ -925,7 +925,7 @@ correlation, and they diverge exactly at the cross-process hop, which is the onl
 place correlation is needed.
 
 **The agent deliberately does not link the tracing SDK.** e2b's `envd` can reach a
-collector directly; `beand` has one inbound vsock connection and no outbound path,
+collector directly; `wizardd` has one inbound vsock connection and no outbound path,
 so adding a reverse channel would either break "zero inbound exposure" or require
 an OTLP relay inside `noded`. It extracts `traceparent` and adopts the trace id
 for its own log lines, and nothing more, because the agent ships on a disk
@@ -933,8 +933,8 @@ attached to every microVM — its size is paid per boot, and the telemetry an
 exporter would serve cannot leave the guest anyway.
 
 **⚠️ One number in `decisions.md` §3.5 is now wrong.** It states
-`go list -deps ./cmd/beand` returns 0 OpenTelemetry packages; it returns **12**.
-The substance of the decision holds and is more precise than the claim: `beand`
+`go list -deps ./cmd/wizardd` returns 0 OpenTelemetry packages; it returns **12**.
+The substance of the decision holds and is more precise than the claim: `wizardd`
 links `otel/trace`, `otel/propagation`, `attribute`, `baggage`, `codes` and
 `semconv` — the API and context-propagation packages — and links **zero** of
 `otel/sdk` or the OTLP exporters. Extracting a `traceparent` requires the
@@ -949,7 +949,7 @@ that line. The regression test sets an endpoint deliberately — the exporter
 connects lazily, so no real collector is needed.
 
 ⚠️ Also worth flagging: the five OTel modules are marked `// indirect` in `go.mod`
-while `internal/obs` and `internal/beand` import them directly. `go mod tidy`
+while `internal/obs` and `internal/wizardd` import them directly. `go mod tidy`
 moves them to the direct block. Cosmetic, but it makes the file misleading about
 what the project depends on.
 
@@ -958,7 +958,7 @@ what the project depends on.
 `internal/obs/metrics.go` implements the text exposition format directly —
 counters, gauges, histograms — so the binaries stay dependency-free, and the same
 registry can be wrapped by an OTLP exporter later. The scrape surface includes
-`bean_node_disk_{free,used}_bytes` and the snapshot cache size.
+`wizard_node_disk_{free,used}_bytes` and the snapshot cache size.
 
 One tool exists because of a measurement trap worth recording:
 `hack/phase-delta.py`. A cumulative histogram's `_sum/_count` gives a lifetime
@@ -989,7 +989,7 @@ the build-tag layout:
 
 The S3 integration tests are the only check that the hand-rolled SigV4 produces
 signatures a server accepts — unit tests can only show the canonicalisation is
-self-consistent with itself. They are gated on `BEAN_S3_ENDPOINT` so
+self-consistent with itself. They are gated on `WIZARD_S3_ENDPOINT` so
 `go test ./...` stays green without infrastructure. ⚠️ There is no scale or load
 testing in `tests/e2e`; the numbers in §1 come from `hack/stress-fc.sh`.
 

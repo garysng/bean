@@ -24,9 +24,9 @@ set -uo pipefail
 
 RUNTIME=${RUNTIME:-runsc}
 N=${N:-5}
-BIN=${BIN:-/tmp/beantest/bin}
+BIN=${BIN:-/tmp/wizardtest/bin}
 STACK=${STACK:-$(dirname "$0")/dev-fc-stack.sh}
-RUN=${RUN:-/tmp/beanrun}
+RUN=${RUN:-/tmp/wizardrun}
 IMG=${IMG:-docker.m.daocloud.io/library/python:3.11-slim}
 UPLINK=${UPLINK:-$(ip route | awk '/^default/ {print $5; exit}')}
 GUEST_SUBNET=${GUEST_SUBNET:-172.31.0.0/30}
@@ -41,8 +41,8 @@ GUEST_SUBNET=${GUEST_SUBNET:-172.31.0.0/30}
 # Safe to oversubscribe: an overlaybd writable layer is sparse, measured at 40 KiB for
 # an idle sandbox against a 20 GiB apparent size.
 NODE_DISK_MIB=${NODE_DISK_MIB:-}
-export BEAN_BASE_URL=http://127.0.0.1:18080
-export BEAN_API_KEY=devkey
+export WIZARD_BASE_URL=http://127.0.0.1:18080
+export WIZARD_API_KEY=devkey
 
 FAILED=0
 pass() { printf '  PASS  %s\n' "$1"; }
@@ -50,14 +50,14 @@ fail() { printf '  FAIL  %s\n' "$1"; FAILED=1; }
 
 SBXS=""
 cleanup() {
-  for s in $SBXS; do "$BIN/bean" kill "$s" >/dev/null 2>&1; done
+  for s in $SBXS; do "$BIN/wizard" kill "$s" >/dev/null 2>&1; done
   BIN=$BIN bash "$STACK" stop >/dev/null 2>&1
 }
 trap cleanup EXIT
 
 echo "runtime: $RUNTIME  sandboxes: $N"
 
-rm -rf "$RUN" /var/lib/bean/images
+rm -rf "$RUN" /var/lib/wizard/images
 GUEST_SUBNET=$GUEST_SUBNET UPLINK=$UPLINK BIN=$BIN BUILDKIT_ADDR= \
   RUNTIME=$RUNTIME NODED_FLAGS="--fc-overlaybd" \
   ${NODE_DISK_MIB:+NODE_DISK_MIB=$NODE_DISK_MIB} \
@@ -67,11 +67,11 @@ sleep 3
 
 # One create first, so the image is converted and the concurrent ones are not all
 # waiting on the same conversion -- that would measure the layer flight, not fan-out.
-warm=$("$BIN/bean" run --image "$IMG" --quiet 2>&1)
+warm=$("$BIN/wizard" run --image "$IMG" --quiet 2>&1)
 if [ -z "$warm" ] || printf '%s' "$warm" | grep -qi error; then
   echo "warm-up create failed: $warm"; tail -20 "$RUN/noded.log"; exit 1
 fi
-"$BIN/bean" kill "$warm" >/dev/null 2>&1
+"$BIN/wizard" kill "$warm" >/dev/null 2>&1
 echo "  image converted; starting $N concurrently"
 
 echo
@@ -80,7 +80,7 @@ start=$(date +%s.%N)
 pids=""
 outdir=$(mktemp -d)
 for i in $(seq 1 "$N"); do
-  ( "$BIN/bean" run --image "$IMG" --quiet >"$outdir/$i" 2>&1 ) &
+  ( "$BIN/wizard" run --image "$IMG" --quiet >"$outdir/$i" 2>&1 ) &
   pids="$pids $!"
 done
 for p in $pids; do wait "$p"; done
@@ -128,7 +128,7 @@ echo "### each sandbox is reachable and is its own"
 # a shared rootfs or a merged device shows up as a sandbox reading someone else's.
 ok=0
 for s in $SBXS; do
-  if "$BIN/bean" exec "$s" -- sh -c "echo $s > /whoami" >/dev/null 2>&1; then
+  if "$BIN/wizard" exec "$s" -- sh -c "echo $s > /whoami" >/dev/null 2>&1; then
     ok=$((ok + 1))
   fi
 done
@@ -140,7 +140,7 @@ fi
 
 leaks=0
 for s in $SBXS; do
-  got=$("$BIN/bean" exec "$s" -- cat /whoami 2>&1 | tr -d '\n\r ')
+  got=$("$BIN/wizard" exec "$s" -- cat /whoami 2>&1 | tr -d '\n\r ')
   if [ "$got" != "$s" ]; then
     fail "$s reads \"$got\" -- sandboxes are sharing a filesystem"
     leaks=$((leaks + 1))
@@ -150,7 +150,7 @@ done
 
 echo
 echo "### one device and one mount per sandbox"
-mounts=$(grep -c "/var/lib/bean/sandboxes" /proc/mounts 2>/dev/null | head -1)
+mounts=$(grep -c "/var/lib/wizard/sandboxes" /proc/mounts 2>/dev/null | head -1)
 mounts=${mounts:-0}
 # Only the container tier mounts a rootfs on the host. fc hands the block device
 # straight to the microVM over virtio-blk, so zero is correct there -- asserting
@@ -183,16 +183,16 @@ fi
 
 echo
 echo "### destroying all of them releases everything"
-for s in $SBXS; do "$BIN/bean" kill "$s" >/dev/null 2>&1; done
+for s in $SBXS; do "$BIN/wizard" kill "$s" >/dev/null 2>&1; done
 SBXS=""
 sleep 3
-left=$(grep -c "/var/lib/bean/sandboxes" /proc/mounts 2>/dev/null | head -1)
+left=$(grep -c "/var/lib/wizard/sandboxes" /proc/mounts 2>/dev/null | head -1)
 left=${left:-0}
 if [ "$left" -eq 0 ]; then
   pass "no mounts left behind"
 else
   fail "$left mount(s) still present"
-  grep "/var/lib/bean/sandboxes" /proc/mounts | head -3
+  grep "/var/lib/wizard/sandboxes" /proc/mounts | head -3
 fi
 # A metadata address left on a torn-down namespace would be invisible until the next
 # sandbox reused the slot and failed to bind.

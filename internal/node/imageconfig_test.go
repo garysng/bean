@@ -5,9 +5,9 @@ import (
 	"reflect"
 	"testing"
 
-	nodev1 "github.com/garysng/bean/internal/gen/bean/node/v1"
-	"github.com/garysng/bean/internal/node/image"
-	"github.com/garysng/bean/internal/node/runtime"
+	nodev1 "github.com/garysng/wizard/internal/gen/wizard/node/v1"
+	"github.com/garysng/wizard/internal/node/image"
+	"github.com/garysng/wizard/internal/node/runtime"
 )
 
 // configRuntime wraps the local runtime with an image configuration, so the merge

@@ -6,8 +6,8 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/garysng/bean/internal/node/network"
-	"github.com/garysng/bean/internal/node/runtime"
+	"github.com/garysng/wizard/internal/node/network"
+	"github.com/garysng/wizard/internal/node/runtime"
 )
 
 // These tests are about the manager's ordering obligations, not about namespaces.
@@ -227,8 +227,8 @@ func TestSpecCarriesTheLayoutWhenConfigured(t *testing.T) {
 		t.Fatal("spec.Network is nil although a namespace was provisioned; the tap " +
 			"exists and no guest is attached to it")
 	}
-	if got.Network.TapName != "beantap0" {
-		t.Errorf("tap = %q, want beantap0; the constant name is what lets a restored "+
+	if got.Network.TapName != "wizardtap0" {
+		t.Errorf("tap = %q, want wizardtap0; the constant name is what lets a restored "+
 			"snapshot find its device", got.Network.TapName)
 	}
 }

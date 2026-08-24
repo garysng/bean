@@ -56,7 +56,7 @@ func seedExt4Image(t *testing.T, p *DevMapperProvider, ref string, sizeMiB int64
 // mountAndRun mounts a device, runs fn against the mountpoint, and unmounts.
 func mountAndRun(t *testing.T, device string, fn func(mnt string)) {
 	t.Helper()
-	mnt, err := os.MkdirTemp("", "beanmnt")
+	mnt, err := os.MkdirTemp("", "wizardmnt")
 	if err != nil {
 		t.Fatal(err)
 	}

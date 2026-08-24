@@ -247,7 +247,7 @@ func (c *ublkControl) setParams(devID uint32, sizeBytes int64) error {
 	p.Basic.Attrs = ublkAttrVolatileCache
 
 	// 512-byte logical blocks with 4 KiB physical, which is what a virtio-blk guest
-	// expects and what the ext4 in bean's images is formatted for.
+	// expects and what the ext4 in wizard's images is formatted for.
 	p.Basic.LogicalBSShift = 9
 	p.Basic.PhysicalBSShift = 12
 	p.Basic.IOOptShift = 12

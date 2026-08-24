@@ -6,7 +6,7 @@ import (
 	"os"
 	"testing"
 
-	"github.com/garysng/bean/internal/control/s3"
+	"github.com/garysng/wizard/internal/control/s3"
 )
 
 // End-to-end against the real store: resolve a real published image with a registry that
@@ -19,14 +19,14 @@ import (
 // bucket. Copied into the package to run, then removed. Kept here so the check is
 // repeatable.
 func TestResolveRealImageFromStoreWithNoRegistry(t *testing.T) {
-	ep := os.Getenv("BEAN_S3_ENDPOINT")
+	ep := os.Getenv("WIZARD_S3_ENDPOINT")
 	if ep == "" {
-		t.Skip("BEAN_S3_ENDPOINT not set")
+		t.Skip("WIZARD_S3_ENDPOINT not set")
 	}
 	c, err := s3.New(s3.Config{
 		Endpoint: ep, Region: "us-east-1", PathStyle: true,
-		AccessKey: os.Getenv("BEAN_S3_ACCESS_KEY"),
-		SecretKey: os.Getenv("BEAN_S3_SECRET_KEY"),
+		AccessKey: os.Getenv("WIZARD_S3_ACCESS_KEY"),
+		SecretKey: os.Getenv("WIZARD_S3_SECRET_KEY"),
 	})
 	if err != nil {
 		t.Fatal(err)

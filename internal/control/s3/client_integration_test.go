@@ -15,25 +15,25 @@ import (
 // check that proves the hand-rolled SigV4 produces signatures a server
 // accepts — unit tests can only show the canonicalisation is self-consistent.
 //
-// Set BEAN_S3_ENDPOINT, BEAN_S3_ACCESS_KEY and BEAN_S3_SECRET_KEY to enable;
+// Set WIZARD_S3_ENDPOINT, WIZARD_S3_ACCESS_KEY and WIZARD_S3_SECRET_KEY to enable;
 // otherwise they skip, so `go test ./...` stays green without infrastructure.
 func testClient(t *testing.T) (*Client, string) {
 	t.Helper()
-	endpoint := os.Getenv("BEAN_S3_ENDPOINT")
+	endpoint := os.Getenv("WIZARD_S3_ENDPOINT")
 	if endpoint == "" {
-		t.Skip("BEAN_S3_ENDPOINT not set; skipping object-store integration test")
+		t.Skip("WIZARD_S3_ENDPOINT not set; skipping object-store integration test")
 	}
 	c, err := New(Config{
 		Endpoint:  endpoint,
-		Region:    envOrDefault("BEAN_S3_REGION", "us-east-1"),
-		AccessKey: os.Getenv("BEAN_S3_ACCESS_KEY"),
-		SecretKey: os.Getenv("BEAN_S3_SECRET_KEY"),
+		Region:    envOrDefault("WIZARD_S3_REGION", "us-east-1"),
+		AccessKey: os.Getenv("WIZARD_S3_ACCESS_KEY"),
+		SecretKey: os.Getenv("WIZARD_S3_SECRET_KEY"),
 		PathStyle: true,
 	})
 	if err != nil {
 		t.Fatalf("new client: %v", err)
 	}
-	bucket := envOrDefault("BEAN_S3_TEST_BUCKET", "bean-test")
+	bucket := envOrDefault("WIZARD_S3_TEST_BUCKET", "wizard-test")
 	if err := c.EnsureBucket(context.Background(), bucket); err != nil {
 		t.Fatalf("ensure bucket %s: %v", bucket, err)
 	}
@@ -51,7 +51,7 @@ func TestObjectRoundTrip(t *testing.T) {
 	c, bucket := testClient(t)
 	ctx := context.Background()
 	key := "roundtrip/" + t.Name()
-	body := []byte("bean snapshot payload")
+	body := []byte("wizard snapshot payload")
 
 	if err := c.PutObject(ctx, bucket, key, body); err != nil {
 		t.Fatalf("put: %v", err)
@@ -186,7 +186,7 @@ func TestMultipartUploadSpansParts(t *testing.T) {
 
 	// Two full parts plus a remainder, with a recognisable pattern so a
 	// mis-ordered part shows up as a content mismatch rather than a size one.
-	want := bytes.Repeat([]byte("bean"), (11<<20)/4)
+	want := bytes.Repeat([]byte("wizard"), (11<<20)/4)
 	if n, err := u.Write(want); err != nil || n != len(want) {
 		t.Fatalf("write: n=%d err=%v", n, err)
 	}

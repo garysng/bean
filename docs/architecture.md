@@ -1,4 +1,4 @@
-# Bean Technical Architecture
+# Wizard Technical Architecture
 
 > 中文版:[zh/architecture.md](zh/architecture.md)
 
@@ -75,7 +75,7 @@ implemented and measured on a real KVM machine (full / `--no-memory` /
 **Networking was the gap and is now built** (network.md): each sandbox gets its
 own namespace, tap and egress, the metadata range and RFC1918 are denied by
 default, and a port inside a sandbox is reachable from outside the node through
-bean-proxy. All of it verified on a real kernel.
+wizard-proxy. All of it verified on a real kernel.
 
 Cross-node sandbox connectivity remains a non-goal, and per-port access control
 is genuinely missing — any port on a sandbox is reachable by anything that can
@@ -110,7 +110,7 @@ reach the proxy (api-design.md §3.4).
              │
         ┌────▼──────────────────────┐
         │ sandbox                   │  fc: microVM (vsock to agent)
-        │  └── beand (init/PID1)    │  container: runc/runsc (TCP in its netns)
+        │  └── wizardd (init/PID1)    │  container: runc/runsc (TCP in its netns)
         │      └── user process     │  agent: exec/PTY/files/port-forward
         └───────────────────────────┘
 
@@ -121,15 +121,15 @@ reach the proxy (api-design.md §3.4).
 
 | Component | Language | Responsibility |
 |---|---|---|
-| `api-gateway` | Go | ✅ REST + gRPC API, auth, quota (port reverse-proxying belongs to bean-proxy, which may be co-deployed) |
-| `scheduler` | Go | Node selection (image affinity + resource bin-packing), lease management — **a logical module of the control plane** (`internal/control/scheduler`, in the same process as bean-api: the scheduling decision, the transactional resource deduction and the command dispatch have to complete atomically; split it out once it becomes a bottleneck or needs leader election) |
-| `image-service` | Go | Image metadata index, format conversion orchestration, prewarm, S3 blob GC (a logical module of the control plane; embedded in bean-api through P0–P2) |
-| `bean-proxy` | Go | ✅ Reverse proxy into sandboxes. Reads `{port}-{sandbox}` from the Host, looks up which node holds it, forwards. Carries both a user's exposed port and the agent's own interface, so port exposure and the data plane are one mechanism. Performs no user authentication (an external layer does; see A7) and refuses a public bind. TLS and DNS are the hosting layer's, not bean's |
+| `api-gateway` | Go | ✅ REST + gRPC API, auth, quota (port reverse-proxying belongs to wizard-proxy, which may be co-deployed) |
+| `scheduler` | Go | Node selection (image affinity + resource bin-packing), lease management — **a logical module of the control plane** (`internal/control/scheduler`, in the same process as wizard-api: the scheduling decision, the transactional resource deduction and the command dispatch have to complete atomically; split it out once it becomes a bottleneck or needs leader election) |
+| `image-service` | Go | Image metadata index, format conversion orchestration, prewarm, S3 blob GC (a logical module of the control plane; embedded in wizard-api through P0–P2) |
+| `wizard-proxy` | Go | ✅ Reverse proxy into sandboxes. Reads `{port}-{sandbox}` from the Host, looks up which node holds it, forwards. Carries both a user's exposed port and the agent's own interface, so port exposure and the data plane are one mechanism. Performs no user authentication (an external layer does; see A7) and refuses a public bind. TLS and DNS are the hosting layer's, not wizard's |
 | `noded` | Go | Node daemon: sandbox lifecycle, networking, image cache, volume mounts, health reporting |
-| `beand` | Go (statically linked) | PID1 inside the sandbox: exec, PTY, file read/write, port forwarding |
+| `wizardd` | Go (statically linked) | PID1 inside the sandbox: exec, PTY, file read/write, port forwarding |
 | `sdk-python` | Python | Primary SDK for the evaluation/rollout side |
 | `sdk-ts` | TypeScript | SDK for the Web/Node side |
-| `cli` | Go | The `bean` command line: sandbox management, image prewarm, debugging |
+| `cli` | Go | The `wizard` command line: sandbox management, image prewarm, debugging |
 
 ## 3. Core Design Decisions
 
@@ -169,7 +169,7 @@ containerd's responsibilities have a more direct replacement in this design:
 >
 > The specific blocker, checked rather than assumed: overlaybd's containerd
 > snapshotter wants images in a registry with a
-> `containerd.io/snapshot/overlaybd/version` manifest annotation, and what bean
+> `containerd.io/snapshot/overlaybd/version` manifest annotation, and what wizard
 > publishes to S3 is a bare blob prefix with neither.
 
 The original reasoning, kept because the trade is real: runc lifecycle and overlayfs
@@ -287,10 +287,10 @@ attached:
    stays DOWN and that address exists nowhere. Dialling it got "network is
    unreachable" because the host resolved it through the default gateway.
 3. **runsc needs `--network=host`.** Its default userspace stack (netstack) takes
-   over the veth, so the agent logged `beand listening` while `ss` in the
+   over the veth, so the agent logged `wizardd listening` while `ss` in the
    namespace showed no listener. See the security note below.
 4. **The agent requires a token on TCP, and the node must serve it one.**
-   `cmd/beand` derives that requirement from the transport rather than a flag,
+   `cmd/wizardd` derives that requirement from the transport rather than a flag,
    because a TCP address is reachable *from inside the sandbox*. The expected hash
    comes from a metadata service at 169.254.169.254, which Firecracker provides
    and a container does not — so this tier runs a per-sandbox one inside the
@@ -327,7 +327,7 @@ overlaybd assembles the image block device: base layer (lazy-pull from S3)
   (the industry-consistent approach: e2b and AgentENV both assemble host-side)
   → attached to the microVM over virtio-blk (the guest sees one disk)
     + the agent disk (read-only, see D5)
-  → beand runs as init inside the guest: mounts /proc /sys /dev and the rest
+  → wizardd runs as init inside the guest: mounts /proc /sys /dev and the rest
     (replicating the OCI default mounts), applies the image config
     (ENV/USER/WORKDIR/Entrypoint+Cmd) and starts the user process
 ```
@@ -340,7 +340,7 @@ complexity inside the guest.
 - No container layer inside the guest; "container" is reduced to an image format, and the zero-conversion promise is unchanged
 - Compatibility: ENV/ENTRYPOINT/CMD/WORKDIR are recorded beside the image when it is converted and merged with the create request when the process starts (rules in [image-pipeline.md](image-pipeline.md) §5); USER is recorded but not yet enforced. The guest is a complete, real Linux kernel, so compatibility beats a gVisor emulation layer. The one difference: the kernel is packaged and provided by the platform (not the host kernel), which a purely user-space eval workload cannot tell apart. See the fcRuntime section of noded-design.md
 - Agent communication goes over vsock (a transport abstraction; same protocol as the container tier's unix socket)
-- Networking: a tap device joins the node's bean0 bridge, with the same nftables rules as the container tier
+- Networking: a tap device joins the node's wizard0 bridge, with the same nftables rules as the container tier
 - This route is validated in production by AgentENV (the Kimi K3 training infrastructure); the implementation takes its overlaybd+ublk integration and snapshot design as reference
 
 ### D4. S3 as the unified storage backend ⚠️
@@ -365,7 +365,7 @@ Nydus is kept as a fallback option for the container tier.
 Hot state (sandbox metadata, leases, scheduling state) lands in a relational
 database, not in S3. ⚠️ **Today that is SQLite** (`modernc.org/sqlite`, pure Go
 with no cgo, `SetMaxOpenConns(1)` for single-writer) or Postgres, chosen by
-whether `bean-api --postgres` is set. SQLite suits a single machine; a
+whether `wizard-api --postgres` is set. SQLite suits a single machine; a
 multi-replica control plane needs Postgres, because SQLite is one file and two
 replicas cannot share it.
 
@@ -388,7 +388,7 @@ injection method depends on the tier:
 
 | Tier | Injection | Communication |
 |---|---|---|
-| fc (default) | **Agent disk**: a small read-only disk (ext4) containing beand, attached as an extra virtio-blk; the guest kernel's init is the agent on that disk | vsock + gRPC |
+| fc (default) | **Agent disk**: a small read-only disk (ext4) containing wizardd, attached as an extra virtio-blk; the guest kernel's init is the agent on that disk | vsock + gRPC |
 | Container tier | Read-only bind mount + entrypoint override, agent runs as PID1 | unix socket + gRPC |
 
 What they share: zero modification to the user image; the original
@@ -499,7 +499,7 @@ data); and the backend stays swappable. See noded-design.md §3.3.
 failure domain + a data domain + a forwarding domain:
 
 ```
-Global Control Plane (bean-api / scheduler / relational DB, global digest index of image metadata)
+Global Control Plane (wizard-api / scheduler / relational DB, global digest index of image metadata)
    │ hosted gRPC ingress (TLS) + node token, noded/proxy connect outbound
    ├── Region A: noded node pool + regional proxy ×N + region S3 backend
    └── Region B (BYOC): customer nodes + customer S3, data never leaves the customer environment
@@ -603,27 +603,27 @@ Target: P50 < 2s (image already cached) / P50 < 10s (lazy-pull of a cold image).
 
 - Untrusted code runs on fc by default (Firecracker microVM, a hardware virtualization boundary); nodes without KVM fall back to runsc
 - ✅ The fc tier's host-side confinement is built: the VMM drops to an unprivileged uid (`--fc-vmm-uid`), runs in a per-sandbox cgroup with a memory ceiling, CPU quota and pid cap (`--fc-cgroups`), and has its own pid, mount and network namespaces by default. Firecracker's built-in seccomp is on top of that, not instead of it
-- ❌ ~~jailer~~ is not planned. With the namespaces, cgroup and uid drop above already in place, what jailer would add is a `chroot` and a device allowlist — [#20](https://github.com/garysng/bean/issues/20) phase 2, and probably not the right shape. Recorded as abandoned rather than pending so it stops reading as a gap
+- ❌ ~~jailer~~ is not planned. With the namespaces, cgroup and uid drop above already in place, what jailer would add is a `chroot` and a device allowlist — [#20](https://github.com/garysng/wizard/issues/20) phase 2, and probably not the right shape. Recorded as abandoned rather than pending so it stops reading as a gap
 - ✅ The container tier is implemented (D3): `--runtime runsc|runc`
-- ⚠️ Network policy between sandboxes is unimplemented. Each sandbox *does* have its own namespace, tap and egress, with the metadata range and RFC1918 denied by default (network.md) — what is missing is per-port access control, so any port on a sandbox is reachable by anything that can reach bean-proxy ([#50](https://github.com/garysng/bean/issues/50))
+- ⚠️ Network policy between sandboxes is unimplemented. Each sandbox *does* have its own namespace, tap and egress, with the metadata range and RFC1918 denied by default (network.md) — what is missing is per-port access control, so any port on a sandbox is reachable by anything that can reach wizard-proxy ([#50](https://github.com/garysng/wizard/issues/50))
 - ⚠️ Nodes currently take their S3 credentials from environment variables; presigned URL / STS rotation is unimplemented
 - API auth: API key (caller identification + quota; no user/tenant system — this is an internal cluster service)
 
 ## 7. Repo Layout ⚠️
 
 ```
-bean/
+wizard/
 ├── proto/                  ✅ gRPC definitions (single source of truth)
 ├── cmd/
-│   ├── bean/               ✅ CLI entry point
-│   ├── bean-api/           ✅ gateway (scheduler / image / snapshot modules embedded)
+│   ├── wizard/               ✅ CLI entry point
+│   ├── wizard-api/           ✅ gateway (scheduler / image / snapshot modules embedded)
 │   ├── noded/              ✅ node daemon
-│   ├── beand/              ✅ in-sandbox agent
-│   └── bean-proxy/         ✅ reverse proxy into sandboxes (Host-routed)
+│   ├── wizardd/              ✅ in-sandbox agent
+│   └── wizard-proxy/         ✅ reverse proxy into sandboxes (Host-routed)
 ├── internal/
 │   ├── control/            ✅ api / scheduler / store / snapshot / s3
 │   ├── node/               ✅ manager / runtime / image / vsock (no network module)
-│   ├── beand/              ✅ in-sandbox daemon implementation
+│   ├── wizardd/              ✅ in-sandbox daemon implementation
 │   ├── obs/                ✅ OTel tracing + gRPC interceptors
 │   ├── logging/            ✅ slog structured logging
 │   └── gen/                ✅ protoc output

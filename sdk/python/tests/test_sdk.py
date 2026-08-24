@@ -1,4 +1,4 @@
-"""Unit tests for the bean SDK against a stub HTTP server."""
+"""Unit tests for the wizard SDK against a stub HTTP server."""
 
 import json
 import sys
@@ -9,8 +9,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from bean import (  # noqa: E402
-    BeanAPIError, BeanClient, BeanConnectionError, Event, Snapshot,
+from wizard import (  # noqa: E402
+    WizardAPIError, WizardClient, WizardConnectionError, Event, Snapshot,
 )
 
 
@@ -145,7 +145,7 @@ class SDKTest(unittest.TestCase):
     def setUpClass(cls):
         cls.httpd = HTTPServer(("127.0.0.1", 0), StubHandler)
         threading.Thread(target=cls.httpd.serve_forever, daemon=True).start()
-        cls.client = BeanClient(api_key="test-key",
+        cls.client = WizardClient(api_key="test-key",
                                 base_url=f"http://127.0.0.1:{cls.httpd.server_port}")
 
     @classmethod
@@ -173,16 +173,16 @@ class SDKTest(unittest.TestCase):
         self.assertEqual(sb.read_file("/a.txt"), b"file-content")
 
     def test_error_mapping(self):
-        bad = BeanClient(api_key="wrong",
+        bad = WizardClient(api_key="wrong",
                          base_url=self.client.base_url)
-        with self.assertRaises(BeanAPIError) as cm:
+        with self.assertRaises(WizardAPIError) as cm:
             bad.sandboxes.list()
         self.assertEqual(cm.exception.code, "UNAUTHENTICATED")
         self.assertEqual(cm.exception.http_status, 401)
 
     def test_create_validation_error(self):
-        # A server-side rejection surfaces as BeanAPIError with its code.
-        with self.assertRaises(BeanAPIError) as cm:
+        # A server-side rejection surfaces as WizardAPIError with its code.
+        with self.assertRaises(WizardAPIError) as cm:
             self.client.sandboxes.create(image_ref="reject-me")
         self.assertEqual(cm.exception.code, "IMAGE_REF_INVALID")
 
@@ -195,11 +195,11 @@ class SDKTest(unittest.TestCase):
     def test_connection_error_is_wrapped(self):
         # 192.0.2.0/24 is TEST-NET-1 (RFC 5737): guaranteed unroutable, so the
         # request fails at the transport layer rather than hitting a live port.
-        c = BeanClient(api_key="k", base_url="http://192.0.2.1:8080", timeout=1)
-        with self.assertRaises(BeanConnectionError) as cm:
+        c = WizardClient(api_key="k", base_url="http://192.0.2.1:8080", timeout=1)
+        with self.assertRaises(WizardConnectionError) as cm:
             c.sandboxes.list()
         self.assertEqual(cm.exception.code, "CONNECTION_ERROR")
-        self.assertIsInstance(cm.exception, BeanAPIError)
+        self.assertIsInstance(cm.exception, WizardAPIError)
 
     def test_events_subscribe_yields_events(self):
         got = list(self.client.events.subscribe())
@@ -218,14 +218,14 @@ class SDKTest(unittest.TestCase):
         self.assertEqual(len(got), 2)
 
     def test_events_subscribe_auth_error(self):
-        bad = BeanClient(api_key="wrong", base_url=self.client.base_url)
-        with self.assertRaises(BeanAPIError) as cm:
+        bad = WizardClient(api_key="wrong", base_url=self.client.base_url)
+        with self.assertRaises(WizardAPIError) as cm:
             list(bad.events.subscribe())
         self.assertEqual(cm.exception.code, "UNAUTHENTICATED")
 
     def test_events_subscribe_connection_error(self):
-        c = BeanClient(api_key="k", base_url="http://192.0.2.1:8080")
-        with self.assertRaises(BeanConnectionError):
+        c = WizardClient(api_key="k", base_url="http://192.0.2.1:8080")
+        with self.assertRaises(WizardConnectionError):
             list(c.events.subscribe(timeout=1))
 
     def test_sandbox_snapshot(self):
@@ -311,7 +311,7 @@ class SDKTest(unittest.TestCase):
         self.assertTrue(self.client.templates.prewarm_status("pw_stub1")["done"])
 
     def test_timeout_configurable(self):
-        c = BeanClient(api_key="k", base_url=self.client.base_url, timeout=1.5)
+        c = WizardClient(api_key="k", base_url=self.client.base_url, timeout=1.5)
         self.assertEqual(c.timeout, 1.5)
 
 
@@ -320,7 +320,7 @@ import struct  # noqa: E402
 
 
 class ProxyHandler(BaseHTTPRequestHandler):
-    """A stub bean-proxy speaking Connect HTTP/JSON, enough for the SDK's data
+    """A stub wizard-proxy speaking Connect HTTP/JSON, enough for the SDK's data
     plane: unary Exec as JSON, ReadFile/WriteFile as enveloped streams. It
     records the Host header so the test can assert the SDK addresses the agent
     as {port}-{sandbox}.{domain}."""
@@ -385,7 +385,7 @@ class ProxyHandler(BaseHTTPRequestHandler):
 
 
 class DataPlaneTest(unittest.TestCase):
-    """The SDK reaches the agent through the proxy when BEAN_PROXY_URL is set,
+    """The SDK reaches the agent through the proxy when WIZARD_PROXY_URL is set,
     with no gRPC dependency -- pure urllib against Connect HTTP/JSON."""
 
     @classmethod
@@ -400,8 +400,8 @@ class DataPlaneTest(unittest.TestCase):
         cls.proxy.server_close()
 
     def _sandbox(self, domain="sandbox.local"):
-        from bean import Sandbox
-        client = BeanClient(api_key="k", base_url="http://127.0.0.1:1",
+        from wizard import Sandbox
+        client = WizardClient(api_key="k", base_url="http://127.0.0.1:1",
                             proxy_url=self.proxy_url)
         return Sandbox(id="sbx_dp1", state="RUNNING", image="x",
                        domain=domain, _client=client)
@@ -425,7 +425,7 @@ class DataPlaneTest(unittest.TestCase):
 
     def test_no_proxy_keeps_the_relay(self):
         # Without a proxy URL the data plane is off: _dataplane_for returns None.
-        client = BeanClient(api_key="k", base_url="http://127.0.0.1:1")
+        client = WizardClient(api_key="k", base_url="http://127.0.0.1:1")
         self.assertIsNone(client._dataplane_for("sbx", ""))
 
     def test_authority_without_domain_is_bare_label(self):

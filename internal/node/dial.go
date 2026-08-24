@@ -6,7 +6,7 @@ import (
 	"net"
 	"strings"
 
-	"github.com/garysng/bean/internal/node/vsock"
+	"github.com/garysng/wizard/internal/node/vsock"
 )
 
 // dialAgentAddr connects to an agent address, choosing the transport from its

@@ -21,7 +21,7 @@ import (
 // be an incomplete imitation; e2b and Daytona reach the same conclusion.
 //
 // What the platform does own is the output shape. BuildKit exports an OCI image
-// layout, from which bean recovers the image config and flattens the layers into
+// layout, from which wizard recovers the image config and flattens the layers into
 // the single rootfs a base image needs -- so there is no registry round trip, and
 // the result goes through the same writer and seal path as a pulled image.
 

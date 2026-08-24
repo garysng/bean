@@ -13,11 +13,11 @@ import (
 
 	"google.golang.org/grpc/status"
 
-	"github.com/garysng/bean/internal/control/image"
-	"github.com/garysng/bean/internal/control/s3"
-	"github.com/garysng/bean/internal/control/store"
-	nodev1 "github.com/garysng/bean/internal/gen/bean/node/v1"
-	"github.com/garysng/bean/internal/logging"
+	"github.com/garysng/wizard/internal/control/image"
+	"github.com/garysng/wizard/internal/control/s3"
+	"github.com/garysng/wizard/internal/control/store"
+	nodev1 "github.com/garysng/wizard/internal/gen/wizard/node/v1"
+	"github.com/garysng/wizard/internal/logging"
 )
 
 // Builds run on a node, where BuildKit and the image cache already live. The
@@ -185,7 +185,7 @@ func (s *Server) pickBuilder() (string, error) {
 // expensive and its result is shared — the tag it produces is what other callers
 // wait on, and its layers warm the node's BuildKit cache for everything built on
 // the same base — so tearing it down because one reader closed a socket would
-// throw away work nobody asked to abandon, and would make `bean build` behave
+// throw away work nobody asked to abandon, and would make `wizard build` behave
 // differently depending on whether someone was watching. Stopping a build is
 // therefore something a caller has to ask for explicitly, which is what the
 // cancel endpoint is for.
@@ -365,7 +365,7 @@ func (s *Server) ReconcileBuilds(ctx context.Context) {
 // and unframing it in each client for no gain — /v1/events uses SSE because its
 // payload is discrete typed JSON objects, which is the opposite case. A cursor
 // endpoint would put reassembly in the client and turn one connection into a
-// polling loop. Plain chunked text is what `curl` and `bean build --follow` can
+// polling loop. Plain chunked text is what `curl` and `wizard build --follow` can
 // both consume without a parser.
 //
 // ?follow=false returns what has been produced so far and stops, which is what a

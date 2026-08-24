@@ -138,7 +138,7 @@ func openLSMTStackFrom(srcs []layerSource) (*lsmtStack, func() error, error) {
 				"source", src.label())
 		}
 
-		// Three containers, outermost first. bean seals with `overlaybd-commit -z -t`, so
+		// Three containers, outermost first. wizard seals with `overlaybd-commit -z -t`, so
 		// a layer is: a tar (from -t, which makes it a valid OCI blob), holding a ZFile
 		// (from -z, block-compressed so any one block can be expanded alone), holding the
 		// LSMT index and its extents.

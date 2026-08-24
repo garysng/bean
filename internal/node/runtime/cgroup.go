@@ -31,7 +31,7 @@ import (
 // of this file, and swap thrashing is the precise failure the ceiling exists to
 // prevent -- so on v1 "limits are in place" would be untrue in the dimension that
 // matters most, which is worse than not supporting v1 at all. v2 spells it
-// memory.swap.max and needs no boot parameter. bean picks its nodes; it does not
+// memory.swap.max and needs no boot parameter. wizard picks its nodes; it does not
 // have to accommodate whichever hierarchy a host happens to present.
 //
 // The ask is not exotic: systemd has defaulted to the unified hierarchy since
@@ -63,16 +63,16 @@ const (
 // the startup log and the tests do not depend on map iteration.
 var cgroupControllers = []string{cgroupMemory, cgroupCPU, cgroupPids}
 
-// cgroupPrefix namespaces bean's groups inside a tree it shares with systemd,
+// cgroupPrefix namespaces wizard's groups inside a tree it shares with systemd,
 // Docker and anything else on the host. Every name this package creates carries
 // it, and the startup sweep will only remove a directory that has it, so a bug
 // here cannot reach another workload's cgroup.
-const cgroupPrefix = "bean-"
+const cgroupPrefix = "wizard-"
 
 // cgroupCPUPeriodUS is the scheduling window a CPU quota is expressed against.
 // 100ms is the kernel's own default and what every other cgroup user on the host
 // will be using; a shorter window bounds latency more tightly at the cost of more
-// scheduler work, and there is no reason for bean to differ.
+// scheduler work, and there is no reason for wizard to differ.
 const cgroupCPUPeriodUS = 100000
 
 // vmmMemoryHeadroomMiB is how much the VMM's memory ceiling exceeds the RAM its
@@ -377,7 +377,7 @@ func (h *cgroupHost) writesFor(controller string, l cgroupLimits) []cgroupWrite 
 // It refuses anything that is not a single path element. Sandbox ids arrive from
 // the control plane and are used here to build a path that is removed later, so
 // an id containing a separator would let a create reach outside the tree and a
-// teardown remove something that was never bean's.
+// teardown remove something that was never wizard's.
 func cgroupNameFor(id string) (string, error) {
 	if id == "" {
 		return "", errors.New("cgroup: sandbox id required")
@@ -516,7 +516,7 @@ func rmdirGroup(dir string) error {
 	}
 	for _, e := range entries {
 		if e.IsDir() {
-			// A child group. Not bean's to remove, and its presence is the reason
+			// A child group. Not wizard's to remove, and its presence is the reason
 			// for the refusal.
 			return err
 		}
@@ -530,7 +530,7 @@ func rmdirGroup(dir string) error {
 	return nil
 }
 
-// SweepOrphans removes bean's groups that no longer hold a process.
+// SweepOrphans removes wizard's groups that no longer hold a process.
 //
 // This is the same leak as GitHub #16's loop devices: Destroy removes the group,
 // a noded that is killed never reaches Destroy, and the directory stays for the
@@ -561,7 +561,7 @@ func (h *cgroupHost) SweepOrphans() (removed, inUse int) {
 			continue
 		}
 		if _, ok := sandboxIDFromCgroupName(e.Name()); !ok {
-			// Not bean's. Not counted, not touched, not reported.
+			// Not wizard's. Not counted, not touched, not reported.
 			continue
 		}
 		if err := rmdirGroup(filepath.Join(base, e.Name())); err != nil {

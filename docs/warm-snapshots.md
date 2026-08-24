@@ -22,10 +22,10 @@ caller of `CreateSandbox` lives under `packages/orchestrator/pkg/template/build/
 The user-facing gRPC handler calls `ResumeSandbox`. Real boot happens only when a
 template is built.
 
-Their `ResumeSandbox` is what bean calls **restore**: it does `PUT /snapshot/load`
-and produces a new sandbox. It is not resume in bean's sense (unfreezing the vCPUs
+Their `ResumeSandbox` is what wizard calls **restore**: it does `PUT /snapshot/load`
+and produces a new sandbox. It is not resume in wizard's sense (unfreezing the vCPUs
 of a live process), and the borrowed name is worth watching for when reading their
-code. This document uses bean's vocabulary throughout —
+code. This document uses wizard's vocabulary throughout —
 [snapshot-resume.md](snapshot-resume.md) §0.
 
 Three details worth taking:
@@ -89,7 +89,7 @@ The one genuinely new thing is that the reported unit is no longer a bare image
 reference. A warm snapshot is only usable on a compatible CPU (§3), so what the
 node reports is a tuple, and the scheduler's existing `CPUConstraint` filter is
 what consumes it. The digest half of that tuple is why images now report their
-digest at all — see `UpdateNodeStatus` in `proto/bean/node/v1/node.proto`.
+digest at all — see `UpdateNodeStatus` in `proto/wizard/node/v1/node.proto`.
 
 **What prewarm does *not* buy today, and this is the whole point of the feature.**
 Preparing the image file removes the pull. It does not remove the boot: a create

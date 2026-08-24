@@ -7,7 +7,7 @@
 sandbox 网络**已实现并交付**:每 sandbox 一个 netns + 地址池 + 两层 MASQUERADE +
 FORWARD DROP + DNS,并在真机 guest 上用规则计数器验证过(status.md 明确标
 「Sandbox networking ✅ / Port exposure ✅」)。SWE-bench 类任务要 `pip install` /
-`git clone`,所以这从来就不是一个可以排后面的优化项 —— 它曾是让 bean 用不了的那个缺口,
+`git clone`,所以这从来就不是一个可以排后面的优化项 —— 它曾是让 wizard 用不了的那个缺口,
 现在已经补上。剩下的只是一些细化项(MTU 调优、tc 带宽限速、IPv6、conntrack 上限,见 §8)。
 
 本文的核心不是「怎么建 tap」,那是三行 `ip` 命令。核心是
@@ -44,17 +44,17 @@ Firecracker 的快照包含整机配置,恢复出的 guest **以完全相同的�
 **同名 tap 可以在不同 netns 里共存**(这是本方案成立的前提):
 
 ```
-ip netns exec bean-probe-a ip tuntap add name beantap0 mode tap
-ip netns exec bean-probe-b ip tuntap add name beantap0 mode tap
-→ beantap0  DOWN  da:b8:ae:9e:9e:93     (netns a)
-→ beantap0  DOWN  82:7d:d5:94:bb:cf     (netns b)
+ip netns exec wizard-probe-a ip tuntap add name wizardtap0 mode tap
+ip netns exec wizard-probe-b ip tuntap add name wizardtap0 mode tap
+→ wizardtap0  DOWN  da:b8:ae:9e:9e:93     (netns a)
+→ wizardtap0  DOWN  82:7d:d5:94:bb:cf     (netns b)
 ```
 
 **进 netns 不改变工作目录**(`hack/netns-cwd-probe.sh`):
 
 ```
-outside netns: /tmp/bean-cwd-check
-inside netns:  /tmp/bean-cwd-check
+outside netns: /tmp/wizard-cwd-check
+inside netns:  /tmp/wizard-cwd-check
 ```
 
 第二条比听起来重要:**快照可移植性完全依赖 `cmd.Dir` + 相对路径**
@@ -68,8 +68,8 @@ guest 内(每个 sandbox 都一样,快照可以随便搬)
   eth0    172.31.0.2/30
   default via 172.31.0.1
 
-netns 内(每 sandbox 一个 netns,名字 bean-<sandboxID>)
-  beantap0  172.31.0.1/30        ← guest 的网关
+netns 内(每 sandbox 一个 netns,名字 wizard-<sandboxID>)
+  wizardtap0  172.31.0.1/30        ← guest 的网关
   veth-in   10.<a>.<b>.2/30      ← 每 sandbox 唯一
   default via 10.<a>.<b>.1
 
@@ -117,7 +117,7 @@ netns 里的地址可以全都一样(那是 netns 的意义),但 **veth 的宿�
 所以池**不维护自己的权威状态**,而是从宿主重建:
 
 ```go
-// 启动时:列出 bean- 前缀的 netns,解析出索引,标记为已占用
+// 启动时:列出 wizard- 前缀的 netns,解析出索引,标记为已占用
 // 分配时:取第一个空闲索引
 // 释放时:删 netns(veth 随之消失),清 NAT 规则
 ```
@@ -125,7 +125,7 @@ netns 里的地址可以全都一样(那是 netns 的意义),但 **veth 的宿�
 **宿主是唯一权威**,和 `Provider.Cached()` 让节点上报自己持有什么是同一个原则
 ([image-pipeline.md](image-pipeline.md) §1)。控制面或内存里的账本都会和现实分叉。
 
-重启后**接管而不是清理**:一个已存在的 `bean-<id>` netns 可能正服务着
+重启后**接管而不是清理**:一个已存在的 `wizard-<id>` netns 可能正服务着
 重启前就在跑的 sandbox。判断孤儿要和控制面的 `SyncState` 期望集合比对,
 这属于宿主资源对账(GitHub #17),不在本文范围。
 
@@ -135,10 +135,10 @@ netns 里的地址可以全都一样(那是 netns 的意义),但 **veth 的宿�
 就是为这个存在的:
 
 ```json
-"network_overrides": [{"iface_id": "eth0", "host_dev_name": "beantap0"}]
+"network_overrides": [{"iface_id": "eth0", "host_dev_name": "wizardtap0"}]
 ```
 
-**在我们的方案里 restore 路径靠 tap 同名成立**:tap 名字在每个 netns 里都是 `beantap0`,
+**在我们的方案里 restore 路径靠 tap 同名成立**:tap 名字在每个 netns 里都是 `wizardtap0`,
 所以快照记录的名字在新 netns 里已经是对的,override 通常不额外触发。这是「同名 tap
 分 netns 共存」那个性质的直接好处。
 
@@ -219,7 +219,7 @@ noded 进入该沙箱的 namespace 后从里面发起连接,所以 guest 地址�
 而池就是重启后要重建的东西 —— 正是本设计想避免的。进 namespace 两者都不需要:
 guest 地址在每个沙箱里都一样,靠 namespace 区分。
 
-路径是 `bean-proxy` → noded 的转发端口 → namespace → `172.31.0.2:{port}`,
+路径是 `wizard-proxy` → noded 的转发端口 → namespace → `172.31.0.2:{port}`,
 `{port}` 从 Host 头读出。见 api-design.md §6。
 
 ## 5a. MASQUERADE 会碰到的、不该碰到的东西 ✅
@@ -265,8 +265,8 @@ FORWARD -s <guest subnet> -d 192.168.0.0/16 -j DROP
   都选择重构:E2B 在 **prerouting priority −150** 挂 nftables 且只匹配入向网卡,
   于是一条规则同时覆盖本地交付和转发的包;AgentENV 保留 FORWARD 但在每条规则上写
   `-o vpeer`,让规则对自己的作用域诚实。见 [competitive-analysis.md](competitive-analysis.md) §2a。
-  改用 prerouting 钩子能消除 bean 对「netns 规则是 guest 与节点之间唯一屏障」的依赖,
-  作为加固记在 [#21](https://github.com/garysng/bean/issues/21)。
+  改用 prerouting 钩子能消除 wizard 对「netns 规则是 guest 与节点之间唯一屏障」的依赖,
+  作为加固记在 [#21](https://github.com/garysng/wizard/issues/21)。
 
 这里没有处理 IPv6。如果上行有 IPv6,对应的元数据地址(`fd00:ec2::254`)是可达的,
 而这些 v4 规则对它什么都没说。要么 guest 完全拿不到 IPv6 地址 —— 这是当前状态,也是安全的

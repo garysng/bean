@@ -184,9 +184,9 @@ them at all.
 **Secrets are read only from environment variables; the endpoint may be a flag**:
 
 ```
---s3-endpoint (or BEAN_S3_ENDPOINT)   # not sensitive, either form is fine
-BEAN_S3_ACCESS_KEY                    # environment variable only
-BEAN_S3_SECRET_KEY                    # environment variable only
+--s3-endpoint (or WIZARD_S3_ENDPOINT)   # not sensitive, either form is fine
+WIZARD_S3_ACCESS_KEY                    # environment variable only
+WIZARD_S3_SECRET_KEY                    # environment variable only
 ```
 
 The distinction is deliberate: a flag shows up in `/proc/<pid>/cmdline`, where any local user
@@ -197,9 +197,9 @@ Environment variables are not strong protection either (`/proc/<pid>/environ` is
 readable, just restricted to the same uid), but at least they are not in `ps`'s default output
 and do not end up in shell history.
 
-**noded talks to S3 directly under `--fc-overlaybd`** (`grep -rn BEAN_S3 cmd/noded/`
+**noded talks to S3 directly under `--fc-overlaybd`** (`grep -rn WIZARD_S3 cmd/noded/`
 now returns 5 hits). It constructs an S3 client (`cmd/noded/main.go` `s3.New(...)` →
-`NewS3BlobStore(...)`) from `BEAN_S3_ACCESS_KEY` / `BEAN_S3_SECRET_KEY`, and the
+`NewS3BlobStore(...)`) from `WIZARD_S3_ACCESS_KEY` / `WIZARD_S3_SECRET_KEY`, and the
 resulting `OverlaybdBlobs` store publishes and range-reads sealed layers
 (`internal/node/image/obdblobstore.go`). Snapshot blobs for the dm-snapshot path
 still flow node → gRPC → gateway → S3, but the node-side S3 access under overlaybd is
@@ -214,8 +214,8 @@ it does need to upload directly:
   directly from inside a sandbox, should both use short-lived URLs issued by the control plane
   and bound to a key prefix and content-length
 - **STS read-only role rotation** is unimplemented — the node already range-reads blobs directly
-  under `--fc-overlaybd-lazy-pull`, and it does so with long-lived `BEAN_S3_ACCESS_KEY` /
-  `BEAN_S3_SECRET_KEY` rather than rotated STS credentials. That is the real gap today: what it
+  under `--fc-overlaybd-lazy-pull`, and it does so with long-lived `WIZARD_S3_ACCESS_KEY` /
+  `WIZARD_S3_SECRET_KEY` rather than rotated STS credentials. That is the real gap today: what it
   needs is a read-only temporary credential rotated every 1h, scoped to the blob bucket prefix
 
 Put differently: node-side S3 access is no longer hypothetical — the node holds long-lived
@@ -232,7 +232,7 @@ Three layers:
 |---|---|---|
 | Signature unit tests | `sign_test.go` | byte-level correctness of the canonical request — the easiest thing to get wrong and the hardest to debug |
 | Protocol unit tests | `client_test.go` / `multipart_test.go` | a `httptest` fake server verifying request shape, part splitting and abort behaviour |
-| Integration tests | `client_integration_test.go` / `s3blobs_test.go` | **against a real MinIO**, skipped when `BEAN_S3_ENDPOINT` is unset |
+| Integration tests | `client_integration_test.go` / `s3blobs_test.go` | **against a real MinIO**, skipped when `WIZARD_S3_ENDPOINT` is unset |
 
 Why the integration tests are necessary: the `ErrBlobNotFound` mapping, the object genuinely
 not existing after an abort, the boundaries of a range read — these are **the server's
@@ -251,19 +251,19 @@ CI runs a real MinIO, so this layer is not "optional extra verification".
 ### 8.1 What is already shared, and what is not
 
 The **wire layer is already single**: `internal/control/s3.Client` (SigV4, multipart, range
-reads) is the one S3 implementation, imported by both `bean-api` and `noded`. There is no
+reads) is the one S3 implementation, imported by both `wizard-api` and `noded`. There is no
 duplicate protocol code to merge.
 
 What is **not** shared is the layer above it — three unrelated facades over the same client:
 
 | Facade | Side | Key scheme | Shape |
 |---|---|---|---|
-| `snapshot.Blobs` (`snapshot/store.go:20`) | control (`bean-api`) | `snapshots/<id>/data` | id-keyed, streaming `Writer`/`Reader`/`Size`/`Delete` |
+| `snapshot.Blobs` (`snapshot/store.go:20`) | control (`wizard-api`) | `snapshots/<id>/data` | id-keyed, streaming `Writer`/`Reader`/`Size`/`Delete` |
 | `image.BlobStore` (`image/obdblobstore.go:36`) | node (`noded`) | `blobs/<digest>` | digest-keyed, buffered `Put` + `BlobURL`/`CheckReadable` |
 | `image.ImageIndex` (`image/obdindex.go:37`) | node (`noded`) | `manifests/<digest>`, `tags/...` | typed manifest/tag objects |
 
-Plus two parallel config namespaces reading the same credentials: `-s3-*` (bean-api) and
-`-fc-overlaybd-s3-*` (noded), both from `BEAN_S3_ACCESS_KEY` / `BEAN_S3_SECRET_KEY`.
+Plus two parallel config namespaces reading the same credentials: `-s3-*` (wizard-api) and
+`-fc-overlaybd-s3-*` (noded), both from `WIZARD_S3_ACCESS_KEY` / `WIZARD_S3_SECRET_KEY`.
 
 ### 8.2 The unified contract
 
@@ -328,15 +328,15 @@ change.
 
 The builder runs on **noded** (`internal/node/image/build_linux.go`, wired at
 `cmd/noded/main.go`), which is exactly where the overlaybd store already has a working
-node-side S3 client on the same `BEAN_S3_*` credentials. So build-output upload lives in the
+node-side S3 client on the same `WIZARD_S3_*` credentials. So build-output upload lives in the
 same process as overlaybd upload — no routing build bytes through the control plane. The
 snapshot store stays control-side; it shares the interface and the low-level client, not the
-process. The unified abstraction is instantiated once per process (once in `bean-api`, once in
+process. The unified abstraction is instantiated once per process (once in `wizard-api`, once in
 `noded`), each with its own key-scheme adapters.
 
 Config converges to one namespace: a single `--s3-endpoint` / `--s3-bucket` / `--s3-region` /
 `--s3-path-style` set (with the overlaybd read-URL kept as the one genuinely overlaybd-specific
-extra), both processes reading the same `BEAN_S3_*` credentials. Phase 1 delivered the shared
+extra), both processes reading the same `WIZARD_S3_*` credentials. Phase 1 delivered the shared
 `ObjectStore` contract and the one `BucketStore` backing both node-side facades under the
 interface; **Phase 2 does the flag rename**, retiring noded's `-fc-overlaybd-s3-*` for `-s3-*`.
 The rename lands in Phase 2 rather than Phase 1 because that is the phase where a built image

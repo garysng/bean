@@ -1,6 +1,6 @@
 // Package proxy resolves which node holds a sandbox and forwards to it.
 //
-// This is the whole of bean-proxy. It is a reverse proxy and deliberately nothing
+// This is the whole of wizard-proxy. It is a reverse proxy and deliberately nothing
 // more: it does not speak gRPC, does not know what an exec is, and does not interpret
 // paths. The one thing it knows is which node a sandbox is on, which is the one thing
 // a node cannot know about a sandbox it does not hold.
@@ -10,7 +10,7 @@
 // has to make the connection, and putting it there is what leaves this a plain proxy.
 //
 // It performs no user authentication. An external layer does that -- a Traefik
-// middleware in the deployment this is built for -- and bean is the infrastructure
+// middleware in the deployment this is built for -- and wizard is the infrastructure
 // underneath it (see GitHub #27, "not in scope"). What that means concretely: anything
 // that can reach this proxy can reach any sandbox it can name, so it belongs behind
 // that layer and not on a public address.
@@ -32,8 +32,8 @@ import (
 
 	"golang.org/x/net/http2"
 
-	"github.com/garysng/bean/internal/logging"
-	"github.com/garysng/bean/internal/node/runtime"
+	"github.com/garysng/wizard/internal/logging"
+	"github.com/garysng/wizard/internal/node/runtime"
 )
 
 // Sandboxes answers which node holds a sandbox.
@@ -174,7 +174,7 @@ func (s *Server) proxyFor(addr string) *httputil.ReverseProxy {
 
 // headerOriginalHost carries the client's Host across the director, which rewrites
 // r.Host as part of retargeting the request.
-const headerOriginalHost = "X-Bean-Original-Host"
+const headerOriginalHost = "X-Wizard-Original-Host"
 
 // roundTripperFunc adapts a function to http.RoundTripper, so the protocol can be
 // chosen per request rather than fixed per node.
@@ -239,7 +239,7 @@ func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 // metadata is carried in HTTP/2 headers, so one credential travelling under two names
 // would be one name too many -- and the failure of a mismatch is every request
 // rejected, which reads as a bad token rather than a bad header.
-const headerNodeToken = "bean-node-token"
+const headerNodeToken = "wizard-node-token"
 
 // Handler returns the proxy as an http.Handler.
 func (s *Server) Handler() http.Handler { return s }

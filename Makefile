@@ -36,9 +36,9 @@ bin:
 proto:
 	PATH="$(GOBIN):$$PATH" protoc \
 		--proto_path=proto \
-		--go_out=internal/gen --go_opt=module=github.com/garysng/bean/internal/gen \
-		--go-grpc_out=internal/gen --go-grpc_opt=module=github.com/garysng/bean/internal/gen \
-		--connect-go_out=internal/gen --connect-go_opt=module=github.com/garysng/bean/internal/gen \
+		--go_out=internal/gen --go_opt=module=github.com/garysng/wizard/internal/gen \
+		--go-grpc_out=internal/gen --go-grpc_opt=module=github.com/garysng/wizard/internal/gen \
+		--connect-go_out=internal/gen --connect-go_opt=module=github.com/garysng/wizard/internal/gen \
 		$(PROTO_FILES)
 
 test:
@@ -46,7 +46,7 @@ test:
 
 cover:
 	go test -race -count=1 -coverprofile=coverage.out \
-		-coverpkg=./internal/beand/...,./internal/node/...,./internal/control/...,./cli/... \
+		-coverpkg=./internal/wizardd/...,./internal/node/...,./internal/control/...,./cli/... \
 		./internal/... ./cli/...
 	go tool cover -func=coverage.out | tail -1
 

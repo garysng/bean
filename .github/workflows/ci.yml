@@ -9,9 +9,9 @@ jobs:
   go:
     runs-on: ubuntu-latest
     env:
-      BEAN_S3_ENDPOINT: http://127.0.0.1:9000
-      BEAN_S3_ACCESS_KEY: beanci
-      BEAN_S3_SECRET_KEY: beancisecret
+      WIZARD_S3_ENDPOINT: http://127.0.0.1:9000
+      WIZARD_S3_ACCESS_KEY: beanci
+      WIZARD_S3_SECRET_KEY: beancisecret
     steps:
       - uses: actions/checkout@v4
       - uses: actions/setup-go@v5

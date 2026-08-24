@@ -1,10 +1,10 @@
-# noded (Node Daemon) and beand (In-Sandbox Daemon) Detailed Design
+# noded (Node Daemon) and wizardd (In-Sandbox Daemon) Detailed Design
 
 > 中文版:[zh/noded-design.md](zh/noded-design.md)
 
 > **noded**: one daemon per node (binary `noded`), the thing that actually executes the sandbox lifecycle.
-> **beand**: the init/PID1 inside the sandbox (binary `beand`), the far end that executes exec/file/port operations.
-> Naming convention: **noded lives on the host, beand lives inside the sandbox**.
+> **wizardd**: the init/PID1 inside the sandbox (binary `wizardd`), the far end that executes exec/file/port operations.
+> Naming convention: **noded lives on the host, wizardd lives inside the sandbox**.
 
 > For the status marker convention see [architecture.md](architecture.md) §0.
 
@@ -40,7 +40,7 @@ three have no code at all.
 
 **Configuration is by flag, not YAML.** A repo-wide
 `grep -rn yaml --include='*.go'` comes back empty; there is no
-`/etc/bean/noded.yaml`. The actual parameters (`cmd/noded/main.go`):
+`/etc/wizard/noded.yaml`. The actual parameters (`cmd/noded/main.go`):
 
 ```
 --listen / --control-plane / --node-token / --bootstrap-token / --region
@@ -72,7 +72,7 @@ s3:
 containerd: null        # ✅ the container tier is implemented and needs no containerd (D2/D3)
 cidr: 10.100.0.0/24     # 📐 not this shape — networking is per-sandbox /30s, not a node subnet (see §5); the guest /30 is set with --guest-subnet
 cache:
-  dir: /var/lib/bean/cache
+  dir: /var/lib/wizard/cache
   maxBytes: 800Gi        # 📐 no cache LRU; base images are not reclaimed automatically today
 runtimes: auto           # 📐 not probed, specified explicitly with --runtime
 overcommit:              # ✅ implemented, see §3.2
@@ -162,16 +162,16 @@ Key points:
 ```
 1. The image module produces the rootfs block device: **dm-snapshot** — a shared
    read-only base (loop-mounted) + a sparse CoW file per sandbox, composed into
-   a single `/dev/mapper/bean-<id>`.
+   a single `/dev/mapper/wizard-<id>`.
    Quota = the CoW file size; the CoW layer is exactly what a snapshot captures.
    (overlaybd is the target form and is now wired in behind `--fc-overlaybd`, over TCMU;
    lazy pull itself is implemented and untested against a registry)
 2. noded execs firecracker directly (**no jailer**, see security §A3):
-   virtio-blk: **the agent disk is the root device** (`agent.ext4`, containing beand)
+   virtio-blk: **the agent disk is the root device** (`agent.ext4`, containing wizardd)
                + the user image as the second disk (`/dev/vdb` inside the guest)
    vsock; a tap NIC (registered pre-boot, see §5.3), **no balloon** (balloon is not wired up)
-   kernel cmdline: `init=/bean/beand -- --listen vsock:1024 --pivot ...`
-3. beand runs as init inside the guest:
+   kernel cmdline: `init=/wizard/wizardd -- --listen vsock:1024 --pivot ...`
+3. wizardd runs as init inside the guest:
    a. Mount matrix: /proc /sys /dev /dev/shm /dev/pts /dev/mqueue /tmp
       (replicating the OCI runtime spec default mounts)
    b. Mount the rootfs disk and switch root (the guest sees one rootfs disk, zero union logic)
@@ -332,10 +332,10 @@ fetched to local disk by version when noded starts:
 | Artifact | Contents | Build | Versioning |
 |---|---|---|---|
 | Guest kernel | 6.x LTS, a trimmed config with virtio/vsock/nfs/overlayfs and the other essentials built in, bzImage | Kernel source + config in the repo, reproducibly built by CI | Its own version number; recorded in the manifest, and snapshot restore verifies it matches |
-| Agent disk | An ext4 read-only image: the static beand binary + busybox-level tools | Packaged by CI, released with the same version as noded | Follows the noded version; older versions are kept until nothing running references them |
+| Agent disk | An ext4 read-only image: the static wizardd binary + busybox-level tools | Packaged by CI, released with the same version as noded | Follows the noded version; older versions are kept until nothing running references them |
 
-- Storage: `s3://bean/artifacts/{kernel,agent-disk}/<version>/` + sha256 verification
-- noded's configuration declares the version (defaulting to the noded release), cached locally under `/var/lib/bean/artifacts/`
+- Storage: `s3://wizard/artifacts/{kernel,agent-disk}/<version>/` + sha256 verification
+- noded's configuration declares the version (defaulting to the noded release), cached locally under `/var/lib/wizard/artifacts/`
 - The container tier's agent bind-mounts the same binary from inside the agent disk, so both tiers come from a single build artifact
 
 ## 4. Image Module ⚠️
@@ -363,7 +363,7 @@ under crates, and the registryfs_v2 remote direct-read mode).
 ### 4.2 Cache Management 📐
 
 ```
-/var/lib/bean/
+/var/lib/wizard/
 ├── cache/               # the sacrificeable pool (LRU)
 │   ├── content/         #   containerd content store (standard layer blobs, the fallback path)
 │   ├── snapshots/       #   overlayfs/overlaybd snapshot directories
@@ -385,7 +385,7 @@ under crates, and the registryfs_v2 remote direct-read mode).
 
 image-service is a **logical module of the control plane**
 (`internal/control/image`), not a separately deployed service; through P0–P2 it is
-embedded in the bean-api process. Its responsibilities need a global view, which
+embedded in the wizard-api process. Its responsibilities need a global view, which
 is why they cannot be pushed down to the nodes:
 
 - Global deduplication of format conversion (an image is converted once, and multiple nodes do not fight over it)
@@ -407,7 +407,7 @@ along the module boundary).
 > security-and-startup.md §A4.
 >
 > Note the shape is **not** the bridge + node-local IPAM sketch this section
-> originally carried. There is no `bean0` bridge and no per-node subnet handed
+> originally carried. There is no `wizard0` bridge and no per-node subnet handed
 > out by a bitmap. Firecracker restores a snapshot with its original IP, so every
 > sandbox is given its **own** network namespace and a **constant** guest
 > address; only the host end varies. Rules are **iptables** (batched through
@@ -421,8 +421,8 @@ restored snapshot keep working without renumbering (network.md §1–§2).
 
 ```
 Setup (network/setup_linux.go, per sandbox):
-1. ip netns add bean-<idx>
-2. tap "beantap0" inside the netns (same name every time; a snapshot finds the device it recorded)
+1. ip netns add wizard-<idx>
+2. tap "wizardtap0" inside the netns (same name every time; a snapshot finds the device it recorded)
      addr 172.31.0.1/30  ← the guest's gateway
 3. veth pair bnv<idx> (host) ↔ bnp<idx> (netns), moved into the netns
      host  end 10.<idx/64>.<idx%64*4>.1/30
@@ -441,7 +441,7 @@ sandboxes the same addresses (network.md §3, `network/alloc.go` + `pool.go`).
 
 DNS: the guest's resolver is handled by the agent inside the guest rather than a
 bridge-side forwarder — the host's upstream resolver is used, configurable with
-`--guest-dns` (network.md §6). There is no `bean0`, no node DNS forwarder process,
+`--guest-dns` (network.md §6). There is no `wizard0`, no node DNS forwarder process,
 and no `/etc/hosts` injection on this path.
 
 ### 5.2 iptables Rules (two layers of NAT + FORWARD DROP, per sandbox) ✅
@@ -487,11 +487,11 @@ noded registers the tap via `/network-interfaces/<id>` with `HostDevName` set to
 the layout's tap name, and applies `/mmds/config` so the VMM serves the metadata
 service on that interface. The VMM is exec'd inside the sandbox's netns (the tap
 lives there), so the fc tier uses the tap in place of the netns end of the veth —
-there is no `bean0` bridge, and the iptables rules above are what isolate one
+there is no `wizard0` bridge, and the iptables rules above are what isolate one
 sandbox from another. A nil layout (a node with no networking configured) keeps
 the earlier behaviour of no interface at all rather than failing the boot.
 
-## 6. beand ✅
+## 6. wizardd ✅
 
 ### 6.1 Injection and Startup ✅
 
@@ -499,17 +499,17 @@ the earlier behaviour of no interface at all rather than failing the boot.
 > override, arriving with P5); for the agent-disk injection on the fc main path
 > see §3.1/§3.4.
 
-1. noded publishes the directory `/var/lib/bean/agent/<version>/beand` (statically linked against musl, ≈8 MiB)
-2. The OCI spec gains a read-only bind mount: `/var/lib/bean/agent/<ver>/beand → /.bean/agent`, plus the socket directory `/run/bean/<id>/ → /.bean/run/` (read-write)
-3. The entrypoint is overridden to `/.bean/agent`; the original image's entrypoint/cmd/env/user/workdir are serialized into a spec annotation for the agent to read
-4. On startup the agent listens on the unix socket `/.bean/run/agent.sock` (noded connects directly from the host side at `/run/bean/<id>/agent.sock`) and reports Ready
+1. noded publishes the directory `/var/lib/wizard/agent/<version>/wizardd` (statically linked against musl, ≈8 MiB)
+2. The OCI spec gains a read-only bind mount: `/var/lib/wizard/agent/<ver>/wizardd → /.wizard/agent`, plus the socket directory `/run/wizard/<id>/ → /.wizard/run/` (read-write)
+3. The entrypoint is overridden to `/.wizard/agent`; the original image's entrypoint/cmd/env/user/workdir are serialized into a spec annotation for the agent to read
+4. On startup the agent listens on the unix socket `/.wizard/run/agent.sock` (noded connects directly from the host side at `/run/wizard/<id>/agent.sock`) and reports Ready
 5. When `autoStartCmd=true` or a StartUserProcess arrives, the agent forks the user process following the original entrypoint semantics (setuid to the image's USER, applying env/workdir)
 
 Version upgrades: the agent is released as part of the noded package, the
 directory is versioned, and running sandboxes are unaffected (older version
 directories are kept until nothing references them).
 
-Path conflicts: if `/.bean` collides with the image contents (extremely rare),
+Path conflicts: if `/.wizard` collides with the image contents (extremely rare),
 creation fails with an explicit error, and an alternative mount point can be
 configured.
 
@@ -594,7 +594,7 @@ shared base image gains another loop device (see the TODO in `docs/status.md`).
 
 ```
 1. Enumerate the actual local state: live firecracker processes (by the
-   /run/bean/fc/<id>/ jailer directory + pidfile convention, the fc-tier main
+   /run/wizard/fc/<id>/ jailer directory + pidfile convention, the fc-tier main
    path) ∪ containerd tasks (container tier, if enabled)
 2. Get the control plane's desired state via SyncState
 3. Three-way reconciliation:
@@ -604,7 +604,7 @@ shared base image gains another loop device (see the TODO in `docs/status.md`).
 4. Report everything and resume the heartbeat
 ```
 
-netns/veth/iptables chains all follow the `bean-<id>` naming convention, so the
+netns/veth/iptables chains all follow the `wizard-<id>` naming convention, so the
 orphan scan compares by prefix against the set of live sandboxes.
 
 ### 7.3 GC Triggers ⚠️
@@ -620,7 +620,7 @@ orphan scan compares by prefix against the set of live sandboxes.
 
 ### 7.4 Downward config: ConfigureAdmission ✅
 
-Almost every RPC in bean flows node→control (Register, Heartbeat, SyncState,
+Almost every RPC in wizard flows node→control (Register, Heartbeat, SyncState,
 UpdateNodeStatus) or is a command riding the control→node `SandboxService`
 channel that already exists for placement (Create/Destroy/…). `ConfigureAdmission`
 is a control→node RPC on that same `SandboxService`: the control plane retunes a
@@ -633,13 +633,13 @@ live node's admission thresholds without a restart.
   its live guards, validates the result, and installs it only if valid — a bad
   threshold is rejected with `InvalidArgument` and the node keeps its previous
   guards rather than adopting a broken one.
-- **Operator surface.** `PATCH /v1/nodes/{id}/admission` on bean-api forwards the
+- **Operator surface.** `PATCH /v1/nodes/{id}/admission` on wizard-api forwards the
   same partial patch. The gateway holds no admission state; it resolves the node's
   `SandboxService` client and forwards. A rejected threshold surfaces as the node's
   own 400; an unreachable node as 503.
 - **Persistence: the node owns its policy.** The thresholds are a runtime
   parameter, not a flag. `noded` reads them from a node-owned file
-  (`--admission-config`, default `/var/lib/bean/noded/admission.json`) at startup,
+  (`--admission-config`, default `/var/lib/wizard/noded/admission.json`) at startup,
   and a `ConfigureAdmission` push rewrites that file (atomically, via
   temp-file+rename) before it installs the new guards — so the last policy set
   survives a restart without the control plane having to re-push, and a write that
@@ -654,11 +654,11 @@ live node's admission thresholds without a restart.
 ## 8. noded's Own Observability ✅
 
 - Prometheus endpoint `--metrics <addr>` → `GET /metrics` (unauthenticated, scraped locally); a later package will export the same registry over OTLP:
-  - `bean_node_create_phase_seconds{phase,runtime}` a histogram of the duration of each creation phase
+  - `wizard_node_create_phase_seconds{phase,runtime}` a histogram of the duration of each creation phase
     (phase: runtime_create / agent_ready / total; image_pull / rootfs / network to be added)
-  - `bean_node_creates_total{outcome,runtime}`, `bean_node_destroys_total{outcome,runtime}`
-  - `bean_node_idle_actions_total{action,outcome}` idle reclamation actions
-  - `bean_node_sandboxes{state}`, `bean_node_requests_in_flight` (recomputed at scrape time)
+  - `wizard_node_creates_total{outcome,runtime}`, `wizard_node_destroys_total{outcome,runtime}`
+  - `wizard_node_idle_actions_total{action,outcome}` idle reclamation actions
+  - `wizard_node_sandboxes{state}`, `wizard_node_requests_in_flight` (recomputed at scrape time)
   - Still to add: cache hit rate, iptables rule count, IPAM utilisation
 - Per-sandbox resource time series (cgroup/FC stats → OTLP, with sandbox_id/labels as attributes); the agent can optionally pass through OTLP from applications inside the sandbox (localhost:4317 → forwarded over vsock)
 - Structured logging (zap), with request_id propagated

@@ -260,7 +260,7 @@ to get that one rootfs member — unoptimised.
 One snapshot = three parts, committed atomically:
 
 ```
-s3://bean/snapshots/{snapId}/
+s3://wizard/snapshots/{snapId}/
 ├── manifest.json        # metadata: source image digest, isolation, resources, env,
 │                        #   agent version, creation time, checksum of each part
 ├── checkpoint/          # process state: CRIU images (runc) or gVisor save files (runsc)
@@ -352,7 +352,7 @@ open it is safe — unlinking a file that is already mmapped does not affect rea
 measurement, decisions §3.7), so `stage.Close()` releases the pin without waiting for the VM
 to end.
 
-Reported as `bean_node_snapshot_cache_bytes` through the optional `runtime.CacheReporter`
+Reported as `wizard_node_snapshot_cache_bytes` through the optional `runtime.CacheReporter`
 interface — space that counts against no allocation should at least be visible.
 
 ### 3.6 Lifecycle (common to both tiers) ⚠️
@@ -448,7 +448,7 @@ one memory image; fork just turns "multiple restores" into "one derivation of N"
 | **CoW layer** | ❌ new for each | It diverges on the first write, and that is the definition of a sandbox |
 | **vsock UDS path** | ❌ separate for each | The path is relative to the sandbox directory (vm-assembly §5) |
 | sandbox id / token | ❌ separate for each | Identity |
-| dm mapping name | ❌ separate for each | `bean-<id>`, a flat namespace |
+| dm mapping name | ❌ separate for each | `wizard-<id>`, a flat namespace |
 
 `guestCID` and the vsock port can both be constants, because every VM has its own vsock
 namespace (vm-assembly §7) — which spares fork one layer of allocation.
@@ -519,8 +519,8 @@ Note that `pause`/`resume` act on `{id}` and return the same sandbox, while crea
 snapshot is a `POST /v1/sandboxes` — a creation — and returns a different one. The URL shapes
 say so.
 
-CLI: `bean snapshot create SBX [--name N] [--no-memory] [--base SNAP] [--no-keep-running]`,
-`bean snapshot ls|rm`, `bean run --snapshot SNAP` (creates a new sandbox from the snapshot each
-time), `bean pause SBX` / `bean resume SBX` (the same sandbox). There is no `bean fork`.
+CLI: `wizard snapshot create SBX [--name N] [--no-memory] [--base SNAP] [--no-keep-running]`,
+`wizard snapshot ls|rm`, `wizard run --snapshot SNAP` (creates a new sandbox from the snapshot each
+time), `wizard pause SBX` / `wizard resume SBX` (the same sandbox). There is no `wizard fork`.
 
 The SDK shape is in [sdk-cli-design.md](sdk-cli-design.md).

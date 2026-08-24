@@ -18,7 +18,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/garysng/bean/internal/control/store"
+	"github.com/garysng/wizard/internal/control/store"
 )
 
 // ErrNoCapacity reports that no node can host the request.

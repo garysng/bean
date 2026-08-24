@@ -34,7 +34,7 @@ type Layout struct {
 	// Index is the sandbox's slot, and the only thing that varies.
 	Index int
 	// Netns is the namespace name, prefixed so an operator sweeping a shared host
-	// can tell bean's namespaces from anything else's.
+	// can tell wizard's namespaces from anything else's.
 	Netns string
 	// TapName is the device the VMM attaches to. It is identical in every
 	// namespace, which is why a snapshot finds the device it recorded.
@@ -63,12 +63,12 @@ const (
 	// records the host device name in the snapshot and looks for it again on
 	// restore; a per-sandbox name would mean every restore needed a
 	// network_overrides entry, and the guest would have to be told about it.
-	tapName = "beantap0"
+	tapName = "wizardtap0"
 
-	// netnsPrefix marks bean's namespaces on a host shared with other workloads.
+	// netnsPrefix marks wizard's namespaces on a host shared with other workloads.
 	// Reconciliation and teardown both match on it, so nothing outside the prefix
 	// can be touched by accident.
-	netnsPrefix = "bean-"
+	netnsPrefix = "wizard-"
 
 	// vethHostPrefix and vethNetnsPrefix are separated so a stray interface is
 	// identifiable as one end or the other. Interface names are capped at 15

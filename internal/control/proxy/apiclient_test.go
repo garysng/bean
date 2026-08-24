@@ -9,10 +9,10 @@ import (
 	"testing"
 	"time"
 
-	"github.com/garysng/bean/internal/node"
+	"github.com/garysng/wizard/internal/node"
 )
 
-// fakeAPI stands in for bean-api, counting requests so the cache is observable.
+// fakeAPI stands in for wizard-api, counting requests so the cache is observable.
 type fakeAPI struct {
 	nodeID    string
 	fwdAddr   string
@@ -81,7 +81,7 @@ func TestPlacementIsCachedAcrossRequests(t *testing.T) {
 		}
 	}
 	if got := f.sbxCalls.Load(); got != 1 {
-		t.Errorf("asked bean-api about the sandbox %d times for 5 requests, want 1", got)
+		t.Errorf("asked wizard-api about the sandbox %d times for 5 requests, want 1", got)
 	}
 	if got := f.nodeCalls.Load(); got != 1 {
 		t.Errorf("fetched the node list %d times for 5 requests, want 1", got)
@@ -171,6 +171,6 @@ func TestTheAPIKeyIsPresented(t *testing.T) {
 	a := NewAPISandboxes(srv.URL, "devkey", time.Minute)
 	_, _ = a.NodeAddrFor("sbx_abc")
 	if seen != "Bearer devkey" {
-		t.Fatalf("bean-api saw Authorization %q, want the proxy's own key", seen)
+		t.Fatalf("wizard-api saw Authorization %q, want the proxy's own key", seen)
 	}
 }

@@ -7,7 +7,7 @@ import (
 	"io"
 	"testing"
 
-	"github.com/garysng/bean/internal/control/s3"
+	"github.com/garysng/wizard/internal/control/s3"
 )
 
 // storeBlobs is an adapter over any s3.ObjectStore; the DirStore is a real
@@ -107,7 +107,7 @@ func TestStoreBlobsRejectsUnsafeIDs(t *testing.T) {
 // TestNewS3BlobsRejectsBadClient covers the NewS3Blobs constructor's error
 // path: a client with no usable endpoint cannot ensure its bucket.
 func TestNewS3BlobsRejectsBadClient(t *testing.T) {
-	if _, err := NewS3Blobs(context.Background(), nil, "bean-test"); err == nil {
+	if _, err := NewS3Blobs(context.Background(), nil, "wizard-test"); err == nil {
 		t.Error("NewS3Blobs with a nil client returned no error")
 	}
 }

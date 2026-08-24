@@ -53,7 +53,7 @@ func TestStartVMMPutsThePidInItsCgroup(t *testing.T) {
 	want := waitFile(t, pidFile)
 	// One group in the unified tree, so one cgroup.procs holds the pid for every
 	// controller at once.
-	procs := filepath.Join(root, "bean-sb-cg", "cgroup.procs")
+	procs := filepath.Join(root, "wizard-sb-cg", "cgroup.procs")
 	b, err := os.ReadFile(procs)
 	if err != nil {
 		t.Errorf("%s: %v: the VMM was never added to its group, so none of the "+

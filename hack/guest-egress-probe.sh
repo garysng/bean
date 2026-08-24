@@ -28,7 +28,7 @@
 # sandbox it created and nothing else -- there are other sandboxes on this host.
 set -u
 
-REPO=${REPO:-/root/bean-net}
+REPO=${REPO:-/root/wizard-net}
 # busybox because its ping and its nslookup are enough for every check here, and
 # because the image is small: a first-time conversion of anything larger dominates
 # the run and can time the create out before a single packet is sent.
@@ -42,18 +42,18 @@ GUEST_SUBNET=${GUEST_SUBNET:-172.31.0.0/30}
 UPLINK=${UPLINK:-enp6s18}
 API_PORT=${API_PORT:-18080}
 API_KEY=${API_KEY:-devkey}
-# The agent disk has to hold a beand built from this tree. The flags the boot
+# The agent disk has to hold a wizardd built from this tree. The flags the boot
 # arguments pass are parsed by the binary inside that image, not by anything on the
 # host, so a stale disk rejects a flag the source clearly defines and the guest
 # panics on "flag provided but not defined" -- with the agent as PID 1, that is
 # "Attempted to kill init". Overriding ASSETS keeps a shared node's disk untouched;
 # see the note below on why it is not rebuilt in place.
-ASSETS=${ASSETS:-/var/lib/bean/assets}
+ASSETS=${ASSETS:-/var/lib/wizard/assets}
 # dev-fc-stack.sh runs binaries out of $BIN and does not build them, so this
 # builds into the same place rather than assuming a previous run left them there.
 BIN=${BIN:-/tmp}
-RUN=${RUN:-/tmp/beanrun}
-BEAN="$BIN/bean"
+RUN=${RUN:-/tmp/wizardrun}
+WIZARD="$BIN/wizard"
 BASE="http://127.0.0.1:$API_PORT"
 
 SBX=""
@@ -76,13 +76,13 @@ check() {
 cleanup() {
   if [ -n "$SBX" ]; then
     note "killing the sandbox this probe created ($SBX)"
-    "$BEAN" kill "$SBX" 2>&1 | tail -1 || true
+    "$WIZARD" kill "$SBX" 2>&1 | tail -1 || true
   fi
   if [ "$FAILED" -ne 0 ]; then
     echo
     echo "$FAILED check(s) failed. The stack is still up for inspection:"
     echo "  tail $RUN/noded.log"
-    echo "  ip netns list | grep bean"
+    echo "  ip netns list | grep wizard"
   fi
 }
 trap cleanup EXIT
@@ -90,14 +90,14 @@ trap cleanup EXIT
 cd "$REPO" || exit 1
 
 note "building into $BIN"
-for c in bean bean-api noded; do
+for c in wizard wizard-api noded; do
   go build -o "$BIN/$c" "./cmd/$c" >>/tmp/guest-egress-build.log 2>&1 || {
     echo "build of $c failed:"
     tail -20 /tmp/guest-egress-build.log
     exit 1
   }
 done
-echo "built: bean bean-api noded"
+echo "built: wizard wizard-api noded"
 
 note "starting the stack with sandbox networking on"
 # The dev stack does not pass network flags, so they come in through NODED_FLAGS.
@@ -122,16 +122,16 @@ grep -q 'sandbox networking on' "$RUN/noded.log" || {
 }
 echo "noded reports: $(grep 'sandbox networking on' "$RUN/noded.log" | tail -1)"
 
-export BEAN_API_KEY="$API_KEY"
-export BEAN_BASE_URL="$BASE"
+export WIZARD_API_KEY="$API_KEY"
+export WIZARD_BASE_URL="$BASE"
 
 note "creating a sandbox from $IMAGE"
-RUN_OUT=$("$BEAN" run --image "$IMAGE" 2>&1)
+RUN_OUT=$("$WIZARD" run --image "$IMAGE" 2>&1)
 SBX=$(printf '%s\n' "$RUN_OUT" | grep -oE 'sbx_[0-9a-f]{20}' | head -1)
 # Existence is confirmed through ls rather than trusted from the parse: a run that
 # printed an error containing something id-shaped would otherwise send the probe on
 # to report six reachability failures for a sandbox that was never created.
-if [ -z "$SBX" ] || ! "$BEAN" ls 2>/dev/null | grep -q "$SBX"; then
+if [ -z "$SBX" ] || ! "$WIZARD" ls 2>/dev/null | grep -q "$SBX"; then
   echo "run did not yield a usable sandbox id. output was:"
   printf '%s\n' "$RUN_OUT" | tail -5
   tail -20 "$RUN/noded.log"
@@ -143,7 +143,7 @@ echo "sandbox: $SBX"
 # Runs a command in the guest and prints its stdout. Failures are reported by the
 # caller's check, not here, because "no output" is a meaningful answer for the
 # reachability probes.
-inguest() { "$BEAN" exec "$SBX" -- sh -c "$1" 2>/dev/null; }
+inguest() { "$WIZARD" exec "$SBX" -- sh -c "$1" 2>/dev/null; }
 
 note "what the guest sees"
 inguest 'ip -4 addr show; echo "--- routes ---"; ip route' || true

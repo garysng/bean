@@ -8,9 +8,9 @@ import (
 	"strconv"
 	"time"
 
-	"github.com/garysng/bean/internal/control/store"
-	nodev1 "github.com/garysng/bean/internal/gen/bean/node/v1"
-	"github.com/garysng/bean/internal/logging"
+	"github.com/garysng/wizard/internal/control/store"
+	nodev1 "github.com/garysng/wizard/internal/gen/wizard/node/v1"
+	"github.com/garysng/wizard/internal/logging"
 )
 
 // Fork derives new sandboxes from a running one.
@@ -238,7 +238,7 @@ func (s *Server) childOf(src *store.Sandbox, req *forkRequest) (*store.Sandbox, 
 	// Recorded so a child can be traced back to what it was forked from. The
 	// snapshot that carried the state is gone by the time anyone reads this, which
 	// is exactly why the source sandbox is named instead.
-	labels["bean.fork.source"] = src.ID
+	labels["wizard.fork.source"] = src.ID
 
 	// Placement is left to inherited labels. The scheduler spreads on the
 	// "eval-run" label (see placementFor), so a caller who already groups a run

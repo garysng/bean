@@ -10,7 +10,7 @@ import (
 )
 
 // TestE2ESnapshotRestore exercises the flow the design exists for, against
-// real bean-api and noded processes: set up an environment once, capture it,
+// real wizard-api and noded processes: set up an environment once, capture it,
 // recreate it, and confirm the clone carries the state forward.
 func TestE2ESnapshotRestore(t *testing.T) {
 	// 1. Create and populate a sandbox.

@@ -9,8 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 
-	"github.com/garysng/bean/internal/logging"
-	"github.com/garysng/bean/internal/node/image"
+	"github.com/garysng/wizard/internal/logging"
+	"github.com/garysng/wizard/internal/node/image"
 )
 
 // NewFCTier assembles the microVM runtime and the rootfs provider it needs.
@@ -145,7 +145,7 @@ func NewFCTier(cfg FCTierConfig) (Runtime, error) {
 		rt.Cgroups = h
 		slog.Info("VMM resource limits: " + rt.Cgroups.Summary())
 		// Swept here, at startup, before this process has created anything: every
-		// bean group standing now belongs to a previous noded. rmdir refuses a group
+		// wizard group standing now belongs to a previous noded. rmdir refuses a group
 		// that still holds a process, so a sandbox that survived the restart keeps
 		// its limits and is counted rather than disturbed. See SweepOrphans for why
 		// this is not in internal/node/reclaim.

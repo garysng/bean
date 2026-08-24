@@ -2,7 +2,7 @@
 
 > 中文版:[zh/competitive-analysis.md](zh/competitive-analysis.md)
 
-> Perspective: bean's target scenario = AI evaluation / agent rollout, characterised by
+> Perspective: wizard's target scenario = AI evaluation / agent rollout, characterised by
 > **large numbers of heterogeneous Docker images** (SWE-bench-class, 2000+ images), batch
 > launches, short lifetimes, and self-controlled deployment.
 
@@ -12,12 +12,12 @@
 > blockdiff treats the chain purely as lineage and flattens it into raw before running (relying
 > on XFS reflink to make flattening nearly free);
 > Firecracker upstream's `snapshot-editor rebase` is also a flatten.
-> bean chooses flatten, with the additional reason that snapCache makes a fan-out scenario pay
+> wizard chooses flatten, with the additional reason that snapCache makes a fan-out scenario pay
 > for the merge once per node, and the page-fault path is unchanged.
 
 ## 1. Vendor by vendor
 
-### Tensorlake (tensorlakeai, pivoted in 2026) ⭐ the closest commercial implementation at bean's layer
+### Tensorlake (tensorlakeai, pivoted in 2026) ⭐ the closest commercial implementation at wizard's layer
 
 The original document-processing/RAG project (indexify) has pivoted into a *sandbox-native cloud
 for AI agents*, with three products: Sandboxes (Firecracker microVM), Cloud Volumes (a
@@ -26,29 +26,29 @@ orchestration, one sandbox per function).
 
 - **Isolation**: Firecracker microVM (not containers); memory + filesystem snapshots, instant
   clone, auto suspend/resume, live migration, prewarm pools, egress allow/deny, and
-  `https://<port>-<sandbox>.sandbox.tensorlake.ai` ingress — overlapping heavily with bean's
+  `https://<port>-<sandbox>.sandbox.tensorlake.ai` ingress — overlapping heavily with wizard's
   D9/D11/lifecycle design
 - **Stack**: Rust (CLI/SDK/FUSE client) + Python/TS SDKs; the Lattice scheduler and Orion, an
   in-house distributed SQL metadata database (Apache-2.0)
 - **Open-source boundary**: the main repo is Apache-2.0 but **only the SDK/CLI/FUSE client**; the
   server and control plane are closed, and the cloud service cannot be self-hosted
 - **Activity**: ~976 stars, updated daily, commercially launched
-- **What it means for bean**: the closest functional benchmark (volumes, snapshots, ingress,
-  orchestration included), but closed-source and not self-hostable — which is exactly bean's
+- **What it means for wizard**: the closest functional benchmark (volumes, snapshots, ingress,
+  orchestration included), but closed-source and not self-hostable — which is exactly wizard's
   footing of "self-controlled + BYOC". Three things worth borrowing:
   1. **`oci2rootfs`** (Apache-2.0, Rust): OCI → ext4 rootfs, with complete whiteout/opaque/xattr
-     handling, but fully pre-materialised with no lazy load — usable as bean's **fallback
+     handling, but fully pre-materialised with no lazy load — usable as wizard's **fallback
      converter for unconverted images** (overlaybd direct attach remains the main path and
      performs better)
   2. **Image as snapshot**: any sandbox snapshot can be `register`ed as a named image, which is
      practical for the "set up the environment once, reuse in bulk" scenario (see roadmap P4)
   3. **`harbor`** (same org): an agent evaluation / RL environment framework, which is precisely
-     bean's target scenario, and its API shape is worth comparing against
+     wizard's target scenario, and its API shape is worth comparing against
 
 ### AgentENV (kvcache-ai / Kimi, open-sourced 2026-07) ⭐ the most direct benchmark
 
 Built for Kimi K3's agentic RL training, and its target scenario (batches of heterogeneous images
-+ RL rollout) all but coincides with bean's:
++ RL rollout) all but coincides with wizard's:
 
 - **Isolation**: one Firecracker microVM per sandbox
 - **Environment**: ✅ any OCI image with zero conversion — **overlaybd + ublk block-level
@@ -58,10 +58,10 @@ Built for Kimi K3's agentic RL training, and its target scenario (batches of het
   instances on a single node; virtio-balloon memory overcommit
 - **API**: an E2B-compatible HTTP API (an existing E2B SDK works by swapping the endpoint) + a reverse proxy
 - **Maturity**: the single-machine path is production-validated at Kimi; **the multi-node control plane is officially labelled a prototype**
-- **What it means for bean**: it validates the whole technical route of "overlaybd block device
-  attached directly to FC + any OCI image" (bean's D4/D9 adopt the same route); its weak spots
+- **What it means for wizard**: it validates the whole technical route of "overlaybd block device
+  attached directly to FC + any OCI image" (wizard's D4/D9 adopt the same route); its weak spots
   (multi-node scheduling, quota, prewarm orchestration, the operations surface) are exactly where
-  bean's own work is concentrated
+  wizard's own work is concentrated
 
 ### CubeSandbox (Tencent Cloud, open-sourced 2026-04, Apache-2.0)
 
@@ -71,9 +71,9 @@ Built for Kimi K3's agentic RL training, and its target scenario (batches of het
 - **snapshot**: the CubeCoW engine — checkpoint/rollback/fork; AutoPause/AutoResume
 - **Components**: CubeAPI (E2B compatible) / CubeMaster / Cubelet / CubeVS (eBPF network isolation) / CubeEgress (an L7 egress gateway: domain filtering, credential injection, auditing)
 - **Maturity**: production-validated at Tencent Cloud, with complete multi-node cluster capability
-- **What it means for bean**: the template route does not fit the eval scenario, but **CubeVS's
+- **What it means for wizard**: the template route does not fit the eval scenario, but **CubeVS's
   eBPF network isolation and CubeEgress's L7 egress governance** (credentials never entering the
-  sandbox) are reference designs for bean's P5 network evolution
+  sandbox) are reference designs for wizard's P5 network evolution
 
 ### e2b (e2b.dev)
 
@@ -85,7 +85,7 @@ Built for Kimi K3's agentic RL training, and its target scenario (batches of het
 - **pause/resume**: in public beta, FC snapshot (pause ~4s/GiB, resume ~1s, retained 30 days)
 - **Open source**: Apache-2.0, self-hostable (1 orchestrator + 2 hosts to start)
 - **Pricing**: billed per second, ~$0.05/vCPU·hr; Pro from $150/month
-- **For the eval scenario**: 2000 images = 2000 template builds, entirely infeasible. **This is the direct reason bean exists**
+- **For the eval scenario**: 2000 images = 2000 template builds, entirely infeasible. **This is the direct reason wizard exists**
 
 ### Daytona (daytona.io)
 
@@ -118,7 +118,7 @@ Built for Kimi K3's agentic RL training, and its target scenario (batches of het
 - **Environment**: ❌ no direct OCI boot. Snapshots are built by chaining `.setup()` from a minimal base image; containers can only be second-class citizens inside the VM
 - **snapshot**: ✨ its strongest suit — Infinibranch: snapshot a running VM at any instant and fork many branches instantly, with near-zero storage overhead
 - **Open source**: ❌ closed; MCU-metered pricing
-- **For the eval scenario**: the branch-exploration capability is the benchmark (bean's fc tier is measured against it), but the image model does not match batch eval at all
+- **For the eval scenario**: the branch-exploration capability is the benchmark (wizard's fc tier is measured against it), but the image model does not match batch eval at all
 
 ### microsandbox (open source, Super Rad Company)
 
@@ -158,12 +158,12 @@ Built for Kimi K3's agentic RL training, and its target scenario (batches of het
 | CodeSandbox | Firecracker | ⚠️ devcontainer wrapper | resume 1–2s | ✅ mature | ❌ | ❌ |
 | Cloudflare | containers | ⚠️ must embed their runtime | fast | ✅ | ❌ (SDK open) | ❌ ecosystem lock-in |
 | Vercel | Firecracker | ✅ but must push to their registry | seconds | ✅ FS snapshot | ❌ | ❌ single region |
-| **bean** | **FC as the default tier (gVisor/runc via the implemented OCI tier — runc for GPU, gVisor as the degraded tier)** | **✅ overlaybd zero conversion, S3 lazy-pull** | **<2s on a hit / <10s cold** | **✅ FC-native snapshot/restore shipped (fork is a future item)** | **in-house, self-hosted** | **✅ a first-class scenario (multi-node scheduling / prewarm / quota at the core)** |
+| **wizard** | **FC as the default tier (gVisor/runc via the implemented OCI tier — runc for GPU, gVisor as the degraded tier)** | **✅ overlaybd zero conversion, S3 lazy-pull** | **<2s on a hit / <10s cold** | **✅ FC-native snapshot/restore shipped (fork is a future item)** | **in-house, self-hosted** | **✅ a first-class scenario (multi-node scheduling / prewarm / quota at the core)** |
 
 > **What "cold start" means in this column.** Nearly every figure quoted above,
 > whatever each vendor calls it, is the cost of **restoring** a new sandbox from a
 > prepared snapshot or template — not of booting a guest, and not of resuming a
-> paused one. Bean's comparable measured numbers are **392 ms** for a restore on a
+> paused one. Wizard's comparable measured numbers are **392 ms** for a restore on a
 > node-local cache hit against **952 ms** for a real create
 > ([status.md](status.md)); a resume is a vCPU unfreeze and is faster than both while
 > doing far less, so it is not the number to compare. Three distinct operations,
@@ -171,11 +171,11 @@ Built for Kimi K3's agentic RL training, and its target scenario (batches of het
 
 ## 2a. Networking, vendor by vendor (researched 2026-08)
 
-Added because two open decisions turned on it: whether bean's guest agent should
-be reached over vsock or over IP ([#27](https://github.com/garysng/bean/issues/27),
+Added because two open decisions turned on it: whether wizard's guest agent should
+be reached over vsock or over IP ([#27](https://github.com/garysng/wizard/issues/27),
 the data plane), and whether the egress filter should stay in FORWARD or move to
 prerouting ([network.md](network.md) §5a). Both now have primary-source answers,
-and one of them contradicted what bean was about to do.
+and one of them contradicted what wizard was about to do.
 
 Source quality is marked per row. **Code** means the rule construction itself was
 read; **docs** means only the vendor's documentation, which for networking tends
@@ -189,12 +189,12 @@ to describe the API surface and not the filter.
 | Daytona (docs) | per-sandbox stack | allowed | not stated (`networkBlockAll`, ≤5 CIDR allowlist) | not stated | n/a |
 | Fly.io (docs) | per-Machine **/112 IPv6** from `fdaa::/16`, org/host/instance in the bits | allowed | "a trivial BPF program", per their 6PN post | DNS at `fdaa::3` is the one documented exception | not documented |
 | Cloudflare (docs) | no host adjacency: Worker → Durable Object → container | not documented | n/a | n/a — platform RPC is the data plane | platform RPC |
-| **bean** | one netns, tap + veth /30 per sandbox | allowed | FORWARD, **both scopes** (netns and host) | ⛔ by design — no host-local REDIRECT listener (ingress is implemented, but noded enters the netns and dials the guest directly, so no host-side listener is needed) | vsock |
+| **wizard** | one netns, tap + veth /30 per sandbox | allowed | FORWARD, **both scopes** (netns and host) | ⛔ by design — no host-local REDIRECT listener (ingress is implemented, but noded enters the netns and dials the guest directly, so no host-side listener is needed) | vsock |
 
-### The two findings that change bean's plans
+### The two findings that change wizard's plans
 
 **Nobody relies on a FORWARD rule matching only on source.** Both Firecracker
-platforms deal with the same fact bean measured on real hardware: a FORWARD rule
+platforms deal with the same fact wizard measured on real hardware: a FORWARD rule
 cannot see a packet the kernel delivers locally. They fix it structurally, in
 opposite directions. E2B **moves the hook** to prerouting priority −150, which
 every ingressing packet traverses regardless of whether routing later sends it to
@@ -203,14 +203,14 @@ forwarded traffic are covered by one rule. AgentENV **stays in FORWARD** and
 writes `-o vpeer` on every rule, which makes the rules honest about covering only
 forwarded traffic, and then never depends on them for host access.
 
-bean is closer to AgentENV's shape without the explicit `-o`, and is currently
+wizard is closer to AgentENV's shape without the explicit `-o`, and is currently
 correct for a different reason: the netns-scope DROP matches the guest subnet and
 fires while the packet is still being forwarded *inside* the namespace, so the
 node's own address is denied there and the host-scope rule never sees it
 (measured — `hack/netns-hostlocal-probe.sh`). That is a real defence, but it rests
 on the netns rule being present and on the guest having no other path. E2B's
 prerouting hook does not rest on either. Tracked as hardening in
-[#21](https://github.com/garysng/bean/issues/21), not as a bug.
+[#21](https://github.com/garysng/wizard/issues/21), not as a bug.
 
 **Neither Firecracker platform uses vsock for the agent, and this is the load-bearing
 finding.** E2B's envd binds `0.0.0.0:49983` and the orchestrator dials
@@ -226,10 +226,10 @@ host namespace then maps it by port to host-local listeners (`:80` hyperloop,
 `:111` portmapper, `:2049` NFS proxy). The rule cannot accidentally widen, because
 widening it would mean widening a range nothing else uses.
 
-bean uses vsock today, which sidesteps the question entirely — a vsock connection
+wizard uses vsock today, which sidesteps the question entirely — a vsock connection
 needs no address, no route and no firewall exception, and the blanket-INPUT-DROP
 problem does not arise. The finding is therefore **not** "switch to IP". It is that
-if [#27](https://github.com/garysng/bean/issues/27)'s data plane ever wants a
+if [#27](https://github.com/garysng/wizard/issues/27)'s data plane ever wants a
 host-side listener, the precedent from both comparable platforms is a documentation-range
 `/32` plus REDIRECT rather than the node's real address — and that vsock remains
 the stronger default precisely because it needs none of that.
@@ -246,11 +246,11 @@ E2B's *reason* for the −150 prerouting priority is inference from the code; th
 hook and the interface-only match are verified, the rationale is not stated in any
 commit or post that was found.
 
-## 3. Conclusion: bean's differentiated position
+## 3. Conclusion: wizard's differentiated position
 
 1. **The technical route is already validated, and the competitive focus is engineering
    completeness**: AgentENV proved that "overlaybd attached directly to FC + any OCI with zero
-   conversion" is feasible and production-usable — bean adopts the same route (D4/D9), and
+   conversion" is feasible and production-usable — wizard adopts the same route (D4/D9), and
    differentiates by turning to AgentENV's blank spots: **multi-node scheduling (image-affinity
    bin-packing), prewarm orchestration, quota/lease/failure recovery, the GPU path (container
    tier, reserved internally for P5), and a complete operations surface**
@@ -277,10 +277,10 @@ commit or post that was found.
 - **How fast AgentENV's multi-node control plane moves from prototype to mature** — if it fills in
   scheduling/quota/operations, "build on top of AgentENV" becomes an option again
 - Whether CubeSandbox adds a direct any-OCI boot route
-- If Daytona adds a gVisor/microVM tier, its overlap with bean rises markedly
+- If Daytona adds a gVisor/microVM tier, its overlap with wizard rises markedly
 - Whether the evolution of e2b's Build System eliminates the per-image template cost
 - Upstream evolution of overlaybd/ublk (the kernel ublk userspace block device ecosystem)
 - **Whether anyone ships per-sandbox egress bandwidth limits** — not found in either
-  Firecracker codebase, and a noisy-neighbour lever bean will eventually need
+  Firecracker codebase, and a noisy-neighbour lever wizard will eventually need
 - **Whether E2B or AgentENV moves the agent transport to vsock** — both chose IP, and
-  a reversal would say the IP route hit a problem bean has not yet met
+  a reversal would say the IP route hit a problem wizard has not yet met

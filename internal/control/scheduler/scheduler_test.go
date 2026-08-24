@@ -8,7 +8,7 @@ import (
 	"testing"
 	"time"
 
-	"github.com/garysng/bean/internal/control/store"
+	"github.com/garysng/wizard/internal/control/store"
 )
 
 func newTestStore(t *testing.T) *store.Store {
@@ -730,7 +730,7 @@ func busy(inFlight, max int) func(*store.NodeRecord) {
 }
 
 // TestAFullPipelineIsStillPlaceable is the property the change is for. e2b scores
-// in-progress placements and never makes a busy node infeasible; this asserts bean
+// in-progress placements and never makes a busy node infeasible; this asserts wizard
 // does the same.
 func TestAFullPipelineIsStillPlaceable(t *testing.T) {
 	// Driven through Reserve, because UpsertNode does not persist create_in_flight --

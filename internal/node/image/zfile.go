@@ -11,7 +11,7 @@ import (
 
 // ZFile is overlaybd's block-compressed file format. This reads it.
 //
-// A sealed layer in bean is produced by `overlaybd-commit -z`, so its data is a
+// A sealed layer in wizard is produced by `overlaybd-commit -z`, so its data is a
 // ZFile: fixed-size uncompressed blocks, each compressed independently, with an
 // index giving every compressed block's length. Independent compression is the
 // property that makes random access possible -- block N can be found and expanded

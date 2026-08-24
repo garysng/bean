@@ -8,7 +8,7 @@ import (
 	"io"
 	"strings"
 
-	"github.com/garysng/bean/internal/control/s3"
+	"github.com/garysng/wizard/internal/control/s3"
 )
 
 // Publishing layer blobs alone does not make the store a source an image can be resolved
@@ -24,7 +24,7 @@ import (
 // With both, a node that has never seen the image resolves it from the store: read the
 // tag, read the manifest, reference the layers. No registry.
 //
-// The consequence is that bean's store becomes the authority for what a tag means, and
+// The consequence is that wizard's store becomes the authority for what a tag means, and
 // prewarm is what updates it. An upstream tag that moves is not noticed until the next
 // prewarm. That is deliberate for a sandbox platform -- a batch of evals half-way through
 // silently picking up new image contents is worse than running a slightly old image -- but
@@ -35,7 +35,7 @@ import (
 //
 // Separate from BlobStore because the readers differ. Layer blobs are read by the
 // overlaybd daemon, anonymously over HTTP, which is what forces the public-read policy on
-// that prefix. These objects are read by bean itself with credentials, so they carry no
+// that prefix. These objects are read by wizard itself with credentials, so they carry no
 // such requirement -- and a deployment may reasonably want them private.
 type ImageIndex interface {
 	// PutManifest records an image's layer list and config under its manifest digest.

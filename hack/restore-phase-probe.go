@@ -21,9 +21,9 @@
 //
 //	go run hack/restore-phase-probe.go --bundle /path/to/bundle.tar.gz
 //
-// The bundle is whatever the node stored: /var/lib/bean/sandboxes/.snapshots holds
+// The bundle is whatever the node stored: /var/lib/wizard/sandboxes/.snapshots holds
 // unpacked entries, so use a blob from the control plane's snapshot store, or
-// produce one with `bean snapshot create` and read it back from S3.
+// produce one with `wizard snapshot create` and read it back from S3.
 package main
 
 import (
@@ -159,7 +159,7 @@ func timeFullExtract(path string) (int64, time.Duration) {
 	}
 	defer zr.Close()
 
-	dir, err := os.MkdirTemp("", "bean-restore-probe-*")
+	dir, err := os.MkdirTemp("", "wizard-restore-probe-*")
 	if err != nil {
 		fatal(err)
 	}

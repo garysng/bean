@@ -115,7 +115,7 @@ func TestAttachServesTheLayerContents(t *testing.T) {
 	}
 
 	serial := deviceSerial("hwtest-attach")
-	dev, err := attachTCMU("beanhwtest", cfgPath, serial, 2<<30)
+	dev, err := attachTCMU("wizardhwtest", cfgPath, serial, 2<<30)
 	if err != nil {
 		t.Fatalf("attachTCMU: %v", err)
 	}
@@ -133,7 +133,7 @@ func TestAttachServesTheLayerContents(t *testing.T) {
 	}
 	defer exec.Command("umount", mnt).Run()
 
-	if _, err := os.Stat(filepath.Join(mnt, "beanmarker")); err != nil {
+	if _, err := os.Stat(filepath.Join(mnt, "wizardmarker")); err != nil {
 		entries, _ := os.ReadDir(mnt)
 		names := make([]string, 0, len(entries))
 		for _, e := range entries {
@@ -188,7 +188,7 @@ func TestAChainPreservesLowerLayerFiles(t *testing.T) {
 		t.Fatalf("writeConfig: %v", err)
 	}
 
-	dev, err := attachTCMU("beanhwchain", cfgPath, deviceSerial("hwtest-chain"), 2<<30)
+	dev, err := attachTCMU("wizardhwchain", cfgPath, deviceSerial("hwtest-chain"), 2<<30)
 	if err != nil {
 		t.Fatalf("attachTCMU: %v", err)
 	}
@@ -251,7 +251,7 @@ func TestTwoDevicesGetDistinctWWIDs(t *testing.T) {
 			t.Fatalf("writeConfig: %v", err)
 		}
 
-		dev, err := attachTCMU("beanhw"+id, cfgPath, deviceSerial(id), 2<<30)
+		dev, err := attachTCMU("wizardhw"+id, cfgPath, deviceSerial(id), 2<<30)
 		if err != nil {
 			t.Fatalf("attachTCMU %s: %v", id, err)
 		}
@@ -272,7 +272,7 @@ func TestTwoDevicesGetDistinctWWIDs(t *testing.T) {
 // since two serials that reduce to the same hex digits present as one LUN.
 func TestAttachRefusesANonHexSerial(t *testing.T) {
 	requireOverlaybd(t)
-	_, err := attachTCMU("beanhwbad", "/nonexistent.json", "bean-sbx-alpha", 1<<30)
+	_, err := attachTCMU("wizardhwbad", "/nonexistent.json", "wizard-sbx-alpha", 1<<30)
 	if err == nil {
 		t.Fatal("attachTCMU accepted a non-hex serial")
 	}
@@ -284,12 +284,12 @@ func TestAttachRefusesANonHexSerial(t *testing.T) {
 // writeTestTar makes a one-file tar, using the tar binary so the archive is exactly
 // what a registry layer looks like to overlaybd-apply.
 func writeTestTar(dest string) error {
-	return writeTar(dest, map[string]string{"beanmarker": "bean\n"})
+	return writeTar(dest, map[string]string{"wizardmarker": "wizard\n"})
 }
 
 // writeTar builds a tar containing the given files.
 func writeTar(dest string, files map[string]string) error {
-	dir, err := os.MkdirTemp("", "beantar")
+	dir, err := os.MkdirTemp("", "wizardtar")
 	if err != nil {
 		return err
 	}
@@ -463,7 +463,7 @@ func (c *countingBlobs) Put(_ context.Context, digest string, size int64, r io.R
 	return nil
 }
 
-func (c *countingBlobs) BlobURL() string { return "http://blobs.example/bean/blobs" }
+func (c *countingBlobs) BlobURL() string { return "http://blobs.example/wizard/blobs" }
 
 // The readability probe is a deployment check, not a layer-resolution one, so it is
 // satisfied here rather than exercised.

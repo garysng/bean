@@ -21,4 +21,4 @@ echo "first 8: $(head -c 8 "$LAYER" | od -An -tx1 | tr -d ' \n')"
 
 echo ""
 echo "== reader test =="
-BEAN_SEALED_LAYER="$LAYER" "$BIN" -test.run TestOpenRealSealedLayer -test.v 2>&1 | tail -15
+WIZARD_SEALED_LAYER="$LAYER" "$BIN" -test.run TestOpenRealSealedLayer -test.v 2>&1 | tail -15

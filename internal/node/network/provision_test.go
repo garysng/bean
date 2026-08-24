@@ -184,7 +184,7 @@ func TestDeprovisionIgnoresASandboxItNeverAssigned(t *testing.T) {
 			"deciding it is an orphan needs the control plane's expected set",
 			host.tornDown)
 	}
-	if !host.live["bean-0"] {
+	if !host.live["wizard-0"] {
 		t.Error("a pre-existing namespace was removed; adoption, not cleanup")
 	}
 }
@@ -199,7 +199,7 @@ func TestProvisionSkipsAnIndexTheHostAlreadyHolds(t *testing.T) {
 		t.Fatal(err)
 	}
 	if l.Index == 0 {
-		t.Fatal("index 0 was handed out while bean-0 is on the host; the new " +
+		t.Fatal("index 0 was handed out while wizard-0 is on the host; the new " +
 			"sandbox and the pre-existing one now share veth addresses")
 	}
 }
@@ -208,7 +208,7 @@ func newProvisionerWithPreexisting(t *testing.T) (*Provisioner, *provHost) {
 	t.Helper()
 	host := newProvHost()
 	// A namespace left by an earlier incarnation of this process.
-	host.live["bean-0"] = true
+	host.live["wizard-0"] = true
 	p, err := NewProvisioner(testSubnet, host)
 	if err != nil {
 		t.Fatal(err)

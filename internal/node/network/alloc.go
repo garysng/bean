@@ -152,7 +152,7 @@ func (a *Allocator) hostIndices() (map[int]bool, error) {
 
 // indexOfNetns recovers a slot from a namespace name.
 //
-// Only bean's own prefix is recognised. A namespace belonging to something else on
+// Only wizard's own prefix is recognised. A namespace belonging to something else on
 // a shared host must be invisible to this pool: counting it would shrink the pool
 // for no reason, and worse, a teardown that matched it could destroy another
 // workload's networking.

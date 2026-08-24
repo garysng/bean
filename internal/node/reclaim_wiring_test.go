@@ -6,8 +6,8 @@ import (
 	"testing"
 	"time"
 
-	nodev1 "github.com/garysng/bean/internal/gen/bean/node/v1"
-	"github.com/garysng/bean/internal/node/reclaim"
+	nodev1 "github.com/garysng/wizard/internal/gen/wizard/node/v1"
+	"github.com/garysng/wizard/internal/node/reclaim"
 )
 
 // recordingHost captures what reconciliation saw, so a test can assert on the
@@ -51,7 +51,7 @@ func (h *recordingHost) snapshot() (int, []string) {
 // reconciler its mapping looks exactly like garbage.
 func TestReclaimUsesControlPlaneExpectedSet(t *testing.T) {
 	mgr := newTestManager(t)
-	host := &recordingHost{mappings: []string{"bean-sbx_live", "bean-sbx_dead"}}
+	host := &recordingHost{mappings: []string{"wizard-sbx_live", "wizard-sbx_dead"}}
 
 	// The control plane expects sbx_live. Neither sandbox exists in this manager,
 	// which is the post-crash state: the host holds both, memory holds neither.
@@ -79,8 +79,8 @@ func TestReclaimUsesControlPlaneExpectedSet(t *testing.T) {
 	}
 
 	_, removed := host.snapshot()
-	if len(removed) != 1 || removed[0] != "bean-sbx_dead" {
-		t.Errorf("removed = %v, want only bean-sbx_dead: the expected set did not "+
+	if len(removed) != 1 || removed[0] != "wizard-sbx_dead" {
+		t.Errorf("removed = %v, want only wizard-sbx_dead: the expected set did not "+
 			"protect the running sandbox", removed)
 	}
 }

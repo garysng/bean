@@ -8,7 +8,7 @@
 
 ## 1. Why it is needed
 
-bean's footing is "any OCI image boots directly with zero conversion", so it needs no
+wizard's footing is "any OCI image boots directly with zero conversion", so it needs no
 e2b-style per-image template build. But having no build capability at all leaves two real gaps:
 
 - **Nowhere to add dependencies**: a user who wants to install `requirements.txt` on top of
@@ -49,7 +49,7 @@ interpolation, build cache, `.dockerignore`, heredocs — together those are mon
 guaranteed to be incomplete; e2b and Daytona use BuildKit as well.
 
 ```
-bean build -f Dockerfile -t myteam/eval-base:v1 .
+wizard build -f Dockerfile -t myteam/eval-base:v1 .
 ```
 
 The CLI packs the build context (subject to `.dockerignore`) and uploads it, and **the build
@@ -209,7 +209,7 @@ scenario that requires us to compute a cacheKey ourselves.
 
 ## 8. Not doing (explicit boundaries)
 
-- **Pushing back to an external OCI registry**: a built image is only usable inside bean.
+- **Pushing back to an external OCI registry**: a built image is only usable inside wizard.
   Reverse conversion or dual-format storage is markedly more expensive, and the current
   scenario (internal eval) does not need it. If it is ever wanted, what it affects is the blob
   layout, which would need redesigning
@@ -225,7 +225,7 @@ scenario that requires us to compute a cacheKey ourselves.
 | e2b | Dockerfile | BuildKit → convert to a VM rootfs | template (5–15 minutes each) |
 | Daytona | Dockerfile / Declarative Builder | BuildKit | snapshot |
 | Modal | chained Python calls | in-house builder (requires Python inside the image) | content-addressed layers |
-| **bean** | Dockerfile ✅ / declarative steps 📐 | BuildKit (platform side) ✅ | ⚠️ currently a node-local ext4; an overlaybd layer on S3 is the target |
+| **wizard** | Dockerfile ✅ / declarative steps 📐 | BuildKit (platform side) ✅ | ⚠️ currently a node-local ext4; an overlaybd layer on S3 is the target |
 
-bean's difference: the build forms unify into one plan, and the output is already in the
+wizard's difference: the build forms unify into one plan, and the output is already in the
 block-device format the fc tier can use, with no further conversion needed.

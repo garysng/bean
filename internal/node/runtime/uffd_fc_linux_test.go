@@ -18,14 +18,14 @@ import (
 //
 //	go test -tags 'linux fcintegration' ./internal/node/runtime/ -run UffdRestore -v
 //
-// BEAN_TEST_ASSETS defaults to /var/lib/bean/assets and must hold firecracker,
-// a guest kernel and agent.ext4. BEAN_TEST_IMAGE points at a prepared rootfs.
+// WIZARD_TEST_ASSETS defaults to /var/lib/wizard/assets and must hold firecracker,
+// a guest kernel and agent.ext4. WIZARD_TEST_IMAGE points at a prepared rootfs.
 func TestUffdRestoreAgainstFirecracker(t *testing.T) {
-	assets := envOr("BEAN_TEST_ASSETS", "/var/lib/bean/assets")
-	kernel := envOr("BEAN_TEST_KERNEL", filepath.Join(assets, "vmlinux-6.1.175"))
-	imagePath := os.Getenv("BEAN_TEST_IMAGE")
+	assets := envOr("WIZARD_TEST_ASSETS", "/var/lib/wizard/assets")
+	kernel := envOr("WIZARD_TEST_KERNEL", filepath.Join(assets, "vmlinux-6.1.175"))
+	imagePath := os.Getenv("WIZARD_TEST_IMAGE")
 	if imagePath == "" {
-		t.Fatal("BEAN_TEST_IMAGE must point at a prepared rootfs image")
+		t.Fatal("WIZARD_TEST_IMAGE must point at a prepared rootfs image")
 	}
 	for _, p := range []string{filepath.Join(assets, "firecracker"), kernel,
 		filepath.Join(assets, "agent.ext4"), imagePath} {
@@ -47,7 +47,7 @@ func TestUffdRestoreAgainstFirecracker(t *testing.T) {
 		fcMachineConfig{VCPUCount: 1, MemSizeMiB: 512})
 	putOrFail(t, ctx, client, "/boot-source", fcBootSource{
 		KernelImagePath: kernel,
-		BootArgs: "quiet reboot=k panic=-1 pci=off init=/bean/beand" +
+		BootArgs: "quiet reboot=k panic=-1 pci=off init=/wizard/wizardd" +
 			" -- --listen vsock:1024 --pivot /dev/vdb",
 	})
 	putOrFail(t, ctx, client, "/drives/agent", fcDrive{

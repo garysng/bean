@@ -19,7 +19,7 @@
 
 | 组件 | 状态 | 说明 |
 |---|---|---|
-| `bean-api` REST gateway | ✅ | sandboxes CRUD、exec、files、logs、events、pause/resume、snapshot、image、metrics;API key 鉴权、配额位、请求体限流、超时钳制 |
+| `wizard-api` REST gateway | ✅ | sandboxes CRUD、exec、files、logs、events、pause/resume、snapshot、image、metrics;API key 鉴权、配额位、请求体限流、超时钳制 |
 | `scheduler` | ✅ | 两级放置（region → 节点）、硬过滤（runtime 能力/labels/承诺量/创建并发）、打分（镜像亲和/装箱/NVMe/spread）;**承诺量落库**,事务内条件更新,多副本不会重复放置、重启不丢账 |
 | `nodesvc` | ✅ | Register（bootstrap token 校验 + 签发 node token）、Heartbeat 双向流续租、SyncState、租约过期回调 |
 | `store` | ✅ | SQLite:sandbox / snapshot / image / prewarm job / 节点与预留。**没有 `Store` 接口**,各调用点用的都是具体类型 `*store.Store`;真正成立的是 SQL 边界收在一个包里(`database/sql` 与驱动 import 只出现在 `internal/control/store`) |
@@ -35,14 +35,14 @@
 |---|---|---|
 | `noded` | ✅ | Manager（创建 含从快照创建/销毁/pause/resume/snapshot、透明唤醒、本地 idle 回收、in-flight 保护）、SandboxService gRPC、node token 鉴权、metrics |
 | `Registrar` | ✅ | 出向注册（无需入站）、SyncState 对账销毁孤儿、心跳带状态与承诺量、指数退避重连 |
-| `beand`（sandbox 内） | ✅ | 双档 listener（unix socket / **AF_VSOCK**）、**microVM 内作 PID 1**（挂伪文件系统 → pivot 用户镜像）、exec（超时/截断/进程组 kill）、文件（os.Root 防逃逸、原子写）、logs 环形缓冲 |
+| `wizardd`（sandbox 内） | ✅ | 双档 listener（unix socket / **AF_VSOCK**）、**microVM 内作 PID 1**（挂伪文件系统 → pivot 用户镜像）、exec（超时/截断/进程组 kill）、文件（os.Root 防逃逸、原子写）、logs 环形缓冲 |
 | `FCRuntime` | ✅ | **真 Firecracker microVM**:VMM 进程管理、agent 盘为 root device + 用户镜像为第二盘、vsock、pause/resume、full snapshot + 从快照创建(内部 Fork 路径)、销毁清理 |
 | `image.Provider` | ✅ | `DevMapperProvider`（**共享只读基础镜像 + 每 sandbox CoW,一个 sandbox 只占 44 KiB**）、`FileProvider`（全量拷贝,兜底）、`PullingProvider`（首次使用时拉取转换,并发去重） |
 | OCI 镜像拉取与转换 | ✅ | 节点直接说 distribution API（不依赖 docker/containerd）:manifest / 多平台 index / token 挑战 / **layer 断点续传**;whiteout 语义、路径逃逸防护;转换产物带元数据文件记录 ref |
 | prewarm | ✅ | 控制面后台调 `PrewarmImage`,节点拉取转换;节点心跳上报 `cachedImages`,**镜像亲和打分与 prewarm 进度因此才真正生效**（之前从未被填充） |
-| build image（Dockerfile） | ✅ | `bean build --tag REF .`,BuildKit 在节点上执行。**导出 `type=tar` 扁平 rootfs**,不组装层也不过 registry,和拉取路径共用同一个 image writer |
+| build image（Dockerfile） | ✅ | `wizard build --tag REF .`,BuildKit 在节点上执行。**导出 `type=tar` 扁平 rootfs**,不组装层也不过 registry,和拉取路径共用同一个 image writer |
 | `OCITier`（容器档） | ✅ | `--runtime runc` / `--runtime runsc`:noded 直驱 OCI runtime(`NewOCITier`),**无 containerd** —— 两者同一套 bundle 与子命令,共用 fc 档的 rootfs providers。这是继 `fc`、`local` 之后的第三个已实装 runtime 档 |
-| `LocalRuntime` | ✅ | 进程级 sandbox（dev/CI，含 darwin），跑真 beand 二进制,验证与 fc 档相同的 agent gRPC 面 |
+| `LocalRuntime` | ✅ | 进程级 sandbox（dev/CI，含 darwin），跑真 wizardd 二进制,验证与 fc 档相同的 agent gRPC 面 |
 
 ### 客户端
 
@@ -52,7 +52,7 @@ pause/resume/events -f/snapshot/image）。
 
 ### 可观测
 
-`bean-api /metrics`：创建结果与延迟、exec 延迟、各状态 sandbox 数、事件计数与订阅数。
+`wizard-api /metrics`：创建结果与延迟、exec 延迟、各状态 sandbox 数、事件计数与订阅数。
 `noded /metrics`：创建阶段耗时、创建/销毁/idle/snapshot 计数、节点 sandbox 状态与 in-flight。
 
 日志走 `log/slog`,字段化 + 分级,`--log-format json` 给采集器、
@@ -68,21 +68,21 @@ trace 走 OTel,`--otlp-endpoint` 指向 OTLP/gRPC collector(空则关闭,
 实测(真机,`hack/tracedump` 收 span):
 
 ```
-POST /v1/sandboxes                 bean-api   1196.0ms
+POST /v1/sandboxes                 wizard-api   1196.0ms
   SandboxService/CreateSandbox     noded      1110.2ms
     node.Create                    noded      1110.1ms   events=[phase.*]
       runtime.Create               noded       324.2ms
       agent.WaitHealthy            noded       785.8ms
 
-POST /v1/sandboxes/{id}/exec       bean-api     18.6ms
+POST /v1/sandboxes/{id}/exec       wizard-api     18.6ms
   SandboxService/Exec              noded        17.4ms
-    (beand 日志 request=283a333e…)  guest         8.0ms
+    (wizardd 日志 request=283a333e…)  guest         8.0ms
 ```
 
 第一棵树立刻给出一个此前没有任何指标覆盖的数字:gateway 与 noded
 之间差 **86ms**(1196 − 1110),那是调度 + 落库的开销。
 
-**beand 只采纳 trace id,不导出 span**,而且刻意不链 OTel SDK
+**wizardd 只采纳 trace id,不导出 span**,而且刻意不链 OTel SDK
 (`go list -deps` 验证过为 0):它在 guest 内没有到 collector 的路径,
 且 agent 盘的体积按每次 boot 计价。它把调用方的 trace id 写进自己的
 日志,所以「慢在 guest 内」可以被核对而不是猜测。
@@ -99,7 +99,7 @@ fc 档实测(镜像已缓存):`runtime_create` ~234ms(起 VMM)、
 裸 Firecracker 到 agent 可连是 606ms,所以上层开销已基本挤干。
 
 destroy **214ms**(曾是 5.25s)。原先销毁前用 ACPI 请 guest 关机并等它退出,
-但 guest 内核没编 `CONFIG_ACPI_BUTTON`、beand 又是没有信号处理的 PID 1 ——
+但 guest 内核没编 `CONFIG_ACPI_BUTTON`、wizardd 又是没有信号处理的 PID 1 ——
 那 5 秒**每次必然超时**。改成经 agent 执行 `sync`:达成的是同一个目的
 (可写层与 sandbox 写入一致),而且是确认而非假设。
 
@@ -231,7 +231,7 @@ loop device 全部归零 —— loop 泄漏的修复(#16)在并发下成立。
 承诺量说节点空着,而盘上已经用掉 76 GB(base 镜像、快照缓存、别的服务)。
 
 **不做超卖系数**:那是让运维猜一个倍数,而稀疏文件的名义大小本来就不该是记账依据。
-改为 `statfs` 测真实占用并上报(`bean_node_disk_{free,used}_bytes` +
+改为 `statfs` 测真实占用并上报(`wizard_node_disk_{free,used}_bytes` +
 心跳 `disk_used_mib` + `/v1/nodes` 的 `diskUsedMiB`)。
 
 **放置仍然走承诺量账本**,没有改成按真实水位判断 —— 账本不会被突发写满超卖,
@@ -245,7 +245,7 @@ loop device 全部归零 —— loop 泄漏的修复(#16)在并发下成立。
 
 真机验证:不可能满足的水位下 create 返回 **503 `NO_CAPACITY`**(不是 500),
 消息带上路径、当前空闲、地板值和后果;没有留下 VM、dm 映射或目录;
-`bean_node_creates_refused_total{reason="disk_pressure"}` 递增。
+`wizard_node_creates_refused_total{reason="disk_pressure"}` 递增。
 换成现实水位(5 GiB / 5%)后 6 并发全部成功、无泄漏。
 
 **关于每 sandbox 的占用:统一引用 44 KiB。** 文档里此前还出现过 8 KiB 和 80 KiB,
@@ -368,16 +368,16 @@ runtime 锁。所以串行点在 configfs 之上的某处,尚未定位。
 | 项 | 状态 |
 |---|---|
 | build image：声明式 steps（Modal 风格链式 API） | ⛔ 未开始;Dockerfile 路径已通,steps 只是另一个前端编译到同一个 plan（`docs/image-build.md` §3.2、§5） |
-| overlaybd | ⚠️ **已接入并在真机端到端验证**(PR #49)。`OverlaybdProvider` 走 TCMU,`--fc-overlaybd` 开启,**dm-snapshot 仍是默认**。实测:sandbox 从 overlaybd 设备启动、guest 从自己的 rootfs 读到 `PRETTY_NAME="Alpine Linux v3.20"`、写落在可写层、`bean kill` 后无 backstore 无 multipath 残留(`hack/overlaybd-e2e.sh`)。同机对比 dm-snapshot(`hack/overlaybd-bench.sh`):三个共享 base 的镜像 **392 MiB → 118 MiB**,转换 CPU 从每镜像平均 2.2 s 降到 1.37 / 0.49 / 0.44 s。**冷启动延迟没有改善** —— 这条路径依然先下载再转换每一层才能组设备,首次使用比拍平做的功还多,收益在第二个镜像和磁盘上。128 核机器 256 并发 create 是它真正发挥的地方:`fc_rootfs` 3.809 s → 0.908 s,吞吐 47.5 → 88.0 creates/s,零失败零泄漏 —— 原因是子进程数,dm-snapshot 每 sandbox fork 两次 `losetup` 一次 `dmsetup`(每次约 26 ms),而 `attachTCMU` 全是 configfs 写、完全不 fork。 |
-| overlaybd lazy-pull | ⚠️ **已实现,未对真 registry 验证过**。`--fc-overlaybd-lazy-pull`。挂载 7ms、只传 19.6% 的层字节就能挂载并读文件、8 个 HTTP 206 —— 这些数字来自 `docs/decisions.md` §3.1 的手工验证,针对的是**已经封好的 overlaybd 层**,不是来自这份代码。普通 OCI 层是 gzip tar,没有可 seek 的块索引,所以指名这种镜像的 create 会被**拒绝**而不是悄悄建一个打不开的 config。产出封好的层是 `Prewarm` 的活:它转换镜像并把每一层按 OCI digest 发布到 bean 自己的对象存储(`--fc-overlaybd-s3-endpoint`),之后任何读同一个存储的节点直接远端读、不再转换。**create 从不发布** —— 几十 MiB 的 S3 上传不该压在 sandbox 的延迟路径上。所以真正冷的 create 仍然是一次转换,但那是**每机群每镜像一次**而不是每节点一次,前提是有人 prewarm |
+| overlaybd | ⚠️ **已接入并在真机端到端验证**(PR #49)。`OverlaybdProvider` 走 TCMU,`--fc-overlaybd` 开启,**dm-snapshot 仍是默认**。实测:sandbox 从 overlaybd 设备启动、guest 从自己的 rootfs 读到 `PRETTY_NAME="Alpine Linux v3.20"`、写落在可写层、`wizard kill` 后无 backstore 无 multipath 残留(`hack/overlaybd-e2e.sh`)。同机对比 dm-snapshot(`hack/overlaybd-bench.sh`):三个共享 base 的镜像 **392 MiB → 118 MiB**,转换 CPU 从每镜像平均 2.2 s 降到 1.37 / 0.49 / 0.44 s。**冷启动延迟没有改善** —— 这条路径依然先下载再转换每一层才能组设备,首次使用比拍平做的功还多,收益在第二个镜像和磁盘上。128 核机器 256 并发 create 是它真正发挥的地方:`fc_rootfs` 3.809 s → 0.908 s,吞吐 47.5 → 88.0 creates/s,零失败零泄漏 —— 原因是子进程数,dm-snapshot 每 sandbox fork 两次 `losetup` 一次 `dmsetup`(每次约 26 ms),而 `attachTCMU` 全是 configfs 写、完全不 fork。 |
+| overlaybd lazy-pull | ⚠️ **已实现,未对真 registry 验证过**。`--fc-overlaybd-lazy-pull`。挂载 7ms、只传 19.6% 的层字节就能挂载并读文件、8 个 HTTP 206 —— 这些数字来自 `docs/decisions.md` §3.1 的手工验证,针对的是**已经封好的 overlaybd 层**,不是来自这份代码。普通 OCI 层是 gzip tar,没有可 seek 的块索引,所以指名这种镜像的 create 会被**拒绝**而不是悄悄建一个打不开的 config。产出封好的层是 `Prewarm` 的活:它转换镜像并把每一层按 OCI digest 发布到 wizard 自己的对象存储(`--fc-overlaybd-s3-endpoint`),之后任何读同一个存储的节点直接远端读、不再转换。**create 从不发布** —— 几十 MiB 的 S3 上传不该压在 sandbox 的延迟路径上。所以真正冷的 create 仍然是一次转换,但那是**每机群每镜像一次**而不是每节点一次,前提是有人 prewarm |
 | overlaybd over ublk | ⚠️ **已接线并在真机实测**。`--fc-overlaybd` 加 `--fc-ublk`:层的解析、按 digest 共享、缺层时转换全都和 TCMU 路线一模一样,变的只是由本进程读层并用 io_uring 建设备,不再把 config 交给 overlaybd 守护进程、也不再每 sandbox 组一套 SCSI fabric。这意味着层格式是用 Go 读的:`lsmt.go` 解 trailer 和位打包的索引,`zfile.go` 解块压缩数据,`lz4block.go` 解块本身(约 100 行;它在每次 guest 读的路径上,所以不引依赖),`lsmtstack.go` 按「新层胜出」合并整条链,`lsmtcow.go` 在上面盖一层稀疏 overlay。**做这件事的理由是 teardown**:拆 128 个 TCMU 设备要 4.0 s,而且 5.15 和 6.8 上都是 4.0 s —— 守护进程卡在一条上游明确警告不要并发使用的 netlink socket 上,而不随内核版本变化的开销就是传输层的开销。**已在真机对照 TCMU 实测**(`hack/obd-transport-bench.sh`,同机同镜像同档次一轮跑完,两边零失败零泄漏):p50 4 并发 461→334ms、16 并发 512→361ms、60 并发 642→420ms;60 并发吞吐 70.1→101.5 creates/s;`fc_rootfs` 0.227s→0.027s(**这才是这次改动真正拿到的 8 倍**),`runtime_create` 0.258s→0.057s。teardown 的主张在它被提出的地方成立:60 并发下 TCMU 的 `obd_detach` 平均 0.704s/sandbox,而 ublk 路径**根本没有这个阶段** —— 没有 fabric 要拆。guest 从本进程自己解码的层链启动:ext4 superblock 经 tar → zfile → lsmt extent → stack 合并读出 0xef53。**这轮真机抓到 5 个单元测试全绿时一个都没暴露的 bug**,详见英文版 status 的「overlaybd over ublk: what only hardware found」。**lazy pull 现在也走得通,并已在真机验证**。只存在于对象存储里的层可以直接背书一个 ublk 设备:`openLSMTStackFrom` 收本地/远端混合的层源,远端的那条走 range 请求读(`blobreader.go` 负责分块和缓存,`blobfetch.go` 对接 registry 或对象存储 URL)。格式代码一行没改 —— 因为传输层以下的每个 reader 本来就收 `io.ReaderAt`,这也正是本行早先把这个缺口写成「结构性限制」为什么是错的:那种说法会让下一个人不去做。**实测**:层在 create 前后都不在本地磁盘,guest **358ms** 起来,最多读了 **5.1 MiB 层的 60%**(这是上界 —— 那个数把所有 loopback 流量都算进去了,不只是 fetch),并正确读出 `/etc/alpine-release`、`uname -m` 和 `/bin/busybox`。为此修了三个 bug,三个都表现成同一个没信息量的症状,详见英文版「lazy pull over ublk: three bugs behind one symptom」。有两件真实存储会做的事被**拒绝**而不是绕过:**对 Range 请求回 200** 意味着 range 被忽略、整个 blob 从 0 字节开始发,那么读层中段会拿到层开头;**响应被截断**算错误而不是部分成功。另外对象存储必须允许匿名 GET —— overlaybd 自己的守护进程就是这么读的;不允许的话节点会在启动时报出来,否则它会静默地把每一层都转换而不是远端读。另外,只按 digest 指名某层的链会被拒绝,并把层和镜像都报出来,因为运维的下一步是在这台机器上 prewarm 那个镜像。`commit` 这个动词已经不存在了 —— 本行早先把它列为「两条路线都未测」,而 PR #61 已把它整条链路移除:文件系统快照和 commit 出来的镜像底层是同一批内容寻址的 overlaybd 层,所以「保存这个环境去分享」就是把快照提升进 template 命名空间。**给一个已删除的功能留注意事项比不留更糟** —— 它会让读者去找一个不存在的东西测。LZ4 解码器是拿 `lz4` CLI 产出的块校验的,不是只拿测试自己造的块 —— 手工造的向量抓不出编解码双方共享同一个误读 |
 | 四条 rootfs 路径回归 | ✅ | worker 拆分和 CoW 互斥锁是为 lazy pull 加的,但它们在**每一次** ublk create 的路径上。修好一条路、弄坏另一条才是真风险,而唯一能看见的办法是把本来就通的那几条再跑一遍。`hack/rootfs-paths-regress.sh` 跑全部四种配置(不带 flag 的 dm-snapshot、只开 ublk、overlaybd 走 tcmu、overlaybd 走 ublk),每一种都要求**guest 回话**,而不只是 sandbox 到 RUNNING —— 这个区分就是重点:agent 不可达正是这轮 bug 从外面看的样子,而只查状态的东西会把它当成成功。每种配置还要写一个文件再读回来,因为互斥锁在写路径上。四条全过、每条两项检查都过,零 ublk 设备、零 dm 映射残留。并发数也没变:60 并发下 ublk 仍是 101.7 creates/s、`fc_rootfs` 0.022s,对比拆分前的 101.5 和 0.027s —— 所以这个交接在它被加进来的那个并发档上不花钱 |
 | diff snapshot（增量） | ✅ `--base SNAP` 只存自 base 以来改动的 guest 内存。实测 base 15.5 MB → diff 298 KB(52×);深度 2 的链 restore 后文件全在且 `uptime 57`(载入内存态而非重新开机 —— 新 sandbox 接着被采集那个 guest 的 uptime 走)。合并在 restore 时物化成平坦镜像,**UFFD 缺页路径零改动**;链深超 8 自动转 full;删 base 有子代时返回 409。需 `--track-dirty-pages`(默认关,boot 前生效) |
 | 端口暴露与数据面 | ✅ 一个机制而非两个:Host 里的 `{port}-{sandbox}` 直达该 guest 的该端口,用户的服务器和 agent 走同一条路。无需注册调用、无需宿主端口池 —— noded 进入 namespace 后直连。缺的是按端口的访问控制 |
 | shared-fs 卷 | ⛔ P3–P4 范围,未开始 |
-| OTel trace | ✅ **已实装并实测**。一次 create/exec 是一棵跨进程 span 树(下方「可观测」段有实测树)。`--otlp-endpoint` 为空则装 no-op provider,埋点无需条件判断。**限制**:beand 在 guest 内无出网路径,只采纳 trace id 写进自己的日志、不导出 span;而 guest 的 stderr 只在 `--debug-console` 下经串口出来,所以默认配置看不到那条日志 |
+| OTel trace | ✅ **已实装并实测**。一次 create/exec 是一棵跨进程 span 树(下方「可观测」段有实测树)。`--otlp-endpoint` 为空则装 no-op provider,埋点无需条件判断。**限制**:wizardd 在 guest 内无出网路径,只采纳 trace id 写进自己的日志、不导出 span;而 guest 的 stderr 只在 `--debug-console` 下经串口出来,所以默认配置看不到那条日志 |
 | 资源超卖 | ✅ `--overcommit-cpu` / `--overcommit-memory`,节点侧算,上报已含系数。实测 `--cpu 8 --overcommit-cpu 3` → allocatable 24。CPU 超了只是变慢,内存超了是被杀,所以内存默认 1.0 —— 抬高它需要先实测 FC 按需供页的富余(#18)并给 VMM 进程加 cgroup(#20) |
-| Postgres | ✅ `bean-api --postgres`。这才是多副本的前提:SQLite 是一个文件,两个副本没法共享。做成方言而不是第二套实现,规模是实测出来的 —— 103 处占位符加少数 DDL 构造,八条 `ON CONFLICT` 原样可移植。`hack/postgres-conformance.sh` 对真 Postgres 16 跑全部 requirement;没跑过真库时套件会显式 skip,不会拿 SQLite 挣来的绿报成通过。**光读 SQL 不够** —— 见下文 |
+| Postgres | ✅ `wizard-api --postgres`。这才是多副本的前提:SQLite 是一个文件,两个副本没法共享。做成方言而不是第二套实现,规模是实测出来的 —— 103 处占位符加少数 DDL 构造,八条 `ON CONFLICT` 原样可移植。`hack/postgres-conformance.sh` 对真 Postgres 16 跑全部 requirement;没跑过真库时套件会显式 skip,不会拿 SQLite 挣来的绿报成通过。**光读 SQL 不够** —— 见下文 |
 | 创建阶段指标 network | ✅ 网络已实装,`network_setup` 阶段已上报 |
 
 ## 3. 节点前提
@@ -423,7 +423,7 @@ multipathd 会把多个 overlaybd 设备合并成一条 multipath,
    真正能砍掉它的是 lazy pull,而那需要已经封好的层(且 lazy pull 与 ublk 互斥)。
 2. **build 的构建日志与取消**：现在 build 是「起了就等」,失败只能从 image state
    看到 FAILED。日志落存储 + 可流式查看 + `cancel` 才算完整（`docs/image-build.md` §6）。
-3. **guest 内日志的出口**:beand 已把 trace id 写进日志,但默认关串口
+3. **guest 内日志的出口**:wizardd 已把 trace id 写进日志,但默认关串口
    意味着那条日志没有出口(只有 `--debug-console` 能看到)。
    应该走 vsock 把 guest 日志收到节点侧,而不是靠串口 ——
    串口既慢(493ms/boot)又只能在调试时开。

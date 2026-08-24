@@ -17,7 +17,7 @@ import (
 // An OCI image layout is the directory BuildKit's `type=oci` exporter writes: an
 // `oci-layout` marker, an `index.json` naming the top-level manifest(s), and a
 // `blobs/<algo>/<hex>` tree holding every manifest, config and layer by digest.
-// bean parses it to recover two things a flat `type=tar` export dropped: the
+// wizard parses it to recover two things a flat `type=tar` export dropped: the
 // image config (ENV/ENTRYPOINT/CMD/WORKDIR/USER the Dockerfile declared) and the
 // layers, which are flattened back into a single rootfs tar.
 //

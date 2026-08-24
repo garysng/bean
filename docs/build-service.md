@@ -13,7 +13,7 @@
 
 ## 0. The question
 
-The four binaries are `bean` (CLI), `bean-api`, `noded`, `beand`. Build has no
+The four binaries are `wizard` (CLI), `wizard-api`, `noded`, `wizardd`. Build has no
 node of its own — so where does it run, and should it? Today build executes
 **inside noded**, in the same process that serves `create`/`exec`, driving a
 `buildkitd` alongside the sandboxes. The question is whether that coupling should
@@ -27,7 +27,7 @@ it.
 ## 1. How build runs today
 
 ```
-CLI/SDK ──► bean-api (build.go) ──gRPC stream──► noded ──► buildctl ──► buildkitd
+CLI/SDK ──► wizard-api (build.go) ──gRPC stream──► noded ──► buildctl ──► buildkitd
                 │ pickBuilder                      │ ImageBuilder            │
                 │ (label-first, else any)          │ (optional per node)     │
                 └─ image marked BUILDING           └─ output: flat ext4 in node-local ImageDir
@@ -79,7 +79,7 @@ Three real couplings, in descending order of how much they block a split:
 
 ## 3. The distribution machinery already exists — for other images
 
-bean already distributes *imported* images across nodes, and build simply does
+wizard already distributes *imported* images across nodes, and build simply does
 not use that path yet:
 
 - **S3 blob store**: `obdblobstore.go` puts sealed overlaybd layers keyed by OCI
@@ -101,7 +101,7 @@ they stop at a local ext4. Closing that gap is the same mechanism, and
 ## 3.5 A second, independent problem: the log stream
 
 Distribution is not the only place build's plumbing shows its age. Build logs
-today take a **double relay** — noded streams them over gRPC to bean-api, which
+today take a **double relay** — noded streams them over gRPC to wizard-api, which
 buffers them and re-serves them to the client — and the buffer is
 **process-local in-memory**:
 
@@ -109,7 +109,7 @@ buffers them and re-serves them to the client — and the buffer is
   bounded to 4 MiB and 30 minutes, never persisted to DB or S3. noded does not
   retain it either — it streams each frame once and keeps nothing
   (`node/buildlog.go:9-16`).
-- **This is a real multi-replica crack.** bean-api runs multiple replicas against
+- **This is a real multi-replica crack.** wizard-api runs multiple replicas against
   Postgres. A build lands on replica A and its log buffer lives in A's memory; a
   client hitting `GET .../build/logs?ref=` or `POST .../build/cancel?ref=` on
   replica B calls `s.builds.get(ref)` against B's own map, misses, and gets a 404
@@ -118,10 +118,10 @@ buffers them and re-serves them to the client — and the buffer is
   system that otherwise scales horizontally, and a process restart drops them.
 
 **Could it go node-direct instead of relaying?** The audit corrects a common
-belief: exec and file transfer *also* relay through bean-api today
+belief: exec and file transfer *also* relay through wizard-api today
 (`cli.go:321` → `handleExec` → `router.Client`), despite the README implying
 otherwise — so build is not special here. The genuinely node-direct data plane
-(bean-proxy and noded's `PortForwarder`) keys entirely on **sandbox id**
+(wizard-proxy and noded's `PortForwarder`) keys entirely on **sandbox id**
 (`ParseSandboxHost` rejects an empty sandbox segment; `TargetFor` looks up
 `m.sandboxes`), and a build has no sandbox — it runs buildkitd. noded also has
 **no per-ref build-log endpoint**, only the one-shot `BuildImage` stream that
@@ -129,7 +129,7 @@ retains nothing.
 
 So node-direct build logs would need two new things: (1) a noded endpoint that
 retains logs by build-ref and can be re-attached to, and (2) an addressing key
-that is not a sandbox id. Of the two data planes, **bean-proxy's model fits
+that is not a sandbox id. Of the two data planes, **wizard-proxy's model fits
 better** — it already resolves "id → node address → endpoint on that node", so
 the increment is widening the id space from sandbox to `build-{ref}` rather than
 inventing a client→noded path from scratch. But note the ordering: the
@@ -170,9 +170,9 @@ and deployment policy, not a new binary.
 - **Cons**: still the noded binary and its assumptions; resource isolation on a
   builder node is coarse (whole-node), not per-build.
 
-**Shape B — a standalone build service (larger step).** A `bean-build` service
+**Shape B — a standalone build service (larger step).** A `wizard-build` service
 (or a mode of an existing binary) that owns buildkitd, exposes the build RPC, and
-writes only to the blob store — never to a local `ImageDir`. bean-api's
+writes only to the blob store — never to a local `ImageDir`. wizard-api's
 `pickBuilder` becomes "route to the build service".
 
 - **Pros**: build capacity scales independently of sandbox capacity; clean

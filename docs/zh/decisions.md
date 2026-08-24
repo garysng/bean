@@ -161,7 +161,7 @@ publish 用「写临时目录 + rename」,所以中断的 unpack 不会留下残
 
 ### 2.4 三家竞品对照
 
-| 维度 | e2b | agentenv | tensorlake | bean(现状) |
+| 维度 | e2b | agentenv | tensorlake | wizard(现状) |
 |---|---|---|---|---|
 | VMM | fork 了 firecracker(私有,加 gdb feature) | 上游 FC | 未公开 | 上游 FC 1.15.1 |
 | guest 内核 | 自己 config + patch,源码取 `amazonlinux/linux`,**不 fork** | prebuilt(R2 站) | 未公开 | **FC CI prebuilt + config 入库** |
@@ -339,7 +339,7 @@ TCMU 默认不给唯一序列号,两个内容完全不同的 overlaybd 设备 WW
 实测第一棵树就给出了一个此前无人知晓的数字:
 
 ```
-POST /v1/sandboxes            bean-api   1196.0ms
+POST /v1/sandboxes            wizard-api   1196.0ms
   CreateSandbox               noded      1110.2ms   ← 差 86ms
     runtime.Create            noded       324.2ms
     agent.WaitHealthy         noded       785.8ms
@@ -355,13 +355,13 @@ POST /v1/sandboxes            bean-api   1196.0ms
 | e2b | OTel,`traceparent` 贯穿 | agent 出 span(envd 有出网路径) |
 | agentenv | OTel | 同上 |
 | tensorlake | 自建 timing 上报 | — |
-| **bean** | OTel + W3C traceparent | **只采纳 trace id,不出 span** |
+| **wizard** | OTel + W3C traceparent | **只采纳 trace id,不出 span** |
 
-**bean 与 e2b 的差异是有意的**:e2b 的 envd 能直连 collector,我们的
-beand 只有一条入向 vsock,没有出网路径。给它加一条反向通道要么破坏
+**wizard 与 e2b 的差异是有意的**:e2b 的 envd 能直连 collector,我们的
+wizardd 只有一条入向 vsock,没有出网路径。给它加一条反向通道要么破坏
 「入站零暴露」,要么需要在 noded 里做一层 OTLP 中继 —— 后者可行但
-不是现在的瓶颈。所以选择是:beand 采纳调用方的 trace id 写进自己的日志,
-**并刻意不链 OTel SDK**。`go list -deps ./cmd/beand` 会列出 12 个 OTel 包,
+不是现在的瓶颈。所以选择是:wizardd 采纳调用方的 trace id 写进自己的日志,
+**并刻意不链 OTel SDK**。`go list -deps ./cmd/wizardd` 会列出 12 个 OTel 包,
 但全部是 API 与传播侧(`otel/trace`、`otel/propagation`、`otel/attribute`、`otel/baggage`、
 `otel/codes`、`otel/semconv` 及其 internal)—— 这些正是解析并透传 `traceparent` 所需的。
 SDK 包为 0,exporter 为 0。理由是
@@ -429,7 +429,7 @@ CPUID leaf 0 的 vendor 字符串和 family 都无法掩,guest 内核要据此�
 | e2b | CPU template 固定 baseline,节点池按 CPU 型号分组 |
 | agentenv | 同上;以单节点 fork 为主(16 子实例),跨节点靠同型号池 |
 | tensorlake | 磁盘增量为主卖点,内存快照限本机/同型号 |
-| **bean** | 自定义 template + 调度器按 vendor/family 硬过滤,不兼容回 409 |
+| **wizard** | 自定义 template + 调度器按 vendor/family 硬过滤,不兼容回 409 |
 
 ### 摸底脚本
 

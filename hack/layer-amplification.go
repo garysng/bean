@@ -64,7 +64,7 @@ import (
 	"strings"
 	"time"
 
-	"github.com/garysng/bean/internal/node/image"
+	"github.com/garysng/wizard/internal/node/image"
 )
 
 // The default set is the python-slim family plus the debian base they are built
@@ -119,7 +119,7 @@ func main() {
 	stream := flag.Bool("stream", false,
 		"fetch and unpack every distinct layer to measure real content bytes")
 	setName := flag.String("set", "python", "built-in image set: python or swebench")
-	cacheDir := flag.String("cache", filepath.Join(os.TempDir(), "bean-layer-amp"),
+	cacheDir := flag.String("cache", filepath.Join(os.TempDir(), "wizard-layer-amp"),
 		"where per-layer walk results are cached between runs")
 	timeout := flag.Duration("timeout", 2*time.Hour, "overall deadline")
 	flag.Parse()
@@ -168,7 +168,7 @@ type imageFacts struct {
 func measure(ctx context.Context, refs []string, source string, stream bool, cacheDir string) error {
 	reg := image.NewRegistry(nil)
 
-	fmt.Printf("bean layer-flattening amplification\n")
+	fmt.Printf("wizard layer-flattening amplification\n")
 	fmt.Printf("images: %d (%s)\n", len(refs), source)
 	if stream {
 		fmt.Printf("mode:   --stream, content bytes are measured by unpacking layers\n")

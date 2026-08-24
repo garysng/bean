@@ -1,6 +1,6 @@
 # 竞品分析（2026-07,快照部分 2026-08 补充）
 
-> 视角：bean 的目标场景 = AI evaluation / agent rollout，特点是**大量异构 Docker 镜像**
+> 视角：wizard 的目标场景 = AI evaluation / agent rollout，特点是**大量异构 Docker 镜像**
 > （SWE-bench 类 2000+ 镜像）、批量拉起、短生命周期、自主可控部署。
 
 > **增量快照的选型对照**(2026-08 调研,已落地)见 `docs/decisions.md` §3.0.1。
@@ -8,12 +8,12 @@
 > cross-build fragmentation 随深度增长;Cognition blockdiff 把链只当血缘、
 > 运行前 flatten 成 raw(靠 XFS reflink 使 flatten 近乎免费);
 > Firecracker 上游 `snapshot-editor rebase` 也是 flatten。
-> bean 选 flatten,额外理由是 snapCache 让 fan-out 场景每节点只付一次合并,
+> wizard 选 flatten,额外理由是 snapCache 让 fan-out 场景每节点只付一次合并,
 > 且缺页路径零改动。
 
 ## 1. 逐家分析
 
-### Tensorlake（tensorlakeai，2026 转型）⭐ 与 bean 同层最接近的商业实现
+### Tensorlake（tensorlakeai，2026 转型）⭐ 与 wizard 同层最接近的商业实现
 
 原文档处理/RAG 项目（indexify）已转型为 *sandbox-native cloud for AI agents*，三块产品：
 Sandboxes（Firecracker microVM）、Cloud Volumes（内容寻址版本化文件系统）、
@@ -21,33 +21,33 @@ Orchestrate（`@application`/`@function` serverless 编排,每 function 独占 s
 
 - **隔离**：Firecracker microVM（非容器）;内存+文件系统快照、instant clone、
   auto suspend/resume、live migration、预热池、egress allow/deny、
-  `https://<port>-<sandbox>.sandbox.tensorlake.ai` ingress——与 bean 的 D9/D11/
+  `https://<port>-<sandbox>.sandbox.tensorlake.ai` ingress——与 wizard 的 D9/D11/
   lifecycle 设计高度重合
 - **技术栈**：Rust（CLI/SDK/FUSE 客户端）+ Python/TS SDK;调度器 Lattice、
   自研分布式 SQL 元数据库 Orion（Apache-2.0）
 - **开源边界**：主仓 Apache-2.0 但**仅 SDK/CLI/FUSE 客户端**;服务端/控制面闭源,
   云服务不可自托管
 - **活跃度**：~976 star,日更,商业化已上线
-- **对 bean 的意义**：功能面最接近的对标（含卷、快照、ingress、编排）,
-  但闭源+不可自托管——这正是 bean「自主可控 + BYOC」的立足点。三个可借鉴点：
+- **对 wizard 的意义**：功能面最接近的对标（含卷、快照、ingress、编排）,
+  但闭源+不可自托管——这正是 wizard「自主可控 + BYOC」的立足点。三个可借鉴点：
   1. **`oci2rootfs`**（Apache-2.0,Rust）:OCI → ext4 rootfs,whiteout/opaque/xattr
-     处理完整,但全量预物化无 lazy load——可作 bean **未转换镜像的 fallback 转换器**
+     处理完整,但全量预物化无 lazy load——可作 wizard **未转换镜像的 fallback 转换器**
      （overlaybd 直挂仍是主路径,性能更优）
   2. **镜像即快照**：任意 sandbox 快照可 `register` 成命名镜像,对「装环境一次、
      批量复用」场景实用（见 roadmap P4）
-  3. **`harbor`**（同 org）:agent evaluation / RL environment 框架,正是 bean 的
+  3. **`harbor`**（同 org）:agent evaluation / RL environment 框架,正是 wizard 的
      目标场景,API 形状值得对照
 
 ### AgentENV（kvcache-ai / Kimi，2026-07 开源）⭐ 最直接的对标
 
-为 Kimi K3 的 agentic RL 训练而建，与 bean 的目标场景（批量异构镜像 + RL rollout）几乎重合：
+为 Kimi K3 的 agentic RL 训练而建，与 wizard 的目标场景（批量异构镜像 + RL rollout）几乎重合：
 
 - **隔离**：Firecracker microVM per sandbox
 - **环境**：✅ 任意 OCI 镜像零转换——**overlaybd + ublk 块级按需加载**，本地盘做有界缓存，镜像总量可超磁盘容量;snapshot 可落 S3
 - **snapshot/fork**：resume <50ms、pause <100ms、增量快照 <100ms;单节点 fork 16 子实例;virtio-balloon 内存超卖
 - **API**：E2B 兼容 HTTP API（存量 E2B SDK 换 endpoint 即用）+ 反向代理
 - **成熟度**：单机路径经 Kimi 生产验证;**多节点控制面官方标注 prototype**
-- **对 bean 的意义**：验证了「overlaybd 块设备直挂 FC + 任意 OCI 镜像」整条技术路线（bean D4/D9 已采纳同路线）;其弱项（多节点调度、配额、prewarm 编排、运维面）恰是 bean 自研的重点
+- **对 wizard 的意义**：验证了「overlaybd 块设备直挂 FC + 任意 OCI 镜像」整条技术路线（wizard D4/D9 已采纳同路线）;其弱项（多节点调度、配额、prewarm 编排、运维面）恰是 wizard 自研的重点
 
 ### CubeSandbox（腾讯云，2026-04 开源，Apache-2.0）
 
@@ -57,7 +57,7 @@ Orchestrate（`@application`/`@function` serverless 编排,每 function 独占 s
 - **snapshot**：CubeCoW 引擎——checkpoint/回滚/fork;AutoPause/AutoResume
 - **组件**：CubeAPI（E2B 兼容）/CubeMaster/Cubelet/CubeVS（eBPF 网络隔离）/CubeEgress（L7 出口网关：域名过滤、凭证注入、审计）
 - **成熟度**：腾讯云生产验证,完整多节点集群能力
-- **对 bean 的意义**：template 路线不适配 eval 场景,但 **CubeVS 的 eBPF 网络隔离与 CubeEgress 的 L7 出口治理**（凭证不进 sandbox）是 bean P5 网络演进的参考设计
+- **对 wizard 的意义**：template 路线不适配 eval 场景,但 **CubeVS 的 eBPF 网络隔离与 CubeEgress 的 L7 出口治理**（凭证不进 sandbox）是 wizard P5 网络演进的参考设计
 
 ### e2b（e2b.dev）
 
@@ -67,7 +67,7 @@ Orchestrate（`@application`/`@function` serverless 编排,每 function 独占 s
 - **pause/resume**：公测，FC snapshot（pause ~4s/GiB、resume ~1s、保留 30 天）
 - **开源**：Apache-2.0，可自托管（1 orchestrator + 2 host 起步）
 - **定价**：按秒计费 ~$0.05/vCPU·hr；Pro $150/月起
-- **对 eval 场景**：2000 镜像 = 2000 次 template build，完全不可行。**这正是 bean 立项的直接原因**
+- **对 eval 场景**：2000 镜像 = 2000 次 template build，完全不可行。**这正是 wizard 立项的直接原因**
 
 ### Daytona（daytona.io）
 
@@ -93,7 +93,7 @@ Orchestrate（`@application`/`@function` serverless 编排,每 function 独占 s
 - **环境**：❌ 无 OCI 直启。从最小基础镜像链式 `.setup()` 构建快照；容器只能作为 VM 内二等公民
 - **snapshot**：✨ 最强项——Infinibranch：运行中 VM 任意时刻快照+即时 fork 多分支，近零存储开销
 - **开源**：❌ 闭源；MCU 计量定价
-- **对 eval 场景**：分支探索能力是标杆（bean FC 档的对标对象），但镜像模式与批量 eval 完全不匹配
+- **对 eval 场景**：分支探索能力是标杆（wizard FC 档的对标对象），但镜像模式与批量 eval 完全不匹配
 
 ### microsandbox（开源，Super Rad Company）
 
@@ -133,21 +133,21 @@ Orchestrate（`@application`/`@function` serverless 编排,每 function 独占 s
 | CodeSandbox | Firecracker | ⚠️ devcontainer 套壳 | resume 1–2s | ✅ 成熟 | ❌ | ❌ |
 | Cloudflare | 容器 | ⚠️ 须嵌其运行时 | 快 | ✅ | ❌(SDK 开源) | ❌ 生态绑定 |
 | Vercel | Firecracker | ✅ 但须推其 registry | 秒级 | ✅ FS 快照 | ❌ | ❌ 单区域 |
-| **bean** | **FC 默认档（gVisor/runc 经已实现的 OCI 档 —— runc 带 GPU、gVisor 作降级档）** | **✅ overlaybd 零转换，S3 lazy-pull** | **命中<2s/冷<10s** | **✅ FC 原生 snapshot/restore 已交付（fork 是未来项）** | **自研自托管** | **✅ 一等场景（多节点调度/prewarm/配额为核心）** |
+| **wizard** | **FC 默认档（gVisor/runc 经已实现的 OCI 档 —— runc 带 GPU、gVisor 作降级档）** | **✅ overlaybd 零转换，S3 lazy-pull** | **命中<2s/冷<10s** | **✅ FC 原生 snapshot/restore 已交付（fork 是未来项）** | **自研自托管** | **✅ 一等场景（多节点调度/prewarm/配额为核心）** |
 
 > **这一列的「冷启动」指的是什么。** 上表引用的绝大多数数字,不管各家自己怎么叫,
 > 量的都是从一份准备好的快照/模板 **restore** 出一个新 sandbox 的开销 —— 既不是开机,
-> 也不是唤醒一个 paused 的 sandbox。bean 可比的实测数是节点本地缓存命中时 restore
+> 也不是唤醒一个 paused 的 sandbox。wizard 可比的实测数是节点本地缓存命中时 restore
 > **392 ms**,对比真 create 的 **952 ms**(见 [status.md](status.md));resume 只是解冻
 > vCPU,比两者都快但做的事也少得多,所以它不是用来对标的那个数。三种操作、三种开销 ——
 > 见 [snapshot-resume.md](snapshot-resume.md) §0。
 
 ## 2a. 网络维度横向对比（2026-08 调研）
 
-加这一节是因为两个待决问题都取决于它：bean 的 guest agent 该走 vsock 还是走 IP
-（[#27](https://github.com/garysng/bean/issues/27) 数据平面），以及出网过滤该留在
+加这一节是因为两个待决问题都取决于它：wizard 的 guest agent 该走 vsock 还是走 IP
+（[#27](https://github.com/garysng/wizard/issues/27) 数据平面），以及出网过滤该留在
 FORWARD 还是移到 prerouting（[network.md](../network.md) §5a）。现在两个问题都有
-一手证据答案，其中一个否定了 bean 原本打算做的事。
+一手证据答案，其中一个否定了 wizard 原本打算做的事。
 
 证据等级逐行标注。**代码**指读了规则构造本身；**文档**指只有厂商文档 ——
 网络这块的文档通常只描述 API 表面，不描述过滤器。
@@ -160,23 +160,23 @@ FORWARD 还是移到 prerouting（[network.md](../network.md) §5a）。现在�
 | Daytona（文档） | 每沙箱独立网络栈 | 放行 | 未说明（有 `networkBlockAll`、≤5 条 CIDR 白名单） | 未说明 | 不适用 |
 | Fly.io（文档） | 每 Machine 一个 **/112 IPv6**，取自 `fdaa::/16`，org/host/instance 编码在位里 | 放行 | 按其 6PN 博文的说法是"一个很简单的 BPF 程序" | `fdaa::3` 上的 DNS 是唯一有文档的例外 | 未公开 |
 | Cloudflare（文档） | 不存在宿主邻接问题：Worker → Durable Object → container | 未公开 | 不适用 | 不适用 —— 平台 RPC 就是数据平面 | 平台 RPC |
-| **bean** | 一个 netns，每沙箱一对 tap + veth /30 | 放行 | FORWARD，**两个 scope**（netns 与宿主） | ⛔ 设计如此 —— 没有宿主本地 REDIRECT 监听者（入站已实现,只是 noded 进 netns 直连 guest,不需要宿主侧监听者） | vsock |
+| **wizard** | 一个 netns，每沙箱一对 tap + veth /30 | 放行 | FORWARD，**两个 scope**（netns 与宿主） | ⛔ 设计如此 —— 没有宿主本地 REDIRECT 监听者（入站已实现,只是 noded 进 netns 直连 guest,不需要宿主侧监听者） | vsock |
 
-### 两个改变 bean 计划的结论
+### 两个改变 wizard 计划的结论
 
 **没有任何一家依赖「只匹配源地址的 FORWARD 规则」。** 两个 Firecracker 平台都撞上了
-bean 在真机上测到的同一个事实：内核本地投递的包，FORWARD 规则看不见。它们的修法都是
+wizard 在真机上测到的同一个事实：内核本地投递的包，FORWARD 规则看不见。它们的修法都是
 结构性的，但方向相反。E2B **换了挂载点** —— prerouting 优先级 −150，任何入向包都会
 经过，无论路由之后是送 INPUT 还是 FORWARD，且只匹配入接口，于是宿主目标和转发目标被
 同一条规则覆盖。AgentENV **留在 FORWARD**，但每条规则都写上 `-o vpeer`，让规则如实
 声明「只管转发流量」，然后完全不依赖它们来阻断宿主访问。
 
-bean 的形状更接近 AgentENV，只是没有那个显式的 `-o`；而它当前正确的原因不同：
+wizard 的形状更接近 AgentENV，只是没有那个显式的 `-o`；而它当前正确的原因不同：
 netns scope 那条 DROP 匹配 guest 子网，在包还在命名空间**内部被转发**的阶段就命中，
 所以节点自身地址在那里就被拒了，宿主 scope 的规则根本没看到
 （已实测 —— `hack/netns-hostlocal-probe.sh`）。这是真实的防护，但它依赖 netns 规则
 存在、且 guest 没有别的路径。E2B 的 prerouting 挂载点不依赖这两点。作为加固记在
-[#21](https://github.com/garysng/bean/issues/21)，不是 bug。
+[#21](https://github.com/garysng/wizard/issues/21)，不是 bug。
 
 **两个 Firecracker 平台的 agent 都不走 vsock，这是最关键的结论。** E2B 的 envd 绑
 `0.0.0.0:49983`，orchestrator 用 `http://<host-interaction-ip>:49983` 去连；它们生成的
@@ -188,9 +188,9 @@ E2B 选的地址值得借鉴：`192.0.2.1` 是 TEST-NET-1 文档保留地址，�
 REDIRECT 按端口映射到宿主本地监听（`:80` hyperloop、`:111` portmapper、`:2049` NFS 代理）。
 这条规则不可能被误扩大，因为扩大它就等于扩大一个别无他用的范围。
 
-bean 今天用 vsock，直接绕开了整个问题 —— vsock 连接不需要地址、不需要路由、不需要防火墙
+wizard 今天用 vsock，直接绕开了整个问题 —— vsock 连接不需要地址、不需要路由、不需要防火墙
 例外，INPUT 全拒的两难根本不出现。所以这个结论**不是**「改用 IP」。它是：如果
-[#27](https://github.com/garysng/bean/issues/27) 的数据平面将来确实需要一个宿主侧监听者，
+[#27](https://github.com/garysng/wizard/issues/27) 的数据平面将来确实需要一个宿主侧监听者，
 两个可比平台的先例都是「文档保留段 `/32` + REDIRECT」而不是节点真实地址 ——
 而 vsock 恰恰因为不需要这一切，仍然是更强的默认选择。
 
@@ -203,10 +203,10 @@ Fly 的出网 NAT 与 VM-宿主隔离内部机制、Modal 的私网与元数据�
 E2B 选 −150 这个 prerouting 优先级的**理由**是我从代码推断的；挂载点和只匹配入接口这两点
 已验证，理由本身在找到的任何提交或博文里都没有说明。
 
-## 3. 结论：bean 的差异化定位
+## 3. 结论：wizard 的差异化定位
 
 1. **技术路线已被验证，竞争焦点在工程完成度**：AgentENV 证明了「overlaybd 直挂
-   FC + 任意 OCI 零转换」可行且生产可用——bean 采纳同一路线（D4/D9），
+   FC + 任意 OCI 零转换」可行且生产可用——wizard 采纳同一路线（D4/D9），
    差异化转向 AgentENV 的空白区：**多节点调度（镜像亲和 bin-packing）、prewarm
    编排、配额/租约/故障恢复、GPU 路径（容器档,P5 内部预留）、完整运维面**
 2. **商业平台仍无人做到「零转换 + 按需加载」**：Tensorlake 走得最远（oci2rootfs
@@ -227,10 +227,10 @@ E2B 选 −150 这个 prerouting 优先级的**理由**是我从代码推断的�
 - **AgentENV 多节点控制面从 prototype 走向成熟的速度**——若其补齐调度/配额/
   运维面,「基于 AgentENV 二开」将重新成为选项
 - CubeSandbox 是否增加任意 OCI 直启路线
-- Daytona 若补上 gVisor/microVM 档,与 bean 重叠度会显著上升
+- Daytona 若补上 gVisor/microVM 档,与 wizard 重叠度会显著上升
 - e2b Build System 演进是否消除 per-image template 成本
 - overlaybd/ublk 上游演进（内核 ublk 用户态块设备生态）
-- **是否有人做出单沙箱出网带宽限制** —— 两个 Firecracker 代码库里都没有，而这是 bean
+- **是否有人做出单沙箱出网带宽限制** —— 两个 Firecracker 代码库里都没有，而这是 wizard
   终究会需要的一个吵闹邻居控制手段
 - **E2B 或 AgentENV 是否把 agent 传输改成 vsock** —— 两家都选了 IP，若有人回退，
-  说明 IP 路线撞上了 bean 尚未遇到的问题
+  说明 IP 路线撞上了 wizard 尚未遇到的问题

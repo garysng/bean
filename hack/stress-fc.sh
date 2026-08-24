@@ -2,7 +2,7 @@
 # Drives N concurrent sandbox creates against a running stack and reports the
 # latency distribution, then checks that tearing them down leaves nothing behind.
 #
-# Every performance number bean quotes — 952 ms create, 950 ms restore — was
+# Every performance number wizard quotes — 952 ms create, 950 ms restore — was
 # measured one sandbox at a time. That says nothing about what happens when a
 # batch arrives, which is the only way this platform is ever used. This script
 # exists to produce that number.
@@ -10,7 +10,7 @@
 # Usage:
 #   hack/stress-fc.sh [--count N] [--image REF] [--keep]
 #
-# Requires a stack already running (hack/dev-fc-stack.sh start) and the bean CLI.
+# Requires a stack already running (hack/dev-fc-stack.sh start) and the wizard CLI.
 # Safety: it only ever destroys sandboxes it created, and only inspects host
 # resources — a pkill on firecracker would take out every sandbox on the node.
 set -uo pipefail
@@ -23,14 +23,14 @@ IMAGE=${IMAGE:-alpine:3.20}
 # sandboxes. Overriding it is how this script reaches a concurrency worth
 # measuring on a node whose disk figure has not been tuned.
 DISK_MIB=${DISK_MIB:-}
-BASE_URL=${BEAN_BASE_URL:-http://127.0.0.1:18080}
+BASE_URL=${WIZARD_BASE_URL:-http://127.0.0.1:18080}
 # noded's metrics, for reading the phase histograms it already keeps rather than
 # timing the same things again from outside.
 METRICS_URL=${METRICS_URL:-http://127.0.0.1:17444/metrics}
-API_KEY=${BEAN_API_KEY:-devkey}
-BEAN=${BEAN:-/tmp/bean}
+API_KEY=${WIZARD_API_KEY:-devkey}
+WIZARD=${WIZARD:-/tmp/wizard}
 KEEP=0
-WORK="$(mktemp -d /tmp/bean-stress.XXXXXX)"
+WORK="$(mktemp -d /tmp/wizard-stress.XXXXXX)"
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -43,7 +43,7 @@ while [[ $# -gt 0 ]]; do
   esac
 done
 
-export BEAN_BASE_URL="$BASE_URL" BEAN_API_KEY="$API_KEY"
+export WIZARD_BASE_URL="$BASE_URL" WIZARD_API_KEY="$API_KEY"
 
 say() { printf '%s\n' "$*"; }
 hr() { printf '%s\n' "------------------------------------------------------------"; }
@@ -112,13 +112,13 @@ else:
 cleanup_workdir() { rm -rf "$WORK"; }
 trap cleanup_workdir EXIT
 
-[[ -x "$BEAN" ]] || { say "bean CLI not executable: $BEAN"; exit 69; }
+[[ -x "$WIZARD" ]] || { say "wizard CLI not executable: $WIZARD"; exit 69; }
 
 # ---- baseline: what the host holds before we start -------------------------
 # Recorded so the leak check compares against reality rather than against zero:
 # the host runs other projects' containers, and the shared base image is
 # legitimately attached.
-before_dm=$(dmsetup ls 2>/dev/null | grep -c '^bean-' || true)
+before_dm=$(dmsetup ls 2>/dev/null | grep -c '^wizard-' || true)
 before_fc=$(pgrep -c firecracker 2>/dev/null || true)
 before_loop=$(losetup -a 2>/dev/null | grep -c . || true)
 
@@ -283,7 +283,7 @@ hr
 say "destroying $count_ids sandboxes"
 destroy_start=$(date +%s)
 for id in $ids; do
-  "$BEAN" kill "$id" >/dev/null 2>&1 &
+  "$WIZARD" kill "$id" >/dev/null 2>&1 &
 done
 wait
 say "destroy wall: $(( $(date +%s) - destroy_start ))s"
@@ -292,7 +292,7 @@ say "destroy wall: $(( $(date +%s) - destroy_start ))s"
 # report mappings that are on their way out.
 sleep 3
 
-after_dm=$(dmsetup ls 2>/dev/null | grep -c '^bean-' || true)
+after_dm=$(dmsetup ls 2>/dev/null | grep -c '^wizard-' || true)
 after_fc=$(pgrep -c firecracker 2>/dev/null || true)
 after_loop=$(losetup -a 2>/dev/null | grep -c . || true)
 deleted_loop=$(losetup -a 2>/dev/null | grep -c deleted || true)
@@ -313,7 +313,7 @@ if [[ "$leaked" == "1" ]]; then
   say ""
   say "Leaked resources are listed below; they are NOT cleaned up automatically"
   say "because a wrong guess here would break sandboxes belonging to other work."
-  dmsetup ls 2>/dev/null | grep '^bean-' || true
+  dmsetup ls 2>/dev/null | grep '^wizard-' || true
   losetup -a 2>/dev/null | grep deleted || true
   exit 70
 fi

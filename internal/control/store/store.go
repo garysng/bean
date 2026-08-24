@@ -41,7 +41,7 @@ type Store struct {
 // There is deliberately no mutex here.
 //
 // Every method used to take one, and it protected nothing: a lock inside one process
-// cannot order writes from a second bean-api replica, which is the whole reason this store
+// cannot order writes from a second wizard-api replica, which is the whole reason this store
 // exists rather than an in-memory scheduler. What it did instead was make a real bug
 // unreproducible -- AcquireSnapshot read the ref count, decided in Go, and wrote it back,
 // and the mutex hid that through a single handle. Measured after removing it: two
@@ -118,7 +118,7 @@ func Open(path string) (*Store, error) {
 	db.SetMaxOpenConns(1) // sqlite single-writer
 
 	// WAL so that another process can read this database while the control plane
-	// writes it. bean-proxy resolves placement on the data path, and in the default
+	// writes it. wizard-proxy resolves placement on the data path, and in the default
 	// rollback-journal mode a reader and a writer lock each other out -- which would
 	// present as the proxy stalling whenever a sandbox is created.
 	//
@@ -141,7 +141,7 @@ func Open(path string) (*Store, error) {
 //
 // Distinct from Open because Open runs migrate(), which is DDL: a second process
 // calling it against a database the first process owns attempts schema writes on
-// someone else's file. Measured -- bean-proxy calling Open failed with
+// someone else's file. Measured -- wizard-proxy calling Open failed with
 // "database is locked (SQLITE_BUSY)" and never started, while the log line saying so
 // looked like a transient contention problem rather than a wrong call.
 //
@@ -599,7 +599,7 @@ func (s *Store) SnapshotChain(id string) ([]*Snapshot, error) {
 // the outcome is decided by how many rows changed. That is what makes this atomic in
 // the database rather than in this process. The earlier form read the row, checked
 // State, then issued the increment as a second statement -- correct only while one
-// process-local mutex serialises every caller. Two bean-api replicas would interleave
+// process-local mutex serialises every caller. Two wizard-api replicas would interleave
 // that check with DeleteSnapshot's, and the visible result is a snapshot deleted
 // underneath a running restore.
 //

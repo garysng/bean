@@ -24,7 +24,7 @@ points:
 - ⚠️ **The jailer P0 talks about is not done**: noded execs firecracker directly
 - ✅ **The networking P0/P1 talk about is done**, and it was the largest gap: per-sandbox
   namespace, tap and NAT egress, metadata and RFC1918 denied by default, and a port inside a
-  sandbox reachable from outside the node through bean-proxy. Verified on a real kernel,
+  sandbox reachable from outside the node through wizard-proxy. Verified on a real kernel,
   denials included. Cross-node sandbox connectivity is still a non-goal
 - 📐 **Not done**: volumes, per-port access control, the TypeScript SDK
 
@@ -43,9 +43,9 @@ directly, envd, and jailer/FC management, compared module by module.
 - Guest kernel + agent disk build (built by hand at first, the pipeline is P2)
 - `noded`: overlaybd ublk direct drive (pre-converted images fully local at first, lazy-pull is
   P2), jailer+FC process management, agent disk injection, basic tap/bridge/NAT networking
-- `beand`: the init mount matrix, vsock gRPC, replicating the image config to start the process,
+- `wizardd`: the init mount matrix, vsock gRPC, replicating the image config to start the process,
   synchronous exec, file read/write, zombie reaping
-- `bean-api` minimal implementation: POST/GET/DELETE sandboxes, exec, files (single node, direct connection, no scheduler)
+- `wizard-api` minimal implementation: POST/GET/DELETE sandboxes, exec, files (single node, direct connection, no scheduler)
 - state: SQLite/in-memory to begin with (with the Postgres interface abstracted properly)
 
 **Acceptance**
@@ -96,7 +96,7 @@ P50 < 2s; the escape regression suite passes.
 **Scope**
 
 - WS streaming exec + PTY (session reconnect), CLI interactive mode (run -it / attach)
-- bean-proxy (regional): wildcard-domain TLS, port exposure (reverse proxy connecting straight to
+- wizard-proxy (regional): wildcard-domain TLS, port exposure (reverse proxy connecting straight to
   the sandbox IP), sandbox token authentication, transparent wake from PAUSED
 - pause/resume (fc PauseVM) + transparent wake from PAUSED
 - Lifecycle automation: idle detection (local to noded), onIdle pause/delete, transparent wake on a request to a PAUSED sandbox

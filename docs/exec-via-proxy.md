@@ -1,16 +1,16 @@
 # exec / file transfer via the data plane, not the gateway
 
 > Status: ✅ **implemented.** `exec` and file transfer no longer relay through
-> bean-api when a proxy is configured: they reach the agent node-direct over the
-> bean-proxy data plane. All six stages in §5 landed — token injection
+> wizard-api when a proxy is configured: they reach the agent node-direct over the
+> wizard-proxy data plane. All six stages in §5 landed — token injection
 > (`internal/node/portforward.go`), the domain on the create response
 > (`internal/control/api/server.go`), the CLI client (`cli/dataplane.go`), the
 > real-host probe (`hack/exec-via-proxy-probe.sh`) and the Python SDK client
-> (`sdk/python/bean/_dataplane.py`). §5 is kept as the record of the order the
+> (`sdk/python/wizard/_dataplane.py`). §5 is kept as the record of the order the
 > work was done in. Authority order holds: code > `status.md` > `decisions.md` >
 > design docs > this page.
 >
-> The path is opt-in, not the default: with `BEAN_PROXY_URL` unset the client
+> The path is opt-in, not the default: with `WIZARD_PROXY_URL` unset the client
 > stays on the gateway relay, which is what a single-node stack without a proxy
 > needs.
 
@@ -22,10 +22,10 @@
 
 The README says `exec` and file transfer "no longer relay through the control
 plane" (README §Also-working). The code does not match: `exec` today is three
-gRPC hops, and the middle hop is bean-api.
+gRPC hops, and the middle hop is wizard-api.
 
 ```
-client ──HTTP/JSON──► bean-api ──gRPC──► noded ──gRPC (vsock/tcp)──► agent
+client ──HTTP/JSON──► wizard-api ──gRPC──► noded ──gRPC (vsock/tcp)──► agent
          POST /exec    handleExec         Exec passthrough           AgentService/Exec
 ```
 
@@ -47,14 +47,14 @@ carries gRPC end to end. No new HTTP surface on the agent, and no teaching the
 proxy about exec, is required.
 
 ```
-client ──gRPC (h2c)──► bean-proxy ──h2c──► noded PortForwarder ──h2c into netns──► agent:10001
+client ──gRPC (h2c)──► wizard-proxy ──h2c──► noded PortForwarder ──h2c into netns──► agent:10001
         authority                 reverse-proxy              dial GuestIP:10001    AgentService/Exec
         10001-{sandbox}
 ```
 
-- **bean-proxy already forwards gRPC.** For the agent port (`AgentGuestPort=10001`)
+- **wizard-proxy already forwards gRPC.** For the agent port (`AgentGuestPort=10001`)
   it selects an h2c `http2.Transport` (`proxy.go:139-152`), and the whole server
-  is wrapped in `h2c.NewHandler` (`bean-proxy/main.go:81`). The "does not speak
+  is wrapped in `h2c.NewHandler` (`wizard-proxy/main.go:81`). The "does not speak
   gRPC" comment means it does not *originate or interpret* gRPC — it relays
   HTTP/2 byte-transparently, and deliberately picks h2c for port 10001.
 - **noded's PortForwarder** does the same split (`portforward.go:193`,
@@ -63,7 +63,7 @@ client ──gRPC (h2c)──► bean-proxy ──h2c──► noded PortForward
   what the forwarder carries. So an exec is expressible as "a gRPC call to
   `10001-{sandbox}` through the proxy."
 
-What does **not** exist is a client that speaks it. bean-api dials noded's
+What does **not** exist is a client that speaks it. wizard-api dials noded's
 *control* gRPC port and calls `SandboxService/Exec` (a different service); no
 client dials the proxy with authority `10001-{sandbox}` and calls
 `AgentService/Exec` directly.
@@ -76,7 +76,7 @@ tiers that matter are in tension:
 
 | tier | agent listener | auth | has guest IP? | PortForwarder can reach? |
 |---|---|---|---|---|
-| networked fc | `tcp:0.0.0.0:10001` | **required** — per-sandbox token (`beand/auth.go`, fail-closed) | yes | **yes** |
+| networked fc | `tcp:0.0.0.0:10001` | **required** — per-sandbox token (`wizardd/auth.go`, fail-closed) | yes | **yes** |
 | no-network fc | `vsock:1024` | none (vsock isolation) | no | no |
 | local (dev) | unix socket | none | no | no |
 
@@ -88,7 +88,7 @@ the per-sandbox token distinguishes noded from that root.
 
 Two facts collide:
 
-1. **The proxy's `bean-node-token` does not satisfy the agent.** That token
+1. **The proxy's `wizard-node-token` does not satisfy the agent.** That token
    authenticates the proxy *to noded's forwarding port* (`proxy.go:242` comment);
    the agent checks a per-sandbox token, which is a different credential. Passing
    the node token through gets the request to the agent, where it is rejected.
@@ -125,15 +125,15 @@ two are mechanical.
 The credential chain becomes:
 
 ```
-client ──apikey──► bean-proxy ──node-token──► noded PortForwarder ──inject per-sandbox token──► agent
+client ──apikey──► wizard-proxy ──node-token──► noded PortForwarder ──inject per-sandbox token──► agent
         (outer platform layer)   (existing boundary F)   (noded holds the plaintext)
 ```
 
 - **client → proxy: apikey only.** We assume every request reaching the proxy has
-  already cleared the platform's API-key layer (the final product wraps one). bean
+  already cleared the platform's API-key layer (the final product wraps one). wizard
   itself does not re-check here; the client presents no per-sandbox credential
   because it has none.
-- **proxy → noded: `bean-node-token`.** Unchanged — the existing forwarding-port
+- **proxy → noded: `wizard-node-token`.** Unchanged — the existing forwarding-port
   boundary (`portforward.go:295`).
 - **noded → agent: per-sandbox token, injected by the PortForwarder.** Today the
   PortForwarder is a pure passthrough and does *not* inject the token (only noded's
@@ -145,7 +145,7 @@ client ──apikey──► bean-proxy ──node-token──► noded PortForw
 
 This is the **only** security-weighted change, and it is deliberately confined to
 noded. The plaintext token stays a noded-only secret exactly as it is today — it
-is *not* surfaced to bean-api or the client. The agent's check (`beand/auth.go`)
+is *not* surfaced to wizard-api or the client. The agent's check (`wizardd/auth.go`)
 stays fail-closed and unchanged: a request that reaches the agent without the
 token (e.g. the sandbox's own root dialing 10001) is still rejected. The
 forwarder injecting it does not weaken that — it means the *legitimate* proxied
@@ -161,19 +161,19 @@ create returns the sandbox's **domain** (or the proxy base the client should
 use). The CLI/SDK constructs the request URL from it — `{port}-{sandbox}` against
 that domain — at call time. The proxy only forwards, and every port mapping is
 open by default (per-port access control is a separate, unbuilt feature —
-[#50](https://github.com/garysng/bean/issues/50)), so no registration call or
+[#50](https://github.com/garysng/wizard/issues/50)), so no registration call or
 host-port pool is involved. This is the E2B subdomain shape, but with the domain
 handed back by the server rather than assembled from client-side convention.
 
 - **`create` response** gains the domain/proxy base for the sandbox.
 - **CLI/SDK** build `10001-{sandbox}` (for the agent) or `{port}-{sandbox}` (for a
   user port) against that domain and issue the call.
-- Falls back to the current bean-api path when no proxy domain is configured, so
+- Falls back to the current wizard-api path when no proxy domain is configured, so
   this is additive — a single-node/dev setup is unaffected.
 
 ### 3.3 Client: a data-plane gRPC client
 
-CLI and SDK today know only `BEAN_BASE_URL` → bean-api REST. The data-plane path
+CLI and SDK today know only `WIZARD_BASE_URL` → wizard-api REST. The data-plane path
 adds a **gRPC client** that dials the proxy with authority `10001-{sandbox}` and
 calls `AgentService/Exec` / `ReadFile` / `WriteFile` / `ListDir` / `DeleteFile`
 directly. No per-sandbox token is attached — the client presents nothing beyond
@@ -198,11 +198,11 @@ stated plainly:
   `manager.go:197` provisions networking only with `--guest-subnet`). `TargetFor`
   hits `net_ == nil` for every local sandbox — the PortForwarder cannot reach it.
 - `--guest-subnet` needs Linux + KVM + `--uplink` (`cmd/noded/main.go:411`).
-- The current e2e stack (`tests/e2e/e2e_test.go`) starts only bean-api + noded,
-  `--runtime local`, no bean-proxy, no `--sandbox-port-listen`.
+- The current e2e stack (`tests/e2e/e2e_test.go`) starts only wizard-api + noded,
+  `--runtime local`, no wizard-proxy, no `--sandbox-port-listen`.
 
 So a genuine "exec through the proxy" e2e **must run on the fc tier on a real
-Linux/KVM host**, with a stack that additionally starts bean-proxy and runs noded
+Linux/KVM host**, with a stack that additionally starts wizard-proxy and runs noded
 with `--sandbox-port-listen`. It cannot be exercised in the local-tier CI stack.
 The verification plan is therefore a `hack/` script (in the shape of
 `guest-egress-probe.sh`) that, on a real microVM host: creates a sandbox, execs
@@ -234,9 +234,9 @@ still rejects everything else.
 Files this will touch: `internal/node/portforward.go` (inject the agent token for
 port 10001 — the one security-weighted change), `internal/control/api/server.go`
 (return the sandbox domain in the create response), `cli/cli.go` (proxy client),
-`sdk/python/bean/__init__.py` (gRPC client), a new `hack/` probe, and the e2e/doc
+`sdk/python/wizard/__init__.py` (gRPC client), a new `hack/` probe, and the e2e/doc
 updates. Note the shift from the earlier draft: the client no longer fetches or
 holds the per-sandbox token, so there is no token endpoint and no secret
-surfaced to bean-api — the plaintext stays noded-only. The proxy (`proxy.go`)
+surfaced to wizard-api — the plaintext stays noded-only. The proxy (`proxy.go`)
 needs no changes; the forwarder (`portforward.go`) does, and that injection is
 the crux of the whole design.

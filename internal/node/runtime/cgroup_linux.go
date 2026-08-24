@@ -54,7 +54,7 @@ func detectCgroupHost() (*cgroupHost, error) {
 		// guess from "wrong cgroup version", and because the alternative -- start
 		// anyway -- is the thing this refusal exists to rule out.
 		return nil, fmt.Errorf("cgroup: %s is not a cgroup v2 unified hierarchy "+
-			"(filesystem type 0x%x, expected cgroup2 0x%x); bean requires v2 because "+
+			"(filesystem type 0x%x, expected cgroup2 0x%x); wizard requires v2 because "+
 			"v1 cannot cap swap: memory.memsw.limit_in_bytes needs the kernel booted "+
 			"with swapaccount=1, so a v1 memory ceiling lets a guest push the host "+
 			"into swap thrashing while reporting the limit as enforced, which is the "+

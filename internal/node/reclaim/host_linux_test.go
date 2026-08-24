@@ -19,13 +19,13 @@ func TestParseLoopLineSeparatesDeletedMarker(t *testing.T) {
 		wantPath   string
 		wantDel    bool
 	}{
-		{"/dev/loop15", "/var/lib/bean/sandboxes/sbx_a/cow.img (deleted)",
-			"/var/lib/bean/sandboxes/sbx_a/cow.img", true},
-		{"/dev/loop3", "/var/lib/bean/images/py.ext4",
-			"/var/lib/bean/images/py.ext4", false},
+		{"/dev/loop15", "/var/lib/wizard/sandboxes/sbx_a/cow.img (deleted)",
+			"/var/lib/wizard/sandboxes/sbx_a/cow.img", true},
+		{"/dev/loop3", "/var/lib/wizard/images/py.ext4",
+			"/var/lib/wizard/images/py.ext4", false},
 		// A path that legitimately ends in the word without the marker's space.
-		{"/dev/loop4", "/var/lib/bean/images/(deleted)",
-			"/var/lib/bean/images/(deleted)", false},
+		{"/dev/loop4", "/var/lib/wizard/images/(deleted)",
+			"/var/lib/wizard/images/(deleted)", false},
 	} {
 		got := parseLoopLine(tc.name, tc.back)
 		if got.BackingFile != tc.wantPath || got.Deleted != tc.wantDel {
@@ -40,7 +40,7 @@ func TestParseLoopLineSeparatesDeletedMarker(t *testing.T) {
 // this without filtering is another workload's storage.
 func TestRemoveDMRefusesForeignNames(t *testing.T) {
 	h := &LinuxHost{BaseDir: t.TempDir()}
-	for _, name := range []string{"docker-253:1-pool", "nexus-bean-x", "", "bean-"} {
+	for _, name := range []string{"docker-253:1-pool", "nexus-wizard-x", "", "wizard-"} {
 		if err := h.RemoveDM(name); err == nil {
 			t.Errorf("RemoveDM(%q) was accepted", name)
 		}
@@ -49,7 +49,7 @@ func TestRemoveDMRefusesForeignNames(t *testing.T) {
 
 func TestDetachLoopRefusesNonLoopDevices(t *testing.T) {
 	h := &LinuxHost{BaseDir: t.TempDir()}
-	for _, dev := range []string{"/dev/sda1", "/dev/mapper/bean-x", "", "loop0"} {
+	for _, dev := range []string{"/dev/sda1", "/dev/mapper/wizard-x", "", "loop0"} {
 		if err := h.DetachLoop(dev); err == nil {
 			t.Errorf("DetachLoop(%q) was accepted", dev)
 		}
@@ -136,8 +136,8 @@ func TestListSandboxDirsSkipsFiles(t *testing.T) {
 func TestDMAlreadyGoneIsNotAFailure(t *testing.T) {
 	gone := []string{
 		// The exact wording measured on the 128-core host.
-		"dmsetup: device-mapper: remove ioctl on bean-sbx_x failed: No such device or address\nCommand failed.",
-		"dmsetup: device-mapper: remove ioctl on bean-sbx_y failed: No such device",
+		"dmsetup: device-mapper: remove ioctl on wizard-sbx_x failed: No such device or address\nCommand failed.",
+		"dmsetup: device-mapper: remove ioctl on wizard-sbx_y failed: No such device",
 		"dmsetup: device does not exist",
 	}
 	for _, msg := range gone {
@@ -149,7 +149,7 @@ func TestDMAlreadyGoneIsNotAFailure(t *testing.T) {
 	}
 
 	stillReal := []string{
-		"dmsetup: device-mapper: remove ioctl on bean-sbx_z failed: Device or resource busy",
+		"dmsetup: device-mapper: remove ioctl on wizard-sbx_z failed: Device or resource busy",
 		"dmsetup: device-mapper: remove ioctl failed: Operation not permitted",
 		"exec: \"dmsetup\": executable file not found in $PATH",
 		// Not a device error at all; must not be swallowed.

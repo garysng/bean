@@ -11,7 +11,7 @@ import (
 	"time"
 )
 
-// APISandboxes resolves placement by asking bean-api, not by reading its database.
+// APISandboxes resolves placement by asking wizard-api, not by reading its database.
 //
 // The database is the wrong interface for two reasons, and only the second is fatal.
 //
@@ -21,16 +21,16 @@ import (
 // reading like transient contention rather than a wrong call.
 //
 // The second is that a SQLite file does not cross machines. This proxy belongs near the
-// nodes it forwards to, and bean-api belongs wherever the control plane runs; a path on
+// nodes it forwards to, and wizard-api belongs wherever the control plane runs; a path on
 // disk cannot span them. Reading the database worked in a single-host development stack
 // and would have had to be undone the first time anything was deployed for real.
 //
 // So placement is read through the API that already publishes it: the sandbox record
 // carries nodeId, and the node record carries the forwarding address in its labels.
 type APISandboxes struct {
-	// BaseURL is bean-api, e.g. http://bean-api.internal:8080.
+	// BaseURL is wizard-api, e.g. http://wizard-api.internal:8080.
 	BaseURL string
-	// APIKey authenticates this proxy to bean-api. The proxy is a cluster component,
+	// APIKey authenticates this proxy to wizard-api. The proxy is a cluster component,
 	// so it holds its own credential rather than forwarding a caller's.
 	APIKey string
 
@@ -116,7 +116,7 @@ func (a *APISandboxes) nodeOf(sandboxID string) (string, error) {
 	case http.StatusNotFound:
 		return "", fmt.Errorf("%w: %s", ErrNoSandbox, sandboxID)
 	default:
-		return "", fmt.Errorf("bean-api returned %d for sandbox %s", status, sandboxID)
+		return "", fmt.Errorf("wizard-api returned %d for sandbox %s", status, sandboxID)
 	}
 	if body.Sandbox.NodeID == "" {
 		// Known but unplaced: transient during a create, permanent for one whose
@@ -128,7 +128,7 @@ func (a *APISandboxes) nodeOf(sandboxID string) (string, error) {
 
 // forwardAddrOf reads a node's forwarding address out of its registration labels.
 //
-// The whole node list is fetched because bean-api has no per-node endpoint. Cached for
+// The whole node list is fetched because wizard-api has no per-node endpoint. Cached for
 // the same window as placement, so this is not a per-request cost.
 func (a *APISandboxes) forwardAddrOf(nodeID string) (string, error) {
 	if addr, ok := a.cached(a.nodes, nodeID); ok {
@@ -146,7 +146,7 @@ func (a *APISandboxes) forwardAddrOf(nodeID string) (string, error) {
 		return "", err
 	}
 	if status != http.StatusOK {
-		return "", fmt.Errorf("bean-api returned %d for the node list", status)
+		return "", fmt.Errorf("wizard-api returned %d for the node list", status)
 	}
 
 	now := time.Now()
@@ -172,7 +172,7 @@ func (a *APISandboxes) forwardAddrOf(nodeID string) (string, error) {
 // its Linux-only files -- into a process that only speaks HTTP. The string is part of
 // a published API response, so it is a wire format either way; a test asserts the two
 // agree.
-const labelSandboxPortAddr = "bean.io/sandbox-port-addr"
+const labelSandboxPortAddr = "wizard.io/sandbox-port-addr"
 
 func (a *APISandboxes) get(path string, out any) (int, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -190,7 +190,7 @@ func (a *APISandboxes) get(path string, out any) (int, error) {
 	if err != nil {
 		// A control plane that cannot be reached is not a missing sandbox, and the
 		// distinction decides whether a caller should retry.
-		return 0, fmt.Errorf("reach bean-api: %w", err)
+		return 0, fmt.Errorf("reach wizard-api: %w", err)
 	}
 	defer resp.Body.Close()
 
@@ -199,7 +199,7 @@ func (a *APISandboxes) get(path string, out any) (int, error) {
 		return resp.StatusCode, nil
 	}
 	if err := json.NewDecoder(io.LimitReader(resp.Body, 1<<20)).Decode(out); err != nil {
-		return resp.StatusCode, fmt.Errorf("decode bean-api response: %w", err)
+		return resp.StatusCode, fmt.Errorf("decode wizard-api response: %w", err)
 	}
 	return resp.StatusCode, nil
 }

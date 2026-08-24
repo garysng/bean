@@ -9,7 +9,7 @@ import (
 	"strings"
 	"testing"
 
-	"github.com/garysng/bean/internal/control/s3"
+	"github.com/garysng/wizard/internal/control/s3"
 )
 
 // fakePutter is an in-memory s3.ObjectStore so the store's own logic is testable
@@ -98,7 +98,7 @@ func (f *fakePutter) Delete(_ context.Context, key string) error {
 // verbatim, colon included.
 func TestBlobStoreURLAndKeyMatchWhatOverlaybdRequests(t *testing.T) {
 	f := newFakePutter()
-	store, err := NewS3BlobStore(f, "bean-obd", "blobs", "http://127.0.0.1:9000")
+	store, err := NewS3BlobStore(f, "wizard-obd", "blobs", "http://127.0.0.1:9000")
 	if err != nil {
 		t.Fatalf("NewS3BlobStore: %v", err)
 	}
@@ -110,7 +110,7 @@ func TestBlobStoreURLAndKeyMatchWhatOverlaybdRequests(t *testing.T) {
 	}
 
 	// What the daemon would fetch.
-	wantURL := "http://127.0.0.1:9000/bean-obd/blobs"
+	wantURL := "http://127.0.0.1:9000/wizard-obd/blobs"
 	if got := store.BlobURL(); got != wantURL {
 		t.Errorf("BlobURL() = %q, want %q", got, wantURL)
 	}
@@ -233,7 +233,7 @@ func TestCheckReadableRejectsAStoreThatDemandsCredentials(t *testing.T) {
 			}))
 			defer srv.Close()
 
-			store, err := NewS3BlobStore(newFakePutter(), "bean-obd", "blobs", srv.URL)
+			store, err := NewS3BlobStore(newFakePutter(), "wizard-obd", "blobs", srv.URL)
 			if err != nil {
 				t.Fatal(err)
 			}
@@ -259,7 +259,7 @@ func TestCheckReadableAcceptsAnEmptyButReadableStore(t *testing.T) {
 	}))
 	defer srv.Close()
 
-	store, err := NewS3BlobStore(newFakePutter(), "bean-obd", "blobs", srv.URL)
+	store, err := NewS3BlobStore(newFakePutter(), "wizard-obd", "blobs", srv.URL)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -276,7 +276,7 @@ func TestCheckReadableReportsAnUnreachableStore(t *testing.T) {
 	url := srv.URL
 	srv.Close()
 
-	store, err := NewS3BlobStore(newFakePutter(), "bean-obd", "blobs", url)
+	store, err := NewS3BlobStore(newFakePutter(), "wizard-obd", "blobs", url)
 	if err != nil {
 		t.Fatal(err)
 	}

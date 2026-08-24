@@ -128,11 +128,11 @@ func TestDiskStatReportsPlausibleOccupancy(t *testing.T) {
 }
 
 func TestErrDiskPressureExplainsWhyRefusingIsCheaper(t *testing.T) {
-	err := &ErrDiskPressure{FreeBytes: 100, FloorBytes: 200, Path: "/var/lib/bean/sandboxes"}
+	err := &ErrDiskPressure{FreeBytes: 100, FloorBytes: 200, Path: "/var/lib/wizard/sandboxes"}
 	msg := err.Error()
 	// The message is what an operator sees first, so it has to carry the numbers
 	// and the reason. A bare "low on disk" sends them looking for the wrong thing.
-	for _, want := range []string{"/var/lib/bean/sandboxes", "100", "200", "not recoverable"} {
+	for _, want := range []string{"/var/lib/wizard/sandboxes", "100", "200", "not recoverable"} {
 		if !contains(msg, want) {
 			t.Errorf("message is missing %q: %s", want, msg)
 		}

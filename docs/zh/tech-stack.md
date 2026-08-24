@@ -5,7 +5,7 @@
 > 状态标注约定见 [architecture.md](architecture.md) §0。
 > **权威顺序:代码 > [status.md](status.md) > [decisions.md](decisions.md) > 设计文档。**
 
-本文梳理 `bean` 依赖的每一项技术:它是什么、在这里做什么、**为什么选它**、
+本文梳理 `wizard` 依赖的每一项技术:它是什么、在这里做什么、**为什么选它**、
 **放弃了什么以及为什么**。有实测数据的地方直接给数字;属于判断而没有实测支撑的,
 明说是判断,不借用它没有的权威性。
 
@@ -49,7 +49,7 @@ snapshot 只能走 API,所以一个 client 覆盖整个生命周期(`fc_api.go`)
 而不是一个被 chroot 的降权用户。
 
 **还有第三档,而它根本不是隔离。** `LocalRuntime`(`internal/node/runtime/local.go`)
-把 sandbox 跑成宿主进程树,用真的 `beand` 二进制限制在一个目录里。它存在的目的是让
+把 sandbox 跑成宿主进程树,用真的 `wizardd` 二进制限制在一个目录里。它存在的目的是让
 macOS 上的开发与 CI 能在没有 KVM 的情况下跑通同一套 agent gRPC 接口。
 它不是安全边界,也从不作为安全边界提供给调用方。
 
@@ -390,7 +390,7 @@ gRPC backoff(−800 ms)那个量级的收益不藏在内核裁剪里。
 ### 4.2 启动参数 ✅
 
 ```
-quiet reboot=k panic=-1 pci=off init=/bean/beand -- --listen vsock:1024 --pivot /dev/vdb
+quiet reboot=k panic=-1 pci=off init=/wizard/wizardd -- --listen vsock:1024 --pivot /dev/vdb
 ```
 
 `quiet` 是有实测的那个。**不挂串口省 493 ms(41%)**:
@@ -414,7 +414,7 @@ quiet             700 /  700 /  711 ms
 
 ### 4.3 agent 作 PID 1,住在自己的盘上 ✅
 
-`beand` 是静态链接的 Go 二进制(`CGO_ENABLED=0`、`-ldflags="-s -w"`),
+`wizardd` 是静态链接的 Go 二进制(`CGO_ENABLED=0`、`-ldflags="-s -w"`),
 装在一个 32 MiB 的只读 ext4 镜像里,作为 guest 的 **root** 设备挂载:
 
 ```
@@ -423,7 +423,7 @@ quiet             700 /  700 /  711 ms
 ```
 
 内核从它挂成 root 的那个设备上 exec init,所以把 agent 放在那儿意味着
-**用户镜像不承担任何义务** —— 不用内嵌 `beand`、不用有 init 系统、不用改 entrypoint。
+**用户镜像不承担任何义务** —— 不用内嵌 `wizardd`、不用有 init 系统、不用改 entrypoint。
 agent 起来之后自己 pivot 到 `/dev/vdb`。这就是「零镜像转换」在 agent 侧的全部内容。
 
 **Firecracker 按注册顺序命名 drive**,而 `--pivot /dev/vdb` 是常量,
@@ -463,11 +463,11 @@ microVM 在 guest 自己配好网络之前没有宿主可达的网络,而为了�
 
 ## 5. 语言与运行时:Go ✅
 
-四个二进制、一种语言:`bean`(CLI)、`bean-api`(gateway,内嵌 scheduler /
-image / snapshot 模块)、`noded`(节点守护进程)、`beand`(sandbox 内 agent)。
+四个二进制、一种语言:`wizard`(CLI)、`wizard-api`(gateway,内嵌 scheduler /
+image / snapshot 模块)、`noded`(节点守护进程)、`wizardd`(sandbox 内 agent)。
 Go 1.26.1。
 
-理由是具体的而不是泛泛的。`beand` 装在挂给**每一个** microVM 的盘上,
+理由是具体的而不是泛泛的。`wizardd` 装在挂给**每一个** microVM 的盘上,
 所以它的体积是按 boot 计价的,而一个不依赖 libc 的静态二进制正是这个要求所需 ——
 `CGO_ENABLED=0` 让它在任何 guest 镜像上都能跑,glibc 或 musl 都行。
 节点守护进程是 I/O 并发密集的:很多 sandbox、很多 gRPC 流、每次恢复一个缺页处理
@@ -547,7 +547,7 @@ GET / PUT / DELETE / HEAD 加分片上传 —— 五个操作。
 `CGO_ENABLED=0`,而一个 cgo 版 SQLite 会把工具链故事劈成两半。
 `SetMaxOpenConns(1)` 强制单写者。
 
-Postgres 现在是一个 flag,不是一个项目:`bean-api --postgres <dsn>`。这才是多副本的
+Postgres 现在是一个 flag,不是一个项目:`wizard-api --postgres <dsn>`。这才是多副本的
 前提 —— SQLite 是一个文件,两个副本没法共享。
 
 **是方言,不是第二套实现。** 一套用 `?` 写的语句,按引擎改写。规模是实测出来的
@@ -709,7 +709,7 @@ dmsetup status: 0 524288 snapshot Invalid
 
 ### 构建用 BuildKit ✅
 
-`bean build` shell out 给 `buildctl`,对着一个 `buildkitd` socket。理由写在代码里:
+`wizard build` shell out 给 `buildctl`,对着一个 `buildkitd` socket。理由写在代码里:
 COPY 和 ADD 语义、多阶段构建、ARG 插值、构建缓存、`.dockerignore`、heredoc
 加起来是好几个月的工作,而且仍然会是一个不完整的模仿。e2b 和 Daytona 得出同样结论。
 
@@ -737,7 +737,7 @@ request id 能回答「这次请求里发生了什么」,回答不了「那 1.2 
 第一棵测出来的 trace 给出了一个没人知道的数字:
 
 ```
-POST /v1/sandboxes            bean-api   1196.0ms
+POST /v1/sandboxes            wizard-api   1196.0ms
   CreateSandbox               noded      1110.2ms   ← 86ms 空隙
     runtime.Create            noded       324.2ms
     agent.WaitHealthy         noded       785.8ms
@@ -750,15 +750,15 @@ POST /v1/sandboxes            bean-api   1196.0ms
 而它们必然在跨进程那一跳分叉 —— 而那恰恰是唯一需要关联的地方。
 
 **agent 刻意不链接 tracing SDK。** e2b 的 `envd` 能直连 collector;
-`beand` 只有一条入向 vsock 连接、没有出向通路,
+`wizardd` 只有一条入向 vsock 连接、没有出向通路,
 所以加一条反向通道要么破坏「零入向暴露」,要么需要在 `noded` 里做一个 OTLP 中继。
 它只提取 `traceparent`、把 trace id 用在自己的日志行上,别的都不做,
 因为 agent 装在挂给每个 microVM 的盘上 —— 体积按 boot 计价,
 而一个 exporter 要服务的遥测数据本来就出不了 guest。
 
 **⚠️ `decisions.md` §3.5 里有一个数字现在是错的。** 它写
-`go list -deps ./cmd/beand` 返回 0 个 OpenTelemetry 包;实际返回 **12** 个。
-这个决定的实质成立,而且比那个说法更精确:`beand` 链接了 `otel/trace`、
+`go list -deps ./cmd/wizardd` 返回 0 个 OpenTelemetry 包;实际返回 **12** 个。
+这个决定的实质成立,而且比那个说法更精确:`wizardd` 链接了 `otel/trace`、
 `otel/propagation`、`attribute`、`baggage`、`codes`、`semconv` ——
 也就是 API 与上下文传播部分 —— 而链接了**零个** `otel/sdk` 或 OTLP exporter。
 提取一个 `traceparent` 本身就需要 propagation API,所以 0 从来不可能达到;
@@ -770,14 +770,14 @@ POST /v1/sandboxes            bean-api   1196.0ms
 为它加的回归测试刻意设了 endpoint —— exporter 是惰性连接的,所以不需要真的 collector。
 
 ⚠️ 另一处值得标出来:五个 OTel 模块在 `go.mod` 里被标成 `// indirect`,
-而 `internal/obs` 和 `internal/beand` 直接 import 它们。`go mod tidy` 会把它们
+而 `internal/obs` 和 `internal/wizardd` 直接 import 它们。`go mod tidy` 会把它们
 移进直接依赖块。纯属外观问题,但它让这个文件对「项目依赖什么」的表述是有误导的。
 
 ### 9.2 Prometheus 格式,不用客户端库 ✅
 
 `internal/obs/metrics.go` 直接实现文本暴露格式 —— counter、gauge、histogram ——
 让二进制保持无依赖,而同一个 registry 之后可以被 OTLP exporter 包起来。
-抓取面包含 `bean_node_disk_{free,used}_bytes` 和快照缓存大小。
+抓取面包含 `wizard_node_disk_{free,used}_bytes` 和快照缓存大小。
 
 有一个工具的存在源于一个值得记录的测量陷阱:`hack/phase-delta.py`。
 累积 histogram 的 `_sum/_count` 给的是生命周期平均值,没法归因单次运行 ——
@@ -804,7 +804,7 @@ POST /v1/sandboxes            bean-api   1196.0ms
 | CI + MinIO | 对真 S3 服务器的 SigV4 | 环境变量门控,不满足则静默 skip |
 
 S3 集成测试是唯一能证明手写 SigV4 产出的签名被服务端接受的检查 ——
-单测只能证明规范化与自己自洽。它们由 `BEAN_S3_ENDPOINT` 门控,
+单测只能证明规范化与自己自洽。它们由 `WIZARD_S3_ENDPOINT` 门控,
 所以 `go test ./...` 在没有基础设施时保持全绿。
 ⚠️ `tests/e2e` 里没有压测/负载测试;§1 的数字来自 `hack/stress-fc.sh`。
 

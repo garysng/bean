@@ -4,8 +4,8 @@ import (
 	"path/filepath"
 	"testing"
 
-	"github.com/garysng/bean/internal/control/store"
-	"github.com/garysng/bean/internal/control/store/storetest"
+	"github.com/garysng/wizard/internal/control/store"
+	"github.com/garysng/wizard/internal/control/store/storetest"
 )
 
 // The SQLite store against the conformance suite.

@@ -1,12 +1,12 @@
 #!/bin/bash
 # Asks whether a sandbox can reach the node's own listening addresses, using a
-# topology that is faithful to bean's two-scope filter.
+# topology that is faithful to wizard's two-scope filter.
 #
 # An earlier version of this probe pinged from inside the sandbox namespace and
 # concluded the filter had a hole. That conclusion was unfounded, for two reasons
 # that are worth stating because both are easy to repeat:
 #
-#   1. It applied rules only in the host namespace. bean's denials exist in both
+#   1. It applied rules only in the host namespace. wizard's denials exist in both
 #      scopes, and the netns-side rule matches -s <guest subnet>, which is a
 #      source the host never sees. Testing one scope says nothing about the pair.
 #   2. A ping generated inside the sandbox namespace is locally generated there,
@@ -27,8 +27,8 @@
 # Docker's and nexus's rules. Prints counts before and after so a leak is visible.
 set -u
 
-GUEST_NS="bean-probe-guest"
-SBX_NS="bean-probe-sbx"
+GUEST_NS="wizard-probe-guest"
+SBX_NS="wizard-probe-sbx"
 
 GUEST_SUBNET="172.31.240.0/30"
 GUEST_IP="172.31.240.2"
@@ -106,7 +106,7 @@ ip -n "$GUEST_NS" route add default via "$GUEST_GW"
 
 sysctl -qw net.ipv4.ip_forward=1
 
-# --- bean's rules, both scopes, in bean's application order -----------------
+# --- wizard's rules, both scopes, in wizard's application order -----------------
 # Netns scope: denials matched on the guest subnet, then an appended ACCEPT,
 # then MASQUERADE onto the link.
 for d in $DENIED; do

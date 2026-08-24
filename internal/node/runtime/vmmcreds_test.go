@@ -49,7 +49,7 @@ func TestParseVMMCredsRefusesRoot(t *testing.T) {
 // TestVMMCredsCarryTheKVMGroup is the accessibility question that decides whether
 // any sandbox boots. /dev/kvm is root:kvm 0660 and shared with everything else
 // using KVM on the host, so the group it already has is how the dropped uid
-// reaches it -- chowning a host-wide device to bean's uid would take it away from
+// reaches it -- chowning a host-wide device to wizard's uid would take it away from
 // other users.
 func TestVMMCredsCarryTheKVMGroup(t *testing.T) {
 	c, err := parseVMMCreds(1000, 1000, 104)

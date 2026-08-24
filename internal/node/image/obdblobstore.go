@@ -8,7 +8,7 @@ import (
 	"net/http"
 	"strings"
 
-	"github.com/garysng/bean/internal/control/s3"
+	"github.com/garysng/wizard/internal/control/s3"
 )
 
 // Lazy pull needs sealed layers to live somewhere the overlaybd daemon can read over
@@ -66,7 +66,7 @@ type BlobStore interface {
 
 // s3BlobStore publishes layers to a bucket, over the unified s3.ObjectStore.
 //
-// It exists rather than a registry client because bean already has a hand-written
+// It exists rather than a registry client because wizard already has a hand-written
 // SigV4 client and already keeps snapshots in a bucket, and because overlaybd turned
 // out not to need registry semantics. A registry would mean a push protocol, token
 // auth and manifests for the sake of a GET this already satisfies.

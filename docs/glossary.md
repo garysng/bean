@@ -1,6 +1,6 @@
 # Glossary
 
-The terms bean uses, defined once. Where a term has a subtlety that has bitten
+The terms wizard uses, defined once. Where a term has a subtlety that has bitten
 us, the definition says so rather than leaving it to be rediscovered.
 
 **Authority order still holds: code > `status.md` > `decisions.md` > design docs > this page.**
@@ -17,9 +17,9 @@ one id (`sbx_...`).
 
 **image** — an OCI registry image reference (`python:3.12`,
 `registry/foo/bar:latest`), plus optional auth for a private registry. It is a
-**create-time source**, not a stored bean record: a node pulls it and converts it
+**create-time source**, not a stored wizard record: a node pulls it and converts it
 to overlaybd, and that conversion produces a *template* (below). "image" names
-only the OCI source; the startable artifact bean stores is a template, never an
+only the OCI source; the startable artifact wizard stores is a template, never an
 "image".
 
 **template** — a startable overlaybd filesystem a sandbox boots from, produced
@@ -141,7 +141,7 @@ mechanisms and different levels of support:
 from. The OCI tier serves the benchmark workload (any OCI image, no build step)
 but has no checkpoint to fork from.
 
-**bean-api** — the control plane (one process): API gateway, scheduler
+**wizard-api** — the control plane (one process): API gateway, scheduler
 (placement in-process so placement and commitment are one transaction), and
 template service (build, OCI conversion, and the template/snapshot records).
 Backed by SQLite or Postgres.
@@ -151,15 +151,15 @@ subsystem (base image, CoW, overlaybd/TCMU). The node package is still named for
 OCI images — a template is a control-plane record; the node handles the OCI
 images and rootfs it converts.
 
-**beand** — PID 1 inside each sandbox, shipped on its own read-only disk so user
+**wizardd** — PID 1 inside each sandbox, shipped on its own read-only disk so user
 images need no modification. Builds the mount matrix, then pivots into the user
 image.
 
-**bean-proxy** — the data-plane path for port traffic into a sandbox:
+**wizard-proxy** — the data-plane path for port traffic into a sandbox:
 `{port}-{sandbox}` reaches that port in that guest, user server or agent alike.
 No registration call, no host-port pool.
 
-**bean** — the CLI.
+**wizard** — the CLI.
 
 ---
 

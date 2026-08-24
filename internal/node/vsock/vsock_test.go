@@ -35,7 +35,7 @@ func shortSocketPath(t *testing.T) string {
 
 func TestParseAddrRoundTrip(t *testing.T) {
 	for _, want := range []Addr{
-		{SocketPath: "/run/bean/sbx_1/vsock.sock", Port: 1024},
+		{SocketPath: "/run/wizard/sbx_1/vsock.sock", Port: 1024},
 		{SocketPath: "/tmp/v", Port: 65535},
 		// A socket path containing a colon must still parse: the port is
 		// taken from the last separator, not the first.

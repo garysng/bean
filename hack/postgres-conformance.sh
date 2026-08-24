@@ -14,10 +14,10 @@
 
 set -euo pipefail
 
-NAME="${BEAN_PG_CONTAINER:-bean-store-conformance}"
-PORT="${BEAN_PG_PORT:-55432}"
-PASSWORD="bean-conformance-local-only"
-IMAGE="${BEAN_PG_IMAGE:-postgres:16-alpine}"
+NAME="${WIZARD_PG_CONTAINER:-wizard-store-conformance}"
+PORT="${WIZARD_PG_PORT:-55432}"
+PASSWORD="wizard-conformance-local-only"
+IMAGE="${WIZARD_PG_IMAGE:-postgres:16-alpine}"
 
 cd "$(dirname "$0")/.."
 
@@ -42,7 +42,7 @@ echo "starting $IMAGE as $NAME on 127.0.0.1:$PORT"
 # people's workloads should not be reachable from the network.
 docker run -d --name "$NAME" \
   -e POSTGRES_PASSWORD="$PASSWORD" \
-  -e POSTGRES_DB=bean \
+  -e POSTGRES_DB=wizard \
   -p "127.0.0.1:$PORT:5432" \
   "$IMAGE" >/dev/null
 
@@ -53,7 +53,7 @@ docker run -d --name "$NAME" \
 echo -n "waiting for postgres"
 ready=0
 for _ in $(seq 1 60); do
-  if docker exec "$NAME" pg_isready -q -U postgres -d bean 2>/dev/null; then
+  if docker exec "$NAME" pg_isready -q -U postgres -d wizard 2>/dev/null; then
     ready=$((ready + 1))
     if [ "$ready" -ge 3 ]; then
       break
@@ -71,7 +71,7 @@ if [ "$ready" -lt 3 ]; then
   exit 1
 fi
 
-export BEAN_TEST_POSTGRES_DSN="postgres://postgres:$PASSWORD@127.0.0.1:$PORT/bean?sslmode=disable"
+export WIZARD_TEST_POSTGRES_DSN="postgres://postgres:$PASSWORD@127.0.0.1:$PORT/wizard?sslmode=disable"
 
 # -count=1 defeats the test cache. A cached pass here would be indistinguishable from a
 # pass against a database that is no longer running, which is exactly the false green this

@@ -6,7 +6,7 @@ import (
 	"sort"
 	"strings"
 
-	"github.com/garysng/bean/internal/control/store"
+	"github.com/garysng/wizard/internal/control/store"
 )
 
 // ErrPolicyDenied reports a reference an operator's policy forbids. It is a

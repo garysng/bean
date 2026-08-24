@@ -11,13 +11,13 @@ import (
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/h2c"
 
-	"github.com/garysng/bean/internal/gen/bean/agent/v1/agentv1connect"
-	commonv1 "github.com/garysng/bean/internal/gen/bean/common/v1"
-	"github.com/garysng/bean/internal/node/runtime"
+	"github.com/garysng/wizard/internal/gen/wizard/agent/v1/agentv1connect"
+	commonv1 "github.com/garysng/wizard/internal/gen/wizard/common/v1"
+	"github.com/garysng/wizard/internal/node/runtime"
 )
 
 func TestDataPlaneForOptsInOnlyWithAProxyURL(t *testing.T) {
-	// Unset proxy means the client stays on the bean-api relay, so a single-node
+	// Unset proxy means the client stays on the wizard-api relay, so a single-node
 	// or dev deployment is unaffected. Only a set URL opts into the data plane.
 	if _, ok := dataPlaneFor("", "example.com"); ok {
 		t.Error("empty proxy URL opted into the data plane; the relay must be the default")
@@ -180,7 +180,7 @@ func TestResolveDomainSurfacesRESTErrors(t *testing.T) {
 func TestExecReachesTheAgentOverConnectThroughTheProxyHost(t *testing.T) {
 	// This is the crux of the CLI's switch to Connect: no gRPC stack, the same
 	// h2c transport the SDK uses, and the sandbox chosen by the Host header the
-	// proxy would route on. The fake proxy stands in for bean-proxy: it records
+	// proxy would route on. The fake proxy stands in for wizard-proxy: it records
 	// the Host it was addressed with and forwards to the stub agent.
 	agentPath, agentHandler := agentv1connect.NewAgentServiceHandler(stubAgent{})
 	agentMux := http.NewServeMux()

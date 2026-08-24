@@ -5,7 +5,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/garysng/bean/internal/node/runtime"
+	"github.com/garysng/wizard/internal/node/runtime"
 )
 
 // The node owns a build's lifetime, not whoever opened the BuildImage stream.

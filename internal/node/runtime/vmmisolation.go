@@ -29,7 +29,7 @@ type VMMIsolation struct {
 	// invisible to the host and the host's later mounts are invisible to it.
 	//
 	// Verified on real hardware rather than reasoned about, because the concern was
-	// specific and turned out to be unfounded: bean's rootfs is a device-mapper node
+	// specific and turned out to be unfounded: wizard's rootfs is a device-mapper node
 	// under /dev rather than a file, and the worry was that it would stop being
 	// openable inside a private mount namespace. It does not -- a dm node reads fine
 	// under `unshare -m --propagation private`, and a sandbox booted with this flag

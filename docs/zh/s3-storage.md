@@ -164,9 +164,9 @@ func AbortWrite(blobs Blobs, id string, w io.WriteCloser) {
 **secret 只从环境变量读,endpoint 可以是 flag**:
 
 ```
---s3-endpoint(或 BEAN_S3_ENDPOINT)   # 非敏感,两种都行
-BEAN_S3_ACCESS_KEY                    # 仅环境变量
-BEAN_S3_SECRET_KEY                    # 仅环境变量
+--s3-endpoint(或 WIZARD_S3_ENDPOINT)   # 非敏感,两种都行
+WIZARD_S3_ACCESS_KEY                    # 仅环境变量
+WIZARD_S3_SECRET_KEY                    # 仅环境变量
 ```
 
 这个区分是刻意的:flag 会出现在 `/proc/<pid>/cmdline`,任何本地用户 `ps`
@@ -175,8 +175,8 @@ BEAN_S3_SECRET_KEY                    # 仅环境变量
 环境变量也不是强防护(`/proc/<pid>/environ` 同样可读,只是限制在同 uid),
 但至少不在 `ps` 的默认输出里,也不会被记进 shell history。
 
-**noded 在 `--fc-overlaybd` 下直连 S3**(`grep -rn BEAN_S3 cmd/noded/` 现在有 5 处命中)。
-它从 `BEAN_S3_ACCESS_KEY` / `BEAN_S3_SECRET_KEY` 构造 S3 client
+**noded 在 `--fc-overlaybd` 下直连 S3**(`grep -rn WIZARD_S3 cmd/noded/` 现在有 5 处命中)。
+它从 `WIZARD_S3_ACCESS_KEY` / `WIZARD_S3_SECRET_KEY` 构造 S3 client
 (`cmd/noded/main.go` 的 `s3.New(...)` → `NewS3BlobStore(...)`),由此得到的
 `OverlaybdBlobs` store 发布并 range 读 sealed layers(`internal/node/image/obdblobstore.go`)。
 dm-snapshot 路径的快照 blob 仍走 节点 → gRPC → gateway → S3,但 overlaybd 下的节点侧
@@ -189,7 +189,7 @@ S3 访问已经是真实存在的,随之而来的凭证管理需求也是真实�
 - **presigned URL** 未实装 —— 节点上传产物、sandbox 内直传产物都应该用控制面
   签发的、绑定 key 前缀与 content-length 的短时 URL
 - **STS 只读角色轮换**未实装 —— 节点已经在 `--fc-overlaybd-lazy-pull` 下直接 range 读 blob,
-  且用的是长期 `BEAN_S3_ACCESS_KEY` / `BEAN_S3_SECRET_KEY` 而非轮转的 STS 凭证。这才是当前
+  且用的是长期 `WIZARD_S3_ACCESS_KEY` / `WIZARD_S3_SECRET_KEY` 而非轮转的 STS 凭证。这才是当前
   真正的 gap:它需要的是 1h 轮换、限 blob bucket 前缀的只读临时凭证
 
 换句话说:节点侧 S3 访问已不再是假设 —— 一旦开启 overlaybd,节点就持有长期凭证,
@@ -204,7 +204,7 @@ S3 访问已经是真实存在的,随之而来的凭证管理需求也是真实�
 |---|---|---|
 | 签名单测 | `sign_test.go` | canonical request 的字节级正确性 —— 这是最容易错且最难调的地方 |
 | 协议单测 | `client_test.go` / `multipart_test.go` | 用 `httptest` 假服务端验请求形状、分片切分、abort 行为 |
-| 集成测试 | `client_integration_test.go` / `s3blobs_test.go` | **打真 MinIO**,`BEAN_S3_ENDPOINT` 未设则 skip |
+| 集成测试 | `client_integration_test.go` / `s3blobs_test.go` | **打真 MinIO**,`WIZARD_S3_ENDPOINT` 未设则 skip |
 
 集成测试为什么必需:`ErrBlobNotFound` 的映射、abort 之后对象确实不存在、
 range 读的边界 —— 这些是**服务端的行为**而不是我们包装层的行为,
@@ -221,18 +221,18 @@ CI 里跑真 MinIO,所以这一层不是「可选的额外验证」。
 ### 8.1 现在已经共享什么、还没共享什么
 
 **wire 层已经是单一的**:`internal/control/s3.Client`(SigV4、multipart、range 读)是唯一
-一套 S3 实现,`bean-api` 和 `noded` 都在 import。没有重复的协议代码要合并。
+一套 S3 实现,`wizard-api` 和 `noded` 都在 import。没有重复的协议代码要合并。
 
 **没共享的是它上面那一层** —— 三个互不相干的 facade 架在同一个 client 上:
 
 | Facade | 侧 | key 方案 | 形状 |
 |---|---|---|---|
-| `snapshot.Blobs`(`snapshot/store.go:20`) | 控制面(`bean-api`) | `snapshots/<id>/data` | id 键,流式 `Writer`/`Reader`/`Size`/`Delete` |
+| `snapshot.Blobs`(`snapshot/store.go:20`) | 控制面(`wizard-api`) | `snapshots/<id>/data` | id 键,流式 `Writer`/`Reader`/`Size`/`Delete` |
 | `image.BlobStore`(`image/obdblobstore.go:36`) | 节点(`noded`) | `blobs/<digest>` | digest 键,缓冲 `Put` + `BlobURL`/`CheckReadable` |
 | `image.ImageIndex`(`image/obdindex.go:37`) | 节点(`noded`) | `manifests/<digest>`、`tags/...` | 带类型的 manifest/tag 对象 |
 
-外加两套并行的配置命名空间,读同一批凭证:`-s3-*`(bean-api)与 `-fc-overlaybd-s3-*`
-(noded),都来自 `BEAN_S3_ACCESS_KEY` / `BEAN_S3_SECRET_KEY`。
+外加两套并行的配置命名空间,读同一批凭证:`-s3-*`(wizard-api)与 `-fc-overlaybd-s3-*`
+(noded),都来自 `WIZARD_S3_ACCESS_KEY` / `WIZARD_S3_SECRET_KEY`。
 
 ### 8.2 统一契约
 
@@ -287,14 +287,14 @@ key 原样保留,意味着对 snapshot 和 overlaybd 而言这次统一是纯重
 ### 8.4 控制面 vs 节点侧是部署事实,不是障碍
 
 builder 跑在 **noded** 上(`internal/node/image/build_linux.go`,在 `cmd/noded/main.go` 接线),
-正好就是 overlaybd 存储已经有一套可用的、用同一批 `BEAN_S3_*` 凭证的节点侧 S3 client 的地方。
+正好就是 overlaybd 存储已经有一套可用的、用同一批 `WIZARD_S3_*` 凭证的节点侧 S3 client 的地方。
 所以 build 产物上传和 overlaybd 上传在同一进程 —— 不用把 build 字节绕经控制面。snapshot 存储
-留在控制面;它共享的是接口和低层 client,不是进程。统一抽象每进程实例化一次(`bean-api` 一次、
+留在控制面;它共享的是接口和低层 client,不是进程。统一抽象每进程实例化一次(`wizard-api` 一次、
 `noded` 一次),各带自己的 key 方案适配器。
 
 配置收敛成一个命名空间:单一的 `--s3-endpoint` / `--s3-bucket` / `--s3-region` /
 `--s3-path-style`(overlaybd 读 URL 作为唯一真正 overlaybd 特有的额外项保留),两个进程读同一批
-`BEAN_S3_*` 凭证。阶段 1 交付了共享的 `ObjectStore` 契约,以及在接口之下支撑两个节点侧 facade 的
+`WIZARD_S3_*` 凭证。阶段 1 交付了共享的 `ObjectStore` 契约,以及在接口之下支撑两个节点侧 facade 的
 单一 `BucketStore`;**改名放在阶段 2 做**,把 noded 的 `-fc-overlaybd-s3-*` 退成 `-s3-*`。改名落在
 阶段 2 而非阶段 1,是因为那一阶段 build 产物也封成 overlaybd 层进同一个存储,存储就明确是节点唯一的
 产物存储,通用的 `-s3-*` 名才准确。
