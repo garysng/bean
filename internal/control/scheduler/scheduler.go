@@ -282,10 +282,8 @@ func (s *Scheduler) feasible(n *store.NodeRecord, req *Request) bool {
 	// Treating a transient as a capability meant a single-node cluster with a full
 	// pipeline reported NO_CAPACITY for work it could have taken moments later, and
 	// ScheduleWait's polling existed to paper over that rather than to add queueing
-	// on top of a correct answer. Pressure belongs in score, which is where e2b puts
-	// it too (packages/api/internal/orchestrator/placement/placement_best_of_K.go
-	// folds in-progress placements into the score's numerator and never makes a busy
-	// node infeasible).
+	// on top of a correct answer. Pressure belongs in score: in-progress placements
+	// fold into the score so a busy node is penalised but never made infeasible.
 	//
 	// Restoring guest memory onto an incompatible CPU produces a sandbox that
 	// resumes and then misbehaves, so that one does belong in the hard filter.

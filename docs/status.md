@@ -237,7 +237,7 @@ holding deleted files all return to their baseline. The loop-device leak fix
   `SELECT` fails the reference-count requirement on Postgres too. Both engines are
   also run under `-race`, which matters because the store now holds no mutex
 
-### Two testing rules earned the hard way
+### Two testing rules
 
 **Verify through the real persistence layer.** When state exists in both memory
 and on disk, a test that reads memory proves nothing. The silent

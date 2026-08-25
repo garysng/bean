@@ -411,7 +411,7 @@ which is exactly what the analysis above predicted. GitHub #19.
 whereas CPU/memory/disk are held for the sandbox's lifetime — waiting ten seconds is still not enough,
 and waiting only turns a fast, clear rejection into a slow one with identical content.
 
-**A rejection must say which resource it was.** This one was learned the hard way: the same burst under three configurations
+**A rejection must say which resource it was.** The same burst under three configurations
 was limited to 5/8/16 by disk, CPU, and create concurrency respectively, and the error was identical —
 which is how "16" got misread as `max_creates` when it was actually the core count. The most likely reaction to an unattributed
 capacity error is to go adjust the wrong limit, and that does not work. So it now reports how many nodes each resource blocked,

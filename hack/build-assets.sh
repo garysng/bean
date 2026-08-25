@@ -108,9 +108,8 @@ PY
 #
 # Not built from source: the config is published beside the binary, so using the
 # prebuilt costs nothing in reproducibility while a build would need a kernel
-# toolchain on every node that prepares assets. e2b takes the same position for
-# the same reason — their fc-kernels repo holds a config and a build script, not
-# a kernel fork.
+# toolchain on every node that prepares assets. What is kept is a config and the
+# prebuilt binary, not a kernel fork.
 #
 # The config is downloaded too, and is the thing worth keeping: it is what a
 # custom kernel would start from if boot time ever justifies building one.

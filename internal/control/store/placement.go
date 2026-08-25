@@ -286,8 +286,8 @@ WHERE id = ?
   --
   -- So concurrency is now entirely the scheduler's policy: Weights.CreatePressure
   -- penalises a busy node so a fleet spreads without anyone deciding to, and a lone
-  -- busy node still takes the work. Same shape as e2b, which folds in-progress
-  -- placements into a placement score and has no per-node admission limit at all.
+  -- busy node still takes the work. In-progress placements fold into a placement
+  -- score, with no per-node admission limit at all.
   AND 1 = 1`,
 		res.CPU, res.MemoryMiB, res.DiskMiB, res.GPU, nodeID,
 		res.CPU, res.MemoryMiB, res.DiskMiB, res.GPU)

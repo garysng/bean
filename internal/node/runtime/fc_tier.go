@@ -137,7 +137,7 @@ type FCTierConfig struct {
 	// Both are applied as clone flags during the fork that starts Firecracker, so no
 	// wrapper process is introduced and the recorded pid stays the VMM's own -- which
 	// is what keeps destroy reliable. See vmmisolation_linux.go for why that matters
-	// and how it differs from e2b's `unshare ... bash -c ...` arrangement.
+	// and why the isolation is applied as clone flags rather than a wrapper process.
 	VMMPidNamespace bool
 	VMMKillOnExit   bool
 

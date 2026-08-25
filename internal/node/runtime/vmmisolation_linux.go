@@ -10,13 +10,14 @@ import (
 // This file narrows what the VMM process can see of the host, without putting a
 // wrapper process between noded and Firecracker.
 //
-// The distinction matters more than it looks. e2b reaches the same isolation by
-// exec'ing `unshare -pfm --kill-child -- bash -c "... ip netns exec ... firecracker"`
-// (packages/orchestrator/internal/sandbox/fc/process.go), which is three processes
-// deep: what cmd.Process.Pid names is `unshare`, not the VMM. Whether killing that
-// reaches Firecracker then depends on whether each layer execs in place or forks, and
-// the failure mode is a destroy that reports success while the microVM keeps running
-// and keeps holding memory the scheduler has already handed out. netns_linux.go
+// The distinction matters more than it looks. The same isolation can be reached by
+// exec'ing `unshare -pfm --kill-child -- bash -c "... ip netns exec ... firecracker"`,
+// which is three processes deep: what cmd.Process.Pid names is `unshare`, not the VMM.
+// Whether killing that reaches Firecracker then depends on whether each layer execs in
+// place or forks, and the failure mode is a destroy that reports success while the
+// microVM keeps running and keeps holding memory the scheduler has already handed out.
+// Applying the namespaces as clone flags keeps the recorded pid the VMM's own and
+// avoids that failure mode entirely. netns_linux.go
 // records the same reasoning for why the network namespace is entered with setns
 // rather than with `ip netns exec`.
 //
@@ -59,8 +60,8 @@ func isolateVMM(cmd *exec.Cmd, opts VMMIsolation) {
 		// A private mount namespace, plus Unshareflags so its propagation type is
 		// private: without that, CLONE_NEWNS still starts as a copy of the host's
 		// namespace with shared propagation, and mounts made inside would travel back
-		// out. e2b spells the same thing `mount --make-rprivate /` inside its
-		// unshare'd shell; Unshareflags is Go asking the kernel for it directly.
+		// out. The shell equivalent is `mount --make-rprivate /` inside an unshare'd
+		// shell; Unshareflags is Go asking the kernel for it directly.
 		//
 		// Verified on a guest, not just on the flags: wizard's rootfs is a
 		// device-mapper node under /dev, and the concern was that it would stop being

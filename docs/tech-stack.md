@@ -967,7 +967,7 @@ self-consistent with itself. They are gated on `WIZARD_S3_ENDPOINT` so
 `go test ./...` stays green without infrastructure. ⚠️ There is no scale or load
 testing in `tests/e2e`; the numbers in §1 come from `hack/stress-fc.sh`.
 
-### The two rules this project earned the hard way
+### Two rules this project follows
 
 **Verify through the real persistence layer.** When state exists in memory and on
 disk at once, a test that reads memory proves nothing. The silent

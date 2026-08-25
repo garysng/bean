@@ -729,9 +729,9 @@ func busy(inFlight, max int) func(*store.NodeRecord) {
 	}
 }
 
-// TestAFullPipelineIsStillPlaceable is the property the change is for. e2b scores
-// in-progress placements and never makes a busy node infeasible; this asserts wizard
-// does the same.
+// TestAFullPipelineIsStillPlaceable is the property the change is for: scoring
+// in-progress placements must never make a busy node infeasible; this asserts wizard
+// does that.
 func TestAFullPipelineIsStillPlaceable(t *testing.T) {
 	// Driven through Reserve, because UpsertNode does not persist create_in_flight --
 	// the first version of this test set it on the record and so tested an empty

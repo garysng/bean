@@ -18,7 +18,7 @@ import (
 // Building images from a Dockerfile uses BuildKit rather than an in-house
 // executor. COPY and ADD semantics, multi-stage builds, ARG interpolation, build
 // caching, .dockerignore and heredocs add up to months of work and would still
-// be an incomplete imitation; e2b and Daytona reach the same conclusion.
+// be an incomplete imitation.
 //
 // What the platform does own is the output shape. BuildKit exports an OCI image
 // layout, from which wizard recovers the image config and flattens the layers into

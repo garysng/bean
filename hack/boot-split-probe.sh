@@ -121,7 +121,7 @@ say "little. The remainder is guest userspace — the agent's own startup, the m
 say "matrix and the pivot — which is ours to shorten without a kernel toolchain."
 say ""
 say "Either way the conclusion for task #44 holds: not booting at all removes"
-say "both parts, which is what e2b does (real boot only at template-build time)."
+say "both parts: real boot only at template-build time."
 
 for sbx in "${ids[@]}"; do
   "$WIZARD" kill "$sbx" >/dev/null 2>&1 &
