@@ -42,7 +42,7 @@ AI evaluation / agent rollout 场景（如 SWE-bench 类任务）的特点：
 
 现有方案的问题：
 
-- **e2b**（Firecracker microVM + template）：Docker 镜像必须先转换为 VM rootfs（分钟级），对"大量不同评测镜像"的场景不可用
+- **基于 template 的 microVM（Firecracker + template）**：Docker 镜像必须先转换为 VM rootfs（分钟级），对"大量不同评测镜像"的场景不可用
 - **K8s + Pod**：调度/网络栈太重，冷启动路径长，且我们需要完全自主可控的底层
 
 ### 1.2 目标
@@ -122,7 +122,7 @@ AI evaluation / agent rollout 场景（如 SWE-bench 类任务）的特点：
 
 ### D1. 镜像零转换，容器与 microVM 双形态 ⚠️
 
-任意 OCI 镜像直接作为 sandbox 环境，消除 e2b 式 template 转换。镜像经 overlaybd
+任意 OCI 镜像直接作为 sandbox 环境，无 template 转换步骤。镜像经 overlaybd
 组装为块设备（见 D4），既能给容器档做 overlayfs rootfs，也能 virtio-blk 直挂
 microVM（见 D9）——两种形态共享同一条镜像链路，用户无感。
 
@@ -133,13 +133,13 @@ microVM（见 D9）——两种形态共享同一条镜像链路，用户无感�
 > overlaybd **已接入 `image.Provider`**,即 `--fc-overlaybd` 后面的 `OverlaybdProvider`
 > (PR #49)—— 但走 TCMU,不是本节描述的 ublk 直驱。见 [status.md](status.md)。
 
-fc 主路径**不引入 containerd**（AgentENV 同款）：noded 直接驱动 overlaybd（经 TCMU）组装块设备（S3 backing + 本地
+fc 主路径**不引入 containerd**：noded 直接驱动 overlaybd（经 TCMU）组装块设备（S3 backing + 本地
 缓存）→ virtio-blk 挂 microVM。containerd 的三项职责在本设计中均有更直接的替代：
 
 | containerd 职责 | 本设计 |
 |---|---|
 | 镜像拉取/content store | blob 在 S3（image-service 离线转换）,元数据控制面下发;registry 不在热路径 |
-| snapshotter | overlaybd 直驱（经 TCMU 暴露块设备；AgentENV 的 uvm-ublk 实证） |
+| snapshotter | overlaybd 直驱（经 TCMU 暴露块设备） |
 | task 生命周期 | fc:noded 自管 FC 进程;容器档:noded 直驱 runsc/runc（无 containerd,见下） |
 
 > **已修正。** 容器档**不使用** containerd。这一段写于 overlaybd 尚未接入
@@ -270,7 +270,7 @@ FC 档**不是**嵌套容器（Kata 式 guest 内再跑 containerd），而是 r
 
 ```
 overlaybd 组装镜像块设备：base 层（lazy-pull S3）+ overlaybd 可写层，
-  在宿主侧合成【单一块设备】（业界一致做法：e2b/AgentENV 均 host 侧组装）
+  在宿主侧合成【单一块设备】
   → virtio-blk 挂给 microVM（guest 见一块盘）+ agent 盘（只读，见 D5）
   → guest 内 wizardd 作为 init：挂载 /proc /sys /dev 等（按 OCI 默认
     mounts 复刻）、应用 image config（ENV/USER/WORKDIR/Entrypoint+Cmd）
@@ -288,8 +288,6 @@ disk-diff 直接取宿主 overlaybd 可写层、guest 内零 union 复杂度。
   详见 noded-design.md fcRuntime 节
 - agent 通信走 vsock（transport 抽象；容器档同协议但走 netns 内的 TCP，见 D3）
 - 网络：tap 设备接入节点 wizard0 桥，nftables 规则与容器档一致
-- 该路线已被 AgentENV（Kimi K3 训练基础设施）在生产验证；实现参考其
-  overlaybd+ublk 集成与 snapshot 设计
 
 ### D4. S3 为统一存储 backend ⚠️
 
@@ -302,7 +300,7 @@ disk-diff 直接取宿主 overlaybd 可写层、guest 内零 union 复杂度。
 | 快照（P3–P4） | FC memory snapshot / rootfs diff 落 S3，支持跨节点 **从快照创建**（在任意节点造出一个新 sandbox,内部走 restore/Fork 路径;resume 是同进程同节点的,见 snapshot-resume.md §0） |
 | 卷 | shared-fs 卷后端（JuiceFS on S3）宿主挂载 + nfsd 导出（见 D10）;dataset 卷预留 |
 
-选 overlaybd（块级，DADI/阿里，AgentENV 已在 FC 场景验证）而非 Nydus（文件级）的关键原因：**块设备链路同时服务容器档（overlaybd-snapshotter → overlayfs）与 microVM 档（virtio-blk 直挂 guest），一条镜像链路通吃全部 runtime 档位**；Nydus 的文件系统语义进不了 microVM，FC 档需另走 virtiofs（FC 支持弱）。Nydus 保留为容器档备选。
+选 overlaybd（块级，DADI/阿里）而非 Nydus（文件级）的关键原因：**块设备链路同时服务容器档（overlaybd-snapshotter → overlayfs）与 microVM 档（virtio-blk 直挂 guest），一条镜像链路通吃全部 runtime 档位**；Nydus 的文件系统语义进不了 microVM，FC 档需另走 virtiofs（FC 支持弱）。Nydus 保留为容器档备选。
 
 热状态（sandbox 元数据、租约、调度状态）落关系库,不进 S3。引擎由 `wizard-api --postgres`
 是否给出决定:SQLite(`modernc.org/sqlite`,纯 Go 无 cgo,`SetMaxOpenConns(1)` 单写)
@@ -402,7 +400,7 @@ cap:   [runc, runsc, fc] × 每节点并发创建余量（默认 16）
 
 | 类型 | 后端 | 数据面 | 场景 |
 |---|---|---|---|
-| `shared-fs`（首期） | 宿主挂载 JuiceFS（on S3）/CephFS/本地盘 | **宿主内核 nfsd 导出**（e2b 同款路线）：guest 用内核 NFS client 挂宿主内部地址，流量不出节点 | 持久工作区、跨 sandbox 共享读写 |
+| `shared-fs`（首期） | 宿主挂载 JuiceFS（on S3）/CephFS/本地盘 | **宿主内核 nfsd 导出**：guest 用内核 NFS client 挂宿主内部地址，流量不出节点 | 持久工作区、跨 sandbox 共享读写 |
 | `dataset`（预留，暂不排期） | overlaybd 只读块（复用镜像管道） | 容器档 bind mount;fc 档附加 virtio-blk | 数据集/权重海量只读消费 |
 
 shared-fs 走宿主 NFS 而非 guest 内跑分布式 FS 客户端的原因：guest 零凭证零
@@ -573,6 +571,6 @@ wizard/
 ## 8. 实施路线
 
 详见 [roadmap.md](roadmap.md)（单一维护处）。概要：**P0 即 fc 直启**（overlaybd
-直驱 + FC + agent,参考本地 AgentENV 源码）→ P1 多节点可用 → P2 生产化
+直驱 + FC + agent）→ P1 多节点可用 → P2 生产化
 （lazy-pull/prewarm/调度亲和）→ P3 交互/proxy/pause/shared-fs 卷 → P4 snapshot
 完整形态 → P5+ 储备（容器档 GPU 路径按需）。

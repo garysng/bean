@@ -298,9 +298,6 @@ CreateSandbox → overlaybd (over TCMU) assembles the block device (a few MiB of
   overlaybd `record-trace` captures the startup IO sequence, prefetching can be precise
 - Block-level dedup: when 2000+ evaluation images share base layers (ubuntu/python), both S3
   storage and the node cache shrink substantially
-- This route has been validated in production by AgentENV in the FC + massive-OCI-image
-  scenario (a local disk as a bounded cache, with the total image volume allowed to exceed
-  disk capacity)
 - Risks and countermeasures:
   - S3 first-byte latency jitter → trace-driven prefetch + obd-cache hits as the backstop
   - ublk requires a newer kernel (6.0+) → a uniform node OS baseline; **the tcmu backend is

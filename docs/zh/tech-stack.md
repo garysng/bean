@@ -183,10 +183,6 @@ restore 总计       1400 ms
 - **池化预恢复好的 VM。** 每个池成员都持一份内存副本,而实测说明瓶颈在解包与写盘
   而不在 VM 恢复本身 —— agent 只等了 97 ms。池化是花内存去解决一个不是问题的问题。
 
-UFFD 也不是赌注而是共识:e2b 有完整 handler
-(`packages/orchestrator/pkg/sandbox/uffd/`,含 cgo),agentenv 有 Rust 的
-`storage/uffd-core/`,tensorlake 公开宣称亚秒冷启动。
-
 **共享之所以安全,是因为 Firecracker 用 `MAP_PRIVATE` 映射内存文件。**
 这一条是验证过的而不是假设的:在 guest 里写 64 MB 随机数据后,
 宿主上那个内存文件的 md5 不变。这才使得一份解包后的内存镜像可以服务任意多次恢复。
@@ -196,7 +192,7 @@ UFFD 也不是赌注而是共识:e2b 有完整 handler
 
 1. **fd 和 region 布局不一定在同一个数据报里。** 一次 `ReadMsgUnix` 可能返回 fd
    但 body 是空的 → JSON 解析失败 → handler 死掉 → Firecracker 在第一次缺页上
-   永久阻塞。必须循环读到两者都到。agentenv 的 Rust 实现也是循环。
+   永久阻塞。必须循环读到两者都到。
 2. **Firecracker 交过来的 fd 是非阻塞的。** 直接 `read` 立刻返回 `EAGAIN`,
    缺页循环当场退出。必须先 `poll` 等可读。
 
@@ -236,21 +232,12 @@ Firecracker 原生支持 diff 快照;平台以 `--base SNAP` 暴露它,
 `uptime 57` 证明是 resume 而不是 reboot。
 
 Firecracker 的 diff 内存文件**不自包含** —— 它是稀疏文件,必须叠到一个 base 上。
-所以真正的问题不是「怎么产生 diff」,而是**什么时候、在哪里合并**,
-而业界正好在这一点上分成两派,**两派都在生产跑着**:
+所以真正的问题不是「怎么产生 diff」,而是**什么时候、在哪里合并**:
 
-- **E2B** 在缺页时做分层查找:UFFD handler 穿过 `block.Slicer` 走 base 加每一层,
-  于是 K 次 pause/resume 之后一次读要「追 K 个不同的 BuildId 引用」。
-  链深无上限,只有 `NormalizeMappings` 合并同一 build 的相邻段。
-  他们自己的公开分析明说**跨 build 碎片随时间增长**,读放大与深度成正比。
-- **Cognition 的 blockdiff** 把链只当血缘,运行前压平成 raw。
-  `apply` 是纯元数据操作(XFS reflink)—— 128 GB 的 `cp --reflink=always` 实测
-  **0.008 s 对 24.5 s**。他们的压平本质免费,所以文章从头到尾没讨论读放大:
-  运行时根本没有链可走。
 - **Firecracker 上游** 有 `snapshot-editor edit-memory rebase`,就是压平,
   而且要求按创建顺序叠加。
 
-**我们选压平,而理由不止「跟多数」。** 我们有一个 E2B 没有的结构性优势:
+**我们选压平,而理由不止「跟多数」。** 这里有一个结构性优势:
 `snapCache` 已经按 snapshot id 缓存解包结果,所以合并是**每个 leaf 每个节点付一次**,
 该节点之后的每次恢复都复用。fan-out 恰恰就是「同一个 leaf 被恢复很多次」,
 所以在 diff 存在的意义所在的那个场景上,合并被完全摊平。
@@ -259,7 +246,7 @@ Firecracker 的 diff 内存文件**不自包含** —— 它是稀疏文件,必�
 那里的一个 bug 是一页错的内存,而且**没有任何错误信号**。
 压平让 `uffd_linux.go` 仍然只服务一个扁平镜像,和全量快照一直走的是同一份代码。
 
-**链深上限 8**,超过就静默转成全量。E2B 不设上限并因此承担了增长的碎片,
+**链深上限 8**,超过就静默转成全量。不设上限的链会承担随时间增长的碎片,
 这本身就是设上限的依据。它给恢复成本设了界、让祖先可以被回收,
 也让调用方永远不用考虑链深:diff 请求永远成功,只是偶尔更贵。
 
@@ -301,8 +288,7 @@ drop_caches 之后:  cat /root/marker  →  9 × \0  ← 真的读块设备了
 
 **没有别人往已激活设备的 CoW 里写**:firecracker-containerd 的 devmapper snapshotter
 从 thin pool 派生、之后才激活,所以顺序天然是对的;Lambda SnapStart 提供的是
-分块懒加载的块设备;E2B 的 rootfs 就是宿主上的一个文件,CoW 在文件系统层。
-Firecracker 上游文档干脆把磁盘状态甩回给调用方保证 —— 我们撞到的正是它警告的那一类。
+分块懒加载的块设备。Firecracker 上游文档干脆把磁盘状态甩回给调用方保证 —— 我们撞到的正是它警告的那一类。
 
 ### 3.5 CPU 模板 ✅
 
@@ -356,18 +342,10 @@ vendor 校验发生在 `InstanceStart`。只测配置会得出「五个全支持
 脚本会校验下载物是 ELF,因为那个 bucket 被观察到会发截断文件,
 而一个短内核的表现是「boot 挂住」,不是下载错误。
 
-**调研结果:**
-
-| 仓库 | 内容 | 是否 fork |
-|---|---|---|
-| `e2b-dev/firecracker` | VMM 源码 | **是**(加了 gdb feature 等) |
-| `e2b-dev/fc-versions` | 编 VMM 的流水线 | 否 |
-| `e2b-dev/fc-kernels` | 内核 config + patch + build.sh | **否** |
-
-`fc-kernels` 在运行时 `git clone amazonlinux/linux` —— 和 Firecracker 官方
-`rebuild.sh` 用的是同一份源 —— 而仓库本身只放一个 config 加一个 virtio_balloon patch。
-所以 **e2b 的内核维护面就是一个 config 文件,没有 rebase 负担**,
-这就是值得抄的那个面。e2b fork 了 VMM 但没 fork 内核;我们两个都不 fork。
+Firecracker 官方的 `rebuild.sh` 在运行时 `git clone amazonlinux/linux`,
+对着一个 config 加一个 virtio_balloon patch 编内核,
+所以 **内核维护面就是一个 config 文件,没有 rebase 负担**。
+这里 VMM 和内核都不 fork。
 
 自己编被否掉的理由是「先付成本再拿证据」:容器里编意味着要先付工具链、
 拉源码、二十分钟构建,才能拿到第一个数据点,而当时甚至还没确立「换内核有用」这件事。
@@ -375,7 +353,7 @@ vendor 校验发生在 `InstanceStart`。只测配置会得出「五个全支持
 **然后实测**(quiet,VMM 启动到 agent 可连,各三次):
 
 ```
-vmlinux-6.1.175   690 / 689 / 715 ms   (agentenv R2 站点,config 未知)
+vmlinux-6.1.175   690 / 689 / 715 ms   (别处的预编译版,config 未知)
 vmlinux-6.1.102   603 / 613 / 601 ms   (Firecracker CI,config 已知)
 ```
 
@@ -405,8 +383,8 @@ quiet             700 /  700 /  711 ms
 `panic=-1` 让崩掉的 guest 保持可检查而不是进重启循环;
 `pci=off` 因为根本没有 PCI 总线可枚举。
 
-**这个取舍抄的是 e2b 的做法**:它的 `fc-kernels` config 里 `CONFIG_SERIAL_8250=y`
-是开着的,但启动参数里不带 `console=`,所以一个内核既 boot 得快又能调试。
+**这个取舍是保留串口驱动、但不每次 boot 都开串口**:内核里 `CONFIG_SERIAL_8250`
+编进去了,但默认启动参数里不带 `console=`,所以一个内核既 boot 得快又能调试。
 这里 `--debug-console` 把 `console=ttyS0` 加回去。失败的 boot 没有别的证据来源,
 所以这个能力不能丢,但不该每次 boot 都付 493 ms。**代价必须说清楚**:
 默认关串口,意味着 guest 写到 stderr 的一切 —— 包括 agent 那行带 trace id 的日志 ——
@@ -711,7 +689,7 @@ dmsetup status: 0 524288 snapshot Invalid
 
 `wizard build` shell out 给 `buildctl`,对着一个 `buildkitd` socket。理由写在代码里:
 COPY 和 ADD 语义、多阶段构建、ARG 插值、构建缓存、`.dockerignore`、heredoc
-加起来是好几个月的工作,而且仍然会是一个不完整的模仿。e2b 和 Daytona 得出同样结论。
+加起来是好几个月的工作,而且仍然会是一个不完整的模仿。
 
 平台保留的是**输出形态**:BuildKit 能导出**扁平 rootfs tar**,
 而这恰好就是 base 镜像需要的 —— 所以没有层组装、没有 registry 往返,
@@ -749,8 +727,7 @@ POST /v1/sandboxes            wizard-api   1196.0ms
 **request id 就是 trace id。** 两套 id 意味着每次关联都要 join,
 而它们必然在跨进程那一跳分叉 —— 而那恰恰是唯一需要关联的地方。
 
-**agent 刻意不链接 tracing SDK。** e2b 的 `envd` 能直连 collector;
-`wizardd` 只有一条入向 vsock 连接、没有出向通路,
+**agent 刻意不链接 tracing SDK。** `wizardd` 只有一条入向 vsock 连接、没有出向通路,
 所以加一条反向通道要么破坏「零入向暴露」,要么需要在 `noded` 里做一个 OTLP 中继。
 它只提取 `traceparent`、把 trace id 用在自己的日志行上,别的都不做,
 因为 agent 装在挂给每个 microVM 的盘上 —— 体积按 boot 计价,
@@ -888,9 +865,6 @@ restore  1500 ms → 950 ms(首次 1617ms)
 - [architecture.md](architecture.md) —— 组件及其关系
 - [noded-design.md](noded-design.md)、[vm-assembly.md](vm-assembly.md)、
   [image-pipeline.md](image-pipeline.md)、[s3-storage.md](s3-storage.md)、
-  [snapshot-resume.md](snapshot-resume.md)、
-  [competitive-analysis.md](competitive-analysis.md)
+  [snapshot-resume.md](snapshot-resume.md)
 - [firecracker: handling page faults on snapshot resume](https://github.com/firecracker-microvm/firecracker/blob/main/docs/snapshotting/handling-page-faults-on-snapshot-resume.md)
-- [e2b-dev/fc-kernels](https://github.com/e2b-dev/fc-kernels)
-- [tensorlake: Firecracker disk snapshots in O(changed bytes)](https://tensorlake.ai/blog/firecracker-disk-snapshots-o-changed-bytes)
 - [Restoring Uniqueness in MicroVM Snapshots (AWS)](https://arxiv.org/pdf/2102.12892)

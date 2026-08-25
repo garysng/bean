@@ -288,13 +288,10 @@ Two consequences worth stating rather than discovering:
 
   This is worth knowing because the obvious hardening — "add the missing host-side rule" — would
   not be hardening at all; a host-scope FORWARD rule cannot reach this traffic no matter how it is
-  written. The two comparable Firecracker platforms both restructure instead: E2B hooks nftables at
-  **prerouting priority −150** matching on input interface only, so one rule covers both
-  locally-delivered and forwarded packets; AgentENV keeps FORWARD but writes `-o vpeer` on every
-  rule so the rules are honest about their scope. See
-  [competitive-analysis.md](competitive-analysis.md) §2a. Adopting the prerouting hook would remove
-  wizard's dependence on the netns rule being the only thing between a guest and the node, and is
-  tracked as hardening on [#21](https://github.com/garysng/wizard/issues/21).
+  written. Restructuring to hook nftables at **prerouting** — matching on input interface only, so
+  one rule covers both locally-delivered and forwarded packets — would remove wizard's dependence on
+  the netns rule being the only thing between a guest and the node, and is tracked as hardening on
+  [#21](https://github.com/garysng/wizard/issues/21).
 
 IPv6 is not addressed here. If the uplink has IPv6, the equivalent metadata address
 (`fd00:ec2::254`) is reachable and these v4 rules say nothing about it. Either the guest gets no

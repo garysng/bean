@@ -12,34 +12,6 @@ not boot a kernel. Throughput is bounded by the first number:
 So the lever is not a faster boot. It is booting **once per image** instead of once
 per sandbox.
 
-## 1. What the competition does 📐
-
-Read from source rather than marketing — `e2b-dev/infra` @ `17ffd81`:
-
-`Factory.CreateSandbox` (real boot, sets the boot source) and
-`Factory.ResumeSandbox` (`PUT /snapshot/load`) are two separate paths, and **every
-caller of `CreateSandbox` lives under `packages/orchestrator/pkg/template/build/`**.
-The user-facing gRPC handler calls `ResumeSandbox`. Real boot happens only when a
-template is built.
-
-Their `ResumeSandbox` is what wizard calls **restore**: it does `PUT /snapshot/load`
-and produces a new sandbox. It is not resume in wizard's sense (unfreezing the vCPUs
-of a live process), and the borrowed name is worth watching for when reading their
-code. This document uses wizard's vocabulary throughout —
-[snapshot-resume.md](snapshot-resume.md) §0.
-
-Three details worth taking:
-
-- They **boot twice**. Provision runs a BusyBox init executing only the provision
-  script, and readiness is detected by scraping the guest's serial console for a
-  sentinel. Later phases use systemd, with readiness as an HTTP `POST /init` to the
-  in-guest agent.
-- The pause point is **after the user's start command has run**, not merely after
-  boot. Even the user process's memory state is captured.
-- Before pausing: freeze the guest filesystem (`FIFREEZE`), drain the balloon's
-  free-page hints, then pause, then snapshot. The freeze matters because a
-  filesystem captured mid-write restores dirty.
-
 ## 2. Shape 📐
 
 ```
@@ -114,12 +86,8 @@ compatible CPU. The mapping is not `image -> snapshot`; it is:
 A heterogeneous fleet needs one warm snapshot per CPU generation. That is not a
 defect of this design — it is the same constraint that already makes the scheduler
 refuse an incompatible restore with `409 INCOMPATIBLE_CPU`, and the fields to
-express it are already on the `Snapshot` record.
-
-e2b's answer to the same problem is a four-line hardcoded compatibility table plus
-a scheduler filter, which silently forecloses migration between AMD and Intel. We
-already have vendor and family filtering, so the same approach applies without new
-machinery.
+express it are already on the `Snapshot` record. We already have vendor and family
+filtering, so the mapping is expressed without new machinery.
 
 **A miss must be ordinary, not exceptional.** A node whose CPU has no warm
 snapshot boots as it does today. If a miss were an error, adding a machine of a new
@@ -147,10 +115,9 @@ Two options, and the choice has consequences:
 | after a user start command | boot plus the user's own warm-up | boot and application startup | needs a per-image build spec |
 
 The first is the whole win against the 5 CPU-seconds and needs no new user-facing
-concept. The second is what e2b does and is strictly better for something like
-`import torch` — Modal measured `import torch` going from ~5s to 1.05s p50 by
-snapshotting after it — but it requires a template definition, which is a larger
-feature.
+concept. The second is strictly better for something like `import torch` — capturing
+the snapshot after the import folds that cost into the snapshot — but it requires a
+template definition, which is a larger feature.
 
 **The plan is to do the first and leave the second to a template feature**, because
 the first captures the throughput ceiling on its own and the second is an

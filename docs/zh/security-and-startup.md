@@ -253,8 +253,6 @@ CreateSandbox → overlaybd（经 TCMU）组装块设备（元数据数 MiB）�
   通常 < 全镜像的 5%;overlaybd `record-trace` 采集启动 IO 序列后可精准预取
 - 块级 dedup：2000+ 评测镜像共享基础层（ubuntu/python）时 S3 存储与节点缓存
   都大幅缩减
-- 该路线已被 AgentENV 在 FC + 海量 OCI 镜像场景生产验证（本地盘做有界缓存，
-  镜像总量可超磁盘容量）
 - 风险与对策：
   - S3 首字节延迟波动 → 按 trace 预取 + obd-cache 命中兜底
   - ublk 依赖较新内核（6.0+）→ 节点 OS 统一基线;**tcmu 后端在 5.15 上已实测

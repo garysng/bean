@@ -5,8 +5,6 @@
 **A sandbox platform for AI agents** — run untrusted code in hardware isolation:
 create it, exec into it, snapshot it, fan it out. Any OCI image, no template build step.
 
-*Built from zero to one, under continuous iteration and optimisation.*
-
 ![runtime: Firecracker microVM](https://img.shields.io/badge/runtime-Firecracker%20microVM-E24329?style=flat-square)
 ![runtime: gVisor](https://img.shields.io/badge/runtime-gVisor%20%2F%20OCI-4285F4?style=flat-square)
 ![952 ms to a reachable agent](https://img.shields.io/badge/boot-952%20ms%20to%20agent-3FB950?style=flat-square)
@@ -312,8 +310,7 @@ flowchart TB
 4. wizardd as PID 1: mount matrix, then pivot into the user image
 ```
 
-Four ordering constraints in there are load-bearing, and every one was found the
-hard way:
+Four ordering constraints in there are load-bearing:
 
 - A CPU template must be applied **before** `InstanceStart`. A guest reads CPUID
   once during early boot and caches it — glibc picks its string routines from it
@@ -330,17 +327,12 @@ hard way:
   The failure is *silent*: `ls` reports the right size, `cat` returns zeroes,
   `dmesg` says nothing. [decisions §3.0](docs/decisions.md).
 
-The last one is the shape to internalise: each of these is a step that *looks*
-done from every vantage point except the one that matters. The network stack had
-five correct layers and no address in the guest, and every assertion passed.
-
 ---
 
 ## Documentation
 
 Design docs carry per-section delivery status (✅ implemented / ⚠️ partial /
-📐 design only), because writing intent and reality the same way is exactly what
-made networking and jailer look shipped. Convention in
+📐 design only), so intent is never mistaken for what has shipped. Convention in
 [architecture.md §0](docs/architecture.md).
 
 **Authority order: code > `status.md` > `decisions.md` > design docs.**
@@ -349,7 +341,7 @@ made networking and jailer look shipped. Convention in
 |---|---|
 | [glossary.md](docs/glossary.md) | **the terms** — sandbox, image, snapshot, the lifecycle verbs, the runtime tiers — defined once |
 | [status.md](docs/status.md) | **what is actually built**, with measurements |
-| [decisions.md](docs/decisions.md) | **why** each choice was made — measured data, competitor comparisons, and the traps that only appeared on hardware |
+| [decisions.md](docs/decisions.md) | **why** each choice was made — measured data and the traps that only appeared on hardware |
 | [architecture.md](docs/architecture.md) | components, design decisions, state machine |
 | [architecture-diagrams.md](docs/architecture-diagrams.md) | the same architecture as diagrams only, rendered on GitHub |
 | [tech-stack.md](docs/tech-stack.md) | every dependency, what it does here, and what it is instead of |
@@ -367,12 +359,10 @@ made networking and jailer look shipped. Convention in
 | [exec-via-proxy.md](docs/exec-via-proxy.md) | how exec and file transfer reach the agent node-direct, and the credential knot that shaped it |
 | [jailer.md](docs/jailer.md) | 📐 what a jailer chroot would cost, what it would break, and why it is not next |
 | [warm-snapshots.md](docs/warm-snapshots.md) | 📐 booting once per image instead of once per sandbox |
-| [competitive-analysis.md](docs/competitive-analysis.md) | e2b / Modal / Daytona / Morph / AgentENV, including how each one does networking |
 | [roadmap.md](docs/roadmap.md) | phases, with actual progress noted |
 
 `decisions.md` is the one to read if you are evaluating the approach: it records
-what was measured, where competitors chose differently, and which conclusions
-remain unverified.
+what was measured and which conclusions remain unverified.
 
 ---
 
@@ -398,9 +388,8 @@ scp /tmp/img.test root@host:/tmp/ && ssh root@host /tmp/img.test
 ```
 
 [CONTRIBUTING.md](CONTRIBUTING.md) covers the rest: the ASCII rule and why it
-exists, the two testing rules that came out of bugs which passed a fully green
-suite, and how doc status markers are kept honest. Security policy and the two
-known boundary gaps are in [SECURITY.md](SECURITY.md).
+exists, the two testing rules, and how doc status markers are kept honest.
+Security policy and the two known boundary gaps are in [SECURITY.md](SECURITY.md).
 
 ---
 

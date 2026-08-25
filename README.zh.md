@@ -5,8 +5,6 @@
 **面向 AI agent 的 sandbox 平台** —— 在硬件隔离里跑不可信代码:创建、exec 进去、打快照、成批克隆。
 任意 OCI 镜像,不需要模板构建步骤。
 
-*从零到一构建,持续迭代与优化。*
-
 ![runtime: Firecracker microVM](https://img.shields.io/badge/runtime-Firecracker%20microVM-E24329?style=flat-square)
 ![runtime: gVisor](https://img.shields.io/badge/runtime-gVisor%20%2F%20OCI-4285F4?style=flat-square)
 ![952 ms 到 agent 可达](https://img.shields.io/badge/boot-952%20ms%20to%20agent-3FB950?style=flat-square)
@@ -292,7 +290,7 @@ flowchart TB
 4. wizardd 作为 PID 1:先建挂载矩阵,再 pivot 进用户镜像
 ```
 
-其中有四个顺序约束是承重的,而且每一个都是踩出来的:
+其中有四个顺序约束是承重的:
 
 - CPU template 必须在 `InstanceStart` **之前**应用。guest 在早期启动时读一次 CPUID 就缓存
   下来 —— glibc 据此挑选它的字符串例程 —— 所以之后再屏蔽,屏蔽掉的是 guest 已经决定要用
@@ -307,16 +305,12 @@ flowchart TB
   `ls` 报告正确的大小,`cat` 返回全零,`dmesg` 什么都不说。见
   [decisions §3.0](docs/zh/decisions.md)。
 
-最后一条是真正该内化的形状:上面每一步都是"从除了真正要紧的那个视角以外,处处看起来都做完了"
-的步骤。网络栈曾经有五层都正确、guest 里却没有地址,而所有断言都是绿的。
-
 ---
 
 ## 文档
 
-设计文档按小节标注交付状态(✅ 已实现 / ⚠️ 部分 / 📐 仅设计),因为把意图和现实用同一种
-写法写下来,正是当初让网络与 jailer 看起来像已交付的原因。约定见
-[architecture.md §0](docs/zh/architecture.md)。
+设计文档按小节标注交付状态(✅ 已实现 / ⚠️ 部分 / 📐 仅设计),让意图不会被误认为已经交付的部分。
+约定见 [architecture.md §0](docs/zh/architecture.md)。
 
 **权威顺序:代码 > `status.md` > `decisions.md` > 设计文档。**
 
@@ -324,7 +318,7 @@ flowchart TB
 |---|---|
 | [glossary.md](docs/zh/glossary.md) | **术语表** —— sandbox、image、snapshot、生命周期动词、runtime 各档,一次定义清楚 |
 | [status.md](docs/zh/status.md) | **实际构建了什么**,带实测数据 |
-| [decisions.md](docs/zh/decisions.md) | 每个选择**为什么**这么做 —— 实测数据、竞品对比,以及只在真机上才现形的陷阱 |
+| [decisions.md](docs/zh/decisions.md) | 每个选择**为什么**这么做 —— 实测数据,以及只在真机上才现形的陷阱 |
 | [architecture.md](docs/zh/architecture.md) | 组件、设计决策、状态机 |
 | [tech-stack.md](docs/zh/tech-stack.md) | 每一个依赖:在这里做什么,以及替代了什么 |
 | [vm-assembly.md](docs/zh/vm-assembly.md) | microVM 如何组装,以及两个不能改的顺序 |
@@ -341,10 +335,9 @@ flowchart TB
 | [exec-via-proxy.md](docs/zh/exec-via-proxy.md) | exec 与文件传输如何 node-direct 直达 agent,以及塑造了这个设计的凭证死结 |
 | [jailer.md](docs/zh/jailer.md) | 📐 jailer chroot 的代价、会破坏什么,以及为何它不是下一步 |
 | [warm-snapshots.md](docs/zh/warm-snapshots.md) | 📐 每镜像 boot 一次,而非每沙箱 boot 一次 |
-| [competitive-analysis.md](docs/zh/competitive-analysis.md) | e2b / Modal / Daytona / Morph / AgentENV,含各家的网络做法 |
 | [roadmap.md](docs/zh/roadmap.md) | 阶段划分,标注实际进度 |
 
-如果你在评估这套方案,`decisions.md` 是该读的那一份:它记录了测了什么、竞品在哪里选择不同、
+如果你在评估这套方案,`decisions.md` 是该读的那一份:它记录了测了什么,
 以及哪些结论仍未被验证。
 
 ---
@@ -369,9 +362,8 @@ GOOS=linux GOARCH=amd64 go test -c -o /tmp/img.test ./internal/node/image/
 scp /tmp/img.test root@host:/tmp/ && ssh root@host /tmp/img.test
 ```
 
-其余内容见 [CONTRIBUTING.md](CONTRIBUTING.md):ASCII 规则及其理由、两条从"全绿套件也没
-抓到 bug"里长出来的测试规则,以及文档状态标记怎么保持诚实。安全策略与两个已知的边界缺口
-在 [SECURITY.md](SECURITY.md)。
+其余内容见 [CONTRIBUTING.md](CONTRIBUTING.md):ASCII 规则及其理由、两条测试规则,
+以及文档状态标记怎么保持诚实。安全策略与两个已知的边界缺口在 [SECURITY.md](SECURITY.md)。
 
 ---
 

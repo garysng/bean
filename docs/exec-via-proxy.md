@@ -112,10 +112,9 @@ token**, so the client never holds it.
 The decision: **the client never touches the per-sandbox token.** noded injects
 it at the forwarder, because noded is the one process that already holds the
 plaintext. The client authenticates only to the platform's outer API-key layer;
-everything inward of the proxy is the node's trust domain to manage. This is the
-Daytona shape — the proxy layer owns agent auth, the caller holds one platform
-credential — rather than the E2B shape where the client holds the per-sandbox
-token and connects directly.
+everything inward of the proxy is the node's trust domain to manage. The proxy
+layer owns agent auth and the caller holds one platform credential, rather than
+having the client hold the per-sandbox token and connect directly.
 
 Three parts. The auth injection is the one with real security weight; the other
 two are mechanical.
@@ -162,7 +161,7 @@ use). The CLI/SDK constructs the request URL from it — `{port}-{sandbox}` agai
 that domain — at call time. The proxy only forwards, and every port mapping is
 open by default (per-port access control is a separate, unbuilt feature —
 [#50](https://github.com/garysng/wizard/issues/50)), so no registration call or
-host-port pool is involved. This is the E2B subdomain shape, but with the domain
+host-port pool is involved. It is a subdomain shape, with the domain
 handed back by the server rather than assembled from client-side convention.
 
 - **`create` response** gains the domain/proxy base for the sandbox.

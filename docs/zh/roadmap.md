@@ -25,8 +25,6 @@
 
 ## P0 — 单节点端到端骨架（fc 直启,无 containerd）
 
-参考实现：AgentENV——uvm-ublk 直驱 overlaybd、envd、jailer/FC 管理的完整实证,逐模块对照。
-
 **范围**
 
 - `proto/`：NodeService / SandboxService / AgentService v1 定义 + buf 工程化
@@ -86,7 +84,7 @@ curl DELETE → 资源清零（FC 进程/tap/TCMU 设备/挂载无残留）
 - lifecycle 自动化：idle 检测（noded 本地）、onIdle pause/delete、PAUSED 请求透明唤醒
 - fc 档 snapshot 本节点路径（memory+disk → S3）
 - **shared-fs 卷**（宿主挂 JuiceFS + 内核 nfsd 导出、agent NFS 挂载、后端配额）
-- TS SDK、e2b 迁移对照文档
+- TS SDK
 
 **验收**：agent rollout 场景接入（交互式终端 + 端口预览）;pause 后资源计费口径正确。
 
@@ -98,7 +96,7 @@ curl DELETE → 资源清零（FC 进程/tap/TCMU 设备/挂载无残留）
 - PAUSED 归档：超阈值自动 snapshot 落 S3 释放 RAM,再访问透明 restore
 - snapshot 生命周期：配额、引用计数、TTL/S3 lifecycle
 - **镜像即快照**：`POST /images:register {snapshot}` 把任意 sandbox 快照注册为
-  命名镜像（Tensorlake 同款）——「装环境一次、批量复用」的最短路径
+  命名镜像——「装环境一次、批量复用」的最短路径
 
 **验收**：「装环境 → snapshot → fan-out 50 实例」演示(一份快照 restore 50 次、50 个
 互相独立的 sandbox);fc 档 **restore** P50 < 500ms —— 是 restore 不是 resume:
@@ -122,9 +120,9 @@ curl DELETE → 资源清零（FC 进程/tap/TCMU 设备/挂载无残留）
 
 | 风险 | 影响 | 缓解 |
 |---|---|---|
-| fcRuntime 自研复杂度（VM 生命周期/guest 内核/vsock） | P0 延期 | AgentENV 源码在本地逐模块参考（uvm-ublk/envd/warm-pool）;P0 范围收敛（预转换镜像+手工内核） |
+| fcRuntime 自研复杂度（VM 生命周期/guest 内核/vsock） | P0 延期 | P0 范围收敛（预转换镜像+手工内核） |
 | ublk 内核要求（6.0+） | 旧节点无 lazy-pull | 节点 OS 统一基线;tcmu 后端或 overlayfs 全量拉取保底 |
-| overlaybd 转换覆盖率 | 未转换镜像 fc 档不可用 | 转换流水线随镜像入库自动触发;容器档标准拉取兜底;可复用 tensorlake/oci2rootfs（Apache-2.0,OCI→ext4）做全量预物化 fallback |
+| overlaybd 转换覆盖率 | 未转换镜像 fc 档不可用 | 转换流水线随镜像入库自动触发;容器档标准拉取兜底 |
 | FC snapshot 宿主 CPU 代际兼容 | 跨节点 restore 受限 | 调度按 CPU feature set 分组;manifest 记录代际 |
 | GPU 走 runc 隔离弱 | GPU eval 安全短板 | GPU 独立节点池 + 镜像白名单;nvproxy（gVisor GPU）P5 评估 |
 | 节点必须有 KVM（P0–P4 仅 fc 档） | 无 KVM 节点不可用 | 采购/开通嵌套虚拟化;容器档 P5 兜底 |

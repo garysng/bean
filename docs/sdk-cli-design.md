@@ -221,8 +221,8 @@ wizard version
 `port expose`, `config`, batch `kill --label`, interactive PTY (`-i/-t`).
 
 **Why there is no `wizard node ls`**: a node is a scheduling object of the platform, not a
-user-facing concept. Neither e2b, Modal nor Daytona exposes "which machine my sandbox landed
-on" — once exposed, users depend on it, and the scheduler can no longer migrate freely.
+user-facing concept. Once exposed, users depend on "which machine my sandbox landed on", and the
+scheduler can no longer migrate freely.
 `/v1/nodes` and drain are kept as **operator APIs and stay out of the CLI**.
 By the same logic `prewarm`'s parameter is `--replicas` (replica count) rather than `--nodes`
 (machine count).
@@ -254,4 +254,4 @@ By the same logic `prewarm`'s parameter is `--replicas` (replica count) rather t
 
 - Publish the OpenAPI spec + a hosted API reference
 - A quickstart trio: five minutes with the CLI, a Python eval batch example (a mini SWE-bench reproduction), a TS web demo (an xterm.js terminal)
-- SDK examples plus an e2b migration mapping table (`e2b.Sandbox.create` → the `wizard` equivalent), lowering the switching cost for existing users
+- SDK examples

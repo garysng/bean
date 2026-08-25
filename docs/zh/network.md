@@ -261,11 +261,9 @@ FORWARD -s <guest subnet> -d 192.168.0.0/16 -j DROP
   地址布局已经给了这一点。
 
   这点值得知道,是因为那个显而易见的加固手段 ——「把缺的宿主侧规则加上」—— 根本不是加固:
-  host scope 的 FORWARD 规则无论怎么写都碰不到这类流量。两个可比的 Firecracker 平台
-  都选择重构:E2B 在 **prerouting priority −150** 挂 nftables 且只匹配入向网卡,
-  于是一条规则同时覆盖本地交付和转发的包;AgentENV 保留 FORWARD 但在每条规则上写
-  `-o vpeer`,让规则对自己的作用域诚实。见 [competitive-analysis.md](competitive-analysis.md) §2a。
-  改用 prerouting 钩子能消除 wizard 对「netns 规则是 guest 与节点之间唯一屏障」的依赖,
+  host scope 的 FORWARD 规则无论怎么写都碰不到这类流量。重构为在 **prerouting** 挂 nftables
+  且只匹配入向网卡 —— 于是一条规则同时覆盖本地交付和转发的包 —— 能消除 wizard 对
+  「netns 规则是 guest 与节点之间唯一屏障」的依赖,
   作为加固记在 [#21](https://github.com/garysng/wizard/issues/21)。
 
 这里没有处理 IPv6。如果上行有 IPv6,对应的元数据地址(`fd00:ec2::254`)是可达的,

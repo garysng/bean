@@ -9,7 +9,7 @@
 ## 1. Why it is needed
 
 wizard's footing is "any OCI image boots directly with zero conversion", so it needs no
-e2b-style per-image template build. But having no build capability at all leaves two real gaps:
+per-image template build. But having no build capability at all leaves two real gaps:
 
 - **Nowhere to add dependencies**: a user who wants to install `requirements.txt` on top of
   `python:3.12` has to either maintain an external registry themselves or repeat the install
@@ -33,9 +33,8 @@ conversion**, and this has to be stated clearly or the cost gets misjudged:
 |---|---|---|
 | **BuildKit** (Dockerfile / steps) | standard OCI layer | **still needs one conversion** |
 
-Even though the BuildKit path needs a conversion, it is still an improvement over e2b: the
-conversion happens at **build time** (once, cacheable, off the user's waiting path), whereas
-e2b spends another 5–15 minutes converting to a VM rootfs after the build.
+Even though the BuildKit path needs a conversion, that conversion happens at **build time**
+(once, cacheable, off the user's waiting path).
 
 ## 3. Three build forms
 
@@ -46,7 +45,7 @@ layers**. The only difference is how the steps are described.
 
 Uses **BuildKit** rather than an in-house parser. COPY/ADD semantics, multi-stage, ARG
 interpolation, build cache, `.dockerignore`, heredocs — together those are months of work and
-guaranteed to be incomplete; e2b and Daytona use BuildKit as well.
+guaranteed to be incomplete.
 
 ```
 wizard build -f Dockerfile -t myteam/eval-base:v1 .
@@ -56,7 +55,7 @@ The CLI packs the build context (subject to `.dockerignore`) and uploads it, and
 executes on the platform side** — the user needs no local Docker install, and the build cache
 is shared on the platform side.
 
-### 3.2 Declarative steps (Modal style) 📐
+### 3.2 Declarative steps 📐
 
 The eval orchestration side is writing Python anyway, so a chained declaration is easier to
 work with than maintaining a Dockerfile, and every step is naturally a cache key:
@@ -117,8 +116,7 @@ type BuildPlan struct {
 type BuildStep struct {
     Kind string  // run | copy | env | workdir | user
     // CacheKey is a hash of (the chain of preceding steps + this step's content): the basis
-    // for content-addressed caching, and how Modal-style "every step cached automatically"
-    // is implemented
+    // for content-addressed caching, and how "every step cached automatically" is implemented
     CacheKey string
     Run  string
     Copy *CopyStep
@@ -218,14 +216,7 @@ scenario that requires us to compute a cacheKey ourselves.
 - **Cross-region build orchestration**: blob replication for built images takes the same path
   as imported images (D11)
 
-## 9. Comparison with the competition
+## 9. wizard's shape
 
-| Platform | Build definition | Execution | Output |
-|---|---|---|---|
-| e2b | Dockerfile | BuildKit → convert to a VM rootfs | template (5–15 minutes each) |
-| Daytona | Dockerfile / Declarative Builder | BuildKit | snapshot |
-| Modal | chained Python calls | in-house builder (requires Python inside the image) | content-addressed layers |
-| **wizard** | Dockerfile ✅ / declarative steps 📐 | BuildKit (platform side) ✅ | ⚠️ currently a node-local ext4; an overlaybd layer on S3 is the target |
-
-wizard's difference: the build forms unify into one plan, and the output is already in the
-block-device format the fc tier can use, with no further conversion needed.
+The build forms unify into one plan, and the output is already in the block-device format the
+fc tier can use, with no further conversion needed.

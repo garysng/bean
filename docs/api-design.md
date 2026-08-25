@@ -373,8 +373,7 @@ Event types: sandbox.lifecycle.{created,running,paused,resumed,stopped,failed,lo
              // stopped corresponds to the STOPPED state (covers explicit DELETE and
              // onIdle=delete); lost corresponds to losing the node lease
 Event body:  { "id", "type", "timestamp", "sandboxId", "data": {...}, "version": "v1" }
-             // Naming follows e2b (dotted sandbox.lifecycle.* hierarchy) for ecosystem
-             // compatibility
+             // Dotted sandbox.lifecycle.* hierarchy for ecosystem compatibility
 
 GET /sandboxes/{id}/events?pageToken=      // history (Postgres events table, paginated)
 GET /events?sandbox=<id>&label=k%3Dv       // live subscription (SSE: text/event-stream;
@@ -494,9 +493,7 @@ Key message field conventions:
 ### 5.1 Command dispatch model: direct push ✅
 
 The control plane calls noded's `SandboxService` over gRPC directly (noded is the gRPC
-server, reached over the intra-region private network, validated by node token) — the same
-approach the industry converged on in e2b/AgentENV/CubeSandbox, and the shortest scheduling
-path:
+server, reached over the intra-region private network, validated by node token) — the shortest scheduling path:
 
 ```
 scheduler decides (in-memory state + a Postgres transaction deducting the committed
@@ -553,8 +550,7 @@ implemented by noded and called directly by the control plane as a client).
   administrator can opt into global reclamation (off by default); the real long-term answer
   is the P4 snapshot archive: PAUSED past a threshold → state goes to S3, freeing RAM → the
   next access restores it automatically
-- Industry alignment: CubeSandbox v0.5 (on_timeout: pause/delete + transparent wake on the
-  data plane) and e2b auto-pause/auto-resume are the same shape; we express "never" as null,
+- on_timeout: pause/delete + transparent wake on the data plane; we express "never" as null,
   avoiding the -1/0 magic-number overload
 
 ### 5.3 Exec routing ✅
@@ -593,8 +589,8 @@ the user's server on 8000" are the same request with a different number in the H
 | Terminates at | the sandbox's IP:port vs noded relaying to the agent | the sandbox's IP:port, always |
 | Router must distinguish them | yes | **no** -- it forwards a port |
 
-The port order is `{port}-{sandbox}`, port first, matching e2b's `ParseHost`: a sandbox
-id is variable-length and may contain the separator, a port is neither.
+The port order is `{port}-{sandbox}`, port first: a sandbox id is variable-length and may
+contain the separator, a port is neither.
 
 What the original reasoning got right is recorded below and still holds -- that the
 motivation is interface narrowing rather than load.
@@ -606,12 +602,6 @@ reach noded directly" is not a routing change with a performance benefit -- it w
 hand every caller the ability to destroy any sandbox on the node. A proxy holding that
 token and forwarding **only** the data-plane methods is how the interface gets narrowed;
 the byte path is the lesser gain.
-
-e2b arrives at the same shape from the other direction: `packages/client-proxy` resolves
-a sandbox to its node and forwards, and it carries `trafficAccessToken` and
-`envdAccessToken` as *separate* credentials rather than one cluster secret
-(`internal/proxy/proxy.go`). Their orchestrator also listens on its own proxy port
-(5007) rather than exposing the control RPCs to clients.
 
 **Whether noded needs authentication at all** depends on where it listens, and the
 answer today is the same one dockerd gives: `cmd/noded/main.go` refuses to start on a
@@ -629,7 +619,7 @@ A standalone stateless service, co-deployable with the gateway or scaled horizon
 - Host rule: `{sandboxId}-{port}.{region}.sandbox.<domain>`, where sandboxId is the short ID (e.g. base32 of the value with the `sbx-` prefix stripped)
 - HTTP + WebSocket pass-through; non-HTTP protocols are not supported yet (a TCP over TLS SNI scheme is held in reserve)
 
-### 6.2 Routing and data plane (aligned with e2b: the reverse proxy connects straight to the sandbox IP) 📐
+### 6.2 Routing and data plane (the reverse proxy connects straight to the sandbox IP) 📐
 
 ```
 browser → {sbxId}-{port}.{region}.sandbox.<domain> (DNS lands directly on that region's proxy)
@@ -641,10 +631,9 @@ browser → {sbxId}-{port}.{region}.sandbox.<domain> (DNS lands directly on that
         → direct to sandbox IP:port (fc tier tap IP / container tier veth IP, routed inside the node)
 ```
 
-- **Two HTTP reverse-proxy hops, with the last one connecting straight to the sandbox IP** —
-  the same as e2b/CubeSandbox; it does not go through an agent tunnel (saving one userspace
-  copy and the vsock serialisation, which is what matters for performance on a high-traffic
-  port)
+- **Two HTTP reverse-proxy hops, with the last one connecting straight to the sandbox IP**;
+  it does not go through an agent tunnel (saving one userspace copy and the vsock
+  serialisation, which is what matters for performance on a high-traffic port)
 - The agent's `ForwardPort` is retained as a fallback path (for future scenarios such as
   localhost-only services)
 - WebSocket upgrades pass through naturally; connection-level timeout (>620s, to duck under

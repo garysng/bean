@@ -6,7 +6,7 @@
 
 ## 1. 为什么需要
 
-wizard 的立足点是「任意 OCI 镜像零转换直启」，所以不需要 e2b 式的 per-image
+wizard 的立足点是「任意 OCI 镜像零转换直启」，所以不需要 per-image
 template build。但完全没有构建能力留下两个真实缺口：
 
 - **加依赖无处可去**：用户想在 `python:3.12` 上装 `requirements.txt`，只能自己
@@ -29,8 +29,8 @@ template build。但完全没有构建能力留下两个真实缺口：
 |---|---|---|
 | **BuildKit**（Dockerfile / steps） | 标准 OCI layer | **仍需一次转换** |
 
-即便 BuildKit 路径要转换，相对 e2b 仍是改进：转换发生在 **build 时**（一次、
-可缓存、不在用户等待路径上），而 e2b 是 build 完再花 5–15 分钟转 VM rootfs。
+即便 BuildKit 路径要转换，那次转换发生在 **build 时**（一次、
+可缓存、不在用户等待路径上）。
 
 ## 3. 三种构建形式
 
@@ -39,8 +39,7 @@ template build。但完全没有构建能力留下两个真实缺口：
 ### 3.1 Dockerfile（完整语义）✅
 
 用 **BuildKit** 而非自研 parser。COPY/ADD 语义、multi-stage、ARG 插值、
-构建缓存、`.dockerignore`、heredoc 这些加起来是数月工作量且注定不完整；
-e2b 与 Daytona 同样用 BuildKit。
+构建缓存、`.dockerignore`、heredoc 这些加起来是数月工作量且注定不完整。
 
 ```
 wizard build -f Dockerfile -t myteam/eval-base:v1 .
@@ -49,7 +48,7 @@ wizard build -f Dockerfile -t myteam/eval-base:v1 .
 CLI 打包 build context（受 `.dockerignore` 约束）上传，**平台侧执行构建**——
 用户无需本地装 Docker，且构建缓存在平台侧共享。
 
-### 3.2 声明式 steps（Modal 风格）📐
+### 3.2 声明式 steps 📐
 
 eval 编排方本来就在写 Python，链式声明比维护 Dockerfile 更顺手，且每步天然
 是一个缓存键：
@@ -107,7 +106,7 @@ type BuildPlan struct {
 type BuildStep struct {
     Kind string  // run | copy | env | workdir | user
     // CacheKey 是 (前序步骤链 + 本步内容) 的哈希：内容寻址缓存的依据，
-    // 也是 Modal 式「每步自动缓存」的实现方式
+    // 也是「每步自动缓存」的实现方式
     CacheKey string
     Run  string
     Copy *CopyStep
@@ -194,13 +193,6 @@ buildctl --addr <buildkitd> build
 - **build 期间的任意网络访问策略**：沿用 sandbox 的 `egress-only`，不单独开口子
 - **跨 region 构建编排**：built 镜像的 blob 复制走与 imported 镜像相同的路径（D11）
 
-## 9. 与竞品对比
+## 9. wizard 的形态
 
-| 平台 | build 定义 | 执行 | 产物 |
-|---|---|---|---|
-| e2b | Dockerfile | BuildKit → 转 VM rootfs | template（5–15 分钟/个） |
-| Daytona | Dockerfile / Declarative Builder | BuildKit | snapshot |
-| Modal | Python 链式调用 | 自研构建器（要求镜像内有 Python） | 内容寻址层 |
-| **wizard** | Dockerfile ✅ / 声明式 steps 📐 | BuildKit（平台侧）✅ | ⚠️ 当前落节点本地 ext4;overlaybd layer on S3 是目标 |
-
-wizard 的差异：构建形式统一到一个 plan;产物直接是 fc 档可用的块设备格式，不需要再转一次。
+构建形式统一到一个 plan;产物直接是 fc 档可用的块设备格式，不需要再转一次。

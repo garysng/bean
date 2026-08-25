@@ -85,10 +85,9 @@ CPU、同时保持随时可用。它不释放内存 —— 调度器仍按整份
 拿 CPU 换延迟,别无其他。
 
 **混淆两者会让所有性能数字失去意义。**
-[competitive-analysis.md](competitive-analysis.md) 里各家「~100 ms 启动」指的都是
-**restore**。它既不是 create(真开机:952 ms、5 CPU 秒,见 [status.md](status.md)),
-也不是 resume(那只是解冻 vCPU,因此比两者都快,但做的事也少得多)。拿 resume 的延迟
-去对标别人的 restore 延迟,等于把「解冻」和「造一台机器」放在一起比。
+create 是真开机(952 ms、5 CPU 秒,见 [status.md](status.md));restore 是节点本地缓存
+命中(392 ms);resume 只是解冻 vCPU,因此比两者都快,但做的事也少得多。拿 resume 的延迟
+去对标 restore 延迟,等于把「解冻」和「造一台机器」放在一起比。
 
 ## 1. 能力分级
 
@@ -178,7 +177,7 @@ POST /sandboxes/{id}/snapshot   {includeMemory?, base?, keepRunning?}
 内存快照带回的 page cache,`drop_caches` 之后同一个文件读出全零,`ls` 仍显示
 正确 size、无 EIO、无 dmesg。详见 `docs/decisions.md` §3.0。
 
-**合并在 restore 时物化,不在缺页路径分层**:E2B 走后者(fault 时 chase K 个
+**合并在 restore 时物化,不在缺页路径分层**:把查找分层放到缺页路径上(fault 时 chase K 个
 BuildId),代价是 fragmentation 随深度增长;我们物化后交给现有 UFFD handler,
 **缺页路径零改动** —— 那是全系统最热、出错最隐蔽的代码。合并结果按 leaf id 进
 snapCache,所以 fan-out 每节点只付一次。链深超 8 自动转 full。
@@ -195,7 +194,7 @@ snapCache,所以 fan-out 每节点只付一次。链深超 8 自动转 full。
 而不是 `File`。`File` 会在 guest 跑起来之前把整个内存镜像读进来,成本跟 guest
 大小成正比而与「实际访问了多少」无关 —— 512 MiB guest 上是 1303ms。
 改成 userfaultfd 后 guest 内存匿名映射,缺页时由 handler 供页,
-`/snapshot/load` 降到 **7ms**。e2b / agentenv / tensorlake 都是这么做的。
+`/snapshot/load` 降到 **7ms**。
 
 **解 bundle 每快照只做一次(已实装)**:同一快照的每次 restore 解出的字节完全
 相同,所以按 snapshot id 缓存 vmstate + memory。安全性来自 Firecracker 对
@@ -322,7 +321,7 @@ POST /sandboxes { "snapshot": "snap_...", ... }
 | 一致性 | 进程级，外部状态尽力而为 | 整机级（内存+设备+vCPU） |
 | 速度 | 分钟级（大内存） | pause 百 ms;diff snapshot 增量 |
 | restore | 重建进程树 | load snapshot + resume vCPU，百 ms 级 |
-| fork 克隆 | 不支持 | CoW memory → 一母多子（AgentENV 单节点 16 子实证） |
+| fork 克隆 | 不支持 | CoW memory → 一母多子 |
 
 接口统一（用户无感）：
 

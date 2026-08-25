@@ -91,12 +91,11 @@ stops burning CPU while staying instantly available. It frees no memory — the 
 still accounts for the full allocation (§2) — so it trades CPU for latency, and nothing
 else.
 
-**Conflating them makes every performance number incoherent.** The competitive
-"~100 ms start" claims in [competitive-analysis.md](competitive-analysis.md) refer to
-**restore**. They are not create (a real boot: 952 ms and 5 CPU-seconds,
-[status.md](status.md)) and they are not resume (which is a vCPU unfreeze and therefore
-faster than any of them, while doing far less). Quoting a resume latency against a
-competitor's restore latency compares an unfreeze to a machine build.
+**Conflating them makes every performance number incoherent.** Create is a real boot
+(952 ms and 5 CPU-seconds, [status.md](status.md)); restore is a node-local cache hit
+(392 ms); resume is a vCPU unfreeze and therefore faster than either, while doing far
+less. Quoting a resume latency against a restore latency compares an unfreeze to a
+machine build.
 
 ## 1. Capability Tiers
 
@@ -200,10 +199,10 @@ chunks, and the device keeps serving the base image. And on a full snapshot this
 and after `drop_caches` the same file reads back as all zeroes, while `ls` still shows the
 correct size, with no EIO and nothing in dmesg. See `docs/decisions.md` §3.0.
 
-**The merge is materialised at restore time, not layered on the page-fault path**: E2B takes
-the latter (chasing K BuildIds on a fault), at the cost of fragmentation growing with depth;
-we materialise and then hand it to the existing UFFD handler, so the **page-fault path is
-unchanged** — that is the hottest code in the system and the place where mistakes hide best.
+**The merge is materialised at restore time, not layered on the page-fault path**: layering
+the lookup on the fault path (chasing K BuildIds on a fault) makes fragmentation grow with
+depth; we materialise and then hand it to the existing UFFD handler, so the **page-fault path
+is unchanged** — that is the hottest code in the system and the place where mistakes hide best.
 The merge result goes into snapCache keyed by leaf id, so a fan-out pays for it once per
 node. Past a chain depth of 8 it turns into a full snapshot automatically.
 The option comparison is in `docs/decisions.md` §3.0.1.
@@ -223,7 +222,6 @@ backend rather than `File`. `File` reads the entire memory image in before the g
 running, at a cost proportional to guest size and independent of "how much was actually
 accessed" — 1303ms on a 512 MiB guest. Switching to userfaultfd makes the guest memory an
 anonymous mapping served by the handler on fault, and `/snapshot/load` drops to **7ms**.
-e2b / agentenv / tensorlake all do it this way.
 
 **Unpacking a bundle happens once per snapshot (shipped)**: every restore of the same
 snapshot unpacks byte-identical content, so vmstate + memory are cached by snapshot id.
@@ -368,7 +366,7 @@ interface — space that counts against no allocation should at least be visible
 | Consistency | Process-level, external state best-effort | Whole-machine (memory + devices + vCPU) |
 | Speed | Minutes (large memory) | pause in hundreds of ms; diff snapshot incremental |
 | restore | Rebuild the process tree | load snapshot + resume vCPUs, hundreds of ms |
-| fork clone | Not supported | CoW memory → one parent many children (AgentENV demonstrated 16 children on a single node) |
+| fork clone | Not supported | CoW memory → one parent many children |
 
 Unified interface (invisible to the user):
 

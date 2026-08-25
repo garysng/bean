@@ -10,29 +10,6 @@
 
 所以杠杆不在"boot 更快",而在**每个镜像 boot 一次**而不是每个沙箱 boot 一次。
 
-## 1. 竞品怎么做 📐
-
-读源码而不是读宣传 —— `e2b-dev/infra` @ `17ffd81`:
-
-`Factory.CreateSandbox`(真 boot,设置 boot source)和 `Factory.ResumeSandbox`
-(`PUT /snapshot/load`)是两条独立路径,而**`CreateSandbox` 的每一个调用方都在
-`packages/orchestrator/pkg/template/build/` 下面**。面向用户的 gRPC handler 调的是
-`ResumeSandbox`。真 boot 只发生在构建模板的时候。
-
-他们的 `ResumeSandbox` 就是 wizard 说的 **restore**:做 `PUT /snapshot/load` 并产出一个新
-沙箱。它不是 wizard 语义下的 resume(解冻一个活进程的 vCPU),读他们代码时要留意这个借用的
-命名。本文全程使用 wizard 的词汇 —— 见 [snapshot-resume.md](snapshot-resume.md) §0。
-
-三个值得借鉴的细节:
-
-- 他们 **boot 两次**。provision 阶段用 BusyBox init 只执行 provision 脚本,就绪判定是从
-  guest 串口抓 sentinel 字符串。后续阶段用 systemd,就绪判定是向沙箱内 agent 发
-  HTTP `POST /init`。
-- 暂停点在**用户的 start 命令跑完之后**,而不只是 boot 完之后。连用户进程的内存状态都被
-  捕获了。
-- 暂停前:冻结 guest 文件系统(`FIFREEZE`)、排空 balloon 的 free-page hint,然后暂停,
-  然后快照。冻结这一步要紧,因为写入中途被捕获的文件系统恢复出来是脏的。
-
 ## 2. 形状 📐
 
 ```
@@ -97,10 +74,7 @@ Guest 内存记录了它启动时那颗 CPU 提供的东西,而 vendor 与 famil
 
 异构集群需要每个 CPU 代次一份 warm snapshot。这不是本设计的缺陷 —— 它就是那个已经让调度器
 用 `409 INCOMPATIBLE_CPU` 拒绝不兼容 restore 的同一个约束,而表达它需要的字段已经在
-`Snapshot` 记录上了。
-
-e2b 对同一问题的答案是四行硬编码兼容表加一个调度器过滤,这实际上悄悄断掉了 AMD 与 Intel
-之间的迁移。我们已经有 vendor 和 family 过滤,所以同样的做法不需要新机制。
+`Snapshot` 记录上了。我们已经有 vendor 和 family 过滤,所以这个映射不需要新机制就能表达。
 
 **未命中必须是平常事,不是异常。** 一个 CPU 上没有 warm snapshot 的节点,就照今天那样 boot。
 如果未命中是错误,那么往集群里加一台新代次的机器就会让它上面的 create 全部失败。
@@ -125,9 +99,9 @@ e2b 对同一问题的答案是四行硬编码兼容表加一个调度器过滤,
 | agent 可达之后 | guest 已启动、agent 已起、其他什么都没跑 | boot | 每镜像一次 boot |
 | 用户 start 命令之后 | boot 加上用户自己的预热 | boot 与应用启动 | 需要每镜像一份构建规格 |
 
-第一个就是对那 5 CPU-秒的全部胜利,且不需要任何新的用户可见概念。第二个是 e2b 的做法,
-对 `import torch` 这类场景严格更优 —— Modal 实测 `import torch` 通过在其后快照,p50 从
-约 5s 降到 1.05s —— 但它需要一份模板定义,那是个更大的 feature。
+第一个就是对那 5 CPU-秒的全部胜利,且不需要任何新的用户可见概念。第二个对 `import torch`
+这类场景严格更优 —— 在 import 之后再快照,就把这份成本折进了快照 —— 但它需要一份模板定义,
+那是个更大的 feature。
 
 **计划是做第一个,把第二个留给模板 feature**,因为第一个自己就拿下了吞吐上限,而第二个是
 在它之上的应用层优化。

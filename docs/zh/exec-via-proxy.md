@@ -91,8 +91,7 @@ hash),且 fail-closed —— 凭据缺失即拒。它的全部意义(据代码�
 
 定案:**client 全程不碰 per-sandbox token。** 由 **noded 在 forwarder 处注入**,因为 noded
 是唯一本来就握着明文的进程。client 只对平台外层的 apikey 层认证;proxy 往里的一切都归节点信任
-域管理。这是 Daytona 范式 —— proxy 层拥有 agent 认证、调用方只持一个平台凭据 —— 而不是 E2B
-范式的"client 自己持 per-sandbox token 直连"。
+域管理。proxy 层拥有 agent 认证、调用方只持一个平台凭据,而不是"client 自己持 per-sandbox token 直连"。
 
 三部分。注入认证是唯一有真实安全分量的;另两部分是机械的。
 
@@ -129,7 +128,7 @@ client ──apikey──► wizard-proxy ──node-token──► noded PortFo
 create 返回沙箱的 **domain**(或 client 该用的 proxy base)。CLI/SDK 在调用时据此拼出请求
 URL —— 对该 domain 拼 `{port}-{sandbox}`。proxy 只转发,所有端口映射默认通(按端口访问控制是
 另一个尚未构建的功能 —— [#50](https://github.com/garysng/wizard/issues/50)),所以没有注册调用、
-没有宿主端口池。这是 E2B 的 subdomain 范式,但 domain 由服务端返回,而非 client 端按约定拼。
+没有宿主端口池。这是 subdomain 范式,但 domain 由服务端返回,而非 client 端按约定拼。
 
 - **`create` 响应**新增该沙箱的 domain/proxy base。
 - **CLI/SDK** 对该 domain 拼 `10001-{sandbox}`(agent)或 `{port}-{sandbox}`(用户端口)再发起

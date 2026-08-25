@@ -272,7 +272,7 @@ POST /sandboxes { ..., "volumes": [
 | `shared-fs` | JuiceFS（on S3+Redis，与 S3 底座一致）或 CephFS，平台配置，用户不感知 | POSIX 读写共享 | 持久工作区、跨 sandbox 共享数据 |
 | `dataset`（预留） | overlaybd 只读块 | 只读、版本化发布 | 数据集/权重海量只读消费 |
 
-**shared-fs 数据面：宿主 NFS 导出（e2b 同款路线,经其源码验证）**
+**shared-fs 数据面：宿主 NFS 导出**
 
 ```
 后端（宿主挂载,noded volume 模块管理）：JuiceFS(on S3+Redis) / CephFS / 本地盘
@@ -329,8 +329,7 @@ fc 档两个平台工件,均由 CI 构建、S3 分发、noded 启动时按版本
 image 模块直接管理 overlaybd（经 TCMU，不经 containerd snapshotter）：
 按镜像元数据（控制面下发的层清单 + S3 blob 引用）生成 overlaybd config →
 TCMU 块设备就绪 → 交给 runtime。它**已接进 `image.Provider`(`OverlaybdProvider`)**,
-用 `--fc-overlaybd` 开启、真机验证过;dm-snapshot 仍是默认后端。实证细节参考本地
-AgentENV 源码（`src/overlaybd/`、crates 下 uvm-ublk,以及 registryfs_v2 远端直读模式）。
+用 `--fc-overlaybd` 开启、真机验证过;dm-snapshot 仍是默认后端。
 
 | 格式 | 消费方式 | 场景 |
 |---|---|---|

@@ -331,7 +331,7 @@ POST   /sandboxes    { "snapshot": "snap_..." }   // 从快照创建:一个**新
           // stopped 对应状态机 STOPPED（含显式 DELETE 与 onIdle=delete）,
           // lost 对应节点租约丢失
 事件体：  { "id", "type", "timestamp", "sandboxId", "data": {...}, "version": "v1" }
-          // 命名对齐 e2b（sandbox.lifecycle.* 点分层级）,便于生态兼容
+          // sandbox.lifecycle.* 点分层级,便于生态兼容
 
 GET /sandboxes/{id}/events?pageToken=      // 历史（Postgres events 表,分页）
 GET /events?sandbox=<id>&label=k%3Dv       // 实时订阅（SSE:text/event-stream;
@@ -441,7 +441,7 @@ service AgentService {
 
 ### 5.1 指令下发模型：push 直连 ✅
 
-控制面直接 gRPC 调用 noded 的 `SandboxService`（noded 是 gRPC server,同 region 内网直连,node token 校验）——与 e2b/AgentENV/CubeSandbox 的业界一致做法相同，调度路径最短：
+控制面直接 gRPC 调用 noded 的 `SandboxService`（noded 是 gRPC server,同 region 内网直连,node token 校验）——调度路径最短：
 
 ```
 scheduler 决策（内存态 + Postgres 事务扣承诺量、写指令记录）
@@ -486,8 +486,7 @@ control plane 作为 client 直连调用）。
   仍占宿主 RAM 与调度承诺量,容量代价由容量规划承担。管理员可选开启全局回收
   （默认关）;长期正解是 P4 的 snapshot 归档:PAUSED 超阈值 → 状态落 S3 释放
   RAM → 再访问自动 restore
-- 业界对齐:CubeSandbox v0.5(on_timeout: pause/delete + 数据面透明唤醒)、
-  e2b auto-pause/auto-resume 同构;我们以 null 表达「永不」,避开 -1/0 魔数重载
+- on_timeout: pause/delete + 数据面透明唤醒;我们以 null 表达「永不」,避开 -1/0 魔数重载
 
 ### 5.3 Exec 路由 ✅
 
@@ -522,8 +521,7 @@ noded → agent：vsock（fc 主路径;容器档 unix socket,P5）
 | 终点 | sandbox 的 IP:port vs noded 转给 agent | 始终是 sandbox 的 IP:port |
 | 路由器需要区分吗 | 需要 | **不需要** —— 它转发的是一个端口 |
 
-顺序是 `{port}-{sandbox}`,端口在前,与 e2b 的 `ParseHost` 一致:沙箱 id 长度可变且
-可能含分隔符,端口两者都不是。
+顺序是 `{port}-{sandbox}`,端口在前:沙箱 id 长度可变且可能含分隔符,端口两者都不是。
 
 下面保留的是当初推理中站得住的部分 —— 动机是收窄接口,而不是负载。
 
@@ -532,11 +530,6 @@ noded → agent：vsock（fc 主路径;容器档 unix socket,P5）
 共用一个 `--node-token`。所以"让客户端直连 noded"不是一个带性能收益的路由改动 ——
 它会把"销毁节点上任何沙箱"的能力交给每一个调用方。一个持有该 token、且**只**转发数据面方法的
 proxy,才是收窄这个接口的办法;字节路径是次要收益。
-
-e2b 从另一个方向到了同一个形状:`packages/client-proxy` 把 sandbox 解析到它所在的 node 再转发,
-而且它携带 `trafficAccessToken` 与 `envdAccessToken` 两个**分开的**凭据,而不是一个集群密钥
-(`internal/proxy/proxy.go`)。他们的 orchestrator 也监听自己的 proxy 端口(5007),
-而不是把控制面 RPC 暴露给客户端。
 
 **noded 到底需不需要认证**,取决于它监听在哪 —— 而今天的答案与 dockerd 相同:
 `cmd/noded/main.go` 在非 loopback 地址上没有 token 就拒绝启动,在 loopback 上则什么都不要求。
@@ -552,7 +545,7 @@ e2b 从另一个方向到了同一个形状:`packages/client-proxy` 把 sandbox 
 - Host 规则：`{sandboxId}-{port}.{region}.sandbox.<domain>`，sandboxId 用短 ID（如 `sbx-` 去前缀后的 base32）
 - HTTP + WebSocket 透传；非 HTTP 协议暂不支持（预留 TCP over TLS SNI 方案）
 
-### 6.2 路由与数据面（对齐 e2b：反代直连 sandbox IP）📐
+### 6.2 路由与数据面（反代直连 sandbox IP）📐
 
 ```
 浏览器 → {sbxId}-{port}.{region}.sandbox.<domain>（DNS 直达该 region 的 proxy）
@@ -564,7 +557,7 @@ e2b 从另一个方向到了同一个形状:`packages/client-proxy` 把 sandbox 
        → 直连 sandbox IP:port（fc 档 tap IP / 容器档 veth IP,节点内路由）
 ```
 
-- **两跳 HTTP 反代、末端直连 sandbox IP**——e2b/CubeSandbox 同款;不经 agent
+- **两跳 HTTP 反代、末端直连 sandbox IP**;不经 agent
   隧道（省一层用户态拷贝与 vsock 序列化,高流量端口性能关键）
 - agent 的 `ForwardPort` 保留为兜底路径（未来 localhost-only 服务等场景）
 - WebSocket 天然升级透传;连接级超时（>620s,躲上游 LB）、per-sandbox

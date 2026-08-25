@@ -210,8 +210,7 @@ wizard version
 `port expose`、`config`、批量 `kill --label`、交互 PTY（`-i/-t`）。
 
 **为什么没有 `wizard node ls`**：节点是平台的调度对象,不是用户的概念。
-e2b / Modal / Daytona 都不向用户暴露「我的 sandbox 落在哪台机器上」——
-一旦暴露,用户就会依赖它,调度器也就不能再自由迁移了。
+「我的 sandbox 落在哪台机器上」一旦暴露,用户就会依赖它,调度器也就不能再自由迁移了。
 `/v1/nodes` 与 drain 保留为**运维 API,不进 CLI**。
 同理 `prewarm` 的参数是 `--replicas`(副本数)而不是 `--nodes`(机器数)。
 
@@ -238,4 +237,4 @@ e2b / Modal / Daytona 都不向用户暴露「我的 sandbox 落在哪台机器�
 
 - OpenAPI spec 发布 + 托管 API reference
 - Quickstart 三件套：CLI 五分钟、Python eval 批量示例（SWE-bench 迷你复现）、TS Web demo（xterm.js 终端）
-- SDK 示例与 e2b 迁移对照表（`e2b.Sandbox.create` → `wizard` 等价写法），降低已有用户切换成本
+- SDK 示例

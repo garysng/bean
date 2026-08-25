@@ -214,7 +214,7 @@ was identified as noise. Misleading evidence is worse than none.
 The resolution is a loglevel rather than a switch: the console is attached, errors get through,
 initialisation chatter does not, and the measured cost is inside the noise. `--debug-console`
 remains for a guest that fails before it can log an error. The 8250 driver is compiled in either
-way, as in e2b's `fc-kernels` config (`CONFIG_SERIAL_8250=y`).
+way (`CONFIG_SERIAL_8250=y`).
 
 ## 7. Why the agent's address can be a constant ✅
 
@@ -314,9 +314,9 @@ VMM still sees the host's mount namespace, so it can read whatever that uid can 
 The usual name for the missing piece is jailer, and it is worth saying why that is not
 simply "add jailer". jailer's `pivot_root` requires **mknod'ing** device nodes into a
 per-sandbox jail, because device nodes cannot be symlinked into a chroot -- and wizard's
-rootfs is a device-mapper node. e2b gets the namespace half without any of that, by
+rootfs is a device-mapper node. The namespace half can be had without any of that, by
 `unshare`ing a mount namespace and using tmpfs plus symlinks, which work where a chroot
-would not. wizard already has the namespace isolation e2b gets that way, applied as clone
+would not. wizard already has that namespace isolation, applied as clone
 flags instead of a wrapper process (see §12); the private mount namespace is
 `--fc-mount-namespace`, and it is **now on by default** — holding it back assumed wizard's
 device-mapper rootfs would stop being openable inside one, and a booted guest showed
@@ -327,8 +327,7 @@ otherwise.
 The VMM is started with clone flags rather than under `unshare`, and the difference is
 about **which pid noded records**, not about which namespaces exist.
 
-e2b's equivalent is a three-deep command
-(`packages/orchestrator/internal/sandbox/fc/process.go`):
+A wrapper-based equivalent is a three-deep command:
 
 ```
 unshare -pfm --kill-child -- bash -c "mount --make-rprivate / && ... && ip netns exec <ns> firecracker"
@@ -342,7 +341,7 @@ has already handed to something else.
 
 wizard asks the kernel for the same namespaces during the fork instead:
 
-| | e2b | wizard |
+| | wrapper process | wizard |
 |---|---|---|
 | pid namespace | `unshare -p` | `Cloneflags: CLONE_NEWPID` |
 | mount namespace | `unshare -m` + `mount --make-rprivate /` | `Cloneflags` + `Unshareflags: CLONE_NEWNS` |

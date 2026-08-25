@@ -52,7 +52,7 @@ tasks, for example):
 
 Problems with existing options:
 
-- **e2b** (Firecracker microVM + template): the Docker image must first be converted into a VM rootfs (minutes), which is unusable for the "large number of distinct evaluation images" case
+- **Template-based microVM (Firecracker + template)**: the Docker image must first be converted into a VM rootfs (minutes), which is unusable for the "large number of distinct evaluation images" case
 - **K8s + Pod**: the scheduling and network stack are too heavy, the cold-start path is long, and we need full control over the layers underneath
 
 ### 1.2 Goals
@@ -135,8 +135,8 @@ reach the proxy (api-design.md §3.4).
 
 ### D1. Zero image conversion, dual container/microVM form ⚠️
 
-Any OCI image serves directly as the sandbox environment, eliminating e2b-style
-template conversion. The image is assembled by overlaybd into a block device
+Any OCI image serves directly as the sandbox environment, with no
+template conversion step. The image is assembled by overlaybd into a block device
 (see D4), which can back an overlayfs rootfs for the container tier and can
 equally be attached to a microVM over virtio-blk (see D9) — both forms share
 one image path, and the user never notices the difference.
@@ -150,7 +150,7 @@ one image path, and the user never notices the difference.
 > (PR #49) — but over TCMU, not the ublk direct drive this section describes.
 > See [status.md](status.md).
 
-The fc main path **does not bring in containerd** (same as AgentENV):
+The fc main path **does not bring in containerd**:
 noded drives overlaybd directly (over TCMU) to assemble the block device
 (S3 backing + local cache) → virtio-blk attached to the microVM. All three of
 containerd's responsibilities have a more direct replacement in this design:
@@ -158,7 +158,7 @@ containerd's responsibilities have a more direct replacement in this design:
 | containerd responsibility | This design |
 |---|---|
 | Image pull / content store | Blobs live in S3 (image-service converts offline), metadata pushed down by the control plane; the registry is not on the hot path |
-| snapshotter | overlaybd driven directly over TCMU (demonstrated by AgentENV's uvm-ublk) |
+| snapshotter | overlaybd driven directly over TCMU |
 | Task lifecycle | fc: noded owns the FC process; container tier: noded drives runsc/runc directly (no containerd -- see below) |
 
 > **Revised.** The container tier does **not** use containerd. This paragraph was
@@ -324,7 +324,6 @@ inside the guest); the rootfs is attached directly:
 ```
 overlaybd assembles the image block device: base layer (lazy-pull from S3)
   + overlaybd writable layer, composed on the host into a [single block device]
-  (the industry-consistent approach: e2b and AgentENV both assemble host-side)
   → attached to the microVM over virtio-blk (the guest sees one disk)
     + the agent disk (read-only, see D5)
   → wizardd runs as init inside the guest: mounts /proc /sys /dev and the rest
@@ -341,7 +340,6 @@ complexity inside the guest.
 - Compatibility: ENV/ENTRYPOINT/CMD/WORKDIR are recorded beside the image when it is converted and merged with the create request when the process starts (rules in [image-pipeline.md](image-pipeline.md) §5); USER is recorded but not yet enforced. The guest is a complete, real Linux kernel, so compatibility beats a gVisor emulation layer. The one difference: the kernel is packaged and provided by the platform (not the host kernel), which a purely user-space eval workload cannot tell apart. See the fcRuntime section of noded-design.md
 - Agent communication goes over vsock (a transport abstraction; same protocol as the container tier's unix socket)
 - Networking: a tap device joins the node's wizard0 bridge, with the same nftables rules as the container tier
-- This route is validated in production by AgentENV (the Kimi K3 training infrastructure); the implementation takes its overlaybd+ublk integration and snapshot design as reference
 
 ### D4. S3 as the unified storage backend ⚠️
 
@@ -354,8 +352,8 @@ complexity inside the guest.
 | Snapshots (P3–P4) | FC memory snapshot / rootfs diff land in S3, enabling cross-node **create-from-snapshot** (a new sandbox on any node, via the internal restore/Fork path; resume is same-process and same-node, see snapshot-resume.md §0) |
 | Volumes | shared-fs volume backend (JuiceFS on S3) mounted on the host and exported over nfsd (see D10); dataset volumes reserved |
 
-overlaybd (block-level, DADI/Alibaba, already validated by AgentENV in the FC
-case) was chosen over Nydus (file-level) for one decisive reason: **the block
+overlaybd (block-level, DADI/Alibaba) was chosen over Nydus (file-level) for one
+decisive reason: **the block
 device path serves the container tier (overlaybd-snapshotter → overlayfs) and
 the microVM tier (virtio-blk straight into the guest) at once, so a single image
 path covers every runtime tier**; Nydus's filesystem semantics cannot get into a
@@ -483,7 +481,7 @@ once). Two types:
 
 | Type | Backend | Data plane | Use case |
 |---|---|---|---|
-| `shared-fs` (first release) | Host-mounted JuiceFS (on S3) / CephFS / local disk | **Exported by the host kernel's nfsd** (same route as e2b): the guest mounts a host-internal address with the kernel NFS client, and the traffic never leaves the node | Persistent workspace, shared read/write across sandboxes |
+| `shared-fs` (first release) | Host-mounted JuiceFS (on S3) / CephFS / local disk | **Exported by the host kernel's nfsd**: the guest mounts a host-internal address with the kernel NFS client, and the traffic never leaves the node | Persistent workspace, shared read/write across sandboxes |
 | `dataset` (reserved, not scheduled) | overlaybd read-only blocks (reusing the image pipeline) | Container tier: bind mount; fc tier: an extra virtio-blk | Massive read-only consumption of datasets/weights |
 
 Why shared-fs goes through host NFS instead of running a distributed-FS client
@@ -642,8 +640,8 @@ Note: `internal/store/` does not exist; the store is at `internal/control/store/
 ## 8. Implementation Roadmap
 
 See [roadmap.md](roadmap.md) (the single place this is maintained). In outline:
-**P0 is direct fc boot** (overlaybd driven directly + FC + agent, referencing the
-local AgentENV source) → P1 multi-node usable → P2 productionisation
+**P0 is direct fc boot** (overlaybd driven directly + FC + agent) → P1 multi-node
+usable → P2 productionisation
 (lazy-pull/prewarm/scheduling affinity) → P3 interactive/proxy/pause/shared-fs
 volumes → P4 the full snapshot form → P5+ reserve (the container-tier GPU path
 as needed).

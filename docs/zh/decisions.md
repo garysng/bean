@@ -1,6 +1,6 @@
-# 技术选型与方案对比
+# 技术选型与理据
 
-> 每条决策记录:实测数据、竞品做法(e2b / tensorlake / agentenv)、以及为什么选这个。
+> 每条决策记录:实测数据、以及为什么选这个。
 > 没有实测数据支撑的条目标注「未验证」,不当成结论。
 
 ## 1. 启动优化
@@ -16,10 +16,7 @@ quiet             700 /  700 /  711 ms
 
 摘掉串口省 493ms(41%)。8250 UART 写入是同步的,内核每打一行日志都要等硬件。
 
-**竞品**:e2b 的 `fc-kernels` config 里 `CONFIG_SERIAL_8250=y` 是**开着的** ——
-即编译进内核但 boot args 不挂 `console=`。需要调试时才挂,同一个内核既能快启也能调试。
-
-**选择**:学 e2b。内核保留驱动,`--debug-console` 控制是否挂载。
+**选择**:`CONFIG_SERIAL_8250=y` 编译进内核,但 boot args 不挂 `console=`。内核保留驱动,`--debug-console` 控制是否挂载,同一个内核既能快启也能调试。
 理由:失败的 boot 没有别的证据来源,这个能力不能丢,但不该全量买单。
 
 ### 1.2 gRPC 重连退避
@@ -37,17 +34,6 @@ gRPC 默认 `BaseDelay` 是 1s,失败后连接就在退避里躺满一秒,
 
 ### 1.3 guest 内核:用 CI prebuilt,不 fork,不自建编译流程
 
-**调研**:
-| repo | 内容 | 是否 fork |
-|---|---|---|
-| `e2b-dev/firecracker` | VMM 源码 | **是**(加了 gdb feature 等) |
-| `e2b-dev/fc-versions` | 编 VMM 的 pipeline | 否 |
-| `e2b-dev/fc-kernels` | 内核 config + patch + build.sh | **否** |
-
-`fc-kernels` 运行时 `git clone amazonlinux/linux`(Firecracker 官方 `rebuild.sh` 的同一个源),
-repo 里只放 config(3094 行)+ 一个 virtio_balloon patch。
-**e2b 的内核维护面 = 一个 config 文件,没有 rebase 负担。**
-
 **选择**:用 `firecracker-ci/v1.11/x86_64/vmlinux-6.1.102`,`.config` 一起入库
 (CI 把 config 单独发布,所以「用 prebuilt」和「拿到自己的 config」不是二选一)。
 `hack/build-assets.sh kernel` 负责下载并校验是 ELF —— 那个 bucket 见过截断,
@@ -58,7 +44,7 @@ repo 里只放 config(3094 行)+ 一个 virtio_balloon patch。
 
 **实测**(quiet,VMM 启动到 agent 可连,各三次):
 ```
-vmlinux-6.1.175   690 / 689 / 715 ms   (来源 agentenv R2 站,config 未知)
+vmlinux-6.1.175   690 / 689 / 715 ms   (prebuilt,config 未知)
 vmlinux-6.1.102   603 / 613 / 601 ms   (Firecracker CI,config 已知)
 ```
 快 ~90ms(13%)。全链路 create 从 1040ms → 952ms,snapshot/restore 正常。
@@ -90,19 +76,13 @@ restore 总计      1400 ms
 实测 guest 内写 64MB 随机数据后,宿主上的 memory 文件 md5 不变。
 所以多个 restore **可以共享同一份解开的 memory 文件**。
 
-**竞品做法**(三家一致):
-- **e2b**:`packages/orchestrator/pkg/sandbox/uffd/` —— 完整的 UFFD handler,
-  含 `memory/`、`prefetch/`、`userfaultfd/`(cgo)。
-- **agentenv**:`storage/uffd-core/`(Rust)—— 还把 UFFD 后端接到了 overlaybd,
-  缺页直接从镜像读。
-- **tensorlake**:公开博客讲 sub-second cold start,并把磁盘快照做成
-  O(changed bytes)(单文件改动 167ms / 105MB)。
+**再进一步——我们还没做到的**——是把 UFFD 后端接到 overlaybd,缺页直接从镜像读。
 
 **选择**:UFFD。Firecracker 的 `snapshot/load` 支持 `backend_type: Uffd` + UDS 路径,
 VM 不读 memory 文件,缺页时由 handler 进程按需提供。**restore 时零落盘。**
 
 被否掉的方案:「按 snapshot ID 缓存解开的 memory 文件」。它能省掉重复解压,
-但第一次仍要落盘 512MB,而且占磁盘;UFFD 直接消除了这个成本,是竞品的共同选择。
+但第一次仍要落盘 512MB,而且占磁盘;UFFD 直接消除了这个成本。
 
 被否掉的方案:「池化 restore-ready VM」。每个池成员要占一份内存,
 而实测表明瓶颈在解包落盘而非 VM 恢复(agent 只等 97ms),池化解决的不是真问题。
@@ -119,7 +99,7 @@ VM 不读 memory 文件,缺页时由 handler 进程按需提供。**restore 时�
 
 1. **fd 和 region layout 不一定在同一个 datagram 里。** 单次 `ReadMsgUnix`
    拿到 fd 但 body 是空的 → JSON 解析失败 → handler 死掉,而 Firecracker
-   在缺页上永久阻塞。必须循环收齐两者。agentenv 的 Rust 实现也是循环。
+   在缺页上永久阻塞。必须循环收齐两者。
 2. **Firecracker 递过来的 fd 是非阻塞的。** 直接 `read` 立刻返回 EAGAIN,
    fault 循环当场退出。必须 `poll` 等可读。
    这个错误的表现就是「`snapshot/load` 永久挂起」,和 handler 崩溃无法区分 ——
@@ -159,26 +139,24 @@ publish 用「写临时目录 + rename」,所以中断的 unpack 不会留下残
 会产生 `UFFD_EVENT_REMOVE`,handler 必须把对应页面置零而不是回读文件
 (否则会复活脏数据)。
 
-### 2.4 三家竞品对照
+### 2.4 内存恢复的三个判断
 
-| 维度 | e2b | agentenv | tensorlake | wizard(现状) |
-|---|---|---|---|---|
-| VMM | fork 了 firecracker(私有,加 gdb feature) | 上游 FC | 未公开 | 上游 FC 1.15.1 |
-| guest 内核 | 自己 config + patch,源码取 `amazonlinux/linux`,**不 fork** | prebuilt(R2 站) | 未公开 | **FC CI prebuilt + config 入库** |
-| 内存恢复 | UFFD(`uffd/` + `prefetch/`,cgo) | UFFD(`uffd-core/`,Rust) | 未公开细节,声称 sub-second | **UFFD(已实测 7ms load)** |
-| rootfs 按需 | 未见 | UFFD 后端接 overlaybd | 磁盘快照 O(changed bytes),单文件改动 167ms | dm-snapshot CoW(44 KiB/sandbox),**lazy-pull 未做** |
-| 磁盘快照增量 | 未见 | 未见 | **有**(他们的差异化点) | 无(full snapshot) |
+| 维度 | wizard(现状) |
+|---|---|
+| VMM | 上游 FC 1.15.1 |
+| guest 内核 | **FC CI prebuilt + config 入库** |
+| 内存恢复 | **UFFD(已实测 7ms load)** |
+| rootfs 按需 | dm-snapshot CoW(44 KiB/sandbox),**lazy-pull 未做** |
+| 磁盘快照增量 | 无(full snapshot) |
 
-**从对照里得到的三个判断:**
+**三个判断:**
 
-1. **UFFD 是共识,不是选项。** 三家全都做了,而且 e2b/agentenv 都各写了一个
-   完整的 handler 包。我们原来打算的「缓存解开的 memory 文件」只是把成本
+1. **UFFD 是对的选择,不是若干等价选项之一。** 我们原来打算的「缓存解开的 memory 文件」只是把成本
    从「每次」降到「每快照一次」,UFFD 才是把成本降到「每个实际访问的页」。
    两者不冲突 —— 我们现在两个都有。
-2. **不要 fork 内核。** e2b fork 了 VMM 但**没有** fork 内核,只维护一个 config。
-   这是维护面最小的做法,我们跟。
-3. **磁盘增量快照是我们最大的缺口。** tensorlake 把它当核心卖点
-   (O(changed bytes) vs O(disk size))。我们的 rootfs 已经走 sparse extent list,
+2. **不要 fork 内核。** 只维护一个 config 是维护面最小的做法,所以 VMM 可以打 patch 但内核不 fork。
+3. **磁盘增量快照是我们最大的缺口。** 收益会是 O(changed bytes) vs O(disk size)。
+   我们的 rootfs 已经走 sparse extent list,
    所以成本跟着「写了多少」而不是「provision 了多少」—— 方向对了,
    但还是 full snapshot,没有基于上一次快照的增量。Firecracker 原生支持
    diff snapshot,接口不用改。
@@ -194,7 +172,7 @@ dm-snapshot 只要 `dm_snapshot` 模块。
 后者 CoW 已经解决。所以 overlaybd 该做,但理由是**首次使用大镜像的等待时间**,
 不是磁盘占用。
 
-agentenv 的 `uffd-core/src/overlaybd.rs` 表明这两件事可以合并:
+这两件事可以合并:
 UFFD 缺页直接从 overlaybd 镜像读。这是比我们现在更远的一步。
 
 ### 3.0 restore 必须在设备组装**之前**恢复 CoW
@@ -222,10 +200,9 @@ memoryless 快照没有 page cache 可依赖,所以**立刻**暴露成「文件�
 「组装设备」之间调用它。restore 因此改成先把 bundle 落到 staging 目录,
 再交给 `Prepare`,extent 流原样暂存、只在写进设备时解码一次。
 
-竞品对照:**没人往已激活设备的 CoW 里补写**。firecracker-containerd 的
+现有做法:**没人往已激活设备的 CoW 里补写**。firecracker-containerd 的
 devmapper snapshotter 是 thin-pool 先派生再 activate,顺序天生正确;
-Lambda SnapStart 用 chunk 化的惰性加载块设备供给;E2B 的 rootfs 就是宿主文件,
-CoW 在文件系统层。Firecracker 上游文档则直接把磁盘状态甩给调用方保证 ——
+Lambda SnapStart 用 chunk 化的惰性加载块设备供给。Firecracker 上游文档则直接把磁盘状态甩给调用方保证 ——
 我们踩的是它警告过的那一类。
 
 **测试为什么之前没抓到**:三层验证全在错误的抽象层。单测测 tar 进出(数据确实写进了
@@ -243,29 +220,24 @@ CoW 在文件系统层。Firecracker 上游文档则直接把磁盘状态甩给�
 Firecracker 的 diff 内存文件**不自包含** —— 是稀疏文件,必须叠到 base 上。
 所以真正的设计问题不在「怎么产出 diff」,在「什么时候、在哪里合并」。
 
-**竞品选了相反的两条路,都在生产跑:**
+**存在相反的两条路,都在生产跑:**
 
-- **E2B**:fault 时分层查找。UFFD handler 经 `block.Slicer` 走 base + 各层,
-  K 次 pause/resume 后一次读要「chase K different BuildId references」。
-  不设链深上限,只有 `NormalizeMappings` 合并相邻同 build 段。
-  公开分析明确指出 **cross-build fragmentation 随时间增长**,读放大与深度成正比。
-- **Cognition blockdiff**:链只作血缘,运行前 flatten 成 raw。
-  `apply` 是纯元数据操作(XFS reflink),128 GB `cp --reflink=always` 测得
-  0.008s vs 24.5s。他们的 flatten 几乎免费,所以文章完全不谈读放大 ——
-  **运行时没有链可走**。
+- **fault 时分层查找**:UFFD handler 经一个 slicer 走 base + 各层,
+  K 次 pause/resume 后一次读要 chase K 个不同的层引用。
+  不设链深上限、只合并相邻同 build 段时,**cross-build fragmentation 随时间增长**,读放大与深度成正比。
 - **Firecracker 上游**:`snapshot-editor edit-memory rebase` 就是 flatten,
   要求按创建顺序逐层叠加。
 
 **我们选 flatten,理由不止「跟多数」:**
 
-我们有 E2B 没有的结构优势 —— `snapCache` 已按 snapshot id 缓存解包结果。
-E2B 每次 restore(他们代码里叫 `ResumeSandbox`)自己走链;我们只在**某个 leaf 首次在某节点 restore 时**付一次合并,
+我们有 fault 时分层那条路没有的结构优势 —— `snapCache` 已按 snapshot id 缓存解包结果。
+分层查找每次 restore 都自己走链;我们只在**某个 leaf 首次在某节点 restore 时**付一次合并,
 之后该节点所有 restore 复用。fan-out 正是「同一 leaf 恢复很多次」,合并被完全摊掉。
 
 更重要的是 **UFFD 缺页路径零改动**。`fill()` 是全系统最热、出错最隐蔽的代码 ——
 一个 bug 就是一页错内存,而且不会有任何错误信号。full snapshot 走的是同一条码路。
 
-**链深超 8 自动转 full**。E2B 不设限并且确实吃到了 fragmentation 增长,
+**链深超 8 自动转 full**。不设限的链确实会吃到 fragmentation 增长,
 这是支持设限的证据。自动转让恢复成本有上界、祖先可回收,且调用方永远不用关心链深 ——
 请求 diff 永远成功,只是偶尔更贵。
 
@@ -348,16 +320,13 @@ POST /v1/sandboxes            wizard-api   1196.0ms
 那 86ms 是调度 + 落库,之前没有任何指标覆盖它。这正是 trace 的价值:
 它暴露的是**没人想到要去测的那一段**。
 
-**竞品对照**:
+**对照**:
 
 | | trace 方案 | guest 内 |
 |---|---|---|
-| e2b | OTel,`traceparent` 贯穿 | agent 出 span(envd 有出网路径) |
-| agentenv | OTel | 同上 |
-| tensorlake | 自建 timing 上报 | — |
 | **wizard** | OTel + W3C traceparent | **只采纳 trace id,不出 span** |
 
-**wizard 与 e2b 的差异是有意的**:e2b 的 envd 能直连 collector,我们的
+**不出 span 是有意的**:一个能直连 collector 的 guest 内 agent 会出 span,而我们的
 wizardd 只有一条入向 vsock,没有出网路径。给它加一条反向通道要么破坏
 「入站零暴露」,要么需要在 noded 里做一层 OTLP 中继 —— 后者可行但
 不是现在的瓶颈。所以选择是:wizardd 采纳调用方的 trace id 写进自己的日志,
@@ -422,13 +391,10 @@ CPUID leaf 0 的 vendor 字符串和 family 都无法掩,guest 内核要据此�
 **故意不记录 model**:掩指令集特征正是为了让快照跨型号可用,
 按 model 匹配会把 template 的价值抹掉。
 
-### 竞品对照
+### 对照
 
 | | 内存快照的 CPU 处理 |
 |---|---|
-| e2b | CPU template 固定 baseline,节点池按 CPU 型号分组 |
-| agentenv | 同上;以单节点 fork 为主(16 子实例),跨节点靠同型号池 |
-| tensorlake | 磁盘增量为主卖点,内存快照限本机/同型号 |
 | **wizard** | 自定义 template + 调度器按 vendor/family 硬过滤,不兼容回 409 |
 
 ### 摸底脚本
@@ -460,8 +426,7 @@ CPUID leaf 0 的 vendor 字符串和 family 都无法掩,guest 内核要据此�
 真正的杠杆是**减少每次 boot 的 CPU**,或者**不 boot**:
 
 - 从快照 restore 跳过内核初始化,这是 restore 相对 create 的真实价值
-  (也是 e2b/Morph 都把 restore 而非 boot 当作启动 sandbox 主路径的原因 ——
-  是 restore 不是 resume:它产出的是一个新 sandbox,见 snapshot-resume.md §0)
+  (是 restore 不是 resume:它产出的是一个新 sandbox,见 snapshot-resume.md §0)
 - guest 内核裁剪能降低这 5 秒,但需要自建编译流程(§1.3 决定不做)
 
 **推论**:`max_creates` 的正确语义是「排队深度」而不是「拒绝阈值」。
@@ -494,8 +459,8 @@ CPUID leaf 0 的 vendor 字符串和 family 都无法掩,guest 内核要据此�
 | 每 sandbox 硬配额 | dm-thin 每设备尺寸、XFS project quota | 靠配额兜住单个 sandbox 写爆盘 |
 | 节点水位停止接单 | Kubernetes kubelet | `nodefs.available<10%` 触发 DiskPressure;`imageGCHighThresholdPercent=85` **刻意低于**驱逐线,让回收先于驱逐 |
 
-**e2b 做的和我们一样**:`dd if=/dev/zero ... count=5120` 建 5 GB 稀疏 overlay
-叠在只读 squashfs 上,公开文章里**完全没有配额、记账、超卖策略的讨论**。
+**在只读 squashfs 上叠一层稀疏 overlay(如 `dd if=/dev/zero ... count=5120` 建 5 GB 层)是常见做法**,
+相关公开文章里**通常完全没有配额、记账、超卖策略的讨论**。
 所以「稀疏层 + 不精确记账」不是我们的疏漏,是这条路线的常态;
 区别在于我们把名义值当成了调度依据。
 
@@ -647,6 +612,4 @@ gRPC 退避和串口加起来 1293ms,占冷启动优化的 96%。
 
 - [firecracker: handling page faults on snapshot resume](https://github.com/firecracker-microvm/firecracker/blob/main/docs/snapshotting/handling-page-faults-on-snapshot-resume.md)
 - [firecracker: guest_configs](https://github.com/firecracker-microvm/firecracker/tree/main/resources/guest_configs)
-- [e2b-dev/fc-kernels](https://github.com/e2b-dev/fc-kernels)
-- [tensorlake: Firecracker disk snapshots in O(changed bytes)](https://tensorlake.ai/blog/firecracker-disk-snapshots-o-changed-bytes)
 - [Restoring Uniqueness in MicroVM Snapshots (AWS)](https://arxiv.org/pdf/2102.12892)

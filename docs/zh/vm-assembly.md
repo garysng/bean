@@ -190,8 +190,8 @@ console=ttyS0 loglevel=3 reboot=k panic=-1 pci=off ip=... init=/wizard/wizardd -
 Firecracker 自己的输出,它描述的是 VMM 的反应、读起来像硬件故障(`MissingAddressRange`),
 在被认定为噪声之前浪费了实打实的时间。误导性的证据比没有证据更糟。
 解决办法是降 loglevel 而非用开关:console 挂着,错误透传,初始化噪声不透传,实测代价落在噪声里。
-`--debug-console` 保留给那些还没来得及记录错误就失败的 guest。8250 驱动两种方式都编进内核,
-和 e2b 的 `fc-kernels` config 一样(`CONFIG_SERIAL_8250=y`)。
+`--debug-console` 保留给那些还没来得及记录错误就失败的 guest。8250 驱动两种方式都编进内核
+(`CONFIG_SERIAL_8250=y`)。
 
 ## 7. agent 地址为什么可以用常量 ✅
 
@@ -282,16 +282,16 @@ Firecracker 启动到创建 API socket 之间有个窗口,这期间发请求得�
 
 补上这块的通常做法叫 jailer,而「直接加 jailer」并不成立,值得说清原因:jailer 的
 `pivot_root` 要求把设备节点 **mknod** 进每 sandbox 的 jail,因为设备节点无法用符号链接进
-chroot —— 而 wizard 的 rootfs 正是一个 device-mapper 节点。e2b 不做这些也拿到了命名空间那一半:
+chroot —— 而 wizard 的 rootfs 正是一个 device-mapper 节点。命名空间那一半不做这些也能拿到:
 `unshare` 一个 mount 命名空间,再用 tmpfs 加符号链接,这在 chroot 里行不通而在命名空间里可行。
-wizard 已经有 e2b 那样拿到的命名空间隔离,只是用 clone flags 而非包装进程实现(见 §12)。
+wizard 已经有这样的命名空间隔离,只是用 clone flags 而非包装进程实现(见 §12)。
 
 ## 12. 不用包装进程做隔离 ✅
 
 VMM 是用 clone flags 起的,而不是套在 `unshare` 下面。差别在于 **noded 记下的是哪个 pid**,
 不在于存在哪些命名空间。
 
-e2b 的等价物是一条三层深的命令(`packages/orchestrator/internal/sandbox/fc/process.go`):
+基于包装进程的等价物是一条三层深的命令:
 
 ```
 unshare -pfm --kill-child -- bash -c "mount --make-rprivate / && ... && ip netns exec <ns> firecracker"
@@ -304,7 +304,7 @@ unshare -pfm --kill-child -- bash -c "mount --make-rprivate / && ... && ip netns
 
 wizard 改成在 fork 期间向内核索取同样的命名空间:
 
-| | e2b | wizard |
+| | 包装进程 | wizard |
 |---|---|---|
 | pid 命名空间 | `unshare -p` | `Cloneflags: CLONE_NEWPID` |
 | mount 命名空间 | `unshare -m` + `mount --make-rprivate /` | `Cloneflags` + `Unshareflags: CLONE_NEWNS` |

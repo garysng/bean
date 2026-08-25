@@ -244,10 +244,6 @@ analysis:
   restore itself — the agent only waits 97 ms. Pooling would spend memory to
   solve something that was not the problem.
 
-UFFD is also consensus rather than a bet: e2b ships a complete handler
-(`packages/orchestrator/pkg/sandbox/uffd/`, with cgo), agentenv ships
-`storage/uffd-core/` in Rust, and tensorlake publishes sub-second cold starts.
-
 **Sharing is safe because Firecracker maps the memory file `MAP_PRIVATE`.**
 Verified rather than assumed: after writing 64 MB of random data inside the
 guest, the md5 of the host's memory file is unchanged. That is what lets one
@@ -259,8 +255,7 @@ unpacked memory image serve arbitrarily many restores.
 1. **The fd and the region layout are not necessarily in the same datagram.** One
    `ReadMsgUnix` can return the fd with an empty body → the JSON parse fails →
    the handler dies → Firecracker blocks forever on the first page fault. The
-   read must loop until both have arrived. agentenv's Rust implementation loops
-   too.
+   read must loop until both have arrived.
 2. **The fd Firecracker hands over is non-blocking.** A direct `read` returns
    `EAGAIN` immediately and the fault loop exits on the spot. It must `poll` for
    readability first.
@@ -312,24 +307,13 @@ resumed rather than rebooted.
 
 A Firecracker diff memory file is **not self-contained** — it is sparse and must
 be layered onto a base. So the real question is not how to produce a diff but
-**when and where to merge**, and the industry split on exactly this:
+**when and where to merge**:
 
-- **E2B** does layered lookup at fault time: the UFFD handler goes through
-  `block.Slicer` over base plus each layer, so after K pause/resume cycles one
-  read chases K `BuildId` references. No cap on depth, only `NormalizeMappings`
-  merging adjacent segments from the same build. Their own public analysis states
-  that cross-build fragmentation grows over time, with read amplification
-  proportional to depth.
-- **Cognition's blockdiff** keeps the chain as lineage only and flattens to raw
-  before running. `apply` is pure metadata via XFS reflink — a 128 GB
-  `cp --reflink=always` measured **0.008 s against 24.5 s**. Their flatten is
-  essentially free, which is why their write-up never discusses read
-  amplification: at run time there is no chain to walk.
 - **Firecracker upstream** ships `snapshot-editor edit-memory rebase`, which is
   flatten, and requires layering in creation order.
 
 **We flatten, and the reason is more than following the majority.** There is a
-structural advantage E2B does not have: `snapCache` already caches unpacked
+structural advantage here: `snapCache` already caches unpacked
 results by snapshot id, so the merge is paid **once per leaf per node** and every
 later restore on that node reuses it. Fan-out is precisely "the same leaf
 restored many times," so the merge amortises to nothing on the case diffs exist
@@ -342,10 +326,10 @@ is one page of wrong memory with no error signal of any kind. Flattening keeps
 always used.
 
 **Chain depth is capped at 8**, past which a checkpoint silently becomes full.
-E2B setting no limit and taking on growing fragmentation is the evidence for
-setting one. It bounds restore cost, lets ancestors be reclaimed, and means
-callers never reason about depth: a diff request always succeeds, occasionally
-more expensively.
+An unbounded chain takes on fragmentation that grows over time, which is the
+evidence for setting a limit. It bounds restore cost, lets ancestors be
+reclaimed, and means callers never reason about depth: a diff request always
+succeeds, occasionally more expensively.
 
 Three things here must not be silent, and are not:
 
@@ -397,9 +381,8 @@ into the device.
 Nobody else writes into the CoW of an active device: firecracker-containerd's
 devmapper snapshotter derives from a thin pool and activates afterwards, so the
 ordering is inherently right; Lambda SnapStart supplies a chunked lazily loaded
-block device; E2B's rootfs is a host file with CoW at the filesystem layer.
-Firecracker's upstream documentation simply makes disk state the caller's
-problem — this is the class of problem it was warning about.
+block device. Firecracker's upstream documentation simply makes disk state the
+caller's problem — this is the class of problem it was warning about.
 
 ### 3.5 CPU templates ✅
 
@@ -462,19 +445,10 @@ mutually exclusive. It verifies the download is an ELF, because that bucket has
 been seen to serve truncated files and a short kernel presents as "boot hangs,"
 not as a download error.
 
-**What the survey found:**
-
-| repo | contents | forked |
-|---|---|---|
-| `e2b-dev/firecracker` | VMM source | **yes** (added a gdb feature, among others) |
-| `e2b-dev/fc-versions` | pipeline that builds the VMM | no |
-| `e2b-dev/fc-kernels` | kernel config + patch + build.sh | **no** |
-
-`fc-kernels` clones `amazonlinux/linux` at run time — the same source
-Firecracker's own `rebuild.sh` uses — and the repo holds only a config plus one
-virtio_balloon patch. So **e2b's kernel maintenance surface is one config file,
-with no rebase burden**, and that is the surface worth copying. e2b forked the
-VMM but not the kernel; we fork neither.
+Firecracker's own `rebuild.sh` builds a kernel by cloning `amazonlinux/linux` at
+run time against a config plus one virtio_balloon patch, so **the kernel
+maintenance surface is one config file, with no rebase burden**. Neither the VMM
+nor the kernel is forked here.
 
 Building our own was rejected on cost-before-evidence grounds: a container build
 means paying for a toolchain, a source fetch and a 20-minute build before getting
@@ -484,7 +458,7 @@ kernel helped at all.
 **Then measured** (quiet, VMM start to agent connectable, three runs each):
 
 ```
-vmlinux-6.1.175   690 / 689 / 715 ms   (from the agentenv R2 site, config unknown)
+vmlinux-6.1.175   690 / 689 / 715 ms   (prebuilt elsewhere, config unknown)
 vmlinux-6.1.102   603 / 613 / 601 ms   (Firecracker CI, config known)
 ```
 
@@ -516,11 +490,12 @@ logs. The rest: `reboot=k` because Firecracker has no ACPI and keyboard reset is
 the minimal working path; `panic=-1` so a crashed guest stays inspectable instead
 of entering a reboot loop; `pci=off` because there is no PCI bus to enumerate.
 
-**The trade is taken the way e2b takes it**: their `fc-kernels` config has
-`CONFIG_SERIAL_8250=y` but their boot args carry no `console=`, so one kernel both
-boots fast and debugs. Here `--debug-console` adds `console=ttyS0` back. A failed
-boot has no other source of evidence, so that capability cannot be given up — but
-it should not be paid for on every boot. **The cost is real and has to be said
+**The trade keeps the serial driver but not the console on every boot**: the
+kernel has `CONFIG_SERIAL_8250` compiled in but the default boot args carry no
+`console=`, so one kernel both boots fast and debugs, and `--debug-console` adds
+`console=ttyS0` back. A failed boot has no other source of evidence, so that
+capability cannot be given up — but it should not be paid for on every boot.
+**The cost is real and has to be said
 plainly**: with the console off by default, anything the guest writes to stderr,
 including the agent's log line carrying the trace id, is invisible.
 
@@ -879,8 +854,7 @@ missing link in supply-chain defence.
 `wizard build` shells out to `buildctl` against a `buildkitd` socket. The reasoning
 is stated in the code: COPY and ADD semantics, multi-stage builds, ARG
 interpolation, build caching, `.dockerignore` and heredocs add up to months of
-work and would still be an incomplete imitation. e2b and Daytona reach the same
-conclusion.
+work and would still be an incomplete imitation.
 
 What the platform keeps is the output shape: BuildKit can export a **flat rootfs
 tar**, which is exactly what a base image needs, so there is no layer assembly, no
@@ -924,8 +898,8 @@ That is the value of tracing: it exposes the segment nobody thought to measure.
 correlation, and they diverge exactly at the cross-process hop, which is the only
 place correlation is needed.
 
-**The agent deliberately does not link the tracing SDK.** e2b's `envd` can reach a
-collector directly; `wizardd` has one inbound vsock connection and no outbound path,
+**The agent deliberately does not link the tracing SDK.** `wizardd` has one
+inbound vsock connection and no outbound path,
 so adding a reverse channel would either break "zero inbound exposure" or require
 an OTLP relay inside `noded`. It extracts `traceparent` and adopts the trace id
 for its own log lines, and nothing more, because the agent ships on a disk
@@ -1080,9 +1054,6 @@ choose the technology.
 - [architecture.md](architecture.md) — components and their relationships
 - [noded-design.md](noded-design.md), [vm-assembly.md](vm-assembly.md),
   [image-pipeline.md](image-pipeline.md), [s3-storage.md](s3-storage.md),
-  [snapshot-resume.md](snapshot-resume.md),
-  [competitive-analysis.md](competitive-analysis.md)
+  [snapshot-resume.md](snapshot-resume.md)
 - [firecracker: handling page faults on snapshot resume](https://github.com/firecracker-microvm/firecracker/blob/main/docs/snapshotting/handling-page-faults-on-snapshot-resume.md)
-- [e2b-dev/fc-kernels](https://github.com/e2b-dev/fc-kernels)
-- [tensorlake: Firecracker disk snapshots in O(changed bytes)](https://tensorlake.ai/blog/firecracker-disk-snapshots-o-changed-bytes)
 - [Restoring Uniqueness in MicroVM Snapshots (AWS)](https://arxiv.org/pdf/2102.12892)

@@ -34,9 +34,6 @@ volumes.**
 
 ## P0 — Single-node end-to-end skeleton (fc direct boot, no containerd)
 
-Reference implementation: AgentENV — a complete demonstration of uvm-ublk driving overlaybd
-directly, envd, and jailer/FC management, compared module by module.
-
 **Scope**
 
 - `proto/`: NodeService / SandboxService / AgentService v1 definitions + buf tooling
@@ -102,7 +99,7 @@ P50 < 2s; the escape regression suite passes.
 - Lifecycle automation: idle detection (local to noded), onIdle pause/delete, transparent wake on a request to a PAUSED sandbox
 - The fc tier's same-node snapshot path (memory+disk → S3)
 - **shared-fs volumes** (the host mounts JuiceFS and exports it through the kernel nfsd, the agent mounts NFS, backend quota)
-- The TS SDK, an e2b migration mapping document
+- The TS SDK
 
 **Acceptance**: the agent rollout scenario integrated (interactive terminal + port preview); the
 resource billing basis after a pause is correct.
@@ -115,7 +112,7 @@ resource billing basis after a pause is correct.
 - PAUSED archiving: past a threshold, snapshot to S3 automatically to free RAM, and restore transparently on the next access
 - Snapshot lifecycle: quota, reference counting, TTL / S3 lifecycle
 - **Image as snapshot**: `POST /images:register {snapshot}` registers any sandbox snapshot as a
-  named image (the same as Tensorlake) — the shortest path for "set up the environment once, reuse
+  named image — the shortest path for "set up the environment once, reuse
   in bulk"
 
 **Acceptance**: a "set up the environment → snapshot → fan out 50 instances" demo (50 restores of one snapshot, 50 independent sandboxes); fc-tier **restore** P50 < 500ms — restore, not resume: the number being promised is the cost of building a new sandbox.
@@ -140,9 +137,9 @@ resource billing basis after a pause is correct.
 
 | Risk | Impact | Mitigation |
 |---|---|---|
-| Complexity of building fcRuntime ourselves (VM lifecycle / guest kernel / vsock) | P0 slips | The AgentENV source is available locally for module-by-module reference (uvm-ublk/envd/warm-pool); P0's scope is narrowed (pre-converted images + a hand-built kernel) |
+| Complexity of building fcRuntime ourselves (VM lifecycle / guest kernel / vsock) | P0 slips | P0's scope is narrowed (pre-converted images + a hand-built kernel) |
 | ublk's kernel requirement (6.0+) | Older nodes have no lazy-pull | A uniform node OS baseline; the tcmu backend or a full overlayfs pull as the floor |
-| overlaybd conversion coverage | Unconverted images are unusable on the fc tier | The conversion pipeline triggers automatically as images enter the catalogue; the container tier's standard pull as the backstop; tensorlake/oci2rootfs (Apache-2.0, OCI→ext4) can be reused as a fully pre-materialising fallback |
+| overlaybd conversion coverage | Unconverted images are unusable on the fc tier | The conversion pipeline triggers automatically as images enter the catalogue; the container tier's standard pull as the backstop |
 | FC snapshot host CPU generation compatibility | Cross-node restore is constrained | Scheduling groups by CPU feature set; the manifest records the generation |
 | GPU on runc is weakly isolated | A security shortfall for GPU eval | A separate GPU node pool + an image allowlist; nvproxy (gVisor GPU) assessed in P5 |
 | Nodes must have KVM (fc tier only through P0–P4) | Nodes without KVM are unusable | Procure/enable nested virtualisation; the container tier as the P5 floor |

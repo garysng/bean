@@ -1,8 +1,8 @@
-# Technology choices and comparisons
+# Technology choices and rationale
 
 > 中文版:[zh/decisions.md](zh/decisions.md)
 
-> Every decision records: measured data, what the competition does (e2b / tensorlake / agentenv), and why this option was chosen.
+> Every decision records: measured data and why this option was chosen.
 > Entries with no measured data behind them are marked "unverified" and are not treated as conclusions.
 
 ## 1. Boot optimisation
@@ -18,10 +18,7 @@ quiet             700 /  700 /  711 ms
 
 Dropping the serial console saves 493ms (41%). 8250 UART writes are synchronous — the kernel waits on hardware for every line it logs.
 
-**Competition**: in e2b's `fc-kernels` config, `CONFIG_SERIAL_8250=y` is **on** —
-compiled into the kernel, but boot args do not carry `console=`. It is attached only when debugging is needed, so one kernel both boots fast and debugs.
-
-**Choice**: follow e2b. The kernel keeps the driver; `--debug-console` controls whether it is attached.
+**Choice**: keep `CONFIG_SERIAL_8250=y` compiled into the kernel, but do not carry `console=` in the boot args. The kernel keeps the driver; `--debug-console` controls whether it is attached, so one kernel both boots fast and debugs.
 Reasoning: a failed boot has no other source of evidence, so that capability cannot be given up — but it should not be paid for on every boot.
 
 ### 1.2 gRPC reconnect backoff
@@ -38,16 +35,6 @@ Reasoning: the retry interval should match the time scale of "one boot", not the
 
 ### 1.3 Guest kernel: use the CI prebuilt, do not fork, do not build our own compile pipeline
 
-**Investigation**:
-| repo | contents | forked |
-|---|---|---|
-| `e2b-dev/firecracker` | VMM source | **yes** (added a gdb feature, among others) |
-| `e2b-dev/fc-versions` | pipeline that builds the VMM | no |
-| `e2b-dev/fc-kernels` | kernel config + patch + build.sh | **no** |
-
-`fc-kernels` does a `git clone amazonlinux/linux` at run time (the same source Firecracker's official `rebuild.sh` uses); the repo itself only holds a config (3094 lines) plus one virtio_balloon patch.
-**e2b's kernel maintenance surface = one config file, with no rebase burden.**
-
 **Choice**: use `firecracker-ci/v1.11/x86_64/vmlinux-6.1.102`, with the `.config` checked in alongside it
 (CI publishes the config separately, so "use the prebuilt" and "have our own config in hand" are not mutually exclusive).
 `hack/build-assets.sh kernel` downloads it and verifies it is an ELF — that bucket has been seen to serve truncated files, and a short kernel presents as "boot hangs", not as a download error.
@@ -56,7 +43,7 @@ Reasoning: building in a container means paying the cost up front (toolchain + f
 
 **Measured** (quiet, VMM start to agent connectable, three runs each):
 ```
-vmlinux-6.1.175   690 / 689 / 715 ms   (from the agentenv R2 site, config unknown)
+vmlinux-6.1.175   690 / 689 / 715 ms   (prebuilt, config unknown)
 vmlinux-6.1.102   603 / 613 / 601 ms   (Firecracker CI, config known)
 ```
 ~90ms faster (13%). End-to-end create went from 1040ms → 952ms, and snapshot/restore work normally.
@@ -86,14 +73,11 @@ The memory file written to disk actually occupies 513MB (not sparse), and every 
 Measured: after writing 64MB of random data inside the guest, the md5 of the memory file on the host is unchanged.
 So multiple restores **can share a single unpacked memory file**.
 
-**What the competition does** (all three agree):
-- **e2b**: `packages/orchestrator/pkg/sandbox/uffd/` — a complete UFFD handler, including `memory/`, `prefetch/`, `userfaultfd/` (cgo).
-- **agentenv**: `storage/uffd-core/` (Rust) — and it also wires the UFFD backend into overlaybd, so a page fault reads straight from the image.
-- **tensorlake**: public blog posts on sub-second cold start, and they made disk snapshots O(changed bytes) (single-file change, 167ms / 105MB).
+**A further step, not yet ours**: wiring the UFFD backend into overlaybd so a page fault reads straight from the image.
 
 **Choice**: UFFD. Firecracker's `snapshot/load` supports `backend_type: Uffd` plus a UDS path; the VM does not read the memory file, and the handler process supplies pages on demand when they fault. **Zero disk writes at restore.**
 
-Rejected option: "cache the unpacked memory file by snapshot ID". It removes repeated decompression, but the first time still writes 512MB to disk, and it consumes disk; UFFD eliminates that cost outright, and it is the choice all three competitors made.
+Rejected option: "cache the unpacked memory file by snapshot ID". It removes repeated decompression, but the first time still writes 512MB to disk, and it consumes disk; UFFD eliminates that cost outright.
 
 Rejected option: "pool restore-ready VMs". Every pool member holds a copy of memory, and measurement shows the bottleneck is unpacking and writing to disk rather than VM restore (the agent only waits 97ms) — pooling does not solve the real problem.
 
@@ -109,7 +93,7 @@ Two traps, neither documented clearly:
 
 1. **The fd and the region layout are not necessarily in the same datagram.** A single `ReadMsgUnix`
    returns the fd but with an empty body → JSON parse fails → the handler dies, and Firecracker
-   blocks forever on the page fault. You must loop until you have both. agentenv's Rust implementation loops too.
+   blocks forever on the page fault. You must loop until you have both.
 2. **The fd Firecracker hands over is non-blocking.** A direct `read` returns EAGAIN immediately and
    the fault loop exits on the spot. You must `poll` for readability.
    The symptom of this mistake is "`snapshot/load` hangs forever", which is indistinguishable from the handler crashing —
@@ -142,26 +126,24 @@ purely to extract the rootfs member. The right fix is for the node to tell the c
 
 **Known risk** (from Firecracker's own documentation): if the handler process dies, Firecracker **hangs forever** on the next page fault, so liveness monitoring is mandatory. The balloon's `MADV_DONTNEED` produces `UFFD_EVENT_REMOVE`, and the handler must zero the corresponding pages rather than re-reading the file (otherwise it resurrects stale data).
 
-### 2.4 Comparison against the three competitors
+### 2.4 Three judgements on memory restore
 
-| Dimension | e2b | agentenv | tensorlake | wizard (today) |
-|---|---|---|---|---|
-| VMM | forked firecracker (private, added gdb feature) | upstream FC | not public | upstream FC 1.15.1 |
-| guest kernel | own config + patch, source from `amazonlinux/linux`, **no fork** | prebuilt (R2 site) | not public | **FC CI prebuilt + config checked in** |
-| memory restore | UFFD (`uffd/` + `prefetch/`, cgo) | UFFD (`uffd-core/`, Rust) | details not public, claims sub-second | **UFFD (measured 7ms load)** |
-| rootfs on demand | not seen | UFFD backend wired to overlaybd | disk snapshots O(changed bytes), single-file change 167ms | dm-snapshot CoW (44 KiB/sandbox), **lazy-pull not done** |
-| disk snapshot deltas | not seen | not seen | **yes** (their differentiator) | none (full snapshot) |
+| Dimension | wizard (today) |
+|---|---|
+| VMM | upstream FC 1.15.1 |
+| guest kernel | **FC CI prebuilt + config checked in** |
+| memory restore | **UFFD (measured 7ms load)** |
+| rootfs on demand | dm-snapshot CoW (44 KiB/sandbox), **lazy-pull not done** |
+| disk snapshot deltas | none (full snapshot) |
 
-**Three judgements out of that comparison:**
+**Three judgements:**
 
-1. **UFFD is consensus, not an option.** All three did it, and both e2b and agentenv wrote a complete
-   handler package of their own. Our original plan of "cache the unpacked memory file" only moves the cost
+1. **UFFD is the right choice, not one option among equals.** Our original plan of "cache the unpacked memory file" only moves the cost
    from "every time" to "once per snapshot"; UFFD is what moves it to "every page actually touched".
    The two do not conflict — we now have both.
-2. **Do not fork the kernel.** e2b forked the VMM but did **not** fork the kernel, maintaining just one config.
-   That is the smallest maintenance surface, and we follow it.
-3. **Delta disk snapshots are our biggest gap.** tensorlake treats it as the core selling point
-   (O(changed bytes) vs O(disk size)). Our rootfs already goes through a sparse extent list,
+2. **Do not fork the kernel.** Maintaining a single config is the smallest maintenance surface, so the VMM may be patched but the kernel is not forked.
+3. **Delta disk snapshots are our biggest gap.** The gain would be O(changed bytes) vs O(disk size).
+   Our rootfs already goes through a sparse extent list,
    so cost tracks "how much was written" rather than "how much was provisioned" — the direction is right,
    but it is still a full snapshot, with no delta against the previous one. Firecracker natively supports
    diff snapshots, and the interface would not have to change.
@@ -176,7 +158,7 @@ dm-snapshot only needs the `dm_snapshot` module.
 **overlaybd's real value** is in "read blocks on demand on first pull", not in "per-sandbox cost" —
 CoW already solved the latter. So overlaybd is worth doing, but the reason is **wait time on first use of a large image**, not disk usage.
 
-agentenv's `uffd-core/src/overlaybd.rs` shows the two can be combined: a UFFD page fault reads straight from the overlaybd image. That is a step further than where we are.
+The two can be combined: a UFFD page fault reads straight from the overlaybd image. That is a step further than where we are.
 
 ### 3.0 restore must seed the CoW **before** device assembly
 
@@ -198,7 +180,7 @@ A memoryless snapshot has no page cache to lean on, so it exposes it **immediate
 
 **Fix**: a `PrepareOptions.SeedWritable` callback, which the provider invokes between "CoW created" and "device assembled". Restore therefore changed to land the bundle in a staging directory first and then hand it to `Prepare`, keeping the extent stream verbatim and decoding it exactly once, when it is written into the device.
 
-Competitor comparison: **nobody writes into the CoW of an already active device.** firecracker-containerd's devmapper snapshotter derives from a thin-pool first and activates after, so the ordering is inherently correct; Lambda SnapStart supplies a chunked, lazily loaded block device; E2B's rootfs is just a host file, with CoW at the filesystem layer. Firecracker's upstream documentation simply throws disk state back to the caller to guarantee — what we hit is the class of problem it warned about.
+Prior art: **nobody writes into the CoW of an already active device.** firecracker-containerd's devmapper snapshotter derives from a thin-pool first and activates after, so the ordering is inherently correct; Lambda SnapStart supplies a chunked, lazily loaded block device. Firecracker's upstream documentation simply throws disk state back to the caller to guarantee — what we hit is the class of problem it warned about.
 
 **Why the tests did not catch it**: all three layers of verification were at the wrong abstraction level. Unit tests tested tar in and out (the data really was written into the file; the bug is below the file); e2e read a file inside the guest (hits page cache); `dmsetup status` looks at the device that is the snapshot **source**. No layer read **the restored block device itself**.
 
@@ -210,26 +192,21 @@ Competitor comparison: **nobody writes into the CoW of an already active device.
 
 Firecracker's diff memory file is **not self-contained** — it is a sparse file that must be layered onto a base. So the real design question is not "how to produce a diff" but "when and where to merge".
 
-**The competition took the two opposite paths, and both run in production:**
+**Two opposite paths exist, and both run in production:**
 
-- **E2B**: layered lookup at fault time. The UFFD handler goes through `block.Slicer` across base plus each layer, and after K pause/resume cycles a single read has to "chase K different BuildId references".
-  No cap on chain depth, only `NormalizeMappings` merging adjacent segments from the same build.
-  Public analysis states explicitly that **cross-build fragmentation grows over time**, with read amplification proportional to depth.
-- **Cognition blockdiff**: the chain is lineage only, flattened to raw before running.
-  `apply` is a pure metadata operation (XFS reflink); a 128 GB `cp --reflink=always` measured
-  0.008s vs 24.5s. Their flatten is essentially free, which is why the article never discusses read amplification —
-  **there is no chain to walk at run time**.
+- **Layered lookup at fault time**: the UFFD handler goes through a slicer across base plus each layer, and after K pause/resume cycles a single read has to chase K different layer references.
+  With no cap on chain depth and only adjacent same-build segments merged, **cross-build fragmentation grows over time**, with read amplification proportional to depth.
 - **Firecracker upstream**: `snapshot-editor edit-memory rebase` is exactly flatten, and requires layering in creation order.
 
 **We chose flatten, and the reason is more than "go with the majority":**
 
-We have a structural advantage E2B does not — `snapCache` already caches unpacked results by snapshot id.
-E2B walks the chain itself on every restore (which their code calls `ResumeSandbox`); we pay the merge once, **the first time a given leaf is restored on a given node**, and every restore on that node afterwards reuses it. Fan-out is precisely "the same leaf restored many times", so the merge is amortised away entirely.
+We have a structural advantage the fault-time-layering approach does not — `snapCache` already caches unpacked results by snapshot id.
+Layered lookup walks the chain itself on every restore; we pay the merge once, **the first time a given leaf is restored on a given node**, and every restore on that node afterwards reuses it. Fan-out is precisely "the same leaf restored many times", so the merge is amortised away entirely.
 
 More importantly, **the UFFD page-fault path does not change at all**. `fill()` is the hottest and most insidiously error-prone code in the whole system —
 a bug there is one page of wrong memory, with no error signal of any kind. The full snapshot path runs the same code.
 
-**Chain depth over 8 automatically converts to full.** E2B sets no limit and did in fact take on growing fragmentation, which is evidence for setting one. Automatic conversion bounds restore cost, lets ancestors be reclaimed, and means callers never have to think about chain depth — a diff request always succeeds, it is just occasionally more expensive.
+**Chain depth over 8 automatically converts to full.** An unlimited chain takes on growing fragmentation, which is evidence for setting a limit. Automatic conversion bounds restore cost, lets ancestors be reclaimed, and means callers never have to think about chain depth — a diff request always succeeds, it is just occasionally more expensive.
 
 **Three things that must not be silent:**
 
@@ -315,16 +292,13 @@ POST /v1/sandboxes            wizard-api   1196.0ms
 Those 86ms are scheduling plus the database write, and no metric had covered it before. That is exactly the value of tracing:
 what it exposes is **the segment nobody thought to measure**.
 
-**Competitor comparison**:
+**How this compares**:
 
 | | trace approach | inside the guest |
 |---|---|---|
-| e2b | OTel, `traceparent` throughout | agent emits spans (envd has an outbound path) |
-| agentenv | OTel | same |
-| tensorlake | in-house timing reporting | — |
 | **wizard** | OTel + W3C traceparent | **adopts the trace id only, emits no spans** |
 
-**The difference between wizard and e2b here is deliberate**: e2b's envd can reach a collector directly, whereas our
+**The choice to emit no spans is deliberate**: an in-guest agent that could reach a collector directly would emit spans, whereas our
 wizardd has only one inbound vsock and no outbound path. Adding a reverse channel would either break
 "zero inbound exposure" or require an OTLP relay inside noded — the latter is feasible but
 not the current bottleneck. So the choice is: wizardd adopts the caller's trace id and writes it into its own logs,
@@ -388,13 +362,10 @@ and crossing that boundary has to be refused by the scheduler — see `scheduler
 **Model is deliberately not recorded**: masking instruction-set features is exactly what makes a snapshot usable across models,
 and matching on model would erase the template's value.
 
-### Competitor comparison
+### How this compares
 
 | | CPU handling for memory snapshots |
 |---|---|
-| e2b | CPU template pinned to a baseline, node pools grouped by CPU model |
-| agentenv | same; mainly single-node fork (16 child instances), cross-node relies on same-model pools |
-| tensorlake | disk deltas are the main selling point, memory snapshots limited to the same machine/same model |
 | **wizard** | custom template + scheduler hard-filters on vendor/family, incompatible returns 409 |
 
 ### Probe script
@@ -427,8 +398,7 @@ Raising `max_creates` only makes each request slower without raising throughput 
 The real levers are **reducing CPU per boot**, or **not booting**:
 
 - restoring from a snapshot skips kernel init, which is the real value of restore relative to create
-  (and the reason both e2b and Morph treat restore rather than boot as the primary way to start a
-  sandbox — restore, not resume: it produces a new sandbox, see snapshot-resume.md §0)
+  (restore, not resume: it produces a new sandbox, see snapshot-resume.md §0)
 - trimming the guest kernel would reduce those 5 seconds, but requires our own compile pipeline (§1.3 decided against it)
 
 **Inference**: the correct semantics for `max_creates` is "queue depth", not "rejection threshold".
@@ -461,8 +431,8 @@ The industry approach is a combination of three things, rather than making the n
 | Hard quota per sandbox | dm-thin per-device size, XFS project quota | relies on quota to contain a single sandbox writing the disk full |
 | Node watermark stops accepting work | Kubernetes kubelet | `nodefs.available<10%` triggers DiskPressure; `imageGCHighThresholdPercent=85` is **deliberately below** the eviction line, so reclamation happens before eviction |
 
-**e2b does the same as us**: `dd if=/dev/zero ... count=5120` creates a 5 GB sparse overlay
-on top of a read-only squashfs, and their public writing contains **no discussion of quota, accounting, or overcommit policy** at all.
+**A sparse overlay on top of a read-only squashfs — e.g. `dd if=/dev/zero ... count=5120` for a 5 GB layer — is the common pattern**,
+and public writing on it typically contains **no discussion of quota, accounting, or overcommit policy** at all.
 So "sparse layer + imprecise accounting" is not an oversight on our part, it is the norm for this approach;
 the difference is that we treated the nominal value as a scheduling input.
 
@@ -618,7 +588,5 @@ Measure before changing — this time that was decisive.
 
 - [firecracker: handling page faults on snapshot resume](https://github.com/firecracker-microvm/firecracker/blob/main/docs/snapshotting/handling-page-faults-on-snapshot-resume.md)
 - [firecracker: guest_configs](https://github.com/firecracker-microvm/firecracker/tree/main/resources/guest_configs)
-- [e2b-dev/fc-kernels](https://github.com/e2b-dev/fc-kernels)
-- [tensorlake: Firecracker disk snapshots in O(changed bytes)](https://tensorlake.ai/blog/firecracker-disk-snapshots-o-changed-bytes)
 - [Restoring Uniqueness in MicroVM Snapshots (AWS)](https://arxiv.org/pdf/2102.12892)
 

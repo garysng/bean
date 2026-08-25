@@ -286,8 +286,7 @@ image for now, and it will be enabled once the requirement is clear.
 | `shared-fs` | JuiceFS (on S3+Redis, consistent with the S3 substrate) or CephFS, configured by the platform and invisible to the user | POSIX shared read/write | Persistent workspace, data shared across sandboxes |
 | `dataset` (reserved) | overlaybd read-only blocks | Read-only, versioned publishing | Massive read-only consumption of datasets/weights |
 
-**shared-fs data plane: exported over NFS from the host (the same route as e2b,
-verified against its source)**
+**shared-fs data plane: exported over NFS from the host**
 
 ```
 Backend (mounted on the host, managed by the noded volume module): JuiceFS (on S3+Redis) / CephFS / local disk
@@ -347,9 +346,7 @@ through a containerd snapshotter): from the image metadata (the layer list pushe
 down by the control plane + S3 blob references) it generates an overlaybd config
 → the TCMU block device becomes ready → it is handed to the runtime. This is
 **wired into `image.Provider` as `OverlaybdProvider`**, opt-in with `--fc-overlaybd`
-and verified on hardware; dm-snapshot remains the default backend. For the
-demonstrated details see the local AgentENV source (`src/overlaybd/`, uvm-ublk
-under crates, and the registryfs_v2 remote direct-read mode).
+and verified on hardware; dm-snapshot remains the default backend.
 
 | Format | How it is consumed | Use case |
 |---|---|---|
